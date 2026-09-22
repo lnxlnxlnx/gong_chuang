@@ -114,6 +114,7 @@ class MecanumDrive:
             serial_port = self._open_shared_serial()
         self._serial = serial_port
 
+        # 全部4个Emm42Driver共用同一个serial_port(分时复用总线)
         self.wheels: dict[WheelPosition, Emm42Driver] = {}
         for wheel in WHEEL_ORDER:
             self.wheels[wheel] = Emm42Driver(
