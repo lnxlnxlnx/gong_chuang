@@ -30,6 +30,8 @@ class SerialPort(Protocol):
 
     def flush(self) -> None: ...
 
+    def read(self, size: int) -> bytes: ...
+
     def close(self) -> None: ...
 
 
@@ -118,9 +120,9 @@ class Emm42Driver:
         """Immediately brake the motor in either speed or position mode.
 
         帧: addr FE 98 [sync] 6B  (0xFE 0x98 为"立即停止")。
-        注意：驱动器会对每个命令回 ACK(addr FE 02 6B)，但本驱动采用"只发不等"。
+        若电机已经停止/失能，驱动器可能返回 E2，表示无需再次执行停止。
         """
-        self._write(0xFE, b"\x98\x00")
+        self._write(0xFE, b"\x98\x00", accepted_statuses=(0x02, 0xE2))
 
     def home(self, mode: HomeMode) -> None:
         """Trigger the requested homing mode configured in the motor driver.
@@ -160,11 +162,34 @@ class Emm42Driver:
             ) from error
         return serial.Serial(self.port, baudrate=self.BAUDRATE, timeout=self.timeout)
 
-    def _write(self, function: int, parameters: bytes) -> None:
-        # 拼装完整帧并按序写出: [motor_id] [function] [parameters] [0x6B]
+    def _write(
+        self,
+        function: int,
+        parameters: bytes,
+        *,
+        accepted_statuses: tuple[int, ...] = (0x02,),
+    ) -> None:
+        # 拼装完整帧并验证驱动器 ACK: [motor_id] [function] [status] [0x6B]
         serial_port = self._require_serial()
-        serial_port.write(bytes((self.motor_id, function)) + parameters + bytes((self.CHECKSUM,)))
+        frame = bytes((self.motor_id, function)) + parameters + bytes((self.CHECKSUM,))
+        serial_port.write(frame)
         serial_port.flush()
+        reply = serial_port.read(4)
+        expected_prefix = bytes((self.motor_id, function))
+        if not reply:
+            raise RuntimeError(
+                f"Emm42 motor {self.motor_id} command 0x{function:02X} received no ACK"
+            )
+        is_expected_reply = (
+            len(reply) == 4
+            and reply[:2] == expected_prefix
+            and reply[2] in accepted_statuses
+            and reply[3] == self.CHECKSUM
+        )
+        if not is_expected_reply:
+            raise RuntimeError(
+                f"Emm42 motor {self.motor_id} command 0x{function:02X} returned unexpected ACK: {reply.hex(' ')}"
+            )
 
     def _require_serial(self) -> SerialPort:
         if self._serial is None:

@@ -88,6 +88,7 @@ class MecanumDrive:
         acceleration: int = 10,
         pattern: str = "X",
         rotation_gain: float = 1.0,
+        motion_transform: str = "standard",
         timeout: float = 0.1,
         pulses_per_revolution: int = 3200,
         serial_port: SerialPort | None = None,
@@ -96,7 +97,9 @@ class MecanumDrive:
             raise ValueError("pattern must be 'X' or 'O'")
         if rotation_gain <= 0:
             raise ValueError("rotation_gain must be positive")
-        # 默认映射 FL=1 FR=2 RL=3 RR=4；可整体自定义，例如按圆周顺时针接线
+        if motion_transform not in ("standard", "calibrated"):
+            raise ValueError("motion_transform must be 'standard' or 'calibrated'")
+        # 软件逻辑层的标准默认映射；实际硬件地址由上层配置通过 motor_ids 注入。
         self.motor_ids = dict(
             motor_ids
             or {WheelPosition.FL: 1, WheelPosition.FR: 2, WheelPosition.RL: 3, WheelPosition.RR: 4}
@@ -106,6 +109,7 @@ class MecanumDrive:
         self.acceleration = acceleration
         self.pattern = pattern
         self.rotation_gain = rotation_gain
+        self.motion_transform = motion_transform
         self.port = port
         self.timeout = timeout
 
@@ -227,6 +231,9 @@ class MecanumDrive:
         self._require_rpm(rpm)
         matrix = _MATRIX_O if self.pattern == "O" else _MATRIX_X
         w = omega * self.rotation_gain
+        if self.motion_transform == "calibrated":
+            # Calibrated from the installed motor/address layout.
+            vx, vy, w = -w, vx + vy, -vy
         raw: list[float] = []
         for a, b, c in matrix:
             raw.append(a * vx + b * vy + c * w)
@@ -279,6 +286,22 @@ class MecanumDrive:
     def rotate_ccw(self, rpm: int, acceleration: int | None = None, duration: float | None = None) -> None:
         """原地逆时针旋转（俯视）。"""
         self._timed(duration, lambda: self.drive(0.0, 0.0, 1.0, rpm, acceleration))
+
+    def forward_left(self, rpm: int, acceleration: int | None = None, duration: float | None = None) -> None:
+        """向左前方移动。"""
+        self._timed(duration, lambda: self.drive(1.0, 1.0, 0.0, rpm, acceleration))
+
+    def forward_right(self, rpm: int, acceleration: int | None = None, duration: float | None = None) -> None:
+        """向右前方移动。"""
+        self._timed(duration, lambda: self.drive(1.0, -1.0, 0.0, rpm, acceleration))
+
+    def backward_left(self, rpm: int, acceleration: int | None = None, duration: float | None = None) -> None:
+        """向左后方移动。"""
+        self._timed(duration, lambda: self.drive(-1.0, 1.0, 0.0, rpm, acceleration))
+
+    def backward_right(self, rpm: int, acceleration: int | None = None, duration: float | None = None) -> None:
+        """向右后方移动。"""
+        self._timed(duration, lambda: self.drive(-1.0, -1.0, 0.0, rpm, acceleration))
 
     def _timed(self, duration: float | None, action) -> None:
         action()

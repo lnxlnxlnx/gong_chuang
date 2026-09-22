@@ -2,9 +2,9 @@
 
 在板子上运行（需先接好四台 Emm42 驱动器，共用一个 USB-TTL）：
 
-    /home/pi/miniforge3/envs/tensorrt/bin/python examples/demo_mecanum.py [port]
+    /home/pi/miniforge3/envs/tensorrt/bin/python examples/demo_mecanum.py [profile]
 
-默认串口 /dev/ttyUSB0；可直接在命令行指定其它设备名。
+默认使用 `jetson` 配置；Windows 可传入 `windows`，串口和硬件地址都从配置文件读取。
 
 注意：
   - 脚本全程 try/finally 保证结束时松轴并关闭串口；
@@ -13,14 +13,15 @@
 
 from __future__ import annotations
 
-import sys
 import time
 
-from mecanum import MecanumDrive, WheelPosition
+from hardware_tests.mecanum.config import create_drive, load_profile
+from mecanum import WheelPosition
 
 
-def main(port: str = "/dev/ttyUSB0") -> None:
-    car = MecanumDrive(port).initialize()
+def main(profile_name: str = "jetson") -> None:
+    profile = load_profile(profile_name)
+    car = create_drive(profile).initialize()
     try:
         car.enable_all()
         time.sleep(0.2)
@@ -44,4 +45,6 @@ def main(port: str = "/dev/ttyUSB0") -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyUSB0")
+    import sys
+
+    main(sys.argv[1] if len(sys.argv) > 1 else "jetson")

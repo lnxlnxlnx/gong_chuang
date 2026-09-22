@@ -15,7 +15,9 @@ class FakeSerial:
         self.is_open = True
 
     def write(self, data: bytes) -> int:
-        self.writes.append(bytes(data))
+        frame = bytes(data)
+        self.writes.append(frame)
+        self._receive_buffer.extend(bytes((frame[0], frame[1], 0x02, 0x6B)))
         return len(data)
 
     def flush(self) -> None:
@@ -40,6 +42,17 @@ class MecanumDriveTests(unittest.TestCase):
         self.serial = FakeSerial()
         self.car = MecanumDrive("/dev/ttyUSB0", serial_port=self.serial)
 
+    def test_default_motor_ids_use_standard_logical_order(self) -> None:
+        self.assertEqual(
+            self.car.motor_ids,
+            {
+                WheelPosition.FL: 1,
+                WheelPosition.FR: 2,
+                WheelPosition.RL: 3,
+                WheelPosition.RR: 4,
+            },
+        )
+
     def assert_wheel_speeds(self, speeds: tuple[int, int, int, int], *, rpm: int, accel: int = 10) -> None:
         """断言四个轮（FL FR RL RR）各自的带符号轮速对应的帧序列。"""
         expected = []
@@ -53,6 +66,45 @@ class MecanumDriveTests(unittest.TestCase):
 
 
 class DriveKinematicsTests(MecanumDriveTests):
+    def test_calibrated_transform_maps_installed_axes(self) -> None:
+        serial = FakeSerial()
+        car = MecanumDrive("/dev/ttyUSB0", motion_transform="calibrated", serial_port=serial)
+
+        car.drive(1.0, 0.0, 0.0, rpm=60)
+        self.assertEqual(
+            serial.writes,
+            [
+                bytes.fromhex("01 F6 00 00 3C 0A 00 6B"),
+                bytes.fromhex("02 F6 01 00 3C 0A 00 6B"),
+                bytes.fromhex("03 F6 00 00 3C 0A 00 6B"),
+                bytes.fromhex("04 F6 01 00 3C 0A 00 6B"),
+            ],
+        )
+
+        serial.writes.clear()
+        car.drive(-1.0, 1.0, 0.0, rpm=60)
+        self.assertEqual(
+            serial.writes,
+            [
+                bytes.fromhex("01 F6 01 00 3C 0A 00 6B"),
+                bytes.fromhex("02 F6 00 00 3C 0A 00 6B"),
+                bytes.fromhex("03 F6 00 00 3C 0A 00 6B"),
+                bytes.fromhex("04 F6 01 00 3C 0A 00 6B"),
+            ],
+        )
+
+        serial.writes.clear()
+        car.drive(1.0, -1.0, 0.0, rpm=60)
+        self.assertEqual(
+            serial.writes,
+            [
+                bytes.fromhex("01 F6 00 00 3C 0A 00 6B"),
+                bytes.fromhex("02 F6 01 00 3C 0A 00 6B"),
+                bytes.fromhex("03 F6 01 00 3C 0A 00 6B"),
+                bytes.fromhex("04 F6 00 00 3C 0A 00 6B"),
+            ],
+        )
+
     def test_forward_all_wheels_cw(self) -> None:
         self.car.drive(1.0, 0.0, 0.0, rpm=60)
         self.assert_wheel_speeds((1, 1, 1, 1), rpm=60)
@@ -144,6 +196,22 @@ class ConvenienceMethodTests(MecanumDriveTests):
     def test_rotate_ccw_wraps_drive(self) -> None:
         self.car.rotate_ccw(rpm=40)
         self.assert_wheel_speeds((1, -1, -1, 1), rpm=40)
+
+    def test_diagonal_methods_wrap_drive(self) -> None:
+        self.car.forward_left(rpm=60)
+        self.assert_wheel_speeds((1, 0, 1, 0), rpm=60)
+
+        self.serial.writes.clear()
+        self.car.forward_right(rpm=60)
+        self.assert_wheel_speeds((0, 1, 0, 1), rpm=60)
+
+        self.serial.writes.clear()
+        self.car.backward_left(rpm=60)
+        self.assert_wheel_speeds((0, -1, 0, -1), rpm=60)
+
+        self.serial.writes.clear()
+        self.car.backward_right(rpm=60)
+        self.assert_wheel_speeds((-1, 0, -1, 0), rpm=60)
 
     def test_duration_stops_after_sleep(self) -> None:
         self.car.forward(rpm=30, duration=0.01)

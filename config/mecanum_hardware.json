@@ -1,0 +1,46 @@
+{
+  "vehicle": {
+    "motor_ids": {
+      "FL": 1,
+      "FR": 4,
+      "RL": 2,
+      "RR": 3
+    },
+    "wheel_signs": {
+      "FL": 1,
+      "FR": 1,
+      "RL": 1,
+      "RR": 1
+    },
+    "acceleration": 5,
+    "pattern": "X",
+    "rotation_gain": 1.0,
+    "motion_transform": "calibrated"
+  },
+  "profiles": {
+    "jetson": {
+      "port": "/dev/ttyUSB0",
+      "individual_wheels": {
+        "rpm": 20,
+        "duration": 0.75
+      },
+      "chassis_motion": {
+        "rpm": 30,
+        "duration": 1.0,
+        "pause": 0.5
+      }
+    },
+    "windows": {
+      "port": "COM14",
+      "individual_wheels": {
+        "rpm": 20,
+        "duration": 0.75
+      },
+      "chassis_motion": {
+        "rpm": 30,
+        "duration": 1.0,
+        "pause": 0.5
+      }
+    }
+  }
+}
