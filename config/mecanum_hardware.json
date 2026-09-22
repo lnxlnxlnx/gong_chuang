@@ -14,7 +14,8 @@
     },
     "acceleration": 5,
     "pattern": "X",
-    "rotation_gain": 1.0
+    "rotation_gain": 1.0,
+    "motion_transform": "calibrated"
   },
   "profiles": {
     "jetson": {

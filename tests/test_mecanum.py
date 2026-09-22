@@ -55,6 +55,45 @@ class MecanumDriveTests(unittest.TestCase):
 
 
 class DriveKinematicsTests(MecanumDriveTests):
+    def test_calibrated_transform_maps_installed_axes(self) -> None:
+        serial = FakeSerial()
+        car = MecanumDrive("/dev/ttyUSB0", motion_transform="calibrated", serial_port=serial)
+
+        car.drive(1.0, 0.0, 0.0, rpm=60)
+        self.assertEqual(
+            serial.writes,
+            [
+                bytes.fromhex("01 F6 00 00 3C 0A 00 6B"),
+                bytes.fromhex("02 F6 01 00 3C 0A 00 6B"),
+                bytes.fromhex("03 F6 00 00 3C 0A 00 6B"),
+                bytes.fromhex("04 F6 01 00 3C 0A 00 6B"),
+            ],
+        )
+
+        serial.writes.clear()
+        car.drive(-1.0, 1.0, 0.0, rpm=60)
+        self.assertEqual(
+            serial.writes,
+            [
+                bytes.fromhex("01 F6 01 00 3C 0A 00 6B"),
+                bytes.fromhex("02 F6 00 00 3C 0A 00 6B"),
+                bytes.fromhex("03 F6 00 00 3C 0A 00 6B"),
+                bytes.fromhex("04 F6 01 00 3C 0A 00 6B"),
+            ],
+        )
+
+        serial.writes.clear()
+        car.drive(1.0, -1.0, 0.0, rpm=60)
+        self.assertEqual(
+            serial.writes,
+            [
+                bytes.fromhex("01 F6 00 00 3C 0A 00 6B"),
+                bytes.fromhex("02 F6 01 00 3C 0A 00 6B"),
+                bytes.fromhex("03 F6 01 00 3C 0A 00 6B"),
+                bytes.fromhex("04 F6 00 00 3C 0A 00 6B"),
+            ],
+        )
+
     def test_forward_all_wheels_cw(self) -> None:
         self.car.drive(1.0, 0.0, 0.0, rpm=60)
         self.assert_wheel_speeds((1, 1, 1, 1), rpm=60)
@@ -146,6 +185,22 @@ class ConvenienceMethodTests(MecanumDriveTests):
     def test_rotate_ccw_wraps_drive(self) -> None:
         self.car.rotate_ccw(rpm=40)
         self.assert_wheel_speeds((1, -1, -1, 1), rpm=40)
+
+    def test_diagonal_methods_wrap_drive(self) -> None:
+        self.car.forward_left(rpm=60)
+        self.assert_wheel_speeds((1, 0, 1, 0), rpm=60)
+
+        self.serial.writes.clear()
+        self.car.forward_right(rpm=60)
+        self.assert_wheel_speeds((0, 1, 0, 1), rpm=60)
+
+        self.serial.writes.clear()
+        self.car.backward_left(rpm=60)
+        self.assert_wheel_speeds((0, -1, 0, -1), rpm=60)
+
+        self.serial.writes.clear()
+        self.car.backward_right(rpm=60)
+        self.assert_wheel_speeds((-1, 0, -1, 0), rpm=60)
 
     def test_duration_stops_after_sleep(self) -> None:
         self.car.forward(rpm=30, duration=0.01)

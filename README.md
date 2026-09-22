@@ -49,7 +49,7 @@ stepper.stop()
 ```python
 from mecanum import MecanumDrive
 
-car = MecanumDrive("/dev/ttyUSB0").initialize()
+car = MecanumDrive("/dev/ttyUSB0", motion_transform="calibrated").initialize()
 car.enable_all()                      # 移动前必须先使能扭矩
 car.forward(rpm=60)                   # 持续前进，直到 stop()
 car.strafe_left(rpm=40, duration=2.0) # 向左平移 2 秒后自动停
@@ -59,9 +59,10 @@ car.disable_all()                     # 松轴
 car.close()
 ```
 
-- 高级方向方法：`forward` / `backward` / `strafe_left` / `strafe_right` / `rotate_cw` / `rotate_ccw`，均可带可选 `duration` 自动限时停止。
+- 高级方向方法：`forward` / `backward` / `strafe_left` / `strafe_right` / `rotate_cw` / `rotate_ccw` / `forward_left` / `forward_right` / `backward_left` / `backward_right`，均可带可选 `duration` 自动限时停止。
 - 底层单轮 API（供上层调用）：`enable_wheel` / `set_wheel_speed` / `stop_wheel` / `move_wheel_relative` / `move_wheel_absolute` / `home_wheel` / `get_wheel`。
 - 整车低层：`drive(vx, vy, omega, rpm)`（麦轮逆运动学，可斜向移动）、`set_speeds(fl, fr, rl, rr)`。
+- 当前实车安装使用 `motion_transform="calibrated"`；标准麦轮布局可省略该参数，使用默认的 `standard` 坐标变换。
 - 若装配后方向反了：整车方向反 → 把 `drive()` 的 `vx`/`vy` 取反；辊子排布不同 → 换 `pattern="O"`；单轮转向反 → 在 `wheel_signs` 给该轮 `-1`。
 
 ## 本机协议测试
@@ -92,6 +93,7 @@ python -m hardware_tests.mecanum.chassis_motion --profile jetson
 所有常用硬件参数集中在 `config/mecanum_hardware.json`：
 
 - `vehicle`：四轮地址、单轮方向修正、加速度、麦轮 X/O 排布和旋转增益；两套平台共用。
+- `vehicle.motion_transform`：实车安装坐标校准，当前实车为 `calibrated`。
 - `profiles.jetson`：Jetson 串口和两类测试的默认速度、时长。
 - `profiles.windows`：Windows `COM` 串口和两类测试的默认速度、时长。
 

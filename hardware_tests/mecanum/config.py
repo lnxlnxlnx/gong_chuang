@@ -24,6 +24,7 @@ class HardwareProfile:
     acceleration: int
     pattern: str
     rotation_gain: float
+    motion_transform: str
     individual_rpm: int
     individual_duration: float
     chassis_rpm: int
@@ -59,6 +60,9 @@ def load_profile(profile_name: str, config_path: Path = DEFAULT_CONFIG_PATH) -> 
     if pattern not in ("X", "O"):
         raise ValueError("vehicle.pattern must be X or O")
     rotation_gain = _number(vehicle.get("rotation_gain"), "vehicle.rotation_gain", minimum=0, exclusive=True)
+    motion_transform = _string(vehicle.get("motion_transform", "standard"), "vehicle.motion_transform")
+    if motion_transform not in ("standard", "calibrated"):
+        raise ValueError("vehicle.motion_transform must be standard or calibrated")
 
     individual = _mapping(profile.get("individual_wheels"), f"profiles.{profile_name}.individual_wheels")
     chassis = _mapping(profile.get("chassis_motion"), f"profiles.{profile_name}.chassis_motion")
@@ -69,6 +73,7 @@ def load_profile(profile_name: str, config_path: Path = DEFAULT_CONFIG_PATH) -> 
         acceleration=acceleration,
         pattern=pattern,
         rotation_gain=rotation_gain,
+        motion_transform=motion_transform,
         individual_rpm=_integer(individual.get("rpm"), "individual_wheels.rpm", minimum=1, maximum=MecanumDrive.MAX_RPM),
         individual_duration=_number(individual.get("duration"), "individual_wheels.duration", minimum=0, exclusive=True),
         chassis_rpm=_integer(chassis.get("rpm"), "chassis_motion.rpm", minimum=1, maximum=MecanumDrive.MAX_RPM),
@@ -91,6 +96,7 @@ def create_drive(
         acceleration=profile.acceleration if acceleration is None else acceleration,
         pattern=profile.pattern,
         rotation_gain=profile.rotation_gain,
+        motion_transform=profile.motion_transform,
     )
 
 

@@ -55,6 +55,7 @@ class MecanumHardwareConfigTests(unittest.TestCase):
         self.assertEqual(profile.acceleration, 5)
         self.assertEqual(profile.pattern, "X")
         self.assertEqual(profile.rotation_gain, 1.25)
+        self.assertEqual(profile.motion_transform, "standard")
         self.assertEqual(profile.individual_rpm, 15)
         self.assertEqual(profile.chassis_pause, 0.25)
 

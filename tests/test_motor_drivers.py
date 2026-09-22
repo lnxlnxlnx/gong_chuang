@@ -118,6 +118,14 @@ class Emm42DriverTests(unittest.TestCase):
         self.motor.stop()
         self.assertEqual(self.serial.writes, [bytes.fromhex("01 FE 98 00 6B")])
 
+    def test_stop_accepts_already_stopped_status(self) -> None:
+        serial = FakeSerial(replies=[bytes.fromhex("01 FE E2 6B")])
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        motor.stop()
+
+        self.assertEqual(serial.writes, [bytes.fromhex("01 FE 98 00 6B")])
+
     def test_home_writes_requested_home_mode(self) -> None:
         self.motor.home(HomeMode.MULTI_TURN_COLLISION)
         self.assertEqual(self.serial.writes, [bytes.fromhex("01 9A 02 00 6B")])
