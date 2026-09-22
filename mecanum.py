@@ -99,7 +99,7 @@ class MecanumDrive:
             raise ValueError("rotation_gain must be positive")
         if motion_transform not in ("standard", "calibrated"):
             raise ValueError("motion_transform must be 'standard' or 'calibrated'")
-        # 默认映射 FL=1 FR=2 RL=3 RR=4；可整体自定义，例如按圆周顺时针接线
+        # 软件逻辑层的标准默认映射；实际硬件地址由上层配置通过 motor_ids 注入。
         self.motor_ids = dict(
             motor_ids
             or {WheelPosition.FL: 1, WheelPosition.FR: 2, WheelPosition.RL: 3, WheelPosition.RR: 4}

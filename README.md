@@ -44,12 +44,15 @@ stepper.stop()
 
 ## 麦轮小车（MecanumDrive）
 
-四台 Emm42 驱动器共用一根 115200 TTL 总线（一个 USB-TTL 即可），默认主址 `FL=1 FR=2 RL=3 RR=4`。
+软件逻辑层固定使用 `FL/FR/RL/RR` 四个轮位，标准默认地址顺序为 `1/2/3/4`。
+实际驱动器地址属于硬件配置，由 `config/mecanum_hardware.json` 注入；当前实车映射为
+`FL=1 FR=4 RL=2 RR=3`。更换轮子位置时只需修改配置，不需要修改运动 API 或上层代码。
 
 ```python
-from mecanum import MecanumDrive
+from hardware_tests.mecanum.config import create_drive, load_profile
 
-car = MecanumDrive("/dev/ttyUSB0", motion_transform="calibrated").initialize()
+profile = load_profile("jetson")
+car = create_drive(profile).initialize()
 car.enable_all()                      # 移动前必须先使能扭矩
 car.forward(rpm=60)                   # 持续前进，直到 stop()
 car.strafe_left(rpm=40, duration=2.0) # 向左平移 2 秒后自动停
@@ -92,7 +95,8 @@ python -m hardware_tests.mecanum.chassis_motion --profile jetson
 
 所有常用硬件参数集中在 `config/mecanum_hardware.json`：
 
-- `vehicle`：四轮地址、单轮方向修正、加速度、麦轮 X/O 排布和旋转增益；两套平台共用。
+- `vehicle.motor_ids`：硬件实际地址到软件轮位的映射；软件 API 始终按 `FL/FR/RL/RR` 逻辑轮位工作。
+- `vehicle`：单轮方向修正、加速度、麦轮 X/O 排布和旋转增益；两套平台共用。
 - `vehicle.motion_transform`：实车安装坐标校准，当前实车为 `calibrated`。
 - `profiles.jetson`：Jetson 串口和两类测试的默认速度、时长。
 - `profiles.windows`：Windows `COM` 串口和两类测试的默认速度、时长。

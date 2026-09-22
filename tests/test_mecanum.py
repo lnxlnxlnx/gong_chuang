@@ -42,6 +42,17 @@ class MecanumDriveTests(unittest.TestCase):
         self.serial = FakeSerial()
         self.car = MecanumDrive("/dev/ttyUSB0", serial_port=self.serial)
 
+    def test_default_motor_ids_use_standard_logical_order(self) -> None:
+        self.assertEqual(
+            self.car.motor_ids,
+            {
+                WheelPosition.FL: 1,
+                WheelPosition.FR: 2,
+                WheelPosition.RL: 3,
+                WheelPosition.RR: 4,
+            },
+        )
+
     def assert_wheel_speeds(self, speeds: tuple[int, int, int, int], *, rpm: int, accel: int = 10) -> None:
         """断言四个轮（FL FR RL RR）各自的带符号轮速对应的帧序列。"""
         expected = []
