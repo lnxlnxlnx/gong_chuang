@@ -30,7 +30,7 @@
       }
     },
     "windows": {
-      "port": "COM3",
+      "port": "COM14",
       "individual_wheels": {
         "rpm": 20,
         "duration": 0.75
