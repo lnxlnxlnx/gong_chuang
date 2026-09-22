@@ -2,9 +2,9 @@
   "vehicle": {
     "motor_ids": {
       "FL": 1,
-      "FR": 2,
-      "RL": 3,
-      "RR": 4
+      "FR": 4,
+      "RL": 2,
+      "RR": 3
     },
     "wheel_signs": {
       "FL": 1,

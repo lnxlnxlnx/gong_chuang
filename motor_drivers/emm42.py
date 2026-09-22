@@ -30,6 +30,8 @@ class SerialPort(Protocol):
 
     def flush(self) -> None: ...
 
+    def read(self, size: int) -> bytes: ...
+
     def close(self) -> None: ...
 
 
@@ -161,10 +163,21 @@ class Emm42Driver:
         return serial.Serial(self.port, baudrate=self.BAUDRATE, timeout=self.timeout)
 
     def _write(self, function: int, parameters: bytes) -> None:
-        # 拼装完整帧并按序写出: [motor_id] [function] [parameters] [0x6B]
+        # 拼装完整帧并验证驱动器 ACK: [motor_id] [function] [0x02] [0x6B]
         serial_port = self._require_serial()
-        serial_port.write(bytes((self.motor_id, function)) + parameters + bytes((self.CHECKSUM,)))
+        frame = bytes((self.motor_id, function)) + parameters + bytes((self.CHECKSUM,))
+        serial_port.write(frame)
         serial_port.flush()
+        reply = serial_port.read(4)
+        expected = bytes((self.motor_id, function, 0x02, self.CHECKSUM))
+        if not reply:
+            raise RuntimeError(
+                f"Emm42 motor {self.motor_id} command 0x{function:02X} received no ACK"
+            )
+        if reply != expected:
+            raise RuntimeError(
+                f"Emm42 motor {self.motor_id} command 0x{function:02X} returned unexpected ACK: {reply.hex(' ')}"
+            )
 
     def _require_serial(self) -> SerialPort:
         if self._serial is None:

@@ -48,13 +48,19 @@ def run_sequence(
     for wheel in WHEEL_ORDER:
         confirm(wheel.name)
         car.enable_wheel(wheel, True)
+        print(f"[{wheel.name}] enabled")
         car.set_wheel_speed(wheel, rpm)
+        print(f"[{wheel.name}] forward {rpm} RPM acknowledged")
         sleep(duration)
         car.stop_wheel(wheel)
+        print(f"[{wheel.name}] stopped")
         car.set_wheel_speed(wheel, -rpm)
+        print(f"[{wheel.name}] reverse {rpm} RPM acknowledged")
         sleep(duration)
         car.stop_wheel(wheel)
+        print(f"[{wheel.name}] stopped")
         car.enable_wheel(wheel, False)
+        print(f"[{wheel.name}] disabled")
 
 
 def run_hardware_test(

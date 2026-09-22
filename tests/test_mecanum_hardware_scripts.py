@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import unittest
+from contextlib import redirect_stdout
 
 from hardware_tests.mecanum import chassis_motion, individual_wheels
 from mecanum import WHEEL_ORDER, WheelPosition
@@ -91,6 +93,33 @@ class IndividualWheelScriptTests(unittest.TestCase):
         self.assertEqual(car.calls, expected)
         self.assertEqual(confirmations, [wheel.name for wheel in WHEEL_ORDER])
         self.assertEqual(sleeps, [0.5] * 8)
+
+    def test_each_wheel_reports_acknowledged_motion_states(self) -> None:
+        car = FakeMecanumDrive()
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            individual_wheels.run_sequence(
+                car,
+                rpm=20,
+                duration=0.5,
+                confirm=lambda _: None,
+                sleep=lambda _: None,
+            )
+
+        expected: list[str] = []
+        for wheel in WHEEL_ORDER:
+            expected.extend(
+                [
+                    f"[{wheel.name}] enabled",
+                    f"[{wheel.name}] forward 20 RPM acknowledged",
+                    f"[{wheel.name}] stopped",
+                    f"[{wheel.name}] reverse 20 RPM acknowledged",
+                    f"[{wheel.name}] stopped",
+                    f"[{wheel.name}] disabled",
+                ]
+            )
+        self.assertEqual(output.getvalue().splitlines(), expected)
 
     def test_individual_run_cleans_up_after_an_interrupted_sequence(self) -> None:
         car = FakeMecanumDrive()

@@ -15,7 +15,9 @@ class FakeSerial:
         self.is_open = True
 
     def write(self, data: bytes) -> int:
-        self.writes.append(bytes(data))
+        frame = bytes(data)
+        self.writes.append(frame)
+        self._receive_buffer.extend(bytes((frame[0], frame[1], 0x02, 0x6B)))
         return len(data)
 
     def flush(self) -> None:

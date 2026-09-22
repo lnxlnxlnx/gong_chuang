@@ -9,13 +9,17 @@ from motor_drivers.emm42 import Direction, Emm42Driver, HomeMode
 
 
 class FakeSerial:
-    def __init__(self, replies: list[bytes] | None = None) -> None:
+    def __init__(self, replies: list[bytes] | None = None, *, acknowledge_emm42: bool = False) -> None:
         self._receive_buffer = bytearray(b"".join(replies or []))
+        self._acknowledge_emm42 = acknowledge_emm42
         self.writes: list[bytes] = []
         self.is_open = True
 
     def write(self, data: bytes) -> int:
-        self.writes.append(bytes(data))
+        frame = bytes(data)
+        self.writes.append(frame)
+        if self._acknowledge_emm42 and len(frame) >= 3 and frame[-1] == 0x6B:
+            self._receive_buffer.extend(bytes((frame[0], frame[1], 0x02, 0x6B)))
         return len(data)
 
     def flush(self) -> None:
@@ -67,7 +71,7 @@ class BusServoTests(unittest.TestCase):
 
 class Emm42DriverTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.serial = FakeSerial()
+        self.serial = FakeSerial(acknowledge_emm42=True)
         self.motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=self.serial)
 
     def test_initialize_keeps_injected_serial_port_open(self) -> None:
@@ -77,6 +81,12 @@ class Emm42DriverTests(unittest.TestCase):
     def test_enable_writes_enable_command(self) -> None:
         self.motor.enable(True)
         self.assertEqual(self.serial.writes, [bytes.fromhex("01 F3 AB 01 00 6B")])
+
+    def test_enable_rejects_missing_driver_ack(self) -> None:
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=FakeSerial())
+
+        with self.assertRaisesRegex(RuntimeError, "no ACK"):
+            motor.enable(True)
 
     def test_set_speed_encodes_direction_speed_and_acceleration(self) -> None:
         self.motor.set_speed(Direction.CCW, rpm=1500, acceleration=10)
