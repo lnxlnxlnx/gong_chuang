@@ -83,10 +83,23 @@ python -m unittest discover -s tests -v
 
 ```bash
 # 依次测试 FL、FR、RL、RR 的正反转；每个轮子开始前需要人工确认
-python -m hardware_tests.mecanum.individual_wheels
+python -m hardware_tests.mecanum.individual_wheels --profile jetson
 
 # 依次测试前进、后退、左移、右移、顺时针旋转、逆时针旋转
-python -m hardware_tests.mecanum.chassis_motion
+python -m hardware_tests.mecanum.chassis_motion --profile jetson
 ```
 
-两个脚本均支持 `--port`、`--rpm`、`--duration` 和 `--acceleration` 参数；整车脚本额外支持 `--pause`。无论正常结束、异常或 `Ctrl+C`，脚本都会发送四轮停止命令、失能扭矩并关闭串口。
+所有常用硬件参数集中在 `config/mecanum_hardware.json`：
+
+- `vehicle`：四轮地址、单轮方向修正、加速度、麦轮 X/O 排布和旋转增益；两套平台共用。
+- `profiles.jetson`：Jetson 串口和两类测试的默认速度、时长。
+- `profiles.windows`：Windows `COM` 串口和两类测试的默认速度、时长。
+
+Windows 上将 `profiles.windows.port` 改为设备管理器显示的实际 `COM` 号后执行：
+
+```powershell
+py -m hardware_tests.mecanum.individual_wheels --profile windows
+py -m hardware_tests.mecanum.chassis_motion --profile windows
+```
+
+两个脚本均支持 `--config` 指定其他 JSON 文件，也可通过 `--port`、`--rpm`、`--duration` 和 `--acceleration` 临时覆盖当前档案；整车脚本额外支持 `--pause`。无论正常结束、异常或 `Ctrl+C`，脚本都会发送四轮停止命令、失能扭矩并关闭串口。

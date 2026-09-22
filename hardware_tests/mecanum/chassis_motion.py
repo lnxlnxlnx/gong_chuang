@@ -10,9 +10,10 @@ from __future__ import annotations
 import argparse
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Protocol
 
-from mecanum import MecanumDrive
+from .config import DEFAULT_CONFIG_PATH, create_drive, load_profile
 
 
 class ChassisDrive(Protocol):
@@ -89,20 +90,30 @@ def run_hardware_test(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="测试麦轮小车的整车运动")
-    parser.add_argument("--port", default="/dev/ttyUSB0", help="四轮共用的 TTL 串口")
-    parser.add_argument("--rpm", type=int, default=30, help="测试转速，默认 30 RPM")
-    parser.add_argument("--duration", type=float, default=1.0, help="每个动作运行秒数，默认 1.0")
-    parser.add_argument("--pause", type=float, default=0.5, help="动作之间的停止等待秒数，默认 0.5")
-    parser.add_argument("--acceleration", type=int, default=5, help="加速度档，默认 5")
+    parser.add_argument("--profile", default="jetson", help="配置档名，默认 jetson")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="JSON 配置文件路径")
+    parser.add_argument("--port", help="本次运行覆盖配置中的 TTL 串口")
+    parser.add_argument("--rpm", type=int, help="本次运行覆盖配置中的测试转速")
+    parser.add_argument("--duration", type=float, help="本次运行覆盖配置中的单动作时长")
+    parser.add_argument("--pause", type=float, help="本次运行覆盖配置中的动作间停止时间")
+    parser.add_argument("--acceleration", type=int, help="本次运行覆盖配置中的加速度档")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if args.duration <= 0 or args.pause < 0:
+    profile = load_profile(args.profile, args.config)
+    duration = profile.chassis_duration if args.duration is None else args.duration
+    pause = profile.chassis_pause if args.pause is None else args.pause
+    if duration <= 0 or pause < 0:
         raise ValueError("duration must be positive and pause must not be negative")
-    car = MecanumDrive(args.port, acceleration=args.acceleration)
-    run_hardware_test(car, rpm=args.rpm, duration=args.duration, pause=args.pause)
+    car = create_drive(profile, port=args.port, acceleration=args.acceleration)
+    run_hardware_test(
+        car,
+        rpm=profile.chassis_rpm if args.rpm is None else args.rpm,
+        duration=duration,
+        pause=pause,
+    )
 
 
 if __name__ == "__main__":
