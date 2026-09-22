@@ -72,3 +72,21 @@ python -m unittest discover -s tests -v
 ```
 
 预期：所有测试通过，且无需连接 USB-TTL 或电机。
+
+## 测试目录
+
+- `tests/`：离线单元测试，不会打开串口或驱动电机。
+- `hardware_tests/emm42/`：单个 Emm42 驱动器的真机诊断脚本。
+- `hardware_tests/mecanum/`：四麦轮底盘的真机测试脚本。
+
+真机测试必须在 Jetson 上从项目根目录以模块方式执行。开始前让车轮悬空，并确保急停措施可用：
+
+```bash
+# 依次测试 FL、FR、RL、RR 的正反转；每个轮子开始前需要人工确认
+python -m hardware_tests.mecanum.individual_wheels
+
+# 依次测试前进、后退、左移、右移、顺时针旋转、逆时针旋转
+python -m hardware_tests.mecanum.chassis_motion
+```
+
+两个脚本均支持 `--port`、`--rpm`、`--duration` 和 `--acceleration` 参数；整车脚本额外支持 `--pause`。无论正常结束、异常或 `Ctrl+C`，脚本都会发送四轮停止命令、失能扭矩并关闭串口。

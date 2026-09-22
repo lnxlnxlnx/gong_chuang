@@ -1,2 +1,3 @@
 ./登录.txt
 .worktrees/
+__pycache__/
