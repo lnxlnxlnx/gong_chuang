@@ -1,0 +1,47 @@
+"""Real-hardware demo of MecanumDrive on the Jetson board.
+
+在板子上运行（需先接好四台 Emm42 驱动器，共用一个 USB-TTL）：
+
+    /home/pi/miniforge3/envs/tensorrt/bin/python examples/demo_mecanum.py [port]
+
+默认串口 /dev/ttyUSB0；可直接在命令行指定其它设备名。
+
+注意：
+  - 脚本全程 try/finally 保证结束时松轴并关闭串口；
+  - 若某个方向反了，参考 README 用 pattern / wheel_signs / vx取反 修正。
+"""
+
+from __future__ import annotations
+
+import sys
+import time
+
+from mecanum import MecanumDrive, WheelPosition
+
+
+def main(port: str = "/dev/ttyUSB0") -> None:
+    car = MecanumDrive(port).initialize()
+    try:
+        car.enable_all()
+        time.sleep(0.2)
+
+        # 依次演示：前进 → 后退 → 左平移 → 右平移 → 左旋 → 右旋
+        car.forward(rpm=30, duration=2.0)
+        car.backward(rpm=30, duration=2.0)
+        car.strafe_left(rpm=20, duration=1.5)
+        car.strafe_right(rpm=20, duration=1.5)
+        car.rotate_ccw(rpm=20, duration=1.0)
+        car.rotate_cw(rpm=20, duration=1.0)
+
+        # 底层用法：单轮验证转向
+        print("single wheel FL 5s ...")
+        car.set_wheel_speed(WheelPosition.FL, signed_rpm=20, acceleration=5)
+        time.sleep(5.0)
+        car.stop()
+    finally:
+        car.disable_all()
+        car.close()
+
+
+if __name__ == "__main__":
+    main(sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyUSB0")
