@@ -17,7 +17,7 @@
   例如 strafe_left  → 左排轮前进、右排轮后退，地面合力把底盘推向左侧。
 
 装配后若某方向反了，优先在高层修正，不用改协议层:
-  1. 整车前进/后退对调  → 把 drive() 的 vx 取反；
+  1. 整车主向完全不符  → 构造/配置时用 motion_transform="calibrated"，走 _MATRIX_CALIBRATED 标定表；
   2. 辊子排布不同        → 构造时换 pattern="O"；
   3. 单轮转向反了        → 在 wheel_signs 里给该轮 -1。
 """
@@ -56,6 +56,16 @@ _MATRIX_O = (
     (+1.0, +1.0, +1.0),
     (+1.0, -1.0, +1.0),
     (+1.0, +1.0, -1.0),
+)
+# 实车安装标定矩阵（motion_transform="calibrated" 时使用）：
+# 由真机实测反推得到，已包含每轮“正转＝前进方向”的安装因子。
+# 特征：vx 列 = [-, -, +, -]，vy 列 = [+, +, +, -]，ω 列 = [-, +, +, +]。
+# 因此 forward=全前进、backward=全后退、strafe_left=[-, -, +, +]、rotate 上下配对。
+_MATRIX_CALIBRATED = (
+    (-1.0, +1.0, -1.0),  # FL = -vx + vy - ω
+    (-1.0, +1.0, +1.0),  # FR = -vx + vy + ω
+    (+1.0, +1.0, +1.0),  # RL = +vx + vy + ω
+    (-1.0, -1.0, +1.0),  # RR = -vx - vy + ω
 )
 
 
@@ -203,6 +213,48 @@ class MecanumDrive:
         """单轮绝对角度移动。"""
         self.get_wheel(wheel).move_absolute(degrees, rpm, acceleration if acceleration is not None else self.acceleration)
 
+    def move_wheels_relative(
+        self,
+        fl: float,
+        fr: float,
+        rl: float,
+        rr: float,
+        rpm: int,
+        acceleration: int | None = None,
+        synchronized: bool = True,
+    ) -> None:
+        """按 FL、FR、RL、RR 逻辑顺序让四个轮子相对移动指定角度。"""
+        for wheel, degrees in zip(WHEEL_ORDER, (fl, fr, rl, rr)):
+            self.get_wheel(wheel).move_relative(
+                degrees,
+                rpm,
+                acceleration if acceleration is not None else self.acceleration,
+                synchronized=synchronized,
+            )
+        if synchronized:
+            self.wheels[WHEEL_ORDER[0]].trigger_sync_motion()
+
+    def move_wheels_absolute(
+        self,
+        fl: float,
+        fr: float,
+        rl: float,
+        rr: float,
+        rpm: int,
+        acceleration: int | None = None,
+        synchronized: bool = True,
+    ) -> None:
+        """按 FL、FR、RL、RR 逻辑顺序让四个轮子到达绝对角度。"""
+        for wheel, degrees in zip(WHEEL_ORDER, (fl, fr, rl, rr)):
+            self.get_wheel(wheel).move_absolute(
+                degrees,
+                rpm,
+                acceleration if acceleration is not None else self.acceleration,
+                synchronized=synchronized,
+            )
+        if synchronized:
+            self.wheels[WHEEL_ORDER[0]].trigger_sync_motion()
+
     def home_wheel(self, wheel: WheelPosition, mode: HomeMode) -> None:
         """让单个轮子执行回零。"""
         self.wheels[wheel].home(mode)
@@ -229,11 +281,12 @@ class MecanumDrive:
         实现：用矩阵算出四轮的无量纲轮速，再统一归一化到 ``rpm``。
         """
         self._require_rpm(rpm)
-        matrix = _MATRIX_O if self.pattern == "O" else _MATRIX_X
-        w = omega * self.rotation_gain
         if self.motion_transform == "calibrated":
-            # Calibrated from the installed motor/address layout.
-            vx, vy, w = -w, vx + vy, -vy
+            # 专用实车标定矩阵（已含每轮正转安装因子），non-standard 布局用这张表
+            matrix = _MATRIX_CALIBRATED
+        else:
+            matrix = _MATRIX_O if self.pattern == "O" else _MATRIX_X
+        w = omega * self.rotation_gain
         raw: list[float] = []
         for a, b, c in matrix:
             raw.append(a * vx + b * vy + c * w)

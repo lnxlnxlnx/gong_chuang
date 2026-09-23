@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import time
 
-from hardware_tests.mecanum.config import create_drive, load_profile
+from hardware_tests.mecanum.config import create_chassis, load_profile
 from mecanum import WheelPosition
 
 
 def main(profile_name: str = "jetson") -> None:
     profile = load_profile(profile_name)
-    car = create_drive(profile).initialize()
+    car = create_chassis(profile).initialize()
     try:
         car.enable_all()
         time.sleep(0.2)

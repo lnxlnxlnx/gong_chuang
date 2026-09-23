@@ -57,6 +57,18 @@ class FakeMecanumDrive:
     def rotate_ccw(self, rpm: int) -> None:
         self.calls.append(("rotate_ccw", rpm))
 
+    def forward_left(self, rpm: int) -> None:
+        self.calls.append(("forward_left", rpm))
+
+    def forward_right(self, rpm: int) -> None:
+        self.calls.append(("forward_right", rpm))
+
+    def backward_left(self, rpm: int) -> None:
+        self.calls.append(("backward_left", rpm))
+
+    def backward_right(self, rpm: int) -> None:
+        self.calls.append(("backward_right", rpm))
+
 
 class FailingInitializeDrive(FakeMecanumDrive):
     def initialize(self) -> "FailingInitializeDrive":
@@ -156,14 +168,64 @@ class ChassisMotionScriptTests(unittest.TestCase):
     def test_chassis_sequence_runs_each_motion_and_stops_between_steps(self) -> None:
         car = FakeMecanumDrive()
         sleeps: list[float] = []
+        motions = (
+            "forward",
+            "backward",
+            "strafe_left",
+            "strafe_right",
+            "forward_left",
+            "forward_right",
+            "backward_left",
+            "backward_right",
+            "rotate_cw",
+            "rotate_ccw",
+        )
+        prompts = iter(["" if i % 2 == 0 else "n" for i in range(len(motions) * 2)])
 
-        chassis_motion.run_sequence(car, rpm=30, duration=1.0, pause=0.25, sleep=sleeps.append)
+        chassis_motion.run_sequence(
+            car,
+            rpm=30,
+            duration=1.0,
+            pause=0.25,
+            prompt=lambda _: next(prompts, "q"),
+            sleep=sleeps.append,
+        )
 
         expected = []
-        for name in ("forward", "backward", "strafe_left", "strafe_right", "rotate_cw", "rotate_ccw"):
+        for name in motions:
             expected.extend([(name, 30), ("stop",)])
         self.assertEqual(car.calls, expected)
-        self.assertEqual(sleeps, [1.0, 0.25] * 6)
+        self.assertEqual(sleeps, [1.0, 0.25] * 10)
+
+    def test_chassis_sequence_accepts_enter_to_repeat_current_motion(self) -> None:
+        car = FakeMecanumDrive()
+        sleeps: list[float] = []
+        prompts = iter(["", "", "", "n", "q"])  # forward 重做三次后进入下一个动作
+
+        chassis_motion.run_sequence(
+            car,
+            rpm=30,
+            duration=1.0,
+            pause=0.25,
+            prompt=lambda _: next(prompts, "q"),
+            sleep=sleeps.append,
+        )
+
+        self.assertEqual(car.calls, [("forward", 30), ("stop",)] * 3)
+        self.assertEqual(sleeps, [1.0, 1.0, 1.0, 0.25])
+
+    def test_chassis_sequence_quits_early_when_asked(self) -> None:
+        car = FakeMecanumDrive()
+
+        chassis_motion.run_sequence(
+            car,
+            rpm=30,
+            duration=1.0,
+            pause=0.25,
+            prompt=lambda _: "q",
+        )
+
+        self.assertEqual(car.calls, [])
 
     def test_chassis_run_cleans_up_after_an_interrupted_sequence(self) -> None:
         car = FakeMecanumDrive()
@@ -172,7 +234,14 @@ class ChassisMotionScriptTests(unittest.TestCase):
             raise KeyboardInterrupt
 
         with self.assertRaises(KeyboardInterrupt):
-            chassis_motion.run_hardware_test(car, rpm=30, duration=1.0, pause=0.25, sleep=interrupted_sleep)
+            chassis_motion.run_hardware_test(
+                car,
+                rpm=30,
+                duration=1.0,
+                pause=0.25,
+                prompt=lambda _: "n",
+                sleep=interrupted_sleep,
+            )
 
         self.assertEqual(car.calls[:2], [("initialize",), ("enable_all",)])
         self.assertEqual(car.calls[-3:], [("stop",), ("disable_all",), ("close",)])
@@ -181,7 +250,13 @@ class ChassisMotionScriptTests(unittest.TestCase):
         car = FailingInitializeDrive()
 
         with self.assertRaisesRegex(RuntimeError, "serial port unavailable"):
-            chassis_motion.run_hardware_test(car, rpm=30, duration=1.0, pause=0.25)
+            chassis_motion.run_hardware_test(
+                car,
+                rpm=30,
+                duration=1.0,
+                pause=0.25,
+                prompt=lambda _: "n",
+            )
 
         self.assertEqual(car.calls, [("initialize",), ("stop",), ("disable_all",), ("close",)])
 

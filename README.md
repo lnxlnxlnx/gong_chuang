@@ -49,12 +49,13 @@ stepper.stop()
 `FL=1 FR=4 RL=2 RR=3`。更换轮子位置时只需修改配置，不需要修改运动 API 或上层代码。
 
 ```python
-from hardware_tests.mecanum.config import create_drive, load_profile
+from hardware_tests.mecanum.config import create_chassis, load_profile
 
 profile = load_profile("jetson")
-car = create_drive(profile).initialize()
+car = create_chassis(profile).initialize()
 car.enable_all()                      # 移动前必须先使能扭矩
 car.forward(rpm=60)                   # 持续前进，直到 stop()
+car.left(rpm=40, duration=2.0)        # 向左平移 2 秒
 car.strafe_left(rpm=40, duration=2.0) # 向左平移 2 秒后自动停
 car.rotate_cw(rpm=30, duration=1.0)   # 原地顺时针转 1 秒
 car.stop()
@@ -62,10 +63,11 @@ car.disable_all()                     # 松轴
 car.close()
 ```
 
-- 高级方向方法：`forward` / `backward` / `strafe_left` / `strafe_right` / `rotate_cw` / `rotate_ccw` / `forward_left` / `forward_right` / `backward_left` / `backward_right`，均可带可选 `duration` 自动限时停止。
+- 上层整车 API：`MecanumChassis` 的 `forward` / `backward` / `left` / `right` / `rotate_cw` / `rotate_ccw` / `forward_left` / `forward_right` / `backward_left` / `backward_right`，均可带可选 `duration` 自动限时停止。
+- 四轮位置 API：`move_wheels_relative(fl, fr, rl, rr, rpm)` 和 `move_wheels_absolute(fl, fr, rl, rr, rpm)`，默认使用 Emm42 多机同步机制：四条 `0xFD` 位置帧缓存后，再发送 `00 FF 66 6B` 同时启动。
 - 底层单轮 API（供上层调用）：`enable_wheel` / `set_wheel_speed` / `stop_wheel` / `move_wheel_relative` / `move_wheel_absolute` / `home_wheel` / `get_wheel`。
 - 整车低层：`drive(vx, vy, omega, rpm)`（麦轮逆运动学，可斜向移动）、`set_speeds(fl, fr, rl, rr)`。
-- 当前实车安装使用 `motion_transform="calibrated"`；标准麦轮布局可省略该参数，使用默认的 `standard` 坐标变换。
+- 当前实车使用标准麦轮坐标变换 `motion_transform="standard"`，四轮横移都会参与运动。
 - 若装配后方向反了：整车方向反 → 把 `drive()` 的 `vx`/`vy` 取反；辊子排布不同 → 换 `pattern="O"`；单轮转向反 → 在 `wheel_signs` 给该轮 `-1`。
 
 ## 本机协议测试
@@ -89,7 +91,7 @@ python -m unittest discover -s tests -v
 # 依次测试 FL、FR、RL、RR 的正反转；每个轮子开始前需要人工确认
 python -m hardware_tests.mecanum.individual_wheels --profile jetson
 
-# 依次测试前进、后退、左移、右移、顺时针旋转、逆时针旋转
+# 依次测试前进、后退、左移、右移、四个斜向、顺时针旋转、逆时针旋转
 python -m hardware_tests.mecanum.chassis_motion --profile jetson
 ```
 
@@ -97,7 +99,7 @@ python -m hardware_tests.mecanum.chassis_motion --profile jetson
 
 - `vehicle.motor_ids`：硬件实际地址到软件轮位的映射；软件 API 始终按 `FL/FR/RL/RR` 逻辑轮位工作。
 - `vehicle`：单轮方向修正、加速度、麦轮 X/O 排布和旋转增益；两套平台共用。
-- `vehicle.motion_transform`：实车安装坐标校准，当前实车为 `calibrated`。
+- `vehicle.motion_transform`：运动坐标变换，当前实车为 `standard`。
 - `profiles.jetson`：Jetson 串口和两类测试的默认速度、时长。
 - `profiles.windows`：Windows `COM` 串口和两类测试的默认速度、时长。
 
@@ -108,7 +110,7 @@ py -m hardware_tests.mecanum.individual_wheels --profile windows
 py -m hardware_tests.mecanum.chassis_motion --profile windows
 ```
 
-两个脚本均支持 `--config` 指定其他 JSON 文件，也可通过 `--port`、`--rpm`、`--duration` 和 `--acceleration` 临时覆盖当前档案；整车脚本额外支持 `--pause`。无论正常结束、异常或 `Ctrl+C`，脚本都会发送四轮停止命令、失能扭矩并关闭串口。
+在 Windows 上也可以直接运行 `py -m hardware_tests.mecanum.individual_wheels` 或 `py -m hardware_tests.mecanum.chassis_motion`，两个脚本都会自动选择 `windows` profile 并使用配置中的 COM14、速度、时长和暂停时间。需要微调时再使用 `--port`、`--rpm`、`--duration`、`--pause` 或 `--acceleration` 覆盖配置。无论正常结束、异常或 `Ctrl+C`，脚本都会发送四轮停止命令、失能扭矩并关闭串口。
 ## 视觉外设（vision）
 
 USB 摄像头 + YOLOv8 TensorRT 检测，封装为 `vision` 包，供主程序和示例复用：

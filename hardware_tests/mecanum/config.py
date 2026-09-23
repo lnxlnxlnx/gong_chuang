@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Mapping
 
 from mecanum import MecanumDrive, WheelPosition
+from chassis import MecanumChassis
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "mecanum_hardware.json"
@@ -98,6 +99,16 @@ def create_drive(
         rotation_gain=profile.rotation_gain,
         motion_transform=profile.motion_transform,
     )
+
+
+def create_chassis(
+    profile: HardwareProfile,
+    *,
+    port: str | None = None,
+    acceleration: int | None = None,
+) -> MecanumChassis:
+    """Create the application-facing chassis facade from a hardware profile."""
+    return MecanumChassis(create_drive(profile, port=port, acceleration=acceleration))
 
 
 def _mapping(value: object, name: str) -> Mapping[str, object]:

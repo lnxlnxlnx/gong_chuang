@@ -103,6 +103,17 @@ class Emm42DriverTests(unittest.TestCase):
             [bytes.fromhex("01 FD 01 05 DC 00 00 00 0C 80 00 00 6B")],
         )
 
+    def test_move_relative_can_be_buffered_for_synchronized_start(self) -> None:
+        self.motor.move_relative(degrees=90.0, rpm=120, acceleration=5, synchronized=True)
+        self.assertEqual(
+            self.serial.writes,
+            [bytes.fromhex("01 FD 00 00 78 05 00 00 03 20 00 01 6B")],
+        )
+
+    def test_trigger_sync_motion_broadcasts_start_frame(self) -> None:
+        self.motor.trigger_sync_motion()
+        self.assertEqual(self.serial.writes, [bytes.fromhex("00 FF 66 6B")])
+
     def test_move_absolute_encodes_absolute_mode(self) -> None:
         self.motor.move_absolute(
             degrees=360.0,

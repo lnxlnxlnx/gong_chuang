@@ -6,8 +6,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from hardware_tests.mecanum.config import load_profile
+from chassis import MecanumChassis
+from hardware_tests.mecanum.config import create_chassis, load_profile
 from mecanum import WheelPosition
 
 
@@ -77,6 +79,24 @@ class MecanumHardwareConfigTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "must be unique"):
                 load_profile("jetson", config_path)
+
+    def test_create_chassis_wraps_profile_drive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = Path(temporary_directory) / "mecanum_hardware.json"
+            write_config(config_path)
+            profile = load_profile("jetson", config_path)
+
+        with patch("hardware_tests.mecanum.config.create_drive") as create_drive:
+            drive = object()
+            create_drive.return_value = drive
+            chassis = create_chassis(profile)
+
+        self.assertIsInstance(chassis, MecanumChassis)
+        self.assertIs(chassis.drive, drive)
+        create_drive.assert_called_once_with(profile, port=None, acceleration=None)
+
+def test_installed_profiles_use_calibrated_motion_transform(self) -> None:
+        self.assertEqual(load_profile("windows").motion_transform, "calibrated")
 
 
 if __name__ == "__main__":
