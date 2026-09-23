@@ -89,24 +89,24 @@ class DriveKinematicsTests(MecanumDriveTests):
         ]
         strafe_left_frames = [
             bytes.fromhex("01 F6 00 00 3C 0A 00 6B"),
-            bytes.fromhex("02 F6 00 00 3C 0A 00 6B"),
-            bytes.fromhex("03 F6 00 00 3C 0A 00 6B"),
-            bytes.fromhex("04 F6 01 00 3C 0A 00 6B"),
-        ]
-        rotate_ccw_frames = [
-            bytes.fromhex("01 F6 01 00 3C 0A 00 6B"),
-            bytes.fromhex("02 F6 00 00 3C 0A 00 6B"),
+            bytes.fromhex("02 F6 01 00 3C 0A 00 6B"),
             bytes.fromhex("03 F6 00 00 3C 0A 00 6B"),
             bytes.fromhex("04 F6 00 00 3C 0A 00 6B"),
+        ]
+        rotate_ccw_frames = [
+            bytes.fromhex("01 F6 00 00 3C 0A 00 6B"),
+            bytes.fromhex("02 F6 01 00 3C 0A 00 6B"),
+            bytes.fromhex("03 F6 01 00 3C 0A 00 6B"),
+            bytes.fromhex("04 F6 01 00 3C 0A 00 6B"),
         ]
 
         # 标定表 vx 列 = [-1,-1,+1,-1]：forward 引擎符号 [-, -, +, -]
         self.assertEqual(speeds_for(1.0, 0.0, 0.0), forward_frames)
         # backward 整体取反：[+, +, -, +]
         self.assertEqual(speeds_for(-1.0, 0.0, 0.0), backward_frames)
-        # vy 列 = [+1,+1,+1,-1]：strafe_left -> [-, -, +, +]
+        # vy 列 = [+1,-1,+1,+1]：strafe_left -> 引擎 [-, +, +, -]（物理）
         self.assertEqual(speeds_for(0.0, 1.0, 0.0), strafe_left_frames)
-        # ω 列 = [-1,+1,+1,+1]：rotate_ccw -> [-, +, +, +]
+        # ω 列 = [+1,-1,-1,-1]：rotate_ccw -> 引擎 [-, +, -, +]（物理，cw/ccw 已对调）
         self.assertEqual(speeds_for(0.0, 0.0, 1.0), rotate_ccw_frames)
 
     def test_forward_all_wheels_cw(self) -> None:
