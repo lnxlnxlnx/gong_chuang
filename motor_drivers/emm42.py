@@ -64,6 +64,7 @@ class Emm42Driver:
         *,
         timeout: float = 0.1,
         pulses_per_revolution: int = 3200,
+        expect_ack: bool = True,
         serial_port: SerialPort | None = None,
     ) -> None:
         # 地址 1..255, 同一串口总线上可用不同地址挂多台驱动器
@@ -74,6 +75,8 @@ class Emm42Driver:
         self.port = port
         self.motor_id = motor_id
         self.timeout = timeout
+        # Response=None 的驱动器会执行控制帧但不回 4 字节 ACK。
+        self.expect_ack = expect_ack
         # 角度<->脉冲换算系数; 若驱动器细分配置不同需在初始化时传入实际值
         self.pulses_per_revolution = pulses_per_revolution
         # 测试时可注入 FakeSerial, 避免真正打开串口
@@ -202,6 +205,8 @@ class Emm42Driver:
         frame = bytes((target_address, function)) + parameters + bytes((self.CHECKSUM,))
         serial_port.write(frame)
         serial_port.flush()
+        if not self.expect_ack:
+            return
         reply = serial_port.read(4)
         expected_prefix = bytes((target_address, function))
         if not reply:

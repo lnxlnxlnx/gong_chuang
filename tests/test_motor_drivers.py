@@ -88,6 +88,19 @@ class Emm42DriverTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no ACK"):
             motor.enable(True)
 
+    def test_enable_can_skip_ack_when_driver_response_is_none(self) -> None:
+        serial = FakeSerial()
+        motor = Emm42Driver(
+            "/dev/ttyUSB1",
+            motor_id=1,
+            serial_port=serial,
+            expect_ack=False,
+        )
+
+        motor.enable(True)
+
+        self.assertEqual(serial.writes, [bytes.fromhex("01 F3 AB 01 00 6B")])
+
     def test_set_speed_encodes_direction_speed_and_acceleration(self) -> None:
         self.motor.set_speed(Direction.CCW, rpm=1500, acceleration=10)
         self.assertEqual(self.serial.writes, [bytes.fromhex("01 F6 01 05 DC 0A 00 6B")])
