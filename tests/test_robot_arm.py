@@ -6,6 +6,7 @@ import unittest
 
 from motor_drivers.emm42 import Direction
 from robot_arm import RobotArm
+from robot_arm_config import ArmConfig, AxisConfig
 
 
 # Independent protocol fixtures: these literals intentionally do not reuse the
@@ -116,6 +117,31 @@ class RobotArmBaseAxisTests(unittest.TestCase):
                     arm.rotate_cw(pulses=pulses)  # type: ignore[arg-type]
 
         self.assertEqual(serial.writes, [])
+
+    def test_uses_the_configured_motion_limit_and_speed(self) -> None:
+        serial = FakeSerial()
+        config = ArmConfig(
+            pulses_per_revolution=4000,
+            rpm=10,
+            acceleration=5,
+            default_pulses=1200,
+            max_pulses=5000,
+            axes={
+                "base": AxisConfig(motor_id=5, reduction_ratio=6),
+                "lift": AxisConfig(motor_id=6),
+                "extension": AxisConfig(motor_id=7),
+            },
+        )
+        arm = RobotArm("/dev/ttyUSB0", config=config, serial_port=serial)
+
+        arm.rotate_cw(pulses=5000)
+
+        self.assertEqual(
+            serial.writes,
+            [relative_position_frame(motor_id=5, direction=Direction.CW, pulses=5000)],
+        )
+        with self.assertRaises(ValueError):
+            arm.rotate_cw(pulses=5001)
 
 
 class RobotArmAxisMappingTests(unittest.TestCase):

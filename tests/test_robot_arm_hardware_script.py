@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import unittest
+from io import StringIO
+from contextlib import redirect_stderr
+from unittest.mock import patch
 
 from hardware_tests.arm import position_motion
 from robot_arm import MotionReport
+from robot_arm_config import ArmConfig, AxisConfig
 
 
 class FakeRobotArm:
@@ -54,6 +58,31 @@ class FakeRobotArm:
 
 
 class ArmPositionMotionScriptTests(unittest.TestCase):
+    def test_parse_args_uses_the_configured_default_and_limit(self) -> None:
+        config = ArmConfig(
+            pulses_per_revolution=3200,
+            rpm=10,
+            acceleration=5,
+            default_pulses=1200,
+            max_pulses=5000,
+            axes={
+                "base": AxisConfig(motor_id=5, reduction_ratio=6),
+                "lift": AxisConfig(motor_id=6),
+                "extension": AxisConfig(motor_id=7),
+            },
+        )
+
+        with patch("sys.argv", ["position_motion.py", "--port", "COM29"]):
+            args = position_motion.parse_args(config)
+
+        self.assertEqual(args.pulses, 1200)
+        error_output = StringIO()
+        with patch("sys.argv", ["position_motion.py", "--port", "COM29", "--pulses", "5001"]):
+            with redirect_stderr(error_output), self.assertRaises(SystemExit):
+                position_motion.parse_args(config)
+        self.assertIn("must be in 1..5000", error_output.getvalue())
+        self.assertNotIn("choose from", error_output.getvalue())
+
     def test_sequence_sends_each_confirmed_axis_direction_with_one_safe_pulse_count(self) -> None:
         arm = FakeRobotArm()
 

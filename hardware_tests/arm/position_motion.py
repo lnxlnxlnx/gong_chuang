@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Optional, Tuple
 
 from robot_arm import RobotArm
+from robot_arm_config import ArmConfig, load_arm_config
 
 Action = Tuple[str, Optional[Callable[[int], object]]]
 
@@ -78,25 +79,39 @@ def _cleanup(arm: RobotArm) -> None:
             print(f"[!] 清理{name}失败：{error!r}", file=sys.stderr)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(config: ArmConfig) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ZDT Emm42 机械臂三轴保守位置模式测试")
     parser.add_argument(
         "--port", required=True, help="Emm42 总线串口，例如 /dev/ttyUSB0 或 COM28"
     )
     parser.add_argument(
         "--pulses",
-        type=int,
-        default=600,
-        choices=range(1, RobotArm.MAX_TEST_PULSES + 1),
-        metavar="1..1000",
-        help="每个相对位置动作的脉冲数，默认 600",
+        type=_pulse_count(config),
+        default=config.default_pulses,
+        metavar=f"1..{config.max_pulses}",
+        help=f"每个相对位置动作的脉冲数，默认 {config.default_pulses}",
     )
     return parser.parse_args()
 
 
+def _pulse_count(config: ArmConfig) -> Callable[[str], int]:
+    """Build concise CLI validation from the shared configured pulse limit."""
+    def parse(value: str) -> int:
+        try:
+            pulses = int(value)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError("must be an integer") from error
+        if not 1 <= pulses <= config.max_pulses:
+            raise argparse.ArgumentTypeError(f"must be in 1..{config.max_pulses}")
+        return pulses
+
+    return parse
+
+
 def main() -> None:
-    args = parse_args()
-    arm = RobotArm(args.port)
+    config = load_arm_config()
+    args = parse_args(config)
+    arm = RobotArm(args.port, config=config)
     run_hardware_test(arm, pulses=args.pulses)
 
 
