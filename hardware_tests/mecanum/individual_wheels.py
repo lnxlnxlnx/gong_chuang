@@ -8,6 +8,7 @@ Run on the vehicle from the project root:
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -54,12 +55,12 @@ def run_sequence(
         sleep(duration)
         car.stop_wheel(wheel)
         print(f"[{wheel.name}] stopped")
-        car.set_wheel_speed(wheel, -rpm)
+        car.set_wheel_speed(wheel, -rpm)  # 反向转动
         print(f"[{wheel.name}] reverse {rpm} RPM acknowledged")
         sleep(duration)
         car.stop_wheel(wheel)
         print(f"[{wheel.name}] stopped")
-        car.enable_wheel(wheel, False)
+        car.enable_wheel(wheel, False)  # disable to avoid heating up the motor
         print(f"[{wheel.name}] disabled")
 
 
@@ -87,8 +88,13 @@ def _confirm(wheel_name: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="逐个测试四个麦轮的正反转方向")
-    parser.add_argument("--profile", default="jetson", help="配置档名，默认 jetson")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="JSON 配置文件路径")
+    default_profile = "windows" if os.name == "nt" else "jetson"
+    parser.add_argument(
+        "--profile", default=default_profile, help=f"配置档名，默认 {default_profile}"
+    )
+    parser.add_argument(
+        "--config", type=Path, default=DEFAULT_CONFIG_PATH, help="JSON 配置文件路径"
+    )
     parser.add_argument("--port", help="本次运行覆盖配置中的 TTL 串口")
     parser.add_argument("--rpm", type=int, help="本次运行覆盖配置中的测试转速")
     parser.add_argument("--duration", type=float, help="本次运行覆盖配置中的单方向时长")

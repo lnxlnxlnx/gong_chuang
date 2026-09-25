@@ -66,44 +66,48 @@ class MecanumDriveTests(unittest.TestCase):
 
 
 class DriveKinematicsTests(MecanumDriveTests):
-    def test_calibrated_transform_maps_installed_axes(self) -> None:
+    def test_calibrated_matrix_sends_engine_signs(self) -> None:
         serial = FakeSerial()
         car = MecanumDrive("/dev/ttyUSB0", motion_transform="calibrated", serial_port=serial)
 
-        car.drive(1.0, 0.0, 0.0, rpm=60)
-        self.assertEqual(
-            serial.writes,
-            [
-                bytes.fromhex("01 F6 00 00 3C 0A 00 6B"),
-                bytes.fromhex("02 F6 01 00 3C 0A 00 6B"),
-                bytes.fromhex("03 F6 00 00 3C 0A 00 6B"),
-                bytes.fromhex("04 F6 01 00 3C 0A 00 6B"),
-            ],
-        )
+        def speeds_for(vx: float, vy: float, omega: float) -> list[bytes]:
+            serial.writes.clear()
+            car.drive(vx, vy, omega, rpm=60)
+            return list(serial.writes)
 
-        serial.writes.clear()
-        car.drive(-1.0, 1.0, 0.0, rpm=60)
-        self.assertEqual(
-            serial.writes,
-            [
-                bytes.fromhex("01 F6 01 00 3C 0A 00 6B"),
-                bytes.fromhex("02 F6 00 00 3C 0A 00 6B"),
-                bytes.fromhex("03 F6 00 00 3C 0A 00 6B"),
-                bytes.fromhex("04 F6 01 00 3C 0A 00 6B"),
-            ],
-        )
+        forward_frames = [
+            bytes.fromhex("01 F6 01 00 3C 0A 00 6B"),
+            bytes.fromhex("02 F6 01 00 3C 0A 00 6B"),
+            bytes.fromhex("03 F6 00 00 3C 0A 00 6B"),
+            bytes.fromhex("04 F6 01 00 3C 0A 00 6B"),
+        ]
+        backward_frames = [
+            bytes.fromhex("01 F6 00 00 3C 0A 00 6B"),
+            bytes.fromhex("02 F6 00 00 3C 0A 00 6B"),
+            bytes.fromhex("03 F6 01 00 3C 0A 00 6B"),
+            bytes.fromhex("04 F6 00 00 3C 0A 00 6B"),
+        ]
+        strafe_left_frames = [
+            bytes.fromhex("01 F6 00 00 3C 0A 00 6B"),
+            bytes.fromhex("02 F6 01 00 3C 0A 00 6B"),
+            bytes.fromhex("03 F6 00 00 3C 0A 00 6B"),
+            bytes.fromhex("04 F6 00 00 3C 0A 00 6B"),
+        ]
+        rotate_ccw_frames = [
+            bytes.fromhex("01 F6 00 00 3C 0A 00 6B"),
+            bytes.fromhex("02 F6 01 00 3C 0A 00 6B"),
+            bytes.fromhex("03 F6 01 00 3C 0A 00 6B"),
+            bytes.fromhex("04 F6 01 00 3C 0A 00 6B"),
+        ]
 
-        serial.writes.clear()
-        car.drive(1.0, -1.0, 0.0, rpm=60)
-        self.assertEqual(
-            serial.writes,
-            [
-                bytes.fromhex("01 F6 00 00 3C 0A 00 6B"),
-                bytes.fromhex("02 F6 01 00 3C 0A 00 6B"),
-                bytes.fromhex("03 F6 01 00 3C 0A 00 6B"),
-                bytes.fromhex("04 F6 00 00 3C 0A 00 6B"),
-            ],
-        )
+        # 标定表 vx 列 = [-1,-1,+1,-1]：forward 引擎符号 [-, -, +, -]
+        self.assertEqual(speeds_for(1.0, 0.0, 0.0), forward_frames)
+        # backward 整体取反：[+, +, -, +]
+        self.assertEqual(speeds_for(-1.0, 0.0, 0.0), backward_frames)
+        # vy 列 = [+1,-1,+1,+1]：strafe_left -> 引擎 [-, +, +, -]（物理）
+        self.assertEqual(speeds_for(0.0, 1.0, 0.0), strafe_left_frames)
+        # ω 列 = [+1,-1,-1,-1]：rotate_ccw -> 引擎 [-, +, -, +]（物理，cw/ccw 已对调）
+        self.assertEqual(speeds_for(0.0, 0.0, 1.0), rotate_ccw_frames)
 
     def test_forward_all_wheels_cw(self) -> None:
         self.car.drive(1.0, 0.0, 0.0, rpm=60)
@@ -223,6 +227,20 @@ class ConvenienceMethodTests(MecanumDriveTests):
 
 
 class LowLevelApiTests(MecanumDriveTests):
+    def test_move_wheels_relative_sends_four_position_frames(self) -> None:
+        self.car.move_wheels_relative(90, -90, 180, -180, rpm=120, acceleration=5)
+        self.assertEqual([frame[0] for frame in self.serial.writes[:4]], [1, 2, 3, 4])
+        self.assertEqual([frame[1] for frame in self.serial.writes[:4]], [0xFD] * 4)
+        self.assertEqual([frame[-2] for frame in self.serial.writes[:4]], [1] * 4)
+        self.assertEqual(self.serial.writes[4], bytes.fromhex("00 FF 66 6B"))
+
+    def test_move_wheels_absolute_sends_four_position_frames(self) -> None:
+        self.car.move_wheels_absolute(90, 90, 90, 90, rpm=120, acceleration=5)
+        self.assertEqual([frame[0] for frame in self.serial.writes[:4]], [1, 2, 3, 4])
+        self.assertEqual([frame[1] for frame in self.serial.writes[:4]], [0xFD] * 4)
+        self.assertEqual([frame[-2] for frame in self.serial.writes[:4]], [1] * 4)
+        self.assertEqual(self.serial.writes[4], bytes.fromhex("00 FF 66 6B"))
+
     def test_set_speeds_direct(self) -> None:
         self.car.set_speeds(10, -20, 30, -40)
         self.assertEqual(

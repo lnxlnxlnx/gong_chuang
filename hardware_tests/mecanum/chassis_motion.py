@@ -1,13 +1,17 @@
-"""Run timed whole-chassis mecanum movement checks.
+"""Run timed whole-chassis mecanum movement checks interactively.
 
 Run on the vehicle from the project root:
 
     python -m hardware_tests.mecanum.chassis_motion
+
+交互: 每个动作按 Enter 执行并可在当前动作上反复重做，
+输入 n 进入下一个动作，输入 q 结束并停止整个底盘。
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -41,12 +45,24 @@ class ChassisDrive(Protocol):
 
     def rotate_ccw(self, rpm: int) -> None: ...
 
+    def forward_left(self, rpm: int) -> None: ...
+
+    def forward_right(self, rpm: int) -> None: ...
+
+    def backward_left(self, rpm: int) -> None: ...
+
+    def backward_right(self, rpm: int) -> None: ...
+
 
 MOTION_METHODS = (
     ("forward", "forward"),
     ("backward", "backward"),
     ("strafe_left", "strafe_left"),
     ("strafe_right", "strafe_right"),
+    ("forward_left", "forward_left"),
+    ("forward_right", "forward_right"),
+    ("backward_left", "backward_left"),
+    ("backward_right", "backward_right"),
     ("rotate_cw", "rotate_cw"),
     ("rotate_ccw", "rotate_ccw"),
 )
@@ -58,14 +74,28 @@ def run_sequence(
     rpm: int,
     duration: float,
     pause: float,
+    prompt: Callable[[str], str],
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Run each whole-chassis movement for a bounded interval and stop between steps."""
+    """Run each whole-chassis movement for a bounded interval, confirmed one at a time.
+
+    ``prompt`` 在每次执行前被调用，返回用户输入并去除首尾空白;
+    返回 "n" 表示跳过当前动作进入下一个，返回 "q" 表示结束整个序列，
+    其余输入（直接回车等）都会执行当前动作；执行完毕后再次等待输入，
+    因此同一个动作可以反复重做，直到输入 n/q 为止。
+    """
     for label, method_name in MOTION_METHODS:
-        print(f"测试动作: {label}")
-        getattr(car, method_name)(rpm)
-        sleep(duration)
-        car.stop()
+        print(f"准备测试动作: {label}")
+        while True:
+            choice = prompt(f"[{label}] 执行本动作? 回车=执行/重做, n=下一个, q=退出: ").strip()
+            if choice == "q":
+                return
+            if choice == "n":
+                break
+            getattr(car, method_name)(rpm)
+            sleep(duration)
+            car.stop()
+            print(f"[{label}] 已停止")
         sleep(pause)
 
 
@@ -75,22 +105,28 @@ def run_hardware_test(
     rpm: int,
     duration: float,
     pause: float,
+    prompt: Callable[[str], str],
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """Run the sequence and always leave the chassis stopped, disabled, and closed."""
     try:
         car.initialize()
         car.enable_all()
-        run_sequence(car, rpm=rpm, duration=duration, pause=pause, sleep=sleep)
+        run_sequence(car, rpm=rpm, duration=duration, pause=pause, prompt=prompt, sleep=sleep)
     finally:
         car.stop()
         car.disable_all()
         car.close()
 
 
+def _prompt(message: str) -> str:
+    return input(message)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="测试麦轮小车的整车运动")
-    parser.add_argument("--profile", default="jetson", help="配置档名，默认 jetson")
+    default_profile = "windows" if os.name == "nt" else "jetson"
+    parser.add_argument("--profile", default=default_profile, help=f"配置档名，默认 {default_profile}")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="JSON 配置文件路径")
     parser.add_argument("--port", help="本次运行覆盖配置中的 TTL 串口")
     parser.add_argument("--rpm", type=int, help="本次运行覆盖配置中的测试转速")
@@ -113,6 +149,7 @@ def main() -> None:
         rpm=profile.chassis_rpm if args.rpm is None else args.rpm,
         duration=duration,
         pause=pause,
+        prompt=_prompt,
     )
 
 

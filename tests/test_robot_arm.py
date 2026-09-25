@@ -1,0 +1,194 @@
+"""Verify the conservative three-axis robot-arm position controller offline."""
+
+from __future__ import annotations
+
+import unittest
+
+from motor_drivers.emm42 import Direction
+from robot_arm import RobotArm
+from robot_arm_config import ArmConfig, AxisConfig
+
+
+# Independent protocol fixtures: these literals intentionally do not reuse the
+# controller implementation, so a wrong command field still fails a test.
+POSITION_COMMAND = 0xFD
+TORQUE_COMMAND = 0xF3
+EMERGENCY_STOP_COMMAND = 0xFE
+SAFE_TEST_RPM = 10
+SAFE_TEST_ACCELERATION = 5
+RELATIVE_POSITION = 0
+IMMEDIATE_EXECUTION = 0
+FRAME_TAIL = 0x6B
+
+
+def relative_position_frame(*, motor_id: int, direction: Direction, pulses: int) -> bytes:
+    """Build the documented Emm42 relative-position frame used by arm tests."""
+    return (
+        bytes((motor_id, POSITION_COMMAND, int(direction)))
+        + SAFE_TEST_RPM.to_bytes(2, "big")
+        + bytes((SAFE_TEST_ACCELERATION,))
+        + pulses.to_bytes(4, "big")
+        + bytes((RELATIVE_POSITION, IMMEDIATE_EXECUTION, FRAME_TAIL))
+    )
+
+
+def torque_frame(*, motor_id: int, enabled: bool) -> bytes:
+    """Build a documented Emm42 torque enable or disable frame."""
+    return bytes((motor_id, TORQUE_COMMAND, 0xAB, int(enabled), 0, FRAME_TAIL))
+
+
+def emergency_stop_frame(*, motor_id: int) -> bytes:
+    """Build a documented Emm42 immediate-stop frame."""
+    return bytes((motor_id, EMERGENCY_STOP_COMMAND, 0x98, 0, FRAME_TAIL))
+
+
+class FakeSerial:
+    """In-memory Emm42 bus that ACKs every command frame."""
+
+    def __init__(self) -> None:
+        self._receive_buffer = bytearray()
+        self.writes: list[bytes] = []
+        self.is_open = True
+
+    def write(self, data: bytes) -> int:
+        frame = bytes(data)
+        self.writes.append(frame)
+        self._receive_buffer.extend(bytes((frame[0], frame[1], 0x02, 0x6B)))
+        return len(frame)
+
+    def flush(self) -> None:
+        pass
+
+    def read(self, size: int) -> bytes:
+        data = bytes(self._receive_buffer[:size])
+        del self._receive_buffer[:size]
+        return data
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+class RobotArmBaseAxisTests(unittest.TestCase):
+    def test_rotate_cw_uses_position_mode_safe_limits_and_reports_output_angle(self) -> None:
+        serial = FakeSerial()
+        arm = RobotArm("/dev/ttyUSB0", serial_port=serial)
+
+        report = arm.rotate_cw(pulses=1000)
+
+        self.assertEqual(
+            serial.writes,
+            [relative_position_frame(motor_id=5, direction=Direction.CW, pulses=1000)],
+        )
+        self.assertEqual(report.motor_id, 5)
+        self.assertEqual(report.pulses, 1000)
+        self.assertEqual(report.motor_degrees, 112.5)
+        self.assertEqual(report.output_degrees, 18.75)
+
+    def test_current_response_none_configuration_does_not_require_an_ack(self) -> None:
+        class NoAckSerial(FakeSerial):
+            def write(self, data: bytes) -> int:
+                frame = bytes(data)
+                self.writes.append(frame)
+                return len(frame)
+
+        serial = NoAckSerial()
+        arm = RobotArm("/dev/ttyUSB0", serial_port=serial)
+
+        arm.enable_all()
+        arm.rotate_cw(pulses=1)
+
+        self.assertEqual(
+            serial.writes,
+            [
+                torque_frame(motor_id=5, enabled=True),
+                torque_frame(motor_id=6, enabled=True),
+                torque_frame(motor_id=7, enabled=True),
+                relative_position_frame(motor_id=5, direction=Direction.CW, pulses=1),
+            ],
+        )
+
+    def test_rejects_unsafe_or_non_integer_pulse_counts_before_writing(self) -> None:
+        serial = FakeSerial()
+        arm = RobotArm("/dev/ttyUSB0", serial_port=serial)
+
+        for pulses in (0, 1001, 1.5):
+            with self.subTest(pulses=pulses):
+                with self.assertRaises(ValueError):
+                    arm.rotate_cw(pulses=pulses)  # type: ignore[arg-type]
+
+        self.assertEqual(serial.writes, [])
+
+    def test_uses_the_configured_motion_limit_and_speed(self) -> None:
+        serial = FakeSerial()
+        config = ArmConfig(
+            pulses_per_revolution=4000,
+            rpm=10,
+            acceleration=5,
+            default_pulses=1200,
+            max_pulses=5000,
+            axes={
+                "base": AxisConfig(motor_id=5, reduction_ratio=6),
+                "lift": AxisConfig(motor_id=6),
+                "extension": AxisConfig(motor_id=7),
+            },
+        )
+        arm = RobotArm("/dev/ttyUSB0", config=config, serial_port=serial)
+
+        arm.rotate_cw(pulses=5000)
+
+        self.assertEqual(
+            serial.writes,
+            [relative_position_frame(motor_id=5, direction=Direction.CW, pulses=5000)],
+        )
+        with self.assertRaises(ValueError):
+            arm.rotate_cw(pulses=5001)
+
+
+class RobotArmAxisMappingTests(unittest.TestCase):
+    def test_physical_convenience_methods_use_the_confirmed_addresses_and_directions(self) -> None:
+        serial = FakeSerial()
+        arm = RobotArm("/dev/ttyUSB0", serial_port=serial)
+
+        arm.rotate_ccw(pulses=1)
+        arm.move_up(pulses=1)
+        arm.move_down(pulses=1)
+        arm.move_forward(pulses=1)
+        arm.move_backward(pulses=1)
+
+        self.assertEqual(
+            serial.writes,
+            [
+                relative_position_frame(motor_id=5, direction=Direction.CCW, pulses=1),
+                relative_position_frame(motor_id=6, direction=Direction.CW, pulses=1),
+                relative_position_frame(motor_id=6, direction=Direction.CCW, pulses=1),
+                relative_position_frame(motor_id=7, direction=Direction.CW, pulses=1),
+                relative_position_frame(motor_id=7, direction=Direction.CCW, pulses=1),
+            ],
+        )
+
+    def test_enable_stop_and_disable_all_axes_in_address_order(self) -> None:
+        serial = FakeSerial()
+        arm = RobotArm("/dev/ttyUSB0", serial_port=serial)
+
+        arm.enable_all()
+        arm.stop_all()
+        arm.disable_all()
+
+        self.assertEqual(
+            serial.writes,
+            [
+                torque_frame(motor_id=5, enabled=True),
+                torque_frame(motor_id=6, enabled=True),
+                torque_frame(motor_id=7, enabled=True),
+                emergency_stop_frame(motor_id=5),
+                emergency_stop_frame(motor_id=6),
+                emergency_stop_frame(motor_id=7),
+                torque_frame(motor_id=5, enabled=False),
+                torque_frame(motor_id=6, enabled=False),
+                torque_frame(motor_id=7, enabled=False),
+            ],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

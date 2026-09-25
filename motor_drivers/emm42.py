@@ -9,7 +9,7 @@ Emm42 V5.0 闭环步进驱动器串口协议(ZDT Emm 固件)：
   - 波特率 115200, 8N1, TTL 电平；用 USB-TTL 模块连接，驱动器电源独立接 12-32V。
   - 接线: USB-TTL 的 TX -> 驱动器 R/A/H, RX -> T/B/L, GND -> GND。
   - direction: 0=CW(顺时针), 1=CCW(逆时针)。
-  - sync 字节 0=立即执行, 1=缓存后由同步帧触发(本驱动固定填 0)。
+  - sync 字节 0=立即执行, 1=缓存后由 ``00 FF 66 6B`` 同步帧触发。
   - 速度/加速度单位: RPM(0..3000) 与加速度档位(0..255)。
   - 位置模式下脉冲数 = |角度| / 360 * pulses_per_revolution；
     默认 pulses_per_revolution=3200(1.8°步距角 x 16细分 = 3200 脉冲/圈)。
@@ -18,7 +18,7 @@ Emm42 V5.0 闭环步进驱动器串口协议(ZDT Emm 固件)：
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Protocol
+from typing import Optional, Protocol, Tuple
 
 
 class SerialPort(Protocol):
@@ -64,7 +64,8 @@ class Emm42Driver:
         *,
         timeout: float = 0.1,
         pulses_per_revolution: int = 3200,
-        serial_port: SerialPort | None = None,
+        expect_ack: bool = True,
+        serial_port: Optional[SerialPort] = None,
     ) -> None:
         # 地址 1..255, 同一串口总线上可用不同地址挂多台驱动器
         if not 1 <= motor_id <= 255:
@@ -74,6 +75,8 @@ class Emm42Driver:
         self.port = port
         self.motor_id = motor_id
         self.timeout = timeout
+        # Response=None 的驱动器会执行控制帧但不回 4 字节 ACK。
+        self.expect_ack = expect_ack
         # 角度<->脉冲换算系数; 若驱动器细分配置不同需在初始化时传入实际值
         self.pulses_per_revolution = pulses_per_revolution
         # 测试时可注入 FakeSerial, 避免真正打开串口
@@ -108,13 +111,31 @@ class Emm42Driver:
         self._require_range("acceleration", acceleration, 0, 255)
         self._write(0xF6, bytes((Direction(direction),)) + rpm.to_bytes(2, "big") + bytes((acceleration, 0)))
 
-    def move_relative(self, degrees: float, rpm: int, acceleration: int) -> None:
-        """Move a signed relative angle; positive is CW and negative is CCW."""
-        self._move(degrees, rpm, acceleration, absolute=False)
+    def move_relative(
+        self,
+        degrees: float,
+        rpm: int,
+        acceleration: int,
+        *,
+        synchronized: bool = False,
+    ) -> None:
+        """Move a signed relative angle; optionally buffer for synchronized start."""
+        self._move(degrees, rpm, acceleration, absolute=False, synchronized=synchronized)
 
-    def move_absolute(self, degrees: float, rpm: int, acceleration: int) -> None:
-        """Move to a signed absolute angle; positive is CW and negative is CCW."""
-        self._move(degrees, rpm, acceleration, absolute=True)
+    def move_absolute(
+        self,
+        degrees: float,
+        rpm: int,
+        acceleration: int,
+        *,
+        synchronized: bool = False,
+    ) -> None:
+        """Move to a signed absolute angle; optionally buffer for synchronized start."""
+        self._move(degrees, rpm, acceleration, absolute=True, synchronized=synchronized)
+
+    def trigger_sync_motion(self) -> None:
+        """Trigger all previously buffered synchronized commands on the bus."""
+        self._write(0xFF, b"\x66", address=0)
 
     def stop(self) -> None:
         """Immediately brake the motor in either speed or position mode.
@@ -131,7 +152,15 @@ class Emm42Driver:
         """
         self._write(0x9A, bytes((HomeMode(mode), 0)))
 
-    def _move(self, degrees: float, rpm: int, acceleration: int, *, absolute: bool) -> None:
+    def _move(
+        self,
+        degrees: float,
+        rpm: int,
+        acceleration: int,
+        *,
+        absolute: bool,
+        synchronized: bool,
+    ) -> None:
         # 位置命令不允许 0 位移
         if degrees == 0:
             raise ValueError("degrees must be non-zero")
@@ -148,7 +177,7 @@ class Emm42Driver:
             + rpm.to_bytes(2, "big")
             + bytes((acceleration,))
             + pulses.to_bytes(4, "big")
-            + bytes((int(absolute), 0))  # absolute: 0=相对, 1=绝对; 末尾 sync=0 立即执行
+            + bytes((int(absolute), int(synchronized)))
         )
         # 位置命令帧: addr FD dir rpm acc pulses absolute sync 6B
         self._write(0xFD, parameters)
@@ -167,15 +196,19 @@ class Emm42Driver:
         function: int,
         parameters: bytes,
         *,
-        accepted_statuses: tuple[int, ...] = (0x02,),
+        accepted_statuses: Tuple[int, ...] = (0x02,),
+        address: Optional[int] = None,
     ) -> None:
         # 拼装完整帧并验证驱动器 ACK: [motor_id] [function] [status] [0x6B]
         serial_port = self._require_serial()
-        frame = bytes((self.motor_id, function)) + parameters + bytes((self.CHECKSUM,))
+        target_address = self.motor_id if address is None else address
+        frame = bytes((target_address, function)) + parameters + bytes((self.CHECKSUM,))
         serial_port.write(frame)
         serial_port.flush()
+        if not self.expect_ack:
+            return
         reply = serial_port.read(4)
-        expected_prefix = bytes((self.motor_id, function))
+        expected_prefix = bytes((target_address, function))
         if not reply:
             raise RuntimeError(
                 f"Emm42 motor {self.motor_id} command 0x{function:02X} received no ACK"

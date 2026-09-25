@@ -2,3 +2,4 @@
 .worktrees/
 __pycache__/
 models/
+*.pdf
