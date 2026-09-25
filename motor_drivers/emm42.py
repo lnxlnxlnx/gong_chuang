@@ -18,7 +18,7 @@ Emm42 V5.0 闭环步进驱动器串口协议(ZDT Emm 固件)：
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Protocol
+from typing import Optional, Protocol, Tuple
 
 
 class SerialPort(Protocol):
@@ -65,7 +65,7 @@ class Emm42Driver:
         timeout: float = 0.1,
         pulses_per_revolution: int = 3200,
         expect_ack: bool = True,
-        serial_port: SerialPort | None = None,
+        serial_port: Optional[SerialPort] = None,
     ) -> None:
         # 地址 1..255, 同一串口总线上可用不同地址挂多台驱动器
         if not 1 <= motor_id <= 255:
@@ -196,8 +196,8 @@ class Emm42Driver:
         function: int,
         parameters: bytes,
         *,
-        accepted_statuses: tuple[int, ...] = (0x02,),
-        address: int | None = None,
+        accepted_statuses: Tuple[int, ...] = (0x02,),
+        address: Optional[int] = None,
     ) -> None:
         # 拼装完整帧并验证驱动器 ACK: [motor_id] [function] [status] [0x6B]
         serial_port = self._require_serial()

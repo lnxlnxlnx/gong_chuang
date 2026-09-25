@@ -71,6 +71,20 @@ class ArmPositionMotionScriptTests(unittest.TestCase):
             ],
         )
 
+    def test_sequence_waits_for_confirmation_after_the_final_backward_motion(self) -> None:
+        arm = FakeRobotArm()
+        prompts: list[str] = []
+
+        position_motion.run_sequence(
+            arm,
+            pulses=100,
+            prompt=lambda message: prompts.append(message) or "",
+        )
+
+        self.assertEqual(len(prompts), 7)
+        self.assertIn("确认机械臂后缩完成", prompts[-1])
+        self.assertEqual(arm.calls[-1], ("move_backward", 100))
+
     def test_hardware_run_stops_disables_and_closes_after_an_interruption(self) -> None:
         class InterruptedArm(FakeRobotArm):
             def rotate_cw(self, pulses: int) -> MotionReport:

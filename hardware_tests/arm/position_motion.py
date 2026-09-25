@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable
+from typing import Optional, Tuple
 
 from robot_arm import RobotArm
 
-Action = tuple[str, Callable[[int], object]]
+Action = Tuple[str, Optional[Callable[[int], object]]]
 
 
 def run_sequence(
@@ -18,13 +19,14 @@ def run_sequence(
     prompt: Callable[[str], str] = input,
 ) -> None:
     """Ask before each bounded relative move so the operator controls progression."""
-    actions: tuple[Action, ...] = (
+    actions: Tuple[Action, ...] = (
         ("底座顺时针", arm.rotate_cw),
         ("底座逆时针", arm.rotate_ccw),
         ("机械臂向上", arm.move_up),
         ("机械臂向下", arm.move_down),
         ("机械臂前伸", arm.move_forward),
         ("机械臂后缩", arm.move_backward),
+        ("确认机械臂后缩完成", None),
     )
     for label, action in actions:
         answer = (
@@ -34,6 +36,8 @@ def run_sequence(
         )
         if answer == "q":
             return
+        if action is None:
+            continue
         report = action(pulses)
         print(
             f"{label}：电机 {report.motor_id}，{report.pulses} 脉冲，"

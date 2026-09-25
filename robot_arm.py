@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from motor_drivers.emm42 import Direction, Emm42Driver, SerialPort
 
@@ -14,7 +15,7 @@ class MotionReport:
     motor_id: int
     pulses: int
     motor_degrees: float
-    output_degrees: float | None
+    output_degrees: Optional[float]
 
 
 class RobotArm:
@@ -34,7 +35,7 @@ class RobotArm:
         port: str,
         *,
         pulses_per_revolution: int = 3200,
-        serial_port: SerialPort | None = None,
+        serial_port: Optional[SerialPort] = None,
     ) -> None:
         if pulses_per_revolution <= 0:
             raise ValueError("pulses_per_revolution must be positive")
