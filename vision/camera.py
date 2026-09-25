@@ -7,6 +7,25 @@ OpenCV is imported lazily so this module can be loaded on machines without it.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "vision.json"
+
+
+def load_camera_id(platform: str, config_path: Path = DEFAULT_CONFIG_PATH) -> int:
+    """Read the selected camera index for one platform; reject invalid settings."""
+    try:
+        settings = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read vision configuration: {config_path}") from error
+    profile = settings.get(platform) if isinstance(settings, dict) else None
+    camera_id = profile.get("camera_id") if isinstance(profile, dict) else None
+    if type(camera_id) is not int or camera_id < 0:
+        raise ValueError(f"{platform}.camera_id must be a non-negative integer")
+    return camera_id
+
 
 def _cv2():
     """Import and return ``cv2`` lazily."""
@@ -44,7 +63,7 @@ class USBCamera:
         if not capture.isOpened():
             raise RuntimeError(
                 f"USB camera {self.device_id} failed to open; "
-                "check `ls /dev/video*` for available devices"
+                "check the configured camera index and connection"
             )
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)

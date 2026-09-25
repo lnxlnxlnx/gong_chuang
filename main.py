@@ -12,6 +12,7 @@ from mecanum_config import HardwareProfile, create_chassis, load_profile
 from motor_drivers import BusServo
 from robot_arm import RobotArm
 from robot_arm_config import load_arm_config
+from vision import default_model_path, load_camera_id
 
 
 def _confirmed(label: str) -> bool:
@@ -59,15 +60,18 @@ def demo_arm(port: str) -> None:
         arm.close()
 
 
-def demo_vision(engine_path: str = "models/best.engine", camera_id: int = 0) -> None:
+def demo_vision(model_path: str | Path | None = None, camera_id: int | None = None) -> None:
     """Preview detections until q is pressed in the image window."""
-    if not Path(engine_path).is_file():
-        raise FileNotFoundError(f"未找到模型文件：{engine_path}")
+    model_path = Path(model_path) if model_path is not None else default_model_path()
+    camera_id = camera_id if camera_id is not None else load_camera_id(
+        "windows" if os.name == "nt" else "jetson")
+    if not model_path.is_file():
+        raise FileNotFoundError(f"未找到模型文件：{model_path}")
     import cv2
-    from vision import USBCamera, YOLOv8Detector
+    from vision import USBCamera, create_detector
 
     try:
-        with USBCamera(camera_id).initialize() as camera, YOLOv8Detector(engine_path) as detector:
+        with USBCamera(camera_id).initialize() as camera, create_detector(model_path) as detector:
             while True:
                 frame = camera.read()
                 if frame is None:

@@ -1,0 +1,8 @@
+{
+  "windows": {
+    "camera_id": 1
+  },
+  "jetson": {
+    "camera_id": 0
+  }
+}

@@ -9,6 +9,7 @@ be executed inside the stdlib unittest runner.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -19,6 +20,7 @@ from vision.yolov8 import (
     _nms,
     class_name,
     decode,
+    YOLOv8ONNXDetector,
 )
 
 
@@ -125,6 +127,21 @@ class TestDistance(unittest.TestCase):
     def test_focal_from_fov(self):
         # 90-degree FOV at 640 wide -> focal 320 px.
         self.assertAlmostEqual(focal_length_from_fov(90.0, 640), 320.0, places=4)
+
+
+class TestONNXDetector(unittest.TestCase):
+    def test_onnx_backend_returns_the_same_detection_interface(self):
+        raw = np.zeros((1, 14, 1), dtype=np.float32)
+        raw[0, :4, 0] = [320, 320, 100, 100]
+        raw[0, 4, 0] = 0.95
+        with patch("cv2.dnn.readNetFromONNX") as load_model:
+            load_model.return_value.forward.return_value = raw
+            with YOLOv8ONNXDetector("best.onnx") as detector:
+                hits = detector.detect(np.zeros((640, 640, 3), dtype=np.uint8))
+        load_model.assert_called_once_with("best.onnx")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].name, "obj-red")
+        self.assertEqual(hits[0].center, (320.0, 320.0))
 
 
 if __name__ == "__main__":

@@ -3,16 +3,24 @@
 import subprocess
 import sys
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
 import test as test_launcher
+from vision import default_model_path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class EntryPointTests(unittest.TestCase):
+    def test_vision_demo_selects_the_local_model_format(self) -> None:
+        model_path = default_model_path()
+        expected = ".onnx" if os.name == "nt" else ".engine"
+        self.assertEqual(model_path.suffix, expected)
+        self.assertEqual(model_path.name, f"best{expected}")
+
     def test_menu_dispatches_arm_and_returns_to_menu(self) -> None:
         with patch("builtins.input", side_effect=["2", "0"]):
             with patch.object(test_launcher.importlib, "import_module") as import_module:

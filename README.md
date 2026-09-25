@@ -86,7 +86,7 @@ python test.py
 python main.py
 ```
 
-预期：按程序中的调用顺序进入各模块演示，运动前请求确认；视觉窗口按 `q` 退出。运行它需要已连接的硬件及 `models/best.engine`。
+预期：按程序中的调用顺序进入各模块演示，运动前请求确认；视觉窗口按 `q` 退出。运行它需要已连接的硬件及当前平台对应的模型文件。
 
 ## 本机协议测试
 
@@ -121,20 +121,21 @@ python test.py
 Windows 上将 `profiles.windows.port` 改为设备管理器显示的实际 `COM` 号；Jetson 上核对 `profiles.jetson.port`。无论正常结束、异常或 `Ctrl+C`，麦轮脚本都会发送停止命令、失能扭矩并关闭串口。
 ## 视觉外设（vision）
 
-USB 摄像头 + YOLOv8 TensorRT 检测，封装为 `vision` 包，供主程序和示例复用：
+USB 摄像头 + YOLOv8 检测，封装为 `vision` 包，供主程序和示例复用：
 
-- `vision.YOLOv8Detector`：加载 `models/*.engine`，对 BGR 帧做端到端检测，返回 `list[vision.Detection]`。
+- `vision.create_detector(vision.default_model_path())`：Windows 用 ONNX，Jetson 用 TensorRT；都返回 `list[vision.Detection]`。
 - `vision.USBCamera`：USB 摄像头封装（`initialize()/read()/release()`，支持 `with`）。
 - `vision.DistanceEstimator`：单目测距（针孔模型，需要已知类别真实宽度）。
 
+菜单 9 和 `main.py` 的视觉演示从 `config/vision.json` 读取摄像头编号。Windows 当前设为 `1`（外接 USB 摄像头），Jetson 设为 `0`；如果设备枚举顺序不同，修改对应平台的 `camera_id`。指定编号无法打开时会报错，不会自动切换到前置摄像头。
+
 ### 依赖
 
-在 Jetson 的 `tensorrt` conda 环境执行；需要 `tensorrt`、`pycuda`、`numpy`、`opencv-python`。
-推理引擎用 ultralytics YOLOv8 导出（动态尺寸或固定尺寸均可）。
+Windows 使用 OpenCV ONNX 推理，需要 `opencv-python`、`numpy`。Jetson 在 `tensorrt` conda 环境执行，还需要 `tensorrt`、`pycuda`。
 
 ### 模型
 
-引擎文件放 `models/`（已 gitignore，不入库）：`models/best.engine`、`models/best.onnx`。
+模型文件放 `models/`（已 gitignore，不入库）：Windows 用 `models/best.onnx`，Jetson 用 `models/best.engine`。当前两份模型来自远端 `/home/pi/workspace/GC_robot_3G/yolov8n/`；ONNX 输入为 `1×3×640×640`，输出为 `1×14×8400`。
 类别表在 `vision/yolov8.py::DEFAULT_CLASS_NAMES`，与模型训练标签顺序一致；换模型时同步修改即可。
 
 ### 运行示例
@@ -143,7 +144,7 @@ USB 摄像头 + YOLOv8 TensorRT 检测，封装为 `vision` 包，供主程序�
 cd /home/pi/gong_chuang
 source /home/pi/miniforge3/bin/activate tensorrt
 
-# 在菜单中选择 9；默认 models/best.engine，摄像头 /dev/video0
+# 在菜单中选择 9；Windows 默认 best.onnx，Jetson 默认 best.engine
 python test.py
 ```
 
@@ -153,10 +154,10 @@ python test.py
 ### 程序中使用
 
 ```python
-from vision import DistanceEstimator, USBCamera, YOLOv8Detector
+from vision import DistanceEstimator, USBCamera, create_detector, default_model_path
 
 with USBCamera(0).initialize() as cam, \
-        YOLOv8Detector("models/best.engine") as detector:
+        create_detector(default_model_path()) as detector:
     est = DistanceEstimator(focal_px=focal, real_widths={"target-1": 60.0})
     while True:
         frame = cam.read()

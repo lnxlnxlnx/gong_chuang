@@ -1,6 +1,6 @@
-"""Standalone USB camera + TensorRT YOLOv8 vision demo.
+"""Standalone USB camera + YOLOv8 vision demo.
 
-Usage (in the ``tensorrt`` conda env, from the gong_chuang repo root)::
+Usage from the project root (Jetson needs its TensorRT environment)::
 
     python test.py  # 选择 9
 
@@ -11,10 +11,11 @@ readouts (when ``--real-widths`` is given) --- are drawn on the frame.
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 
-from vision import DistanceEstimator, USBCamera, YOLOv8Detector
+from vision import DistanceEstimator, USBCamera, create_detector, default_model_path, load_camera_id
 
 
 def parse_real_widths(text: str | None):
@@ -26,11 +27,11 @@ def parse_real_widths(text: str | None):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="YOLOv8 TensorRT vision demo")
-    parser.add_argument("--engine", default="models/best.engine",
-                        help="path to the serialized TensorRT engine")
-    parser.add_argument("--camera", type=int, default=0,
-                        help="USB camera device id (default: 0)")
+    parser = argparse.ArgumentParser(description="YOLOv8 vision demo")
+    parser.add_argument("--model", type=Path, default=default_model_path(),
+                        help="ONNX model on Windows, TensorRT engine on Jetson")
+    parser.add_argument("--camera", type=int, default=None,
+                        help="override camera index from config/vision.json")
     parser.add_argument("--width", type=int, default=640, help="camera width")
     parser.add_argument("--height", type=int, default=480, help="camera height")
     parser.add_argument("--fps", type=int, default=30, help="camera frame rate")
@@ -44,9 +45,11 @@ def main() -> None:
     parser.add_argument("--max-fps", type=float, default=30.0,
                         help="cap on the displayed FPS (default: 30)")
     args = parser.parse_args()
+    camera_id = args.camera if args.camera is not None else load_camera_id(
+        "windows" if os.name == "nt" else "jetson")
 
-    if not Path(args.engine).exists():
-        parser.error(f"engine file not found: {args.engine}")
+    if not args.model.is_file():
+        parser.error(f"model file not found: {args.model}")
 
     import cv2
 
@@ -54,10 +57,10 @@ def main() -> None:
     focal_px = 560.0  # placeholder; see README "calibrating focal length"
     estimator = DistanceEstimator(focal_px, real_widths) if real_widths else None
 
-    print(f"loading engine: {args.engine} ...")
-    with YOLOv8Detector(args.engine, conf_thresh=args.conf,
+    print(f"loading model: {args.model}; camera index: {camera_id} ...")
+    with create_detector(args.model, conf_thresh=args.conf,
                         iou_thresh=args.iou) as detector, \
-            USBCamera(args.camera, width=args.width, height=args.height,
+            USBCamera(camera_id, width=args.width, height=args.height,
                       fps=args.fps).initialize() as camera:
         print("preview running; press q to quit")
         fps = 0.0
@@ -83,7 +86,7 @@ def main() -> None:
                         cv2.putText(annotated, text, (x, y),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                                     (0, 255, 255), 1)
-            cv2.imshow("YOLOv8 TensorRT vision", annotated)
+            cv2.imshow("YOLOv8 vision", annotated)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
