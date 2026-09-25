@@ -46,10 +46,10 @@ stepper.stop()
 
 软件逻辑层固定使用 `FL/FR/RL/RR` 四个轮位，标准默认地址顺序为 `1/2/3/4`。
 实际驱动器地址属于硬件配置，由 `config/mecanum_hardware.json` 注入；当前实车映射为
-`FL=1 FR=4 RL=2 RR=3`。更换轮子位置时只需修改配置，不需要修改运动 API 或上层代码。
+`FL=3 FR=4 RL=2 RR=1`。更换轮子位置时只需修改配置，不需要修改运动 API 或上层代码。
 
 ```python
-from hardware_tests.mecanum.config import create_chassis, load_profile
+from mecanum_config import create_chassis, load_profile
 
 profile = load_profile("jetson")
 car = create_chassis(profile).initialize()
@@ -70,6 +70,24 @@ car.close()
 - 当前实车使用标准麦轮坐标变换 `motion_transform="standard"`，四轮横移都会参与运动。
 - 若装配后方向反了：整车方向反 → 把 `drive()` 的 `vx`/`vy` 取反；辊子排布不同 → 换 `pattern="O"`；单轮转向反 → 在 `wheel_signs` 给该轮 `-1`。
 
+## 统一入口
+
+在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；其余选项为机械臂、麦轮、电机诊断和视觉的手动真机测试。步进总线端口读取 `config/mecanum_hardware.json` 中当前平台的 `port`，无需每次输入 `--port`。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
+
+```powershell
+python test.py
+```
+
+预期：出现编号菜单；输入 `0` 直接退出，不会打开硬件设备。
+
+`main.py` 是项目应用示例，依次调用底盘、机械臂和视觉。只需要其中一部分时，在 `main()` 中注释对应调用；总线舵机读取示例也在文件中，使用前填写独立的舵机串口。
+
+```powershell
+python main.py
+```
+
+预期：按程序中的调用顺序进入各模块演示，运动前请求确认；视觉窗口按 `q` 退出。运行它需要已连接的硬件及 `models/best.engine`。
+
 ## 本机协议测试
 
 ```powershell
@@ -81,19 +99,16 @@ python -m unittest discover -s tests -v
 
 ## 测试目录
 
-- `tests/`：离线单元测试，不会打开串口或驱动电机。
-- `hardware_tests/emm42/`：单个 Emm42 驱动器的真机诊断脚本。
-- `hardware_tests/mecanum/`：四麦轮底盘的真机测试脚本。
+- `tests/test_*.py`：离线单元测试，不会打开串口或驱动电机。
+- `tests/manual/`：机械臂、麦轮、电机诊断及视觉的手动真机脚本。
 
-真机测试必须在 Jetson 上从项目根目录以模块方式执行。开始前让车轮悬空，并确保急停措施可用：
+真机测试从项目根目录运行菜单。开始前让车轮悬空，并确保急停措施可用：
 
 ```bash
-# 依次测试 FL、FR、RL、RR 的正反转；每个轮子开始前需要人工确认
-python -m hardware_tests.mecanum.individual_wheels --profile jetson
-
-# 依次测试前进、后退、左移、右移、四个斜向、顺时针旋转、逆时针旋转
-python -m hardware_tests.mecanum.chassis_motion --profile jetson
+python test.py
 ```
+
+预期：选择 3 依次测试四轮正反转；选择 4 测试底盘各方向。两项均按当前平台配置取端口和速度。
 
 所有常用硬件参数集中在 `config/mecanum_hardware.json`：
 
@@ -103,14 +118,7 @@ python -m hardware_tests.mecanum.chassis_motion --profile jetson
 - `profiles.jetson`：Jetson 串口和两类测试的默认速度、时长。
 - `profiles.windows`：Windows `COM` 串口和两类测试的默认速度、时长。
 
-Windows 上将 `profiles.windows.port` 改为设备管理器显示的实际 `COM` 号后执行：
-
-```powershell
-py -m hardware_tests.mecanum.individual_wheels --profile windows
-py -m hardware_tests.mecanum.chassis_motion --profile windows
-```
-
-在 Windows 上也可以直接运行 `py -m hardware_tests.mecanum.individual_wheels` 或 `py -m hardware_tests.mecanum.chassis_motion`，两个脚本都会自动选择 `windows` profile 并使用配置中的 COM14、速度、时长和暂停时间。需要微调时再使用 `--port`、`--rpm`、`--duration`、`--pause` 或 `--acceleration` 覆盖配置。无论正常结束、异常或 `Ctrl+C`，脚本都会发送四轮停止命令、失能扭矩并关闭串口。
+Windows 上将 `profiles.windows.port` 改为设备管理器显示的实际 `COM` 号；Jetson 上核对 `profiles.jetson.port`。无论正常结束、异常或 `Ctrl+C`，麦轮脚本都会发送停止命令、失能扭矩并关闭串口。
 ## 视觉外设（vision）
 
 USB 摄像头 + YOLOv8 TensorRT 检测，封装为 `vision` 包，供主程序和示例复用：
@@ -135,17 +143,11 @@ USB 摄像头 + YOLOv8 TensorRT 检测，封装为 `vision` 包，供主程序�
 cd /home/pi/gong_chuang
 source /home/pi/miniforge3/bin/activate tensorrt
 
-# 基础预览：默认 models/best.engine，摄像头 /dev/video0
-python examples/demo_vision.py
-
-# 调整阈值或改摄像头
-python examples/demo_vision.py --conf 0.5 --camera 1
-
-# 启用测距显示（obj-red 真实宽度 120mm、zhangai 80mm）
-python examples/demo_vision.py --real-widths "obj-red=120,zhangai=80"
+# 在菜单中选择 9；默认 models/best.engine，摄像头 /dev/video0
+python test.py
 ```
 
-预览窗口按 `q` 退出。`--real-widths` 与 `demo_vision.py` 内的 `focal_px` 默认值（560px）
+预览窗口按 `q` 退出。`tests/manual/vision.py` 中的 `focal_px` 默认值（560px）
 是占位符，正式使用前需按下方校准。
 
 ### 程序中使用

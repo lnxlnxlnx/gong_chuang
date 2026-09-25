@@ -6,12 +6,13 @@ to see whether the stop command is accepted and takes effect.
 用来排查 **EMM42 步进电机驱动器无法停机** 的问题
 """
 
+import os
 import sys
 import time
 
 import serial
+from mecanum_config import load_profile
 
-PORT = "/dev/ttyUSB0"
 BAUD = 115200
 
 
@@ -31,8 +32,9 @@ def send(ser: serial.Serial, frame: bytes) -> bytes:
 def main() -> None:
     addr = b"\x01"
     CSUM = b"\x6B"
+    port = load_profile("windows" if os.name == "nt" else "jetson").port
 
-    with serial.Serial(PORT, baudrate=BAUD, timeout=0.2) as ser:
+    with serial.Serial(port, baudrate=BAUD, timeout=0.2) as ser:
         ser.reset_input_buffer()
 
         print("[1] enable (F3 AB 01 00)")

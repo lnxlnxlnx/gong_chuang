@@ -2,7 +2,7 @@
 
 Run on the vehicle from the project root:
 
-    python -m hardware_tests.mecanum.individual_wheels
+    python test.py  # 选择 3
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import Protocol
 
 from mecanum import WHEEL_ORDER, WheelPosition
 
-from .config import DEFAULT_CONFIG_PATH, create_drive, load_profile
+from mecanum_config import DEFAULT_CONFIG_PATH, create_drive, load_profile
 
 
 class IndividualWheelDrive(Protocol):

@@ -2,7 +2,7 @@
 
 在板子上运行（需先接好四台 Emm42 驱动器，共用一个 USB-TTL）：
 
-    /home/pi/miniforge3/envs/tensorrt/bin/python examples/demo_mecanum.py [profile]
+    python test.py  # 选择 8
 
 默认使用 `jetson` 配置；Windows 可传入 `windows`，串口和硬件地址都从配置文件读取。
 
@@ -14,12 +14,15 @@
 from __future__ import annotations
 
 import time
+import os
 
-from hardware_tests.mecanum.config import create_chassis, load_profile
+from mecanum_config import create_chassis, load_profile
 from mecanum import WheelPosition
 
 
-def main(profile_name: str = "jetson") -> None:
+def main(profile_name: str | None = None) -> None:
+    if profile_name is None:
+        profile_name = "windows" if os.name == "nt" else "jetson"
     profile = load_profile(profile_name)
     car = create_chassis(profile).initialize()
     try:
@@ -47,4 +50,4 @@ def main(profile_name: str = "jetson") -> None:
 if __name__ == "__main__":
     import sys
 
-    main(sys.argv[1] if len(sys.argv) > 1 else "jetson")
+    main(sys.argv[1] if len(sys.argv) > 1 else None)

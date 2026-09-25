@@ -11,7 +11,7 @@ from mecanum import MecanumDrive, WheelPosition
 from chassis import MecanumChassis
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "mecanum_hardware.json"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "mecanum_hardware.json"
 _WHEEL_NAMES = ("FL", "FR", "RL", "RR")
 
 

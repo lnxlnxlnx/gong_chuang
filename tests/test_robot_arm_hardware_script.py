@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import unittest
+import os
 from io import StringIO
 from contextlib import redirect_stderr
 from unittest.mock import patch
 
-from hardware_tests.arm import position_motion
+from tests.manual import arm as position_motion
+from mecanum_config import load_profile
 from robot_arm import MotionReport
 from robot_arm_config import ArmConfig, AxisConfig
 
@@ -72,10 +74,11 @@ class ArmPositionMotionScriptTests(unittest.TestCase):
             },
         )
 
-        with patch("sys.argv", ["position_motion.py", "--port", "COM29"]):
+        with patch("sys.argv", ["arm.py"]):
             args = position_motion.parse_args(config)
 
         self.assertEqual(args.pulses, 1200)
+        self.assertEqual(args.port, load_profile("windows" if os.name == "nt" else "jetson").port)
         error_output = StringIO()
         with patch("sys.argv", ["position_motion.py", "--port", "COM29", "--pulses", "5001"]):
             with redirect_stderr(error_output), self.assertRaises(SystemExit):

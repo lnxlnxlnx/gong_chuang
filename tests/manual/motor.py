@@ -1,4 +1,4 @@
-"""Gentle end-to-end test for the Emm42 stepper driver on /dev/ttyUSB0.
+"""Gentle end-to-end test for the Emm42 stepper driver on the configured port.
 
 测试流程：
 
@@ -10,16 +10,16 @@
 6. 正常结束；异常时进入 except，finally 块保证：停止电机、关闭扭矩、关闭串口
 """
 
+import os
 import sys
 import time
 
-sys.path.insert(0, "/home/pi/gong_chuang")
-
 from motor_drivers.emm42 import Direction, Emm42Driver, HomeMode
+from mecanum_config import load_profile
 
 
 def main() -> None:
-    port = "/dev/ttyUSB0"
+    port = load_profile("windows" if os.name == "nt" else "jetson").port
     motor_id = 1
     print(f"[*] Motor test: {port}, id={motor_id}")
     motor = Emm42Driver(port, motor_id=motor_id).initialize()

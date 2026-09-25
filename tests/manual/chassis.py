@@ -2,7 +2,7 @@
 
 Run on the vehicle from the project root:
 
-    python -m hardware_tests.mecanum.chassis_motion
+    python test.py  # 选择 4
 
 交互: 每个动作按 Enter 执行并可在当前动作上反复重做，
 输入 n 进入下一个动作，输入 q 结束并停止整个底盘。
@@ -17,7 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from .config import DEFAULT_CONFIG_PATH, create_drive, load_profile
+from mecanum_config import DEFAULT_CONFIG_PATH, create_drive, load_profile
 
 
 class ChassisDrive(Protocol):

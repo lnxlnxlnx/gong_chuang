@@ -8,7 +8,7 @@ import unittest
 class ArmPython39CompatibilityTests(unittest.TestCase):
     def test_position_motion_module_imports(self):
         result = subprocess.run(
-            [sys.executable, "-c", "import hardware_tests.arm.position_motion"],
+            [sys.executable, "-c", "import tests.manual.arm"],
             capture_output=True,
             text=True,
         )

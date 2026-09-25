@@ -82,7 +82,7 @@ class RobotArmBaseAxisTests(unittest.TestCase):
         self.assertEqual(report.motor_id, 5)
         self.assertEqual(report.pulses, 1000)
         self.assertEqual(report.motor_degrees, 112.5)
-        self.assertEqual(report.output_degrees, 18.75)
+        self.assertEqual(report.output_degrees, 112.5 / arm.config.base_reduction)
 
     def test_current_response_none_configuration_does_not_require_an_ack(self) -> None:
         class NoAckSerial(FakeSerial):
@@ -111,7 +111,7 @@ class RobotArmBaseAxisTests(unittest.TestCase):
         serial = FakeSerial()
         arm = RobotArm("/dev/ttyUSB0", serial_port=serial)
 
-        for pulses in (0, 1001, 1.5):
+        for pulses in (0, arm.config.max_pulses + 1, 1.5):
             with self.subTest(pulses=pulses):
                 with self.assertRaises(ValueError):
                     arm.rotate_cw(pulses=pulses)  # type: ignore[arg-type]

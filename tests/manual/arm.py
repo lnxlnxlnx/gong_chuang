@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable
 from typing import Optional, Tuple
 
 from robot_arm import RobotArm
 from robot_arm_config import ArmConfig, load_arm_config
+from mecanum_config import load_profile
 
 Action = Tuple[str, Optional[Callable[[int], object]]]
 
@@ -81,8 +83,10 @@ def _cleanup(arm: RobotArm) -> None:
 
 def parse_args(config: ArmConfig) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ZDT Emm42 机械臂三轴保守位置模式测试")
+    default_profile = "windows" if os.name == "nt" else "jetson"
     parser.add_argument(
-        "--port", required=True, help="Emm42 总线串口，例如 /dev/ttyUSB0 或 COM28"
+        "--port", default=load_profile(default_profile).port,
+        help="覆盖平台配置中的 Emm42 总线串口",
     )
     parser.add_argument(
         "--pulses",

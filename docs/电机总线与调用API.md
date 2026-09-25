@@ -13,7 +13,7 @@
 
 ```
 ┌─ 应用代码（你写的）────────────────────────────────────┐
-│  from hardware_tests.mecanum.config import create_chassis  │
+│  from mecanum_config import create_chassis                │
 │  car = create_chassis(profile).initialize()                │
 │  car.forward(rpm=60)                                       │
 └──────────────────────────┬───────────────────────────────┘
@@ -36,7 +36,7 @@
 - **第 2 层（整车）**：`mecanum.py` `MecanumDrive`，四轮共享一根串口，含麦轮逆运动学。
 - **第 3 层（门面）**：`chassis.py` `MecanumChassis`，向上层应用提供的"整车动作" API。
 - **配置**：`config/mecanum_hardware.json`，硬件地址、方向修正、串口都在这里，脚本里用
-  `hardware_tests/mecanum/config.py` 读取。
+  `mecanum_config.py` 读取。
 
 > 总线舵机只到第 1 层（没有整车层），用 `BusServo` 直接控制。
 
@@ -255,7 +255,7 @@ MecanumDrive(
 真机/Windows 切换、换装轮子都不用改应用代码。
 
 ```python
-from hardware_tests.mecanum.config import create_chassis, load_profile
+from mecanum_config import create_chassis, load_profile
 
 profile = load_profile("jetson")          # 或 "windows"
 car = create_chassis(profile).initialize()
@@ -274,16 +274,16 @@ rotate_cw/rotate_ccw/forward_left/forward_right/backward_left/backward_right`，
 另外有 `enable()/enable_all()/disable()/disable_all()/stop()/set_wheel_speed()/
 move_wheels_relative()/move_wheels_absolute()/wheel(WheelPosition)`（返回底层驱动对象）。
 
-> 建议真机示例直接抄 `examples/demo_mecanum.py`，它用 try/finally 保证结束时必松轴关串口。
+> 真机演示见 `main.py` 或 `tests/manual/mecanum_demo.py`，两处都在结束时松轴并关闭串口。
 
 ---
 
-## 7. 配置加载：`hardware_tests/mecanum/config.py`
+## 7. 配置加载：`mecanum_config.py`
 
 配置文件 `config/mecanum_hardware.json` 集中管理硬件参数：
 
 ```python
-from hardware_tests.mecanum.config import (
+from mecanum_config import (
     create_chassis,   # -> MecanumChassis（上层应用推荐）
     create_drive,     # -> MecanumDrive（需要底层 API 时）
     load_profile,     # -> HardwareProfile（只读配置，不建控制对象）

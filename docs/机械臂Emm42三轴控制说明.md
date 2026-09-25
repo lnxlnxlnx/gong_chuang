@@ -133,18 +133,14 @@
 | 向前/后 | `move_forward(pulses)` / `move_backward(pulses)` | 电机脉冲数与电机角度 |
 | 全轴安全清理 | `stop_all()`、`disable_all()`、`close()` | 无 |
 
-在 Jetson 上从项目根目录执行真机脚本。`--port` 必填；当前默认每个动作走 600 脉冲，每步都需要操作员回车确认，输入 `q` 停止后续动作。正常结束、异常和 `Ctrl+C` 都会停止三轴、失能并关闭串口。
+在项目根目录运行统一测试菜单并选择机械臂；串口从当前平台的 `config/mecanum_hardware.json` 读取。当前默认每个动作走 800 脉冲，每步都需要操作员回车确认，输入 `q` 停止后续动作。正常结束、异常和 `Ctrl+C` 都会停止三轴、失能并关闭串口。
 
 ```powershell
-python -m hardware_tests.arm.position_motion --port /dev/ttyUSB0
+python test.py
 ```
 
-预期：终端依次询问底座顺/逆时针、向上/下、向前/后六个动作；每次只发送一条地址为 5、6 或 7 的 `FD` 相对位置帧，速度、加速度和默认脉冲均来自 `config/robot_arm.json`（初始为 10 RPM、5、600）。动作表末尾有“确认机械臂后缩完成”的空动作：它不会发送串口帧，只等待确认，使后缩完成后才停止、失能、关闭串口。因为当前驱动器设置为 `Response=None`，该脚本不会等待 ACK。
+预期：选择 2 后，终端依次询问底座顺/逆时针、向上/下、向前/后六个动作；每次只发送一条地址为 5、6 或 7 的 `FD` 相对位置帧，速度、加速度和默认脉冲均来自 `config/robot_arm.json`（当前为 10 RPM、5、800）。动作表末尾有“确认机械臂后缩完成”的空动作：它不会发送串口帧，只等待确认，使后缩完成后才停止、失能、关闭串口。因为当前驱动器设置为 `Response=None`，该脚本不会等待 ACK。
 
 需要改变测试范围时，只修改 `config/robot_arm.json` 的 `motion.default_pulses` 与 `motion.max_pulses`；前者必须不大于后者。需要在用户确认机械行程安全后才提高上限：
 
-```powershell
-python -m hardware_tests.arm.position_motion --port /dev/ttyUSB0 --pulses 1000
-```
-
-预期：参数超出配置的 `1..motion.max_pulses` 时命令行立即拒绝，不发送任何运动帧。
+预期：当配置中的默认脉冲超过 `motion.max_pulses` 时，程序会在打开串口前拒绝配置，不发送运动帧。

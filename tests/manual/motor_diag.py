@@ -1,11 +1,11 @@
 """Diagnostic motor test: torque-lock check + 3x full 360 deg sweeps."""
 
+import os
 import sys
 import time
 
-sys.path.insert(0, "/home/pi/gong_chuang")
-
 from motor_drivers.emm42 import Direction, Emm42Driver
+from mecanum_config import load_profile
 
 
 def step(msg: str) -> None:
@@ -14,7 +14,8 @@ def step(msg: str) -> None:
 
 
 def main() -> None:
-    motor = Emm42Driver("/dev/ttyUSB0", motor_id=1).initialize()
+    port = load_profile("windows" if os.name == "nt" else "jetson").port
+    motor = Emm42Driver(port, motor_id=1).initialize()
     print("[*] serial opened OK")
     try:
         step("enable torque - SHAFT SHOULD LOCK, try to turn it by hand for 5s")

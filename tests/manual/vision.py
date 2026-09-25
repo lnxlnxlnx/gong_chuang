@@ -2,8 +2,7 @@
 
 Usage (in the ``tensorrt`` conda env, from the gong_chuang repo root)::
 
-    python examples/demo_vision.py --engine models/best.engine
-    python examples/demo_vision.py --engine models/best.engine --conf 0.5 --gpu-id 0
+    python test.py  # 选择 9
 
 Press ``q`` in the preview window to quit.  Optional FPS --- and distance
 readouts (when ``--real-widths`` is given) --- are drawn on the frame.
