@@ -1,0 +1,23 @@
+{
+  "motor": {
+    "id": 8,
+    "port": "COM28",
+    "expect_ack": true,
+    "pulses_per_revolution": 3200,
+    "rpm": 10,
+    "acceleration": 5
+  },
+  "lidar": {
+    "port": "COM26"
+  },
+  "scan": {
+    "max_ccw_pulses": 800,
+    "step_pulses": 40,
+    "sweep_degrees": 90,
+    "settle_seconds": 0.5,
+    "sample_timeout_seconds": 2.0,
+    "min_distance_mm": 70,
+    "max_distance_mm": 7500,
+    "obstacle_distance_mm": 1000
+  }
+}
