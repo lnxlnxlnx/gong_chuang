@@ -6,6 +6,8 @@ to see whether the stop command is accepted and takes effect.
 用来排查 **EMM42 步进电机驱动器无法停机** 的问题
 """
 
+MENU_ENTRY = (7, "单电机停机诊断")
+
 import os
 import sys
 import time

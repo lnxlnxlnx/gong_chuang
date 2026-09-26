@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+MENU_ENTRY = (2, "机械臂三轴")
+
 import argparse
 import os
 import sys

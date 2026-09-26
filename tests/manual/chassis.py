@@ -10,6 +10,8 @@ Run on the vehicle from the project root:
 
 from __future__ import annotations
 
+MENU_ENTRY = (4, "麦轮底盘")
+
 import argparse
 import os
 import time

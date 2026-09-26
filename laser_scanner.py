@@ -178,7 +178,7 @@ def scan_sector(
 def save_scan(
     samples: list[ScanPoint], config: ScanConfig, prefix: Path
 ) -> tuple[Path, Path]:
-    """Save numerical scan data and a standalone quarter-circle radar view."""
+    """Save numerical scan data and a full radar with third-quadrant samples."""
     csv_path = prefix.with_suffix(".csv")
     svg_path = prefix.with_suffix(".svg")
     if csv_path.exists() or svg_path.exists():
@@ -193,55 +193,80 @@ def save_scan(
                              point.obstacle))
 
     svg = ET.Element("svg", {
-        "xmlns": "http://www.w3.org/2000/svg", "viewBox": "0 0 560 550",
-        "width": "560", "height": "550", "role": "img",
-        "aria-label": "STP-23L 90 degree obstacle scan",
+        "xmlns": "http://www.w3.org/2000/svg", "viewBox": "0 0 600 650",
+        "width": "600", "height": "650", "role": "img",
+        "aria-label": "STP-23L 90 degree counterclockwise obstacle scan",
     })
-    ET.SubElement(svg, "rect", {"width": "560", "height": "550", "fill": "#ffffff"})
+    ET.SubElement(svg, "rect", {"width": "600", "height": "650", "fill": "#ffffff"})
     ET.SubElement(svg, "text", {
         "x": "32", "y": "38", "fill": "#172528", "font-size": "18",
         "font-family": "Arial, sans-serif",
-    }).text = "STP-23L obstacle scan"
-    origin_x, origin_y, radius = 90, 460, 380
-    for distance in range(1000, config.max_distance_mm + 1, 1000):
-        ring = radius * distance / config.max_distance_mm
-        ET.SubElement(svg, "path", {
-            "d": f"M {origin_x + ring:.1f} {origin_y} A {ring:.1f} {ring:.1f} 0 0 0 {origin_x} {origin_y - ring:.1f}",
-            "fill": "none", "stroke": "#d4dedf", "stroke-width": "1",
-        })
-    threshold_radius = radius * config.obstacle_distance_mm / config.max_distance_mm
+    }).text = "STP-23L | 90° CCW scan"
+    origin_x, origin_y, radius = 300, 315, 250
     ET.SubElement(svg, "path", {
-        "d": f"M {origin_x + threshold_radius:.1f} {origin_y} A {threshold_radius:.1f} {threshold_radius:.1f} 0 0 0 {origin_x} {origin_y - threshold_radius:.1f}",
-        "fill": "none", "stroke": "#d58b43", "stroke-width": "2", "stroke-dasharray": "5 4",
+        "d": (f"M {origin_x} {origin_y} L {origin_x - radius} {origin_y} "
+              f"A {radius} {radius} 0 0 0 {origin_x} {origin_y + radius} Z"),
+        "fill": "#e9f5f2",
     })
-    for angle in (0, 30, 60, 90):
-        radians = math.radians(angle)
-        x = origin_x + radius * math.cos(radians)
-        y = origin_y - radius * math.sin(radians)
-        ET.SubElement(svg, "line", {
-            "x1": str(origin_x), "y1": str(origin_y),
-            "x2": f"{x:.1f}", "y2": f"{y:.1f}", "stroke": "#d4dedf",
+    for fraction in (0.25, 0.5, 0.75, 1.0):
+        ring = radius * fraction
+        distance = config.max_distance_mm * fraction
+        ET.SubElement(svg, "circle", {
+            "class": "distance-ring", "cx": str(origin_x), "cy": str(origin_y),
+            "r": f"{ring:.1f}", "fill": "none", "stroke": "#d4dedf",
+            "stroke-width": "1",
         })
         ET.SubElement(svg, "text", {
-            "x": f"{x:.1f}", "y": f"{y - 8:.1f}", "fill": "#56676a",
+            "x": str(origin_x + 8), "y": f"{origin_y - ring + 14:.1f}",
+            "fill": "#56676a", "font-size": "12", "font-family": "Arial, sans-serif",
+        }).text = f"{distance:g} mm"
+    threshold_radius = radius * config.obstacle_distance_mm / config.max_distance_mm
+    ET.SubElement(svg, "circle", {
+        "class": "threshold-ring", "cx": str(origin_x), "cy": str(origin_y),
+        "r": f"{threshold_radius:.1f}", "fill": "none", "stroke": "#d58b43",
+        "stroke-width": "2", "stroke-dasharray": "5 4",
+    })
+    ET.SubElement(svg, "text", {
+        "x": f"{origin_x + threshold_radius + 8:.1f}", "y": str(origin_y + 24),
+        "fill": "#9a5926", "font-size": "12", "font-family": "Arial, sans-serif",
+    }).text = f"Obstacle <= {config.obstacle_distance_mm} mm"
+    for x1, y1, x2, y2 in (
+        (origin_x - radius, origin_y, origin_x + radius, origin_y),
+        (origin_x, origin_y - radius, origin_x, origin_y + radius),
+    ):
+        ET.SubElement(svg, "line", {
+            "x1": str(x1), "y1": str(y1), "x2": str(x2), "y2": str(y2),
+            "stroke": "#aabbbc", "stroke-width": "1",
+        })
+    for angle in (0, 30, 60, 90):
+        radians = math.radians(180 + angle)
+        x = origin_x + radius * math.cos(radians)
+        y = origin_y - radius * math.sin(radians)
+        if angle in (30, 60):
+            ET.SubElement(svg, "line", {
+                "x1": str(origin_x), "y1": str(origin_y),
+                "x2": f"{x:.1f}", "y2": f"{y:.1f}", "stroke": "#d4dedf",
+            })
+        label = "0° start" if angle == 0 else "90° end" if angle == 90 else f"{angle}°"
+        ET.SubElement(svg, "text", {
+            "x": f"{x:.1f}", "y": f"{y + (20 if angle else -8):.1f}", "fill": "#56676a",
             "font-size": "12", "font-family": "Arial, sans-serif",
             "text-anchor": "middle",
-        }).text = f"{angle}°"
+        }).text = label
     for point in samples:
         if point.distance_mm is None:
             continue
         scaled = radius * min(point.distance_mm, config.max_distance_mm) / config.max_distance_mm
-        radians = math.radians(point.angle_degrees)
+        radians = math.radians(180 + point.angle_degrees)
         x = origin_x + scaled * math.cos(radians)
         y = origin_y - scaled * math.sin(radians)
         ET.SubElement(svg, "circle", {
-            "cx": f"{x:.1f}", "cy": f"{y:.1f}", "r": "5",
+            "class": "scan-point", "cx": f"{x:.1f}", "cy": f"{y:.1f}", "r": "5",
             "fill": "#c64538" if point.obstacle else "#147d85",
         })
     ET.SubElement(svg, "text", {
-        "x": "32", "y": "525", "fill": "#56676a", "font-size": "12",
+        "x": "32", "y": "625", "fill": "#56676a", "font-size": "12",
         "font-family": "Arial, sans-serif",
-    }).text = (f"Red: <= {config.obstacle_distance_mm} mm    Teal: clear    "
-               f"Outer arc: {config.max_distance_mm} mm")
+    }).text = "Red: obstacle    Teal: farther    Empty quadrants: not scanned"
     ET.ElementTree(svg).write(svg_path, encoding="utf-8", xml_declaration=True)
     return csv_path, svg_path

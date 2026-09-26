@@ -10,6 +10,8 @@
 6. 正常结束；异常时进入 except，finally 块保证：停止电机、关闭扭矩、关闭串口
 """
 
+MENU_ENTRY = (5, "单电机基础测试")
+
 import os
 import sys
 import time

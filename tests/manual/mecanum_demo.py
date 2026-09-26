@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+MENU_ENTRY = (8, "底盘演示")
+
 import time
 import os
 

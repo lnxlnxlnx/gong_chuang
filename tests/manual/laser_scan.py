@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+MENU_ENTRY = (10, "激光障碍物扫描")
+
 import argparse
 from datetime import datetime
 from pathlib import Path

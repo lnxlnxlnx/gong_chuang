@@ -7,6 +7,8 @@ Run on the vehicle from the project root:
 
 from __future__ import annotations
 
+MENU_ENTRY = (3, "麦轮逐轮")
+
 import argparse
 import os
 import time

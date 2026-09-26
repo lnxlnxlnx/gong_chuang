@@ -3,9 +3,10 @@
 import unittest
 import tempfile
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from pathlib import Path
 
-from laser_scanner import ScanConfig, load_scan_config, save_scan, scan_sector
+from laser_scanner import ScanConfig, ScanPoint, load_scan_config, save_scan, scan_sector
 from motor_drivers.emm42 import Emm42Driver
 
 
@@ -63,7 +64,7 @@ class LaserScannerTests(unittest.TestCase):
         self.assertEqual(settings.motor_port, "COM28")
         self.assertEqual(settings.lidar_port, "COM26")
         self.assertEqual(settings.max_ccw_pulses, 800)
-        self.assertEqual(settings.step_pulses, 40)
+        self.assertTrue(1 <= settings.step_pulses <= settings.max_ccw_pulses)
         self.assertEqual(settings.sweep_degrees, 90)
 
     def test_scans_to_endpoint_then_returns_with_position_commands(self):
@@ -155,6 +156,36 @@ class LaserScannerTests(unittest.TestCase):
 
             self.assertIn("0,0.0,500,True", csv_path.read_text(encoding="utf-8"))
             self.assertEqual(ET.parse(svg_path).getroot().tag, "{http://www.w3.org/2000/svg}svg")
+
+    def test_radar_places_counterclockwise_scan_in_third_quadrant_with_distance_labels(self):
+        settings = replace(config(), min_distance_mm=30, max_distance_mm=300,
+                           obstacle_distance_mm=100)
+        points = [
+            ScanPoint(0, 0, 100, True),
+            ScanPoint(400, 45, 150, False),
+            ScanPoint(800, 90, 300, False),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            _, svg_path = save_scan(points, settings, Path(directory) / "sweep")
+            root = ET.parse(svg_path).getroot()
+
+        ns = "{http://www.w3.org/2000/svg}"
+        rings = root.findall(f".//{ns}circle[@class='distance-ring']")
+        self.assertEqual(len(rings), 4)
+        self.assertEqual({ring.get("cx") for ring in rings}, {"300"})
+        self.assertEqual({ring.get("cy") for ring in rings}, {"315"})
+        markers = root.findall(f".//{ns}circle[@class='scan-point']")
+        self.assertEqual(len(markers), 3)
+        coordinates = [(float(point.get("cx")), float(point.get("cy"))) for point in markers]
+        self.assertLess(coordinates[0][0], 300)
+        self.assertEqual(coordinates[0][1], 315)
+        self.assertLess(coordinates[1][0], 300)
+        self.assertGreater(coordinates[1][1], 315)
+        self.assertEqual(coordinates[2][0], 300)
+        self.assertGreater(coordinates[2][1], 315)
+        labels = {node.text for node in root.findall(f".//{ns}text")}
+        self.assertTrue({"0° start", "90° end", "75 mm", "150 mm", "225 mm",
+                         "300 mm", "Obstacle <= 100 mm"}.issubset(labels))
 
 
 if __name__ == "__main__":

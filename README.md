@@ -72,13 +72,15 @@ car.close()
 
 ## 统一入口
 
-在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；其余选项为机械臂、麦轮、电机诊断和视觉的手动真机测试。步进总线端口读取 `config/mecanum_hardware.json` 中当前平台的 `port`，无需每次输入 `--port`。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
+在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距。步进总线端口读取 `config/mecanum_hardware.json` 中当前平台的 `port`，无需每次输入 `--port`；激光测试使用独立的 `config/laser_scan.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
 
 ```powershell
 python test.py
 ```
 
 预期：出现编号菜单；输入 `0` 直接退出，不会打开硬件设备。
+
+菜单自动发现 `tests/manual/` 下声明 `MENU_ENTRY = (编号, "菜单名称")` 且提供 `main()` 的脚本。新增真机测试时，只需在新脚本中声明未占用的编号和名称，无需修改 `test.py`；展示菜单不会导入真机模块，选择后才导入并运行。
 
 `main.py` 是项目应用示例，依次调用底盘、机械臂和视觉。只需要其中一部分时，在 `main()` 中注释对应调用；总线舵机读取示例也在文件中，使用前填写独立的舵机串口。
 

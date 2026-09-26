@@ -1,9 +1,12 @@
 """Smoke checks for the two project entry points without opening hardware."""
 
+import io
+import os
 import subprocess
 import sys
+import tempfile
 import unittest
-import os
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +18,41 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EntryPointTests(unittest.TestCase):
+    def test_manual_test_is_discovered_without_importing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "future_scan.py"
+            script.write_text(
+                'MENU_ENTRY = (11, "新测试")\nraise RuntimeError("imported")\n',
+                encoding="utf-8",
+            )
+            entries = test_launcher.discover_manual_tests(Path(directory))
+        self.assertEqual(entries, (("11", "新测试", "tests.manual.future_scan"),))
+
+    def test_duplicate_manual_menu_number_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ("first", "second"):
+                (Path(directory) / f"{name}.py").write_text(
+                    'MENU_ENTRY = (10, "重复")\n', encoding="utf-8"
+                )
+            with self.assertRaisesRegex(ValueError, "10"):
+                test_launcher.discover_manual_tests(Path(directory))
+
+    def test_menu_dispatches_laser_scan(self) -> None:
+        with patch("builtins.input", side_effect=["10", "0"]):
+            with patch.object(test_launcher.importlib, "import_module") as import_module:
+                with redirect_stdout(io.StringIO()) as output:
+                    test_launcher.main()
+        self.assertIn("10. 激光障碍物扫描", output.getvalue())
+        import_module.assert_called_once_with("tests.manual.laser_scan")
+
+    def test_menu_dispatches_fixed_laser_distance(self) -> None:
+        with patch("builtins.input", side_effect=["11", "0"]):
+            with patch.object(test_launcher.importlib, "import_module") as import_module:
+                with redirect_stdout(io.StringIO()) as output:
+                    test_launcher.main()
+        self.assertIn("11. 激光固定测距", output.getvalue())
+        import_module.assert_called_once_with("tests.manual.laser_fixed")
+
     def test_vision_demo_selects_the_local_model_format(self) -> None:
         model_path = default_model_path()
         expected = ".onnx" if os.name == "nt" else ".engine"

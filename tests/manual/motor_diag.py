@@ -1,5 +1,7 @@
 """Diagnostic motor test: torque-lock check + 3x full 360 deg sweeps."""
 
+MENU_ENTRY = (6, "单电机诊断")
+
 import os
 import sys
 import time

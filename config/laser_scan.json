@@ -2,7 +2,7 @@
   "motor": {
     "id": 8,
     "port": "COM28",
-    "expect_ack": true,
+    "expect_ack": false,
     "pulses_per_revolution": 3200,
     "rpm": 10,
     "acceleration": 5
@@ -12,12 +12,12 @@
   },
   "scan": {
     "max_ccw_pulses": 800,
-    "step_pulses": 40,
+    "step_pulses": 20,
     "sweep_degrees": 90,
-    "settle_seconds": 0.5,
+    "settle_seconds": 0.0001,
     "sample_timeout_seconds": 2.0,
-    "min_distance_mm": 70,
-    "max_distance_mm": 7500,
-    "obstacle_distance_mm": 1000
+    "min_distance_mm": 30,
+    "max_distance_mm": 300,
+    "obstacle_distance_mm": 100
   }
 }

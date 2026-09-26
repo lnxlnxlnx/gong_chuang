@@ -4,3 +4,4 @@ __pycache__/
 models/
 *.pdf
 __pycache__/
+output/

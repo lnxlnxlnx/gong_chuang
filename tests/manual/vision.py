@@ -10,6 +10,8 @@ readouts (when ``--real-widths`` is given) --- are drawn on the frame.
 
 from __future__ import annotations
 
+MENU_ENTRY = (9, "视觉演示")
+
 import argparse
 import os
 import time
