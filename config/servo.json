@@ -1,0 +1,8 @@
+{
+  "windows": {
+    "port": "COM30"
+  },
+  "jetson": {
+    "port": ""
+  }
+}

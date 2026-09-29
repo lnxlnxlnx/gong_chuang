@@ -64,6 +64,16 @@ class BusServoTests(unittest.TestCase):
         self.assertEqual(self.servo.read_position(), -2)
         self.assertEqual(self.serial.writes, [bytes.fromhex("55 55 01 03 1C DF")])
 
+    def test_read_position_rejects_another_servos_reply(self) -> None:
+        self.serial._receive_buffer.extend(bytes.fromhex("55 55 02 05 1C F4 01 E7"))
+        with self.assertRaisesRegex(RuntimeError, "unexpected servo position response"):
+            self.servo.read_position()
+
+    def test_read_position_rejects_wrong_response_length(self) -> None:
+        self.serial._receive_buffer.extend(bytes.fromhex("55 55 01 03 1C DF"))
+        with self.assertRaisesRegex(RuntimeError, "unexpected servo position response"):
+            self.servo.read_position()
+
     def test_set_position_rejects_out_of_range_values(self) -> None:
         with self.assertRaises(ValueError):
             self.servo.set_position(position=1001, duration_ms=1000)

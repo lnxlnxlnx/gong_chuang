@@ -117,7 +117,7 @@ class BusServo:
         self._write(self.POS_READ)
         packet = self._read_packet()
         # packet[0:2]=55 55; packet[2]=id; packet[3]=长度; packet[4]=指令码
-        if packet[4] != self.POS_READ or len(packet) != 8:
+        if len(packet) != 8 or packet[2] != self.servo_id or packet[3] != 5 or packet[4] != self.POS_READ:
             raise RuntimeError("unexpected servo position response")
         # 数据段为 2 字节带符号小端位置值 (packet[5:7])
         return int.from_bytes(packet[5:7], "little", signed=True)
