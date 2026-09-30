@@ -1,4 +1,4 @@
-"""Checks for the 9600 baud controller actually present on COM30."""
+"""Check the 9600 baud multi-servo controller protocol without hardware."""
 
 import unittest
 

@@ -1,8 +1,8 @@
-"""Manual COM11 direct bus-servo trial; separate from the controller path."""
+"""Manual direct bus-servo trial; separate from the controller path."""
 
 from __future__ import annotations
 
-MENU_ENTRY = (14, "夹爪直连调试（COM11）")
+MENU_ENTRY = (14, "夹爪直连调试")
 
 import argparse
 import time
@@ -36,10 +36,11 @@ def run_direct_test(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="115200 bps 夹爪直连调试，非正式控制板路径")
-    parser.add_argument("--port", default="COM11", help="直连调试串口，默认 COM11")
+    parser.add_argument("--port", default=None, help="覆盖 config/servo.json 中的平台串口")
     args = parser.parse_args()
-    config = load_gripper_config("windows")
-    servo = BusServo(args.port, config.servo_id, timeout=0.5).initialize()
+    config = load_gripper_config()
+    port = args.port if args.port is not None else config.port
+    servo = BusServo(port, config.servo_id, timeout=0.5).initialize()
     try:
         run_direct_test(servo, config)
     finally:

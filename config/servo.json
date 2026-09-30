@@ -4,5 +4,11 @@
   },
   "jetson": {
     "port": ""
+  },
+  "gripper": {
+    "servo_id": 1,
+    "open_position": 300,
+    "closed_position": 500,
+    "duration_ms": 1000
   }
 }

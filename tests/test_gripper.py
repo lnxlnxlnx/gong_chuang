@@ -21,17 +21,26 @@ class GripperTests(unittest.TestCase):
     def test_controller_port_comes_from_servo_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "servo.json"
-            path.write_text(json.dumps({"windows": {"port": "COM77"}}), encoding="utf-8")
-            self.assertEqual(load_gripper_config("windows", servo_config_path=path).port, "COM77")
+            path.write_text(json.dumps({
+                "windows": {"port": "COM77"},
+                "gripper": {
+                    "servo_id": 1, "open_position": 300,
+                    "closed_position": 500, "duration_ms": 1000,
+                },
+            }), encoding="utf-8")
+            self.assertEqual(load_gripper_config("windows", path).port, "COM77")
 
     def test_invalid_endpoint_is_rejected_before_serial_opens(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "gripper.json"
+            path = Path(directory) / "servo.json"
             path.write_text(json.dumps({
-                "servo_id": 1,
-                "open_position": 300,
-                "closed_position": 1001,
-                "duration_ms": 1000,
+                "windows": {"port": "COM77"},
+                "gripper": {
+                    "servo_id": 1,
+                    "open_position": 300,
+                    "closed_position": 1001,
+                    "duration_ms": 1000,
+                },
             }), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "closed_position"):
                 load_gripper_config("windows", path)

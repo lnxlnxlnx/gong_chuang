@@ -10,8 +10,7 @@ from pathlib import Path
 from motor_drivers.servo_controller import ServoController
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "gripper.json"
-SERVO_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "servo.json"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "servo.json"
 
 
 @dataclass(frozen=True)
@@ -26,28 +25,26 @@ class GripperConfig:
 def load_gripper_config(
     platform: str | None = None,
     config_path: Path = DEFAULT_CONFIG_PATH,
-    servo_config_path: Path = SERVO_CONFIG_PATH,
 ) -> GripperConfig:
-    """Read gripper positions and the shared multi-servo controller port."""
+    """Read the controller port and gripper settings from one servo JSON file."""
     platform = platform or ("windows" if os.name == "nt" else "jetson")
     try:
         document = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"无法读取夹爪配置：{config_path}") from error
+        raise ValueError(f"无法读取舵机配置：{config_path}") from error
     if not isinstance(document, dict):
-        raise ValueError("夹爪配置必须是 JSON 对象")
-    try:
-        servo_document = json.loads(servo_config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"无法读取舵机控制板配置：{servo_config_path}") from error
-    profile = servo_document.get(platform) if isinstance(servo_document, dict) else None
+        raise ValueError("舵机配置必须是 JSON 对象")
+    profile = document.get(platform)
     if not isinstance(profile, dict) or not isinstance(profile.get("port"), str) or not profile["port"].strip():
-        raise ValueError(f"请先填写 {servo_config_path} 中的 {platform}.port")
+        raise ValueError(f"请先填写 {config_path} 中的 {platform}.port")
+    gripper = document.get("gripper")
+    if not isinstance(gripper, dict):
+        raise ValueError("gripper 必须是 JSON 对象")
 
     def integer(name: str, minimum: int, maximum: int) -> int:
-        value = document.get(name)
+        value = gripper.get(name)
         if type(value) is not int or not minimum <= value <= maximum:
-            raise ValueError(f"{name} 必须是 {minimum}..{maximum} 的整数")
+            raise ValueError(f"gripper.{name} 必须是 {minimum}..{maximum} 的整数")
         return value
 
     config = GripperConfig(

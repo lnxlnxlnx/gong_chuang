@@ -86,11 +86,11 @@ python test.py
 
 ### 夹爪控制板封装
 
-`gripper.Gripper` 通过菜单 12 所用的 **9600 bps 多舵机控制板**封装夹爪 `open_gripper()` 和 `close_gripper()`。控制板串口沿用 `config/servo.json`（目前填 `COM11`）；夹爪 ID `1`、张开 `300`、闭合 `500` 脉冲和动作时间 `1000` 毫秒在 `config/gripper.json`。**300/500 只是随意选定的试动值，后续必须按真实夹爪行程修改，不能视为最终张开与夹紧位置。**目前 COM11 上的 115200 bps 直连调试已验证舵机移动，但 9600 bps 控制板查询没有回包，尚未验证正式控制板夹爪动作。运行 `python test.py` 选择 `13. 夹爪控制板测试`；程序先查询舵机位置，每个动作再单独要求输入 `YES`。
+`gripper.Gripper` 通过菜单 12 所用的 **9600 bps 多舵机控制板**封装夹爪 `open_gripper()` 和 `close_gripper()`。控制板串口、夹爪 ID `1`、张开 `300`、闭合 `500` 脉冲和动作时间 `1000` 毫秒统一在 `config/servo.json`；当前 Windows 端口填 `COM11`。**300/500 只是随意选定的试动值，后续必须按真实夹爪行程修改，不能视为最终张开与夹紧位置。**目前 COM11 上的 115200 bps 直连调试已验证舵机移动，但 9600 bps 控制板查询没有回包，尚未验证正式控制板夹爪动作。运行 `python test.py` 选择 `13. 夹爪控制板测试`；程序先查询舵机位置，每个动作再单独要求输入 `YES`。
 
 完整说明、Jetson 迁移步骤及 COM11 调试记录见 `夹爪控制板使用说明.md`。
 
-`python gripper.py` 本身不会执行动作。当前 COM11 直连调试可运行 `python -m tests.manual.gripper_direct --port COM11`（或测试菜单 14），逐项输入 `YES` 后依次试动 300 和 500；这条 115200 bps 调试路径与菜单 13 的 9600 bps 正式控制板路径不同。
+`python gripper.py` 本身不会执行动作。当前 COM11 直连调试可运行 `python -m tests.manual.gripper_direct`（或测试菜单 14），默认串口同样读取 `config/servo.json`，逐项输入 `YES` 后依次试动 300 和 500；这条 115200 bps 调试路径与菜单 13 的 9600 bps 正式控制板路径不同。
 
 ```python
 import time
