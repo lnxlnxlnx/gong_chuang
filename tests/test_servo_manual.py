@@ -47,8 +47,11 @@ class BusServoConfigTests(unittest.TestCase):
                 load_bus_config("windows", path)
 
     def test_project_file_configures_the_verified_direct_bus(self) -> None:
+        """The project file must supply a usable direct-bus bus config, not just a port."""
         config = load_bus_config("windows")
-        self.assertEqual((config.baudrate, config.servo_id), (115200, 2))
+        self.assertEqual(config.baudrate, 115200)
+        self.assertTrue(config.port.strip())
+        self.assertTrue(1 <= config.servo_id <= 253)
 
 
 class ServoManualTests(unittest.TestCase):

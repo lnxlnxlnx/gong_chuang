@@ -4,9 +4,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from gripper import Gripper, GripperConfig, load_gripper_config
+from tests.manual import gripper as gripper_manual
 from tests.manual.gripper import run_manual
 
 
@@ -59,23 +60,35 @@ class GripperTests(unittest.TestCase):
         controller.close.assert_called_once()
 
     def test_manual_actions_require_individual_yes(self) -> None:
-        gripper = Mock()
-        gripper.config = GripperConfig("COM30", 1, 300, 500, 1000)
-        gripper.read_position.return_value = 400
+        servo = Mock()
+        servo.read_position.return_value = 400
+        config = GripperConfig("COM14", 1, 300, 500, 1000)
         answers = iter(["no", "YES"])
-        run_manual(gripper, prompt=lambda _: next(answers))
-        gripper.open_gripper.assert_not_called()
-        gripper.close_gripper.assert_called_once()
-        gripper.read_position.assert_called_once()
+        with patch.object(gripper_manual.time, "sleep"):
+            run_manual(servo, config, prompt=lambda _: next(answers))
+        # 只有第二项得到 YES：第一次不会发送任何位置指令
+        servo.set_position.assert_called_once_with(500, 1000)
+        # 起始位置读一次，张开的 YES 被拒绝所以没有读回，闭合后读回一次
+        self.assertEqual(servo.read_position.call_count, 2)
 
     def test_manual_does_not_move_when_servo_does_not_answer(self) -> None:
-        gripper = Mock()
-        gripper.config = GripperConfig("COM30", 1, 300, 500, 1000)
-        gripper.read_position.side_effect = TimeoutError("no response")
+        servo = Mock()
+        servo.read_position.side_effect = TimeoutError("no response")
+        config = GripperConfig("COM14", 1, 300, 500, 1000)
         with self.assertRaises(TimeoutError):
-            run_manual(gripper, prompt=lambda _: "YES")
-        gripper.open_gripper.assert_not_called()
-        gripper.close_gripper.assert_not_called()
+            run_manual(servo, config, prompt=lambda _: "YES")
+        servo.set_position.assert_not_called()
+
+    def test_main_opens_configured_gripper_id_on_the_bus_port(self) -> None:
+        config = GripperConfig("COM14", 1, 300, 500, 1000)
+        bus = Mock(port="COM14", baudrate=115200, servo_id=2)
+        with patch.object(gripper_manual, "load_gripper_config", return_value=config), \
+                patch.object(gripper_manual, "load_bus_config", return_value=bus), \
+                patch.object(gripper_manual, "run_manual"), \
+                patch.object(gripper_manual, "BusServo") as bus_servo:
+            gripper_manual.main()
+        bus_servo.assert_called_once_with("COM14", 1, baudrate=115200, timeout=0.5)
+        bus_servo.return_value.initialize.return_value.close.assert_called_once()
 
 
 if __name__ == "__main__":

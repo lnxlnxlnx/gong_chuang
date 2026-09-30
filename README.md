@@ -82,30 +82,33 @@ python test.py
 
 菜单自动发现 `tests/manual/` 下声明 `MENU_ENTRY = (编号, "菜单名称")` 且提供 `main()` 的脚本。新增真机测试时，只需在新脚本中声明未占用的编号和名称，无需修改 `test.py`；展示菜单不会导入真机模块，选择后才导入并运行。
 
-菜单 `12. 总线舵机测试` 走 PDF 中的 **115200 bps 直连总线舵机协议**，直接使用 `motor_drivers.bus_servo.BusServo`。端口、波特率和舵机 ID 从 `config/servo.json` 读取：平台串口取 `windows.port` / `jetson.port`，舵机参数取 `bus.baudrate` 和 `bus.servo_id`，菜单里不再要求输入 ID。测试先只读当前位置；只有查询成功、输入目标脉冲位置和时长，并输入大写 `YES`，才会发送一次运动指令，随后读回实际位置。当前 Windows 端口填 `COM14`，舵机 ID 为 `2`；Jetson 串口需按实际接线填写。`motor_drivers.servo_controller.ServoController` 是旧工程 9600 bps 多舵机控制板协议，只服务菜单 13 的夹爪路径，两种协议不可混用。
+菜单 `12. 总线舵机测试` 走 PDF 中的 **115200 bps 直连总线舵机协议**，直接使用 `motor_drivers.bus_servo.BusServo`。端口、波特率和舵机 ID 从 `config/servo.json` 读取：平台串口取 `windows.port` / `jetson.port`，舵机参数取 `bus.baudrate` 和 `bus.servo_id`，菜单里不再要求输入 ID。测试先只读当前位置；只有查询成功、输入目标脉冲位置和时长，并输入大写 `YES`，才会发送一次运动指令，随后读回实际位置。当前 Windows 端口填 `COM14`，舵机 ID 为 `1`；Jetson 串口需按实际接线填写。
 
-### 夹爪控制板封装
+### 夹爪测试
 
-`gripper.Gripper` 通过 **9600 bps 多舵机控制板**封装夹爪 `open_gripper()` 和 `close_gripper()`；这条控制板路径只服务菜单 13，与菜单 12 的 115200 直连协议不同。控制板串口、夹爪 ID `1`、张开 `300`、闭合 `500` 脉冲和动作时间 `1000` 毫秒统一在 `config/servo.json`；当前 Windows 端口填 `COM14`。**300/500 只是随意选定的试动值，后续必须按真实夹爪行程修改，不能视为最终张开与夹紧位置。**此前在同一串口上的 115200 bps 直连调试已验证舵机移动，但 9600 bps 控制板查询没有回包，尚未验证正式控制板夹爪动作。运行 `python test.py` 选择 `13. 夹爪控制板测试`；程序先查询舵机位置，每个动作再单独要求输入 `YES`。
+菜单 `13. 夹爪测试` 和 `14. 夹爪直连调试` 都走**同一条 115200 bps 直连通路**，使用 `BusServo`，串口取 `config/servo.json` 的平台 `port`，舵机 ID 取 `gripper.servo_id`，位置和耗时取 `gripper` 下的 `open_position` / `closed_position` / `duration_ms`。两者都不再经过 9600 bps 控制板。菜单 13 先读位置，再对张开、闭合分别要求大写 `YES`，每次动作后读回实际位置；菜单 14 是同一条通路的快速试动入口。**300/500 只是随意选定的试动值，后续必须按真实夹爪行程修改，不能视为最终张开与夹紧位置。**`motor_drivers.servo_controller.ServoController` 是旧工程 9600 bps 多舵机控制板协议，当前没有任何菜单入口使用它。
 
 完整说明、Jetson 迁移步骤及直连调试记录见 `夹爪控制板使用说明.md`。
 
-`python gripper.py` 本身不会执行动作。夹爪直连调试可运行 `python -m tests.manual.gripper_direct`（或测试菜单 14），默认串口同样读取 `config/servo.json`，逐项输入 `YES` 后依次试动 300 和 500；这条 115200 bps 调试路径与菜单 13 的 9600 bps 正式控制板路径不同。
+`python gripper.py` 本身不会执行动作；`gripper.Gripper` 类仍按 9600 bps 控制板协议封装，尚未改到直连通路，应用代码暂不要用它驱动当前硬件。夹爪直连调试可运行 `python -m tests.manual.gripper_direct`（或测试菜单 14），逐项输入 `YES` 后依次试动 300 和 500。
 
 ```python
 import time
-from gripper import Gripper
+from gripper import load_gripper_config
+from motor_drivers.bus_servo import BusServo, load_bus_config
 
-gripper = Gripper().initialize()
+config = load_gripper_config()
+bus = load_bus_config()
+servo = BusServo(bus.port, config.servo_id, baudrate=bus.baudrate, timeout=0.5).initialize()
 try:
-    gripper.open_gripper()
-    time.sleep(gripper.config.duration_ms / 1000)
-    gripper.close_gripper()
+    servo.set_position(config.open_position, config.duration_ms)
+    time.sleep(config.duration_ms / 1000 + 0.2)
+    print("张开后读回：", servo.read_position())
 finally:
-    gripper.close()  # 关闭控制板串口；不会改变夹爪位置
+    servo.close()  # 只关闭串口，不会改变夹爪位置
 ```
 
-该封装只负责夹爪开合，尚未与机械臂动作组成自动抓取流程。Jetson 使用前需填写 `config/servo.json` 中的 `jetson.port`。
+这段直接读写`config/servo.json` 中的串口与 `gripper` 参数，与菜单 13、14 是同一条通路；`gripper.Gripper` 仍是旧的 9600 控制板封装，暂未接入当前硬件。夹爪开合尚未与机械臂动作组成自动抓取流程。Jetson 使用前需填写 `config/servo.json` 中的 `jetson.port`。
 
 `main.py` 是项目应用示例，依次调用底盘、机械臂和视觉。只需要其中一部分时，在 `main()` 中注释对应调用；总线舵机读取示例也在文件中，使用前填写独立的舵机串口。
 
