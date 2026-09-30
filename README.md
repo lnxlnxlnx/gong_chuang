@@ -10,7 +10,7 @@
 
 步进驱动器使用一个 USB-TTL 模块：模块 `TX -> R/A/H`、`RX -> T/B/L`、`GND -> GND`；驱动器电源独立接 `12-32 V`。
 
-总线舵机为单线、5 V 上拉的半双工 UART。应使用总线舵机 USB 转接板，或具备半双工收发和 3.3 V/5 V 电平转换的 USB 串口模块。普通 USB-TTL 的 `TX` 与 `RX` 不能直接并接在舵机信号线上。
+总线舵机为单线、5 V 上拉的半双工 UART，波特率 115200。Jetson UART 直连时也需要按 `docs/幻尔科技总线舵机通信协议.pdf` 图 1 处理发送/接收方向与电平；USB 转接板只是另一种串口接法。普通全双工 UART 的 `TX` 与 `RX` 不能直接并接在舵机信号线上。
 
 运行前在 Jetson 上确认设备名：
 
@@ -18,7 +18,7 @@
 Get-ChildItem /dev/ttyUSB*
 ```
 
-预期看到两个独立设备，例如 `/dev/ttyUSB0`（舵机）和 `/dev/ttyUSB1`（步进驱动）。本代码在运行时需要 `pyserial`，请在 Jetson 的目标 Python 环境中自行安装。
+如果使用 USB 转接板，预期看到独立的串口设备，例如 `/dev/ttyUSB0`（舵机）和 `/dev/ttyUSB1`（步进驱动）。使用 Jetson 板载 UART 时，按实际接线填写对应的 `/dev/ttyTHS*` 设备名。本代码在运行时需要 `pyserial`。
 
 ## 使用示例
 
@@ -46,10 +46,10 @@ stepper.stop()
 
 软件逻辑层固定使用 `FL/FR/RL/RR` 四个轮位，标准默认地址顺序为 `1/2/3/4`。
 实际驱动器地址属于硬件配置，由 `config/mecanum_hardware.json` 注入；当前实车映射为
-`FL=1 FR=4 RL=2 RR=3`。更换轮子位置时只需修改配置，不需要修改运动 API 或上层代码。
+`FL=3 FR=4 RL=2 RR=1`。更换轮子位置时只需修改配置，不需要修改运动 API 或上层代码。
 
 ```python
-from hardware_tests.mecanum.config import create_chassis, load_profile
+from mecanum_config import create_chassis, load_profile
 
 profile = load_profile("jetson")
 car = create_chassis(profile).initialize()
@@ -70,6 +70,54 @@ car.close()
 - 当前实车使用标准麦轮坐标变换 `motion_transform="standard"`，四轮横移都会参与运动。
 - 若装配后方向反了：整车方向反 → 把 `drive()` 的 `vx`/`vy` 取反；辊子排布不同 → 换 `pattern="O"`；单轮转向反 → 在 `wheel_signs` 给该轮 `-1`。
 
+## 统一入口
+
+在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13、14 为夹爪测试。步进总线端口读取 `config/mecanum_hardware.json` 中当前平台的 `port`，无需每次输入 `--port`；激光测试使用独立的 `config/laser_scan.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
+
+```powershell
+python test.py
+```
+
+预期：出现编号菜单；输入 `0` 直接退出，不会打开硬件设备。
+
+菜单自动发现 `tests/manual/` 下声明 `MENU_ENTRY = (编号, "菜单名称")` 且提供 `main()` 的脚本。新增真机测试时，只需在新脚本中声明未占用的编号和名称，无需修改 `test.py`；展示菜单不会导入真机模块，选择后才导入并运行。
+
+菜单 `12. 总线舵机测试` 走 PDF 中的 **115200 bps 直连总线舵机协议**，直接使用 `motor_drivers.bus_servo.BusServo`。端口、波特率和舵机 ID 从 `config/servo.json` 读取：平台串口取 `windows.port` / `jetson.port`，舵机参数取 `bus.baudrate` 和 `bus.servo_id`，菜单里不再要求输入 ID。测试先只读当前位置；只有查询成功、输入目标脉冲位置和时长，并输入大写 `YES`，才会发送一次运动指令，随后读回实际位置。当前 Windows 端口填 `COM14`，舵机 ID 为 `1`；Jetson 串口需按实际接线填写。
+
+### 夹爪测试
+
+菜单 `13. 夹爪测试` 和 `14. 夹爪直连调试` 都走**同一条 115200 bps 直连通路**，使用 `BusServo`，串口取 `config/servo.json` 的平台 `port`，舵机 ID 取 `gripper.servo_id`，位置和耗时取 `gripper` 下的 `open_position` / `closed_position` / `duration_ms`。两者都不再经过 9600 bps 控制板。菜单 13 先读位置，再对张开、闭合分别要求大写 `YES`，每次动作后读回实际位置；菜单 14 是同一条通路的快速试动入口。**300/500 只是随意选定的试动值，后续必须按真实夹爪行程修改，不能视为最终张开与夹紧位置。**`motor_drivers.servo_controller.ServoController` 是旧工程 9600 bps 多舵机控制板协议，当前没有任何菜单入口使用它。
+
+完整说明、Jetson 迁移步骤及直连调试记录见 `夹爪控制板使用说明.md`。
+
+`python gripper.py` 本身不会执行动作；`gripper.Gripper` 类仍按 9600 bps 控制板协议封装，尚未改到直连通路，应用代码暂不要用它驱动当前硬件。夹爪直连调试可运行 `python -m tests.manual.gripper_direct`（或测试菜单 14），逐项输入 `YES` 后依次试动 300 和 500。
+
+```python
+import time
+from gripper import load_gripper_config
+from motor_drivers.bus_servo import BusServo, load_bus_config
+
+config = load_gripper_config()
+bus = load_bus_config()
+servo = BusServo(bus.port, config.servo_id, baudrate=bus.baudrate, timeout=0.5).initialize()
+try:
+    servo.set_position(config.open_position, config.duration_ms)
+    time.sleep(config.duration_ms / 1000 + 0.2)
+    print("张开后读回：", servo.read_position())
+finally:
+    servo.close()  # 只关闭串口，不会改变夹爪位置
+```
+
+这段直接读写`config/servo.json` 中的串口与 `gripper` 参数，与菜单 13、14 是同一条通路；`gripper.Gripper` 仍是旧的 9600 控制板封装，暂未接入当前硬件。夹爪开合尚未与机械臂动作组成自动抓取流程。Jetson 使用前需填写 `config/servo.json` 中的 `jetson.port`。
+
+`main.py` 是项目应用示例，依次调用底盘、机械臂和视觉。只需要其中一部分时，在 `main()` 中注释对应调用；总线舵机读取示例也在文件中，使用前填写独立的舵机串口。
+
+```powershell
+python main.py
+```
+
+预期：按程序中的调用顺序进入各模块演示，运动前请求确认；视觉窗口按 `q` 退出。运行它需要已连接的硬件及当前平台对应的模型文件。
+
 ## 本机协议测试
 
 ```powershell
@@ -81,19 +129,16 @@ python -m unittest discover -s tests -v
 
 ## 测试目录
 
-- `tests/`：离线单元测试，不会打开串口或驱动电机。
-- `hardware_tests/emm42/`：单个 Emm42 驱动器的真机诊断脚本。
-- `hardware_tests/mecanum/`：四麦轮底盘的真机测试脚本。
+- `tests/test_*.py`：离线单元测试，不会打开串口或驱动电机。
+- `tests/manual/`：机械臂、麦轮、电机诊断及视觉的手动真机脚本。
 
-真机测试必须在 Jetson 上从项目根目录以模块方式执行。开始前让车轮悬空，并确保急停措施可用：
+真机测试从项目根目录运行菜单。开始前让车轮悬空，并确保急停措施可用：
 
 ```bash
-# 依次测试 FL、FR、RL、RR 的正反转；每个轮子开始前需要人工确认
-python -m hardware_tests.mecanum.individual_wheels --profile jetson
-
-# 依次测试前进、后退、左移、右移、四个斜向、顺时针旋转、逆时针旋转
-python -m hardware_tests.mecanum.chassis_motion --profile jetson
+python test.py
 ```
+
+预期：选择 3 依次测试四轮正反转；选择 4 测试底盘各方向。两项均按当前平台配置取端口和速度。
 
 所有常用硬件参数集中在 `config/mecanum_hardware.json`：
 
@@ -103,30 +148,24 @@ python -m hardware_tests.mecanum.chassis_motion --profile jetson
 - `profiles.jetson`：Jetson 串口和两类测试的默认速度、时长。
 - `profiles.windows`：Windows `COM` 串口和两类测试的默认速度、时长。
 
-Windows 上将 `profiles.windows.port` 改为设备管理器显示的实际 `COM` 号后执行：
-
-```powershell
-py -m hardware_tests.mecanum.individual_wheels --profile windows
-py -m hardware_tests.mecanum.chassis_motion --profile windows
-```
-
-在 Windows 上也可以直接运行 `py -m hardware_tests.mecanum.individual_wheels` 或 `py -m hardware_tests.mecanum.chassis_motion`，两个脚本都会自动选择 `windows` profile 并使用配置中的 COM14、速度、时长和暂停时间。需要微调时再使用 `--port`、`--rpm`、`--duration`、`--pause` 或 `--acceleration` 覆盖配置。无论正常结束、异常或 `Ctrl+C`，脚本都会发送四轮停止命令、失能扭矩并关闭串口。
+Windows 上将 `profiles.windows.port` 改为设备管理器显示的实际 `COM` 号；Jetson 上核对 `profiles.jetson.port`。无论正常结束、异常或 `Ctrl+C`，麦轮脚本都会发送停止命令、失能扭矩并关闭串口。
 ## 视觉外设（vision）
 
-USB 摄像头 + YOLOv8 TensorRT 检测，封装为 `vision` 包，供主程序和示例复用：
+USB 摄像头 + YOLOv8 检测，封装为 `vision` 包，供主程序和示例复用：
 
-- `vision.YOLOv8Detector`：加载 `models/*.engine`，对 BGR 帧做端到端检测，返回 `list[vision.Detection]`。
+- `vision.create_detector(vision.default_model_path())`：Windows 用 ONNX，Jetson 用 TensorRT；都返回 `list[vision.Detection]`。
 - `vision.USBCamera`：USB 摄像头封装（`initialize()/read()/release()`，支持 `with`）。
 - `vision.DistanceEstimator`：单目测距（针孔模型，需要已知类别真实宽度）。
 
+菜单 9 和 `main.py` 的视觉演示从 `config/vision.json` 读取摄像头编号。Windows 当前设为 `1`（外接 USB 摄像头），Jetson 设为 `0`；如果设备枚举顺序不同，修改对应平台的 `camera_id`。指定编号无法打开时会报错，不会自动切换到前置摄像头。
+
 ### 依赖
 
-在 Jetson 的 `tensorrt` conda 环境执行；需要 `tensorrt`、`pycuda`、`numpy`、`opencv-python`。
-推理引擎用 ultralytics YOLOv8 导出（动态尺寸或固定尺寸均可）。
+Windows 使用 OpenCV ONNX 推理，需要 `opencv-python`、`numpy`。Jetson 在 `tensorrt` conda 环境执行，还需要 `tensorrt`、`pycuda`。
 
 ### 模型
 
-引擎文件放 `models/`（已 gitignore，不入库）：`models/best.engine`、`models/best.onnx`。
+模型文件放 `models/`（已 gitignore，不入库）：Windows 用 `models/best.onnx`，Jetson 用 `models/best.engine`。当前两份模型来自远端 `/home/pi/workspace/GC_robot_3G/yolov8n/`；ONNX 输入为 `1×3×640×640`，输出为 `1×14×8400`。
 类别表在 `vision/yolov8.py::DEFAULT_CLASS_NAMES`，与模型训练标签顺序一致；换模型时同步修改即可。
 
 ### 运行示例
@@ -135,26 +174,20 @@ USB 摄像头 + YOLOv8 TensorRT 检测，封装为 `vision` 包，供主程序�
 cd /home/pi/gong_chuang
 source /home/pi/miniforge3/bin/activate tensorrt
 
-# 基础预览：默认 models/best.engine，摄像头 /dev/video0
-python examples/demo_vision.py
-
-# 调整阈值或改摄像头
-python examples/demo_vision.py --conf 0.5 --camera 1
-
-# 启用测距显示（obj-red 真实宽度 120mm、zhangai 80mm）
-python examples/demo_vision.py --real-widths "obj-red=120,zhangai=80"
+# 在菜单中选择 9；Windows 默认 best.onnx，Jetson 默认 best.engine
+python test.py
 ```
 
-预览窗口按 `q` 退出。`--real-widths` 与 `demo_vision.py` 内的 `focal_px` 默认值（560px）
+预览窗口按 `q` 退出。`tests/manual/vision.py` 中的 `focal_px` 默认值（560px）
 是占位符，正式使用前需按下方校准。
 
 ### 程序中使用
 
 ```python
-from vision import DistanceEstimator, USBCamera, YOLOv8Detector
+from vision import DistanceEstimator, USBCamera, create_detector, default_model_path
 
 with USBCamera(0).initialize() as cam, \
-        YOLOv8Detector("models/best.engine") as detector:
+        create_detector(default_model_path()) as detector:
     est = DistanceEstimator(focal_px=focal, real_widths={"target-1": 60.0})
     while True:
         frame = cam.read()

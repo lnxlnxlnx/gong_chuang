@@ -1,0 +1,18 @@
+{
+  "windows": {
+    "port": "COM14"
+  },
+  "jetson": {
+    "port": ""
+  },
+  "bus": {
+    "baudrate": 115200,
+    "servo_id": 1
+  },
+  "gripper": {
+    "servo_id": 1,
+    "open_position": 300,
+    "closed_position": 500,
+    "duration_ms": 1000
+  }
+}

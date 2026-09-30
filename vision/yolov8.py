@@ -395,6 +395,36 @@ class YOLOv8Detector:
         self.close()
 
 
+class YOLOv8ONNXDetector(YOLOv8Detector):
+    """Run the same YOLOv8 preprocessing and decoding with OpenCV on Windows.
+
+    The supplied competition ONNX model has a fixed 640×640 input. This
+    adapter owns only model loading and inference; detection results and
+    drawing remain identical to the TensorRT implementation.
+    """
+
+    def __init__(self, model_path: str, *, class_names=None,
+                 conf_thresh: float = DEFAULT_CONF_THRESH,
+                 iou_thresh: float = DEFAULT_IOU_THRESH, colors=None):
+        self.class_names = list(class_names) if class_names else list(DEFAULT_CLASS_NAMES)
+        self.conf_thresh = conf_thresh
+        self.iou_thresh = iou_thresh
+        self.colors = colors
+        self.input_size = 640
+        self.net = _cv2().dnn.readNetFromONNX(model_path)
+
+    def infer(self, blob: np.ndarray) -> np.ndarray:
+        """Evaluate a preprocessed frame using OpenCV's ONNX reader."""
+        if blob.shape != (1, 3, self.input_size, self.input_size):
+            raise ValueError(f"unexpected ONNX input shape: {blob.shape}")
+        self.net.setInput(blob)
+        return self.net.forward()
+
+    def close(self) -> None:
+        """Release the OpenCV network reference."""
+        self.net = None
+
+
 if __name__ == "__main__":  # pragma: no cover - exercised manually on the board
     import time
 

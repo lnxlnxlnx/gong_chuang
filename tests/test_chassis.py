@@ -6,7 +6,7 @@ import unittest
 
 from chassis import MecanumChassis
 from mecanum import MecanumDrive, WheelPosition
-from test_mecanum import FakeSerial
+from tests.test_mecanum import FakeSerial
 
 
 class ChassisFacadeTests(unittest.TestCase):

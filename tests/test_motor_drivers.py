@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from motor_drivers.bus_servo import BusServo
 from motor_drivers.emm42 import Direction, Emm42Driver, HomeMode
@@ -43,6 +44,16 @@ class BusServoTests(unittest.TestCase):
         self.assertIs(self.servo.initialize(), self.servo)
         self.assertTrue(self.serial.is_open)
 
+    def test_custom_baudrate_is_used_when_opening_serial(self) -> None:
+        servo = BusServo("/dev/ttyUSB0", servo_id=2, baudrate=9600)
+        with patch("serial.Serial") as serial_type:
+            servo.initialize()
+        serial_type.assert_called_once_with("/dev/ttyUSB0", baudrate=9600, timeout=0.1)
+
+    def test_rejects_non_positive_baudrate(self) -> None:
+        with self.assertRaises(ValueError):
+            BusServo("/dev/ttyUSB0", servo_id=1, baudrate=0)
+
     def test_set_position_encodes_little_endian_position_and_duration(self) -> None:
         self.servo.set_position(position=500, duration_ms=1000)
         self.assertEqual(self.serial.writes, [bytes.fromhex("55 55 01 07 01 F4 01 E8 03 16")])
@@ -63,6 +74,16 @@ class BusServoTests(unittest.TestCase):
         self.serial._receive_buffer.extend(bytes.fromhex("55 55 01 05 1C FE FF E0"))
         self.assertEqual(self.servo.read_position(), -2)
         self.assertEqual(self.serial.writes, [bytes.fromhex("55 55 01 03 1C DF")])
+
+    def test_read_position_rejects_another_servos_reply(self) -> None:
+        self.serial._receive_buffer.extend(bytes.fromhex("55 55 02 05 1C F4 01 E7"))
+        with self.assertRaisesRegex(RuntimeError, "unexpected servo position response"):
+            self.servo.read_position()
+
+    def test_read_position_rejects_wrong_response_length(self) -> None:
+        self.serial._receive_buffer.extend(bytes.fromhex("55 55 01 03 1C DF"))
+        with self.assertRaisesRegex(RuntimeError, "unexpected servo position response"):
+            self.servo.read_position()
 
     def test_set_position_rejects_out_of_range_values(self) -> None:
         with self.assertRaises(ValueError):
