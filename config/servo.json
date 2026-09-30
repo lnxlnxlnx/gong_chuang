@@ -1,6 +1,6 @@
 {
   "windows": {
-    "port": "COM30"
+    "port": "COM11"
   },
   "jetson": {
     "port": ""
