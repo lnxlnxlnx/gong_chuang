@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from motor_drivers.bus_servo import BusServo
 from motor_drivers.emm42 import Direction, Emm42Driver, HomeMode
@@ -42,6 +43,16 @@ class BusServoTests(unittest.TestCase):
     def test_initialize_keeps_injected_serial_port_open(self) -> None:
         self.assertIs(self.servo.initialize(), self.servo)
         self.assertTrue(self.serial.is_open)
+
+    def test_custom_baudrate_is_used_when_opening_serial(self) -> None:
+        servo = BusServo("/dev/ttyUSB0", servo_id=2, baudrate=9600)
+        with patch("serial.Serial") as serial_type:
+            servo.initialize()
+        serial_type.assert_called_once_with("/dev/ttyUSB0", baudrate=9600, timeout=0.1)
+
+    def test_rejects_non_positive_baudrate(self) -> None:
+        with self.assertRaises(ValueError):
+            BusServo("/dev/ttyUSB0", servo_id=1, baudrate=0)
 
     def test_set_position_encodes_little_endian_position_and_duration(self) -> None:
         self.servo.set_position(position=500, duration_ms=1000)

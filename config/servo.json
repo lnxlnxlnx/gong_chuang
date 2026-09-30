@@ -1,9 +1,13 @@
 {
   "windows": {
-    "port": "COM11"
+    "port": "COM14"
   },
   "jetson": {
     "port": ""
+  },
+  "bus": {
+    "baudrate": 115200,
+    "servo_id": 1
   },
   "gripper": {
     "servo_id": 1,

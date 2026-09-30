@@ -1,34 +1,17 @@
-"""Interactive position test for the old project's 9600 baud servo controller."""
+"""Interactive position test for the Hiwonder 115200 bps bus servo."""
 
-MENU_ENTRY = (12, "舵机控制板测试")
+from __future__ import annotations
 
-import json
-import os
+MENU_ENTRY = (12, "总线舵机测试")
+
 import time
-from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
-from motor_drivers.servo_controller import ServoController
-
-
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "servo.json"
-
-
-def load_port(platform: str, config_path: Path = DEFAULT_CONFIG_PATH) -> str:
-    """Load the controller's serial port; reject an unset port."""
-    try:
-        settings = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"无法读取舵机配置：{config_path}") from error
-    profile = settings.get(platform) if isinstance(settings, dict) else None
-    port = profile.get("port") if isinstance(profile, dict) else None
-    if not isinstance(port, str) or not port.strip():
-        raise ValueError(f"请先填写 {config_path} 中的 {platform}.port")
-    return port.strip()
+from motor_drivers.bus_servo import BusServo, load_bus_config
 
 
 def _number(text: str, name: str, minimum: int, maximum: int) -> int:
-    """Validate one manually entered servo ID, position, or duration."""
+    """Validate one manually entered position or duration."""
     try:
         value = int(text)
     except ValueError as error:
@@ -38,9 +21,9 @@ def _number(text: str, name: str, minimum: int, maximum: int) -> int:
     return value
 
 
-def run_manual(controller: ServoController, servo_id: int, *, prompt: Callable[[str], str]) -> None:
+def run_manual(servo: BusServo, servo_id: int, *, prompt: Callable[[str], str]) -> None:
     """Read first; send one position command only after an explicit YES."""
-    current = controller.read_position(servo_id)
+    current = servo.read_position()
     print(f"舵机 {servo_id} 当前脉冲位置：{current}")
     target_text = prompt("目标位置 0..1000（输入 q 只读不动）：").strip()
     if target_text.lower() == "q":
@@ -51,28 +34,30 @@ def run_manual(controller: ServoController, servo_id: int, *, prompt: Callable[[
         print("已取消运动")
         return
 
-    controller.set_position(servo_id, position=target, duration_ms=duration)
+    servo.set_position(target, duration)
     time.sleep(duration / 1000)
-    print(f"运动后脉冲位置：{controller.read_position(servo_id)}")
+    print(f"运动后脉冲位置：{servo.read_position()}")
 
 
 def main() -> None:
-    """Open only the configured controller UART, then close it on every exit path."""
-    platform = "windows" if os.name == "nt" else "jetson"
-    port = load_port(platform)
-    id_text = input("舵机 ID 1..253（输入 q 退出）：").strip()
-    if id_text.lower() == "q":
-        return
-    servo_id = _number(id_text, "舵机 ID", 1, 253)
-    controller = ServoController(port).initialize()
+    """Read the port, baud rate and ID from config, then close the UART on every exit path."""
+    config = load_bus_config()
+    print(f"总线舵机 {config.port} @ {config.baudrate} bps，ID={config.servo_id}")
     try:
-        print(f"已连接舵机控制板串口 {port}，ID={servo_id}")
+        servo = BusServo(
+            config.port, config.servo_id, baudrate=config.baudrate, timeout=0.5
+        ).initialize()
+    except Exception as error:
+        # 端口被占用或设备名不对时直接说明，不再抛 traceback
+        print(f"无法打开 {config.port}：{error}")
+        return
+    try:
         try:
-            run_manual(controller, servo_id, prompt=input)
+            run_manual(servo, config.servo_id, prompt=input)
         except (RuntimeError, TimeoutError) as error:
             print(f"舵机测试未通过：{error}")
     finally:
-        controller.close()
+        servo.close()
 
 
 if __name__ == "__main__":

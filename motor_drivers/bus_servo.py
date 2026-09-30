@@ -20,7 +20,56 @@
 
 from __future__ import annotations
 
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
+
+
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "servo.json"
+
+
+@dataclass(frozen=True)
+class BusServoConfig:
+    """Port and servo identity read from ``config/servo.json``."""
+
+    port: str
+    baudrate: int
+    servo_id: int
+
+
+def _config_integer(section: dict, name: str, minimum: int, maximum: int) -> int:
+    value = section.get(name)
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError(f"bus.{name} 必须是 {minimum}..{maximum} 的整数")
+    return value
+
+
+def load_bus_config(
+    platform: str | None = None,
+    config_path: Path = DEFAULT_CONFIG_PATH,
+) -> BusServoConfig:
+    """Read the bus servo port, baud rate and ID from the shared servo file."""
+    platform = platform or ("windows" if os.name == "nt" else "jetson")
+    try:
+        document = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"无法读取舵机配置：{config_path}") from error
+    if not isinstance(document, dict):
+        raise ValueError("舵机配置必须是 JSON 对象")
+    profile = document.get(platform)
+    if not isinstance(profile, dict) or not isinstance(profile.get("port"), str) or not profile["port"].strip():
+        raise ValueError(f"请先填写 {config_path} 中的 {platform}.port")
+    bus = document.get("bus")
+    if not isinstance(bus, dict):
+        raise ValueError("bus 必须是 JSON 对象")
+    return BusServoConfig(
+        port=profile["port"].strip(),
+        # 协议固定 115200；允许配置覆盖，便于换用其它半双工转接板
+        baudrate=_config_integer(bus, "baudrate", 1, 4000000),
+        servo_id=_config_integer(bus, "servo_id", 1, 253),
+    )
 
 
 class SerialPort(Protocol):
@@ -66,14 +115,18 @@ class BusServo:
         port: str,
         servo_id: int,
         *,
+        baudrate: int = BAUDRATE,
         timeout: float = 0.1,
         serial_port: SerialPort | None = None,
     ) -> None:
         # 地址为 0 时代表广播(所有舵机)，因此允许 0..253
         if not 0 <= servo_id <= 253:
             raise ValueError("servo_id must be in 0..253")
+        if baudrate <= 0:
+            raise ValueError("baudrate must be positive")
         self.port = port
         self.servo_id = servo_id
+        self.baudrate = baudrate
         self.timeout = timeout
         # 测试时可注入一个 FakeSerial，避免真正打开串口
         self._serial = serial_port
@@ -129,7 +182,7 @@ class BusServo:
             raise RuntimeError(
                 "pyserial is required on Jetson. Install it in the target Python environment first."
             ) from error
-        return serial.Serial(self.port, baudrate=self.BAUDRATE, timeout=self.timeout)
+        return serial.Serial(self.port, baudrate=self.baudrate, timeout=self.timeout)
 
     def _write(self, command: int, parameters: bytes = b"") -> None:
         serial_port = self._require_serial()
