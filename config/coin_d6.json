@@ -1,0 +1,35 @@
+{
+  "profiles": {
+    "windows": {
+      "port": "COM14"
+    },
+    "jetson": {
+      "port": "/dev/ttyUSB1"
+    }
+  },
+  "device": {
+    "baudrate": 230400,
+    "ack_timeout_seconds": 1.0,
+    "read_timeout_seconds": 0.2,
+    "strict_checksum": true,
+    "require_ack": true
+  },
+  "scan": {
+    "revolutions": 3,
+    "angle_min_degrees": -180.0,
+    "angle_max_degrees": 180.0,
+    "min_distance_mm": 300,
+    "max_distance_mm": 3000,
+    "clockwise": true,
+    "angle_offset_degrees": 0.0,
+    "max_points": 40000,
+    "timeout_seconds": 15.0
+  },
+  "visualization": {
+    "range_mm": 4000.0,
+    "color_by": "distance",
+    "point_size": 6.0,
+    "colormap": "turbo",
+    "show_window": true
+  }
+}

@@ -72,7 +72,7 @@ car.close()
 
 ## 统一入口
 
-在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13、14 为夹爪测试；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）。步进总线端口读取 `config/mecanum_hardware.json` 中当前平台的 `port`，无需每次输入 `--port`；激光测试使用独立的 `config/laser_scan.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
+在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13、14 为夹爪测试；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集。步进总线端口读取 `config/mecanum_hardware.json` 中当前平台的 `port`，无需每次输入 `--port`；激光测试使用独立的 `config/laser_scan.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `config/coin_d6.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
 
 ```powershell
 python test.py
@@ -89,6 +89,71 @@ python test.py
 菜单 `13. 夹爪测试` 和 `14. 夹爪直连调试` 都走**同一条 115200 bps 直连通路**，使用 `BusServo`，串口取 `config/servo.json` 的平台 `port`，舵机 ID 取 `gripper.servo_id`，位置和耗时取 `gripper` 下的 `open_position` / `closed_position` / `duration_ms`。两者都不再经过 9600 bps 控制板。菜单 13 先读位置，再对张开、闭合分别要求大写 `YES`，每次动作后读回实际位置；菜单 14 是同一条通路的快速试动入口。**300/500 只是随意选定的试动值，后续必须按真实夹爪行程修改，不能视为最终张开与夹紧位置。**`motor_drivers.servo_controller.ServoController` 是旧工程 9600 bps 多舵机控制板协议，当前没有任何菜单入口使用它。
 
 完整说明、Jetson 迁移步骤及直连调试记录见 `夹爪控制板使用说明.md`。
+
+## D6 激光雷达（lidar）
+
+`lidar` 包封装国科光芯 COIN-D6 的串口指令与点云解析（协议见
+`docs/国科光芯/1 D6激光雷达手册资料/`），并把采集结果画成点云图：
+
+- `lidar.protocol`：帧编解码。启动 `AA 55 F0 0F`、停止 `AA 55 F5 0A`，应答为 12 字节
+  `A5 5A ...`；上传帧 `A5 5A LEN CS TYPE DATA`（`0x01` 设备信息、`0x81` 点云）；点云包为
+  `AA 55 M&T LSN FSA LSA CS` + 每点 3 字节（14 位距离、8 位强度、高反标志）。读取端会跳过噪声、
+  坏校验包并自动重新同步，也同时接受带 `A5 5A` 外层封装与裸 `AA 55` 两种点云流。
+- `lidar.CoinD6`：一次串口会话，`initialize()` / `start()` / `read_device_info()` /
+  `collect_scan()` / `stop()` / `close()`；`scan(config.scan)` 一次跑完启停与采集。
+- `lidar.PointCloud` / `CloudPoint`：点云数据（角度、距离、强度、高反），可 `save_csv()`。
+- `lidar.visualize`：俯视点云图（按距离着色、等比例、带距离环），保存 PNG 并可弹窗。
+- `lidar.simulate`：内置虚拟雷达，不接硬件就能跑通「串口 → 解析 → 出图」整条链路。
+
+全部可调参数集中在 `config/coin_d6.json`，改完存盘即生效，菜单里不再输入端口：
+
+- `profiles.windows.port` / `profiles.jetson.port`：串口设备名（Windows 看设备管理器，Jetson 用 `/dev/ttyUSB*`）。
+- `device.baudrate`：波特率，D6/D2 出厂为 `230400`。
+- `device.strict_checksum`：点云包校验不过时是否丢弃（默认 `true`；排查接线时可临时设 `false`）。
+- `device.require_ack`：启停是否必须收到应答（手册写明有应答；若某台雷达不回应答可设 `false`）。
+- `scan.revolutions`：采集几圈完整点云。
+- `scan.angle_min_degrees` / `angle_max_degrees`：保留的角度窗口（以雷达 0° 为前方，逆时针为正）。
+- `scan.min_distance_mm` / `max_distance_mm`：保留的距离窗口，`max_distance_mm` 最大 16383（14 位距离）。
+- `scan.clockwise` / `angle_offset_degrees`：雷达旋转方向（D6 为顺时针，出图时镜像成逆时针）与零点补偿。
+- `scan.timeout_seconds` / `max_points`：整次采集超时与点数上限。
+- `visualization.range_mm` / `color_by` / `colormap` / `point_size` / `show_window`：出图范围、着色字段（`distance`/`intensity`/`angle`）与是否弹窗。
+
+```python
+from lidar import CoinD6, load_lidar_config, render_point_cloud
+
+config = load_lidar_config()                       # 也可传 "windows" / "jetson"
+with CoinD6(config.device.port, baudrate=config.device.baudrate) as lidar:
+    cloud = lidar.scan(config.scan)                # 启动、采 N 圈、停止
+cloud.save_csv("output/lidar_cloud/scan.csv")
+render_point_cloud(cloud, config.view, "output/lidar_cloud/scan.png")
+```
+
+菜单 16 采集一次点云，写出 `output/lidar_cloud/cloud-<时间戳>.csv` 与 `.png`，并按
+`visualization.show_window` 弹窗。没有硬件时用内置虚拟雷达验证整条链路：
+
+```powershell
+python -m tests.manual.coin_d6 --simulate --no-window
+```
+
+该命令不需要串口，会生成一张模拟房间（含圆柱障碍与高反条）的点云图。真机运行前先把
+`config/coin_d6.json` 中的端口改成实际设备名，并确认雷达前方无遮挡。
+
+第一次接真机（或采集一直失败）时先跑诊断：它只发一次启动指令，把**实际发送的原始字节**
+和雷达回传的原始字节、解析统计一起打出来，用来区分接线/波特率问题和协议问题。
+
+```powershell
+python -m tests.manual.coin_d6 --diagnose
+```
+
+正常应看到 `已发送启动指令（原始字节，非文本）：AA 55 F0 0F`、一条 `A5 5A …` 应答和若干
+点云包；若点云包为 0 且回传字节像乱码，先核对波特率（D6 出厂 230400）。
+
+离线单测覆盖帧解析、校验、断包重同步、角度换算、扫描窗口过滤与出图，全部不打开串口：
+
+```powershell
+python -m unittest tests.test_lidar_protocol tests.test_lidar_device tests.test_lidar_config `
+  tests.test_lidar_cloud tests.test_lidar_visualize tests.test_lidar_menu -v
+```
 
 `python gripper.py` 本身不会执行动作；`gripper.Gripper` 类仍按 9600 bps 控制板协议封装，尚未改到直连通路，应用代码暂不要用它驱动当前硬件。夹爪直连调试可运行 `python -m tests.manual.gripper_direct`（或测试菜单 14），逐项输入 `YES` 后依次试动 300 和 500。
 

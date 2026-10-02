@@ -61,6 +61,14 @@ class EntryPointTests(unittest.TestCase):
         self.assertIn("12. 总线舵机测试", output.getvalue())
         import_module.assert_called_once_with("tests.manual.servo")
 
+    def test_menu_dispatches_coin_d6_point_cloud(self) -> None:
+        with patch("builtins.input", side_effect=["16", "0"]):
+            with patch.object(test_launcher.importlib, "import_module") as import_module:
+                with redirect_stdout(io.StringIO()) as output:
+                    test_launcher.main()
+        self.assertIn("16. D6 激光雷达点云", output.getvalue())
+        import_module.assert_called_once_with("tests.manual.coin_d6")
+
     def test_vision_demo_selects_the_local_model_format(self) -> None:
         model_path = default_model_path()
         expected = ".onnx" if os.name == "nt" else ".engine"
