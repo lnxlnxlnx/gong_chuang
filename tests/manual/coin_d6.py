@@ -158,10 +158,11 @@ def diagnose(
         else:
             counts["point"] += 1
             if counts["point"] == 1:
+                speed = f"转速 {packet.speed_hz} Hz | " if packet.is_start else ""
                 output(
                     f"收到第一个点云包：LSN={len(packet.points)} "
-                    f"FSA={packet.start_angle_degrees:.2f}° LSA={packet.end_angle_degrees:.2f}° "
-                    f"转速 {packet.speed_hz} Hz | 校验分组 {packet.checksum_variant} "
+                    f"FSA={packet.start_angle_degrees:.2f}° LSA={packet.end_angle_degrees:.2f}° | "
+                    f"{speed}校验分组 {packet.checksum_variant} "
                     f"| 起始包 {'是' if packet.is_start else '否'}"
                 )
     try:

@@ -9,6 +9,7 @@ before hardware is available.
 from __future__ import annotations
 
 import math
+import time
 from typing import List, Optional, Sequence, Tuple
 
 from .protocol import (
@@ -35,6 +36,8 @@ REFLECTOR_X_MM = -2200.0
 REFLECTOR_HALF_Y_MM = 260.0
 DEFAULT_POINTS_PER_PACKET = 12
 DEFAULT_POINTS_PER_REVOLUTION = 144
+#: The COIN-D6 rotates at a fixed 10 Hz, so this is how fast samples appear.
+DEFAULT_ROTATION_HZ = 10.0
 
 
 def encode_sample(distance_mm: int, intensity: int = 120, high_reflection: bool = False) -> bytes:
@@ -166,12 +169,16 @@ class SimulatedLidar:
         revolutions: Optional[int] = None,
         device_info: bool = True,
         device_model: str = "COIN-D6",
+        rotation_hz: Optional[float] = DEFAULT_ROTATION_HZ,
     ) -> None:
         self.variant = variant
         self.envelope = envelope
         self.points_per_packet = points_per_packet
         self.points_per_revolution = points_per_revolution
         self.revolutions = revolutions
+        # A real sensor cannot outrun its own rotation; pacing the fake one keeps
+        # the CPU free for the reader thread's consumer (the live window).
+        self.rotation_hz = rotation_hz
         self.is_open = True
         self.commands: List[bytes] = []
         self._pending = bytearray(encode_device_info(device_model) if device_info else b"")
@@ -221,17 +228,25 @@ class SimulatedLidar:
         if not self._start_sent:
             self._start_sent = True
             self._index = 0
-            packet = self._packet(0, 1, is_start=True)
+            count = 1
+            packet = self._packet(0, count, is_start=True)
             self._index = 1
-            return packet
-        count = min(self.points_per_packet, self.points_per_revolution - self._index)
-        packet = self._packet(self._index, count)
-        self._index += count
-        if self._index >= self.points_per_revolution:
-            self._index = 0
-            self._start_sent = False
-            self._revolution += 1
+        else:
+            count = min(self.points_per_packet, self.points_per_revolution - self._index)
+            packet = self._packet(self._index, count)
+            self._index += count
+            if self._index >= self.points_per_revolution:
+                self._index = 0
+                self._start_sent = False
+                self._revolution += 1
+        self._pace(count)
         return packet
+
+    def _pace(self, samples: int) -> None:
+        """Sleep as long as those samples would take to appear at the rotation rate."""
+        if not self.rotation_hz:
+            return
+        time.sleep(samples / (self.points_per_revolution * self.rotation_hz))
 
     def _packet(self, first_index: int, count: int, *, is_start: bool = False) -> bytes:
         """Build the packet covering samples ``first_index .. first_index+count``."""
