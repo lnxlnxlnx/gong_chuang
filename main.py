@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from mecanum_config import HardwareProfile, create_chassis, load_profile
@@ -91,13 +92,13 @@ def func_run_circle_map(car, profile):
 def func_run_half_map(car, profile):
     """Run one map file with the configured calibration."""
     car.forward_left(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
-    car.forward(rpm=profile.chassis_rpm, duration=7.5 * profile.chassis_duration)
-    os.sleep(1)
     car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
-    car.left(rpm=profile.chassis_rpm, duration=7.5 * profile.chassis_duration)
+    time.sleep(1)
+    car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
+    car.left(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
     car.backward(rpm=profile.chassis_rpm, duration=15 * profile.chassis_duration)
-    car.left(rpm=profile.chassis_rpm, duration=7.5 * profile.chassis_duration)
-    car.forward(rpm=profile.chassis_rpm, duration=7.5 * profile.chassis_duration)
+    car.left(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
+    car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
     # car.backward_right(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
 
 
@@ -156,10 +157,7 @@ def demo_vision(
     from vision import USBCamera, create_detector
 
     try:
-        with (
-            USBCamera(camera_id).initialize() as camera,
-            create_detector(model_path) as detector,
-        ):
+        with USBCamera(camera_id).initialize() as camera ,create_detector(model_path) as detector:
             while True:
                 frame = camera.read()
                 if frame is None:
