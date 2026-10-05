@@ -43,6 +43,7 @@ def demo_chassis(profile: HardwareProfile) -> None:
         car.disable_all()
         car.close()
 
+
 def demo_run_one_map(profile: HardwareProfile) -> None:
     """Run one map file with the configured calibration."""
     car = create_chassis(profile)
@@ -51,30 +52,55 @@ def demo_run_one_map(profile: HardwareProfile) -> None:
         car.enable_all()
         # if _confirmed(f"运行地图 {map_path}"):
         if _confirmed("运行地图"):
-            car.forward_left(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
-            car.forward(rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration)
+            car.forward_left(
+                rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration
+            )
+            car.forward(
+                rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration
+            )
             car.left(rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration)
-        # if _confirmed("往返"):
-            car.backward(rpm=profile.chassis_rpm, duration=15 * profile.chassis_duration)
+            # if _confirmed("往返"):
+            car.backward(
+                rpm=profile.chassis_rpm, duration=15 * profile.chassis_duration
+            )
             car.right(rpm=profile.chassis_rpm, duration=16 * profile.chassis_duration)
-            car.backward_right(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
-        
+            car.backward_right(
+                rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration
+            )
+
     finally:
         car.stop()
         car.disable_all()
         car.close()
-        
+
+
 def func_run_circle_map(car, profile):
     """Run one map file with the configured calibration."""
     if _confirmed("运行地图"):
         car.forward_left(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
         car.forward(rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration)
         car.left(rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration)
-        car.backward_right(rpm=profile.chassis_rpm, duration= profile.chassis_duration)
+        car.backward_right(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
         car.backward(rpm=profile.chassis_rpm, duration=15 * profile.chassis_duration)
         car.right(rpm=profile.chassis_rpm, duration=16 * profile.chassis_duration)
-        car.backward_right(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
-        
+        car.backward_right(
+            rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration
+        )
+
+
+def func_run_half_map(car, profile):
+    """Run one map file with the configured calibration."""
+    car.forward_left(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
+    car.forward(rpm=profile.chassis_rpm, duration=7.5 * profile.chassis_duration)
+    os.sleep(1)
+    car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
+    car.left(rpm=profile.chassis_rpm, duration=7.5 * profile.chassis_duration)
+    car.backward(rpm=profile.chassis_rpm, duration=15 * profile.chassis_duration)
+    car.left(rpm=profile.chassis_rpm, duration=7.5 * profile.chassis_duration)
+    car.forward(rpm=profile.chassis_rpm, duration=7.5 * profile.chassis_duration)
+    # car.backward_right(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
+
+
 def run_map_by_func(profile: HardwareProfile, func) -> None:
     """Run one map file with the configured calibration."""
     car = create_chassis(profile)
@@ -87,6 +113,7 @@ def run_map_by_func(profile: HardwareProfile, func) -> None:
         car.stop()
         car.disable_all()
         car.close()
+
 
 def demo_arm(port: str) -> None:
     """Run one bounded position command in each arm direction."""
@@ -112,18 +139,27 @@ def demo_arm(port: str) -> None:
         arm.close()
 
 
-def demo_vision(model_path: str | Path | None = None, camera_id: int | None = None) -> None:
+def demo_vision(
+    model_path: str | Path | None = None, camera_id: int | None = None
+) -> None:
     """Preview detections until q is pressed in the image window."""
     model_path = Path(model_path) if model_path is not None else default_model_path()
-    camera_id = camera_id if camera_id is not None else load_camera_id(
-        "windows" if os.name == "nt" else "jetson")
+    camera_id = (
+        camera_id
+        if camera_id is not None
+        else load_camera_id("windows" if os.name == "nt" else "jetson")
+    )
     if not model_path.is_file():
         raise FileNotFoundError(f"未找到模型文件：{model_path}")
     import cv2
+
     from vision import USBCamera, create_detector
 
     try:
-        with USBCamera(camera_id).initialize() as camera, create_detector(model_path) as detector:
+        with (
+            USBCamera(camera_id).initialize() as camera,
+            create_detector(model_path) as detector,
+        ):
             while True:
                 frame = camera.read()
                 if frame is None:
@@ -150,7 +186,7 @@ def main() -> None:
 
     # 按需注释以下调用；机械臂和底盘使用同一平台配置中的步进总线端口。
     # demo_chassis(profile)
-    run_map_by_func(profile, func_run_circle_map)
+    run_map_by_func(profile, func_run_half_map)
     # demo_arm(profile.port)
     # demo_vision()
     # 总线舵机使用独立串口；确认设备名后取消注释并填写端口。
