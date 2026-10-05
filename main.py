@@ -27,14 +27,43 @@ def demo_chassis(profile: HardwareProfile) -> None:
         car.initialize()
         car.enable_all()
         if _confirmed("底盘前进"):
-            car.forward(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
-        if _confirmed("底盘顺时针旋转"):
-            car.rotate_cw(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
+            car.forward(rpm=profile.chassis_rpm, duration=10 * profile.chassis_duration)
+        # if _confirmed("底盘顺时针旋转"):
+        # car.rotate_cw(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
+        # if _confirmed("底盘左移"):
+        #     car.left(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
+        # if _confirmed("底盘右移"):
+        #     car.right(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
+        # if _confirmed("底盘左前移"):
+        #     car.forward_left(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
+        # if _confirmed("底盘右前移"):
+        #     car.forward_right(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
     finally:
         car.stop()
         car.disable_all()
         car.close()
 
+def demo_run_one_map(profile: HardwareProfile) -> None:
+    """Run one map file with the configured calibration."""
+    car = create_chassis(profile)
+    try:
+        car.initialize()
+        car.enable_all()
+        # if _confirmed(f"运行地图 {map_path}"):
+        if _confirmed("运行地图"):
+            car.forward_left(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
+            car.forward(rpm=profile.chassis_rpm, duration=15 * profile.chassis_duration)
+            car.left(rpm=profile.chassis_rpm, duration=15 * profile.chassis_duration)
+        # if _confirmed("往返"):
+            car.backward_right(rpm=profile.chassis_rpm, duration= profile.chassis_duration)
+            car.backward(rpm=profile.chassis_rpm, duration=14 * profile.chassis_duration)
+            car.right(rpm=profile.chassis_rpm, duration=14 * profile.chassis_duration)
+            car.backward_right(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
+        
+    finally:
+        car.stop()
+        car.disable_all()
+        car.close()
 
 def demo_arm(port: str) -> None:
     """Run one bounded position command in each arm direction."""
@@ -97,9 +126,10 @@ def main() -> None:
     profile = load_profile("windows" if os.name == "nt" else "jetson")
 
     # 按需注释以下调用；机械臂和底盘使用同一平台配置中的步进总线端口。
-    demo_chassis(profile)
-    demo_arm(profile.port)
-    demo_vision()
+    # demo_chassis(profile)
+    demo_run_one_map(profile)
+    # demo_arm(profile.port)
+    # demo_vision()
     # 总线舵机使用独立串口；确认设备名后取消注释并填写端口。
     # demo_servo("<舵机串口>")
 

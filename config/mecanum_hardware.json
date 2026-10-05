@@ -7,10 +7,10 @@
       "RR": 1
     },
     "wheel_signs": {
-      "FL": 1,
-      "FR": 1,
-      "RL": 1,
-      "RR": 1
+      "FL": -1,
+      "FR": -1,
+      "RL": -1,
+      "RR": -1
     },
     "acceleration": 5,
     "pattern": "X",
@@ -25,8 +25,8 @@
         "duration": 0.75
       },
       "chassis_motion": {
-        "rpm": 30,
-        "duration": 1.0,
+        "rpm": 50,
+        "duration": 0.6,
         "pause": 0.5
       }
     },
