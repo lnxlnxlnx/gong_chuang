@@ -25,8 +25,8 @@
         "duration": 0.75
       },
       "chassis_motion": {
-        "rpm": 50,
-        "duration": 0.6,
+        "rpm": 60,
+        "duration": 0.5,
         "pause": 0.5
       }
     },
