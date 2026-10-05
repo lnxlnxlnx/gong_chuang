@@ -2,6 +2,7 @@
 .worktrees/
 __pycache__/
 models/
+*.pt
 *.pdf
 __pycache__/
 output/
