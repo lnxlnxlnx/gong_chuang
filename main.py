@@ -100,6 +100,18 @@ def func_run_half_map(car, profile):
     car.left(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
     car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
     # car.backward_right(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
+    
+    # 来回测试
+    car.right(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
+    car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
+    time.sleep(0.1)
+    car.backward(rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration)
+    time.sleep(0.1)
+    car.left(rpm=profile.chassis_rpm, duration=7.5 * profile.chassis_duration)
+    car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
+    car.right(rpm=profile.chassis_rpm, duration=16 * profile.chassis_duration)
+    car.backward(rpm=profile.chassis_rpm, duration=8.5 * profile.chassis_duration)
+    
 
 
 def run_map_by_func(profile: HardwareProfile, func) -> None:
