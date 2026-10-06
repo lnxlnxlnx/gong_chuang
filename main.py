@@ -139,6 +139,32 @@ def demo_arm(port: str) -> None:
         arm.close()
 
 
+def arm_grab(port: str) -> None:
+    """Run one bounded position command in each arm direction."""
+    config = load_arm_config()
+    arm = RobotArm(port, config=config)
+    try:
+        arm.initialize()
+        arm.enable_all()
+        motions = (
+            # ("底座顺时针", arm.rotate_cw, 5 * config.default_pulses),  # 差不多90度
+            # ("底座逆时针", arm.rotate_ccw, 5 * config.default_pulses),
+            # ("机械臂前伸", arm.move_forward, 3 * config.default_pulses),
+            # ("机械臂后缩", arm.move_backward, 3 * config.default_pulses),
+            # 默认差不多2cm->3个默认是5cm
+            ("机械臂向上", arm.move_up, 3 * config.default_pulses),
+            ("机械臂向下", arm.move_down, 3 * config.default_pulses),
+            ("机械臂前伸", arm.move_forward, config.default_pulses),
+        )
+        for label, action, pulses in motions:
+            if _confirmed(label):
+                action(pulses)
+    finally:
+        arm.stop_all()
+        arm.disable_all()
+        arm.close()
+
+
 def demo_vision(
     model_path: str | Path | None = None, camera_id: int | None = None
 ) -> None:
@@ -186,8 +212,9 @@ def main() -> None:
 
     # 按需注释以下调用；机械臂和底盘使用同一平台配置中的步进总线端口。
     # demo_chassis(profile)
-    run_map_by_func(profile, func_run_half_map)
+    # run_map_by_func(profile, func_run_half_map)
     # demo_arm(profile.port)
+    arm_grab(profile.port)
     # demo_vision()
     # 总线舵机使用独立串口；确认设备名后取消注释并填写端口。
     # demo_servo("<舵机串口>")

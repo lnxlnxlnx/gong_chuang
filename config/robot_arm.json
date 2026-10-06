@@ -1,7 +1,7 @@
 {
   "motion": {
     "pulses_per_revolution": 3200,
-    "rpm": 10,
+    "rpm": 30,
     "acceleration": 5,
     "default_pulses": 800,
     "max_pulses": 5000
