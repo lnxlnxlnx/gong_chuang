@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import unittest
+import math
 import numpy as np
 
-from vision.hough_lock import synthetic_rings
+from vision.hough_lock import LockedRegion, RingLock, synthetic_rings
 from vision.material_locate import MaterialLocator
 from vision.yolov8 import Detection
 
@@ -19,6 +20,13 @@ class FakeYOLO:
 
     def close(self):
         pass
+
+
+class FixedCircleLocator:
+    """Return a known circle so camera-coordinate checks have exact values."""
+
+    def locate(self, _frame):
+        return RingLock((LockedRegion(400.0, 200.0, 60.0),))
 
 
 def hit(name, score, x):
@@ -80,6 +88,38 @@ class MaterialLocatorTests(unittest.TestCase):
             MaterialLocator(yolo=FakeYOLO(), focal_px=0)
         with self.assertRaises(ValueError):
             MaterialLocator(yolo=FakeYOLO(), top_diameter_mm=0)
+
+    def test_public_result_has_camera_coordinates_and_confidence(self):
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        locator = MaterialLocator(
+            locator=FixedCircleLocator(),
+            yolo=FakeYOLO([Detection(380, 180, 420, 220, 0.8, 2, "obj-blue")]),
+            focal_px=300,
+        )
+
+        report = locator.locate(frame)
+        item = report.regions[0]
+        self.assertTrue(report.present)
+        self.assertEqual(item.name, "obj-blue")
+        self.assertAlmostEqual(item.confidence, 0.8)
+        self.assertEqual((item.center_x_px, item.center_y_px), (400.0, 200.0))
+        self.assertAlmostEqual(item.x_mm, 20.0)
+        self.assertAlmostEqual(item.y_mm, -10.0)
+        self.assertAlmostEqual(item.z_mm, 75.0)
+        self.assertAlmostEqual(item.distance_mm, 75.0)
+        self.assertAlmostEqual(item.range_mm, math.sqrt(20**2 + 10**2 + 75**2))
+
+    def test_yolo_miss_keeps_position_but_has_no_confidence(self):
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        report = MaterialLocator(
+            locator=FixedCircleLocator(), yolo=FakeYOLO(), focal_px=300
+        ).locate(frame)
+
+        item = report.regions[0]
+        self.assertTrue(report.present)
+        self.assertIsNone(item.name)
+        self.assertIsNone(item.confidence)
+        self.assertEqual((item.x_mm, item.y_mm, item.z_mm), (20.0, -10.0, 75.0))
 
 
 if __name__ == "__main__":
