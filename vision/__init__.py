@@ -6,20 +6,28 @@ detection stack meant to be reused by robot applications:
   - :class:`vision.yolov8.YOLOv8Detector`: TensorRT detection on Jetson.
   - :class:`vision.yolov8.YOLOv8ONNXDetector`: OpenCV ONNX detection on Windows.
   - :class:`vision.camera.USBCamera`: USB camera capture wrapper.
+  - :func:`vision.preview.open_preview`: HighGUI preview window (ASCII name,
+    created explicitly; see the module docstring for the Windows traps).
   - :class:`vision.distance.DistanceEstimator`: monocular distance estimate.
 
 Example::
 
-    from vision import USBCamera, create_detector, default_model_path
+    import cv2
+    from vision import USBCamera, close_previews, create_detector, default_model_path, open_preview
 
-    with USBCamera(0).initialize() as cam, \
-            create_detector(default_model_path()) as detector:
-        while True:
-            frame = cam.read()
-            if frame is None:
-                break
-            for hit in detector.detect(frame):
-                print(hit)
+    window = open_preview()
+    try:
+        with USBCamera(0).initialize() as cam, \
+                create_detector(default_model_path()) as detector:
+            while True:
+                frame = cam.read()
+                if frame is None:
+                    break
+                cv2.imshow(window, detector.draw(frame, detector.detect(frame)))
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+    finally:
+        close_previews()
 """
 
 from __future__ import annotations
@@ -27,16 +35,29 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .camera import USBCamera, load_camera_id
+from .camera import USBCamera, load_camera_id, looks_blank
 from .distance import DistanceEstimator, focal_length_from_fov
+from .preview import (
+    BLANK_FRAME_WARNING,
+    PREVIEW_WINDOW_NAME,
+    close_previews,
+    open_preview,
+    warn_blank_preview,
+)
 from .yolov8 import DEFAULT_CLASS_NAMES, Detection, YOLOv8Detector, YOLOv8ONNXDetector
 
 __all__ = [
+    "BLANK_FRAME_WARNING",
     "DEFAULT_CLASS_NAMES",
     "Detection",
     "DistanceEstimator",
+    "PREVIEW_WINDOW_NAME",
     "USBCamera",
+    "close_previews",
     "load_camera_id",
+    "looks_blank",
+    "open_preview",
+    "warn_blank_preview",
     "YOLOv8Detector",
     "YOLOv8ONNXDetector",
     "focal_length_from_fov",

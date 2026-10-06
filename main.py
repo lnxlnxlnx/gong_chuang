@@ -29,6 +29,9 @@ def demo_chassis(profile: HardwareProfile) -> None:
         car.enable_all()
         if _confirmed("底盘前进"):
             car.forward(rpm=profile.chassis_rpm, duration=10 * profile.chassis_duration)
+        # 位置模式示例：四轮按逆运动学各走 3200 脉冲（一圈）后自动返回。
+        # if _confirmed("底盘前进一圈"):
+        #     car.forward(rpm=profile.chassis_rpm, pulses=3200)
         # if _confirmed("底盘顺时针旋转"):
         # car.rotate_cw(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
         # if _confirmed("底盘左移"):
@@ -100,7 +103,7 @@ def func_run_half_map(car, profile):
     car.left(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
     car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
     # car.backward_right(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
-    
+
     # 来回测试
     car.right(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
     car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
@@ -111,7 +114,6 @@ def func_run_half_map(car, profile):
     car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
     car.right(rpm=profile.chassis_rpm, duration=16 * profile.chassis_duration)
     car.backward(rpm=profile.chassis_rpm, duration=8.5 * profile.chassis_duration)
-    
 
 
 def run_map_by_func(profile: HardwareProfile, func) -> None:
@@ -192,20 +194,40 @@ def demo_vision(
         raise FileNotFoundError(f"未找到模型文件：{model_path}")
     import cv2
 
-    from vision import USBCamera, create_detector
+    from vision import (
+        BLANK_FRAME_WARNING,
+        USBCamera,
+        close_previews,
+        create_detector,
+        looks_blank,
+        open_preview,
+        warn_blank_preview,
+    )
 
+    # 窗口名必须是 ASCII，且要先显式建窗，见 vision/preview.py 顶部说明。
+    window = open_preview()
+    blank_frames = 0
+    warned_blank = False
     try:
-        with USBCamera(camera_id).initialize() as camera ,create_detector(model_path) as detector:
+        with (
+            USBCamera(camera_id).initialize() as camera,
+            create_detector(model_path) as detector,
+        ):
+            print(f"摄像头编号 {camera_id}，模型 {model_path.name}；预览窗口 {window!r}，按 q 退出")
             while True:
                 frame = camera.read()
                 if frame is None:
                     raise RuntimeError("摄像头未返回图像")
+                blank_frames = blank_frames + 1 if looks_blank(frame) else 0
+                if blank_frames >= BLANK_FRAME_WARNING and not warned_blank:
+                    warned_blank = True
+                    warn_blank_preview(camera_id)
                 hits = detector.detect(frame)
-                cv2.imshow("项目视觉演示", detector.draw(frame, hits))
+                cv2.imshow(window, detector.draw(frame, hits))
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
     finally:
-        cv2.destroyAllWindows()
+        close_previews()
 
 
 def demo_servo(port: str, servo_id: int = 1) -> None:
@@ -224,8 +246,8 @@ def main() -> None:
     # demo_chassis(profile)
     # run_map_by_func(profile, func_run_half_map)
     # demo_arm(profile.port)
-    arm_grab(profile.port)
-    # demo_vision()
+    # arm_grab(profile.port)
+    demo_vision()
     # 总线舵机使用独立串口；确认设备名后取消注释并填写端口。
     # demo_servo("<舵机串口>")
 

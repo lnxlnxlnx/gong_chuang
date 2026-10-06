@@ -52,6 +52,7 @@ def run_sequence(
                 if report.output_degrees is not None
                 else ""
             )
+            + f"（已按估算等待 {report.estimated_seconds:.2f}s 到位）"
         )
 
 

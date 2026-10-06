@@ -12,7 +12,7 @@ from tests.test_mecanum import FakeSerial
 class ChassisFacadeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.serial = FakeSerial()
-        self.drive = MecanumDrive("COM14", serial_port=self.serial)
+        self.drive = MecanumDrive("COM14", serial_port=self.serial, sleep=lambda _seconds: None)
         self.chassis = MecanumChassis(self.drive)
 
     def test_forward_delegates_to_four_wheel_drive(self) -> None:
@@ -26,6 +26,19 @@ class ChassisFacadeTests(unittest.TestCase):
                 bytes.fromhex("04 F6 00 00 1E 0A 00 6B"),
             ],
         )
+
+    def test_forward_with_pulses_uses_the_position_mode(self) -> None:
+        counts = self.chassis.forward(rpm=200, pulses=3200)
+
+        self.assertEqual(counts, [3200, 3200, 3200, 3200])
+        self.assertEqual([frame[1] for frame in self.serial.writes[:4]], [0xFD] * 4)
+        self.assertEqual(self.serial.writes[4], bytes.fromhex("00 FF 66 6B"))
+
+    def test_move_wheels_relative_pulses_passthrough(self) -> None:
+        self.chassis.move_wheels_relative_pulses(0, 3200, 0, -3200, rpm=200)
+
+        self.assertEqual([frame[0] for frame in self.serial.writes[:2]], [2, 4])
+        self.assertEqual([frame[1] for frame in self.serial.writes[:2]], [0xFD, 0xFD])
 
     def test_relative_position_moves_all_wheels_in_logical_order(self) -> None:
         self.chassis.move_wheels_relative(fl=90, fr=-90, rl=180, rr=-180, rpm=120)

@@ -35,12 +35,15 @@ stepper = Emm42Driver("/dev/ttyUSB1", motor_id=1).initialize()
 stepper.enable(True)
 stepper.set_speed(Direction.CW, rpm=300, acceleration=10)
 stepper.move_relative(degrees=-360.0, rpm=300, acceleration=10)
+stepper.move_relative_pulses(pulses=-3200, rpm=300, acceleration=10)
 stepper.move_absolute(degrees=720.0, rpm=300, acceleration=10)
 stepper.home(HomeMode.SINGLE_TURN_NEAREST)
 stepper.stop()
 ```
 
 `Emm42Driver` 默认按说明书中的 1.8 度、16 细分配置使用 `3200` 脉冲/圈。若驱动器的细分配置不同，初始化时传入实际的 `pulses_per_revolution`。
+
+`move_relative` / `move_absolute` 收角度，`move_relative_pulses` / `move_absolute_pulses` 收脉冲数（正数 = CW）；后者不经过角度换算，机械臂和麦轮的位置模式都走这一条。
 
 ## 麦轮小车（MecanumDrive）
 
@@ -55,18 +58,35 @@ profile = load_profile("jetson")
 car = create_chassis(profile).initialize()
 car.enable_all()                      # 移动前必须先使能扭矩
 car.forward(rpm=60)                   # 持续前进，直到 stop()
-car.left(rpm=40, duration=2.0)        # 向左平移 2 秒
+car.left(rpm=40, duration=2.0)        # 速度模式：向左平移 2 秒
 car.strafe_left(rpm=40, duration=2.0) # 向左平移 2 秒后自动停
 car.rotate_cw(rpm=30, duration=1.0)   # 原地顺时针转 1 秒
+car.forward(rpm=200, pulses=3200)     # 位置模式：四轮各走 3200 脉冲（一圈）后返回
+car.drive_pulses(1.0, 1.0, 0.0, pulses=1600, rpm=200)  # 任意方向走固定脉冲数
 car.stop()
 car.disable_all()                     # 松轴
 car.close()
 ```
 
-- 上层整车 API：`MecanumChassis` 的 `forward` / `backward` / `left` / `right` / `rotate_cw` / `rotate_ccw` / `forward_left` / `forward_right` / `backward_left` / `backward_right`，均可带可选 `duration` 自动限时停止。
-- 四轮位置 API：`move_wheels_relative(fl, fr, rl, rr, rpm)` 和 `move_wheels_absolute(fl, fr, rl, rr, rpm)`，默认使用 Emm42 多机同步机制：四条 `0xFD` 位置帧缓存后，再发送 `00 FF 66 6B` 同时启动。
+### 统一运动参数（机械臂 / 底盘一致）
+
+所有整车动作和机械臂动作使用同一套参数名，含义相同（实现见 `motion.py`）：
+
+| 参数 | 含义 | 机械臂 `RobotArm` | 底盘 `MecanumChassis` / `MecanumDrive` |
+|---|---|---|---|
+| `pulses` | 位置模式：本次走多少脉冲（正数，方向由动作方法决定） | 必填（第一个位置参数） | 可选关键字；给 `pulses` 就走位置模式 |
+| `duration` | 速度模式：一条速度命令持续多少秒 | 不支持（机械臂只有相对位置模式） | 可选；与 `pulses` 只能给一个 |
+| `rpm` | 目标转速，缺省用配置值 | 可选关键字 | 必填（第一个位置参数） |
+| `acceleration` | 曲线加减速档位 `0..255`，缺省用配置值 | 可选关键字 | 可选 |
+| `wait` | `True`（默认）等到动作走完再返回；`False` 只发命令 | 默认 `True` | 默认 `True`（位置模式用） |
+
+- **`wait` 为什么重要**：Emm42 位置命令"发完就返回"，驱动器不会告诉上位机什么时候停。机械臂 5/6/7 号驱动器是 `Response=None`（连 ACK 都不回），如果不等待，连续调用会让后一条位置帧覆盖前一条的目标，看起来就是"上一个动作被跳过"。`wait=True` 按说明书的曲线加减速公式估算耗时并等待（`motion.estimate_move_seconds`），`MotionReport.estimated_seconds` 会把它带回来。
+- 需要毫秒级精确时不能用估算：那要用 `0x3A` 读运动状态标志（`&0x02` 到位位）轮询，当前没有实现。
+- 轮子位置模式默认走 Emm42 多机同步：四条 `0xFD` 帧缓存后发 `00 FF 66 6B` 同时启动；0 脉冲的轮子不下发。
+- 上层整车 API：`MecanumChassis` 的 `forward` / `backward` / `left` / `right` / `rotate_cw` / `rotate_ccw` / `forward_left` / `forward_right` / `backward_left` / `backward_right`，都可带 `duration`（速度模式）、`pulses`（位置模式）或都不带（持续运动）。
+- 四轮位置 API：`move_wheels_relative(fl, fr, rl, rr, rpm)` 按角度、`move_wheels_relative_pulses(fl, fr, rl, rr, rpm)` 按脉冲数（同样默认同步启动），以及对应的一组 `*_absolute*`。
 - 底层单轮 API（供上层调用）：`enable_wheel` / `set_wheel_speed` / `stop_wheel` / `move_wheel_relative` / `move_wheel_absolute` / `home_wheel` / `get_wheel`。
-- 整车低层：`drive(vx, vy, omega, rpm)`（麦轮逆运动学，可斜向移动）、`set_speeds(fl, fr, rl, rr)`。
+- 整车低层：`drive(vx, vy, omega, rpm)`（麦轮逆运动学，可斜向移动）、`drive_pulses(vx, vy, omega, pulses, rpm)`（同矩阵，位移用脉冲数给）、`set_speeds(fl, fr, rl, rr)`。
 - 当前实车使用标准麦轮坐标变换 `motion_transform="standard"`，四轮横移都会参与运动。
 - 若装配后方向反了：整车方向反 → 把 `drive()` 的 `vx`/`vy` 取反；辊子排布不同 → 换 `pattern="O"`；单轮转向反 → 在 `wheel_signs` 给该轮 `-1`。
 
@@ -241,6 +261,8 @@ USB 摄像头 + YOLOv8 检测，封装为 `vision` 包，供主程序和示例�
 
 - `vision.create_detector(vision.default_model_path())`：Windows 用 ONNX，Jetson 用 TensorRT；都返回 `list[vision.Detection]`。
 - `vision.USBCamera`：USB 摄像头封装（`initialize()/read()/release()`，支持 `with`）。
+- `vision.open_preview()` / `vision.close_previews()`：HighGUI 预览窗口。**窗口名必须是 ASCII，并且要先显式 `namedWindow` 再 `imshow`**：本机实测中文窗口名会显示成 `??????`（Qt 后端里是 `椤圭洰瑙嗚…` 这样的乱码），不同发行版的 OpenCV 窗口后端（pip 的 Win32UI / conda-forge 的 Qt6）隐式建窗行为也不一样。所以预览入口统一用 `vision-preview` 这个名字。
+- `vision.looks_blank(frame)` / `vision.warn_blank_preview(camera_id)`：`read()` 成功但画面是纯黑/纯白时（被别的程序占用、序号指向没有画面的设备、镜头盖关着）打印排查清单，而不是让用户对着一个纯色窗口猜。
 - `vision.DistanceEstimator`：单目测距（针孔模型，需要已知类别真实宽度）。
 
 菜单 9 和 `main.py` 的视觉演示从 `config/vision.json` 读取摄像头编号。Windows 当前设为 `1`（外接 USB 摄像头），Jetson 设为 `0`；如果设备枚举顺序不同，修改对应平台的 `camera_id`。指定编号无法打开时会报错，不会自动切换到前置摄像头。
@@ -272,18 +294,28 @@ python test.py
 ### 程序中使用
 
 ```python
-from vision import DistanceEstimator, USBCamera, create_detector, default_model_path
+import cv2
+from vision import (DistanceEstimator, USBCamera, close_previews, create_detector,
+                    default_model_path, open_preview)
 
-with USBCamera(0).initialize() as cam, \
-        create_detector(default_model_path()) as detector:
-    est = DistanceEstimator(focal_px=focal, real_widths={"target-1": 60.0})
-    while True:
-        frame = cam.read()
-        if frame is None:
-            break
-        for hit in detector.detect(frame):      # hit: vision.Detection
-            dist_mm = est.estimate(hit)         # 未知类别返回 None
-            print(hit.name, hit.center, dist_mm)
+window = open_preview()          # ASCII 窗口名 + 显式建窗
+try:
+    with USBCamera(0).initialize() as cam, \
+            create_detector(default_model_path()) as detector:
+        est = DistanceEstimator(focal_px=focal, real_widths={"target-1": 60.0})
+        while True:
+            frame = cam.read()
+            if frame is None:
+                break
+            hits = detector.detect(frame)       # hit: vision.Detection
+            for hit in hits:
+                dist_mm = est.estimate(hit)     # 未知类别返回 None
+                print(hit.name, hit.center, dist_mm)
+            cv2.imshow(window, detector.draw(frame, hits))
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+finally:
+    close_previews()
 ```
 
 ### 校准焦距

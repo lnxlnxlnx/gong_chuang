@@ -42,6 +42,33 @@
 
 ---
 
+## 1.1 统一运动参数（机械臂与底盘一致）
+
+第 2、3 层的运动方法都使用同一套参数名，含义完全相同（算法在 `motion.py`）：
+
+| 参数 | 含义 | 机械臂 `RobotArm` | 底盘 `MecanumChassis` / `MecanumDrive` |
+|---|---|---|---|
+| `pulses` | 位置模式：本次移动的脉冲数（正数，方向由动作方法决定） | 必填（第一个位置参数） | 可选关键字；给了就走位置模式 |
+| `duration` | 速度模式：一条速度命令持续多少秒 | 不支持（只允许相对位置模式） | 可选；与 `pulses` 互斥 |
+| `rpm` | 目标转速，缺省用配置值 | 可选关键字 | 必填（第一个位置参数） |
+| `acceleration` | 曲线加减速档位 `0..255`，缺省用配置值 | 可选关键字 | 可选 |
+| `wait` | `True`（默认）等到动作走完再返回，`False` 只发命令 | 默认 `True` | 位置模式默认 `True` |
+
+**为什么需要 `wait`**：Emm42 位置命令是"发完就返回"，驱动器不会告诉上位机什么时候停。
+不等待时，下一条位置帧会在上一条还没走完时改写目标，现象就是"上一个动作被跳过"。
+`wait=True` 按说明书给的曲线加减速公式估算耗时后等待：
+
+```
+每档加速度让转速 +1 RPM 约需 (256 - acceleration) * 50µs
+总耗时 ≈ rpm * (256 - 档位) * 50µs  +  脉冲数 / (rpm * 脉冲每圈 / 60)  +  到位余量(默认 0.15s)
+```
+
+这是估算（把减速段和串口往返折进到位余量），**不是编码器实测**；要毫秒级精确必须用
+`0x3A` 读运动状态标志（`&0x02` 到位位）轮询，当前没有实现。`MotionReport.estimated_seconds`
+会带回本次估算值，`wait=False` 时调用方可以自己拿它去等。
+
+---
+
 ## 2. 总线如何区分各台电机：帧首地址
 
 Emm42 是**共享总线 + 帧内寻址**：
@@ -161,6 +188,8 @@ Emm42Driver(
 | `set_speed(direction: Direction, rpm: int, acceleration: int)` | **持续正/反转**，速度 0~3000 | `F6 dir rpm accel sync` |
 | `move_relative(degrees, rpm, acceleration, *, synchronized=False)` | 相对角度移动（正角=CW） | `FD ...` |
 | `move_absolute(degrees, rpm, acceleration, *, synchronized=False)` | 绝对角度移动 | `FD ...` |
+| `move_relative_pulses(pulses, rpm, acceleration, *, synchronized=False)` | 相对脉冲数移动（正数=CW），不做角度换算 | `FD ...` |
+| `move_absolute_pulses(pulses, rpm, acceleration, *, synchronized=False)` | 绝对脉冲位置 | `FD ...` |
 | `trigger_sync_motion()` | 触发总线所有"同步标志=1"的缓存命令 | `00 FF 66 6B` |
 | `stop()` | 立即刹车（速度/位置模式通用） | `FE 98 00` |
 | `home(mode: HomeMode)` | 触发回零 | `9A mode` |
@@ -223,7 +252,8 @@ MecanumDrive(
 | `set_wheel_speed(wheel, signed_rpm, acceleration=None)` | **正=前进、负=后退、0=停止** |
 | `set_wheel_acceleration(wheel, accel)` | 设默认加速度档 |
 | `stop_wheel(wheel)` | 单轮立即刹车 |
-| `move_wheel_relative(degrees, rpm, ...)` / `move_wheel_absolute(...)` | 单轮位置模式 |
+| `move_wheel_relative(degrees, rpm, ...)` / `move_wheel_absolute(...)` | 单轮位置模式（角度） |
+| `move_wheels_relative_pulses(fl, fr, rl, rr, rpm, ...)` / `move_wheels_absolute_pulses(...)` | 四轮位置模式（**脉冲数**，0 脉冲的轮子不下发，默认同步启动） |
 | `home_wheel(wheel, mode)` | 单轮回零 |
 
 **整车控制**
@@ -231,12 +261,14 @@ MecanumDrive(
 | 方法 | 说明 |
 |---|---|
 | `drive(vx, vy, omega, rpm, acceleration=None)` | 逆运动学入口：`vx>0`=前，`vy>0`=左，`omega>0`=逆时针；四轮转速归一化到 `rpm` |
+| `drive_pulses(vx, vy, omega, pulses, rpm, acceleration=None, *, wait=True)` | 同一张矩阵，但位移归一化到 `pulses`；`wait=True` 等估算耗时走完 |
 | `set_speeds(fl, fr, rl, rr, acceleration=None)` | 最低层整车入口：直接给 4 个带符号 RPM，绕过矩阵 |
 | `stop()` | 4 轮全部刹车 |
-| `move_wheels_relative(fl, fr, rl, rr, rpm, *, synchronized=True)` | 4 轮相对位置，默认**多机同步**（缓存 FD 后发 `00 FF 66 6B`） |
-| `move_wheels_absolute(fl, fr, rl, rr, rpm, *, synchronized=True)` | 4 轮绝对位置 |
+| `move_wheels_relative(fl, fr, rl, rr, rpm, *, synchronized=True)` | 4 轮相对位置（角度），默认**多机同步**（缓存 FD 后发 `00 FF 66 6B`） |
+| `move_wheels_absolute(fl, fr, rl, rr, rpm, *, synchronized=True)` | 4 轮绝对位置（角度） |
+| `move_wheels_relative_pulses(...)` / `move_wheels_absolute_pulses(...)` | 同上，但直接给脉冲数 |
 
-**高层方向方法**（都可由 `duration=` 限时自动停）
+**高层方向方法**（统一参数：`pulses` 位置模式 / `duration` 速度模式限时 / 都不给则持续；`wait` 控制是否阻塞）
 
 | 方法 | 方向 |
 |---|---|
@@ -244,6 +276,12 @@ MecanumDrive(
 | `strafe_left(rpm)` / `strafe_right(rpm)` | 左平移 / 右平移 |
 | `rotate_cw(rpm)` / `rotate_ccw(rpm)` | 俯视顺时针 / 逆时针原地自转 |
 | `forward_left/forward_right/backward_left/backward_right(rpm)` | 四个斜向 |
+
+```python
+car.forward(rpm=60, duration=2.0)     # 速度模式：跑 2 秒后自动停（阻塞 2 秒）
+car.forward(rpm=200, pulses=3200)     # 位置模式：四轮各走 3200 脉冲后返回
+car.forward(rpm=200, pulses=3200, wait=False)   # 只发命令，不等
+```
 
 `WheelPosition` 枚举：`FL / FR / RL / RR`（注意是本项目的轮位命名，无 BL/BR）。
 
@@ -336,14 +374,18 @@ time.sleep(0.5)
 drive.stop(); drive.disable_all(); drive.close()
 ```
 
-### 例 3：位置模式（相对 + 多机同步）
+### 例 3：位置模式（相对 + 脉冲数 + 多机同步）
 ```python
 car = create_chassis(load_profile("jetson")).initialize()
 try:
     car.enable_all()
     # 四轮同步各转 180°：先缓存 4 条 FD，再发 00 FF 66 6B 同时启动
     car.move_wheels_relative(fl=180.0, fr=180.0, rl=-180.0, rr=-180.0, rpm=200, synchronized=True)
-    # 绝对位置
+    # 直接按脉冲数给（前进一圈 = 每轮 3200 脉冲），默认等动作走完
+    car.forward(rpm=200, pulses=3200)
+    # 任意方向走固定脉冲数：vx=1、vy=1（左前），最大轮位移 1600 脉冲
+    car.drive_pulses(1.0, 1.0, 0.0, pulses=1600, rpm=200)
+    # 绝对位置（角度）
     car.move_wheels_absolute(fl=0.0, fr=0.0, rl=0.0, rr=0.0, rpm=200, synchronized=True)
 finally:
     car.disable_all(); car.close()

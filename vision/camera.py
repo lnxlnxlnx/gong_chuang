@@ -33,6 +33,21 @@ def _cv2():
     return cv2
 
 
+def looks_blank(frame, *, std_threshold: float = 2.0) -> bool:
+    """Return ``True`` when a frame is one flat colour (all black / all white).
+
+    A real camera picture always has some variation, so a near-zero standard
+    deviation means the capture produced nothing usable even though ``read()``
+    reported success. Used by the preview entry points to print a diagnosis
+    instead of silently showing a black window.
+    """
+    if frame is None:
+        return True
+    import numpy as np
+
+    return bool(float(np.asarray(frame).std()) < std_threshold)
+
+
 class USBCamera:
     """A V4L2/USB camera wrapper producing BGR frames.
 

@@ -42,6 +42,8 @@ class VisionCameraConfigTests(unittest.TestCase):
                     patch.object(vision_demo, "default_model_path", return_value=model_path), \
                     patch.object(vision_demo, "load_camera_id", return_value=3), \
                     patch.object(vision_demo, "create_detector"), \
+                    patch.object(vision_demo, "open_preview", return_value="vision-preview"), \
+                    patch.object(vision_demo, "close_previews"), \
                     patch.object(vision_demo, "USBCamera") as camera_type:
                 camera_type.return_value.initialize.return_value.__enter__.return_value.read.return_value = None
                 vision_demo.main()

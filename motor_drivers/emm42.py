@@ -133,6 +133,32 @@ class Emm42Driver:
         """Move to a signed absolute angle; optionally buffer for synchronized start."""
         self._move(degrees, rpm, acceleration, absolute=True, synchronized=synchronized)
 
+    def move_relative_pulses(
+        self,
+        pulses: int,
+        rpm: int,
+        acceleration: int,
+        *,
+        synchronized: bool = False,
+    ) -> None:
+        """Move a signed pulse count; positive pulses mean CW.
+
+        与 ``move_relative`` 的唯一区别是本方法直接给脉冲数，不再经过
+        "角度 -> 脉冲" 的有损换算，机械臂和麦轮的位置模式都走这里。
+        """
+        self._move_pulses(pulses, rpm, acceleration, absolute=False, synchronized=synchronized)
+
+    def move_absolute_pulses(
+        self,
+        pulses: int,
+        rpm: int,
+        acceleration: int,
+        *,
+        synchronized: bool = False,
+    ) -> None:
+        """Move to a signed absolute pulse position; optionally buffered."""
+        self._move_pulses(pulses, rpm, acceleration, absolute=True, synchronized=synchronized)
+
     def trigger_sync_motion(self) -> None:
         """Trigger all previously buffered synchronized commands on the bus."""
         self._write(0xFF, b"\x66", address=0)
@@ -164,14 +190,58 @@ class Emm42Driver:
         # 位置命令不允许 0 位移
         if degrees == 0:
             raise ValueError("degrees must be non-zero")
+        # 角度 -> 脉冲数（保留原来的校验顺序：先角度、再速度/加速度、最后脉冲范围）
         self._require_range("rpm", rpm, 0, self.MAX_RPM)
         self._require_range("acceleration", acceleration, 0, 255)
-        # 角度 -> 脉冲数, 再校验脉冲数能放进 4 字节大端无符号整数
         pulses = round(abs(degrees) * self.pulses_per_revolution / 360)
         if not 1 <= pulses <= 0xFFFFFFFF:
             raise ValueError("degrees is outside the representable pulse range")
-        # 正角度 -> CW, 负角度 -> CCW
-        direction = Direction.CW if degrees > 0 else Direction.CCW
+        self._write_position(
+            Direction.CW if degrees > 0 else Direction.CCW,
+            pulses,
+            rpm,
+            acceleration,
+            absolute=absolute,
+            synchronized=synchronized,
+        )
+
+    def _move_pulses(
+        self,
+        pulses: int,
+        rpm: int,
+        acceleration: int,
+        *,
+        absolute: bool,
+        synchronized: bool,
+    ) -> None:
+        if isinstance(pulses, bool) or not isinstance(pulses, int):
+            raise ValueError("pulses must be an integer")
+        # 位置命令不允许 0 位移
+        if pulses == 0:
+            raise ValueError("pulses must be non-zero")
+        if not -0xFFFFFFFF <= pulses <= 0xFFFFFFFF:
+            raise ValueError("pulses is outside the representable range")
+        self._require_range("rpm", rpm, 0, self.MAX_RPM)
+        self._require_range("acceleration", acceleration, 0, 255)
+        self._write_position(
+            Direction.CW if pulses > 0 else Direction.CCW,
+            abs(pulses),
+            rpm,
+            acceleration,
+            absolute=absolute,
+            synchronized=synchronized,
+        )
+
+    def _write_position(
+        self,
+        direction: Direction,
+        pulses: int,
+        rpm: int,
+        acceleration: int,
+        *,
+        absolute: bool,
+        synchronized: bool,
+    ) -> None:
         parameters = (
             bytes((direction,))
             + rpm.to_bytes(2, "big")

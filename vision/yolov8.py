@@ -430,6 +430,8 @@ if __name__ == "__main__":  # pragma: no cover - exercised manually on the board
 
     import cv2
 
+    from vision.preview import close_previews, open_preview
+
     detector = YOLOv8Detector("models/best.engine")
     camera = cv2.VideoCapture(0)
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -440,6 +442,7 @@ if __name__ == "__main__":  # pragma: no cover - exercised manually on the board
     fps = 0.0
     previous = time.time()
     print("preview running; press q to quit")
+    window = open_preview()
     try:
         while True:
             ok, frame = camera.read()
@@ -450,10 +453,10 @@ if __name__ == "__main__":  # pragma: no cover - exercised manually on the board
             fps = fps * 0.9 + (1.0 / (now - previous + 1e-6)) * 0.1
             previous = now
             annotated = detector.draw(frame, detections, fps=fps)
-            cv2.imshow("YOLOv8 TensorRT vision", annotated)
+            cv2.imshow(window, annotated)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
     finally:
         camera.release()
-        cv2.destroyAllWindows()
+        close_previews()
         detector.close()

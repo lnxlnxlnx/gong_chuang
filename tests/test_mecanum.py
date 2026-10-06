@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from mecanum import MecanumDrive, WheelPosition, WHEEL_ORDER
+from motion import estimate_move_seconds
 from motor_drivers.emm42 import Direction, HomeMode
 
 
@@ -284,6 +285,125 @@ class LowLevelApiTests(MecanumDriveTests):
 
     def test_get_wheel_returns_underlying_driver(self) -> None:
         self.assertIs(self.car.get_wheel(WheelPosition.FL), self.car.wheels[WheelPosition.FL])
+
+
+class RecordingSleep:
+    """Records requested waits instead of sleeping."""
+
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+
+
+class PulseModeTests(unittest.TestCase):
+    """轮子位置模式：同样的方向方法改用 pulses 走固定距离。"""
+
+    def setUp(self) -> None:
+        self.serial = FakeSerial()
+        self.sleep = RecordingSleep()
+        self.car = MecanumDrive("/dev/ttyUSB0", serial_port=self.serial, sleep=self.sleep)
+
+    def position_frame(
+        self,
+        motor_id: int,
+        direction: Direction,
+        rpm: int,
+        acceleration: int,
+        pulses: int,
+        *,
+        absolute: int = 0,
+        sync: int = 1,
+    ) -> bytes:
+        return (
+            bytes((motor_id, 0xFD, int(direction)))
+            + rpm.to_bytes(2, "big")
+            + bytes((acceleration,))
+            + pulses.to_bytes(4, "big")
+            + bytes((absolute, sync, 0x6B))
+        )
+
+    def test_forward_pulses_sends_four_synchronized_position_frames(self) -> None:
+        counts = self.car.forward(rpm=200, pulses=3200)
+
+        self.assertEqual(
+            self.serial.writes,
+            [self.position_frame(motor_id, Direction.CW, 200, 10, 3200) for motor_id in (1, 2, 3, 4)]
+            + [bytes.fromhex("00 FF 66 6B")],
+        )
+        self.assertEqual(counts, [3200, 3200, 3200, 3200])
+        self.assertEqual(
+            self.sleep.calls,
+            [estimate_move_seconds(3200, 200, self.car.pulses_per_revolution, 10)],
+        )
+
+    def test_diagonal_pulses_skip_wheels_that_do_not_move(self) -> None:
+        counts = self.car.forward_left(rpm=200, pulses=1600, wait=False)
+
+        # 标准 X 排布：vx=vy=1 -> FL/RL 满载，FR/RR 为 0，不下发 0 位移帧。
+        self.assertEqual(counts, [1600, 0, 1600, 0])
+        self.assertEqual([frame[0] for frame in self.serial.writes[:2]], [1, 3])
+        self.assertEqual(self.serial.writes[-1], bytes.fromhex("00 FF 66 6B"))
+        self.assertEqual(self.sleep.calls, [])
+
+    def test_rotate_ccw_pulses_use_opposite_directions_per_wheel(self) -> None:
+        counts = self.car.rotate_ccw(rpm=100, pulses=800, wait=False)
+
+        self.assertEqual(counts, [800, -800, -800, 800])
+        self.assertEqual(
+            [frame[2] for frame in self.serial.writes[:4]],
+            [int(Direction.CW), int(Direction.CCW), int(Direction.CCW), int(Direction.CW)],
+        )
+
+    def test_wheel_signs_flip_the_pulse_direction(self) -> None:
+        self.car.wheel_signs[WheelPosition.FR] = -1
+
+        counts = self.car.forward(rpm=200, pulses=1000, wait=False)
+
+        self.assertEqual(counts, [1000, -1000, 1000, 1000])
+
+    def test_move_wheels_relative_pulses_skips_zero_and_triggers_sync(self) -> None:
+        self.car.move_wheels_relative_pulses(100, 0, -100, 0, rpm=200, acceleration=5)
+
+        self.assertEqual([frame[0] for frame in self.serial.writes[:2]], [1, 3])
+        self.assertEqual([frame[2] for frame in self.serial.writes[:2]], [int(Direction.CW), int(Direction.CCW)])
+        self.assertEqual(self.serial.writes[2], bytes.fromhex("00 FF 66 6B"))
+
+    def test_move_wheels_absolute_pulses_encodes_absolute_mode(self) -> None:
+        self.car.move_wheels_absolute_pulses(0, 3200, -3200, 0, rpm=200, acceleration=5)
+
+        # FL/RR 是 0 脉冲，不下发；帧尾两字节 = [绝对模式标志, 同步标志]。
+        self.assertEqual([frame[0] for frame in self.serial.writes[:2]], [2, 3])
+        self.assertEqual(
+            [frame[2] for frame in self.serial.writes[:2]],
+            [int(Direction.CW), int(Direction.CCW)],
+        )
+        self.assertEqual([frame[-3] for frame in self.serial.writes[:2]], [1, 1])
+        self.assertEqual([frame[-2] for frame in self.serial.writes[:2]], [1, 1])
+        self.assertEqual(self.serial.writes[2], bytes.fromhex("00 FF 66 6B"))
+
+    def test_zero_kinematics_stops_instead_of_moving(self) -> None:
+        counts = self.car.drive_pulses(0.0, 0.0, 0.0, pulses=1000, rpm=60)
+
+        self.assertIsNone(counts)
+        self.assertEqual(len(self.serial.writes), 4)
+        self.assertEqual({frame[1] for frame in self.serial.writes}, {0xFE})
+        self.assertEqual(self.sleep.calls, [])
+
+    def test_pulses_and_duration_cannot_be_combined(self) -> None:
+        with self.assertRaises(ValueError):
+            self.car.forward(rpm=100, duration=1.0, pulses=100)
+
+        self.assertEqual(self.serial.writes, [])
+        self.assertEqual(self.sleep.calls, [])
+
+    def test_rejects_invalid_pulse_counts_before_writing(self) -> None:
+        for pulses in (0, -1, 1.5):
+            with self.subTest(pulses=pulses), self.assertRaises(ValueError):
+                self.car.forward(rpm=100, pulses=pulses)  # type: ignore[arg-type]
+
+        self.assertEqual(self.serial.writes, [])
 
 
 class PatternOTests(unittest.TestCase):
