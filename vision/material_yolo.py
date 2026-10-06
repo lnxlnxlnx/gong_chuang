@@ -284,13 +284,18 @@ def _run_camera(model_path, camera_id: int, conf: float) -> int:
     window = open_preview()
     blank_frames = 0
     warned = False
+    resolution_reported = False
     try:
-        with MaterialYOLO(model_path, conf_thresh=conf) as yolo, USBCamera(camera_id).initialize() as camera:
+        with MaterialYOLO(model_path, conf_thresh=conf) as yolo, USBCamera(camera_id, width=1280, height=720).initialize() as camera:
             print(f"摄像头 {camera_id}，窗口 {window!r}，按 q 退出")
             while True:
                 frame = camera.read()
                 if frame is None:
                     raise RuntimeError("摄像头未返回图像")
+                if not resolution_reported:
+                    height, width = frame.shape[:2]
+                    print(f"实际画面尺寸：{width}x{height}")
+                    resolution_reported = True
                 blank_frames = blank_frames + 1 if looks_blank(frame) else 0
                 if blank_frames >= BLANK_FRAME_WARNING and not warned:
                     warned = True
