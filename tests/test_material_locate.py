@@ -64,6 +64,8 @@ class MaterialLocatorTests(unittest.TestCase):
         self.assertIn("blue", summary)
         self.assertIn("mm", summary)
         self.assertIn("3", summary)
+        self.assertIn("xyz=", summary)
+        self.assertIn("confidence=0.90", summary)
 
     def test_draw_marks_circles_without_changing_input(self):
         before = self.frame.copy()

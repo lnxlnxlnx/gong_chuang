@@ -312,7 +312,7 @@ rotate_cw/rotate_ccw/forward_left/forward_right/backward_left/backward_right`，
 另外有 `enable()/enable_all()/disable()/disable_all()/stop()/set_wheel_speed()/
 move_wheels_relative()/move_wheels_absolute()/wheel(WheelPosition)`（返回底层驱动对象）。
 
-> 真机演示见 `main.py` 或 `tests/manual/mecanum_demo.py`，两处都在结束时松轴并关闭串口。
+> 底盘短动作演示见 `app/wheel/demo.py`，地图路线见 `app/wheel/map.py`，交互式动作测试见 `tests/manual/chassis.py`；入口都在结束时停机、失能并关闭串口。
 
 ---
 

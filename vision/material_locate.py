@@ -76,12 +76,14 @@ class RegionReport:
         return math.sqrt(self.x_mm**2 + self.y_mm**2 + self.z_mm**2)
 
     def summary(self) -> str:
-        """Show location even when YOLO cannot classify the material."""
+        """Show pixel and camera coordinates even when YOLO misses the material."""
         category = f"{self.label}（{self.name}）" if self.name else "类别未知"
+        confidence = f"{self.confidence:.2f}" if self.confidence is not None else "--"
         return (
             f"@({self.region.center_x:.0f},{self.region.center_y:.0f}) "
-            f"{category}，圆直径 {2 * self.region.radius:.0f} px，"
-            f"距离约 {self.distance_mm:.0f} mm"
+            f"{category}，confidence={confidence}，圆直径 {2 * self.region.radius:.0f} px，"
+            f"xyz=({self.x_mm:.1f},{self.y_mm:.1f},{self.z_mm:.1f}) mm，"
+            f"直线距离约 {self.range_mm:.1f} mm"
         )
 
 

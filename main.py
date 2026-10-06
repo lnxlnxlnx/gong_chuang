@@ -1,15 +1,10 @@
-"""项目应用入口：按顺序演示底盘、机械臂和视觉功能。
-
-在 ``main()`` 里注释暂时不用的演示调用即可。所有运动都需要现场回车确认。
-"""
+"""项目应用入口：默认预览物料定位结果。"""
 
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 
-from mecanum_config import HardwareProfile, create_chassis, load_profile
 from motor_drivers import BusServo
 from robot_arm import RobotArm
 from robot_arm_config import load_arm_config
@@ -19,115 +14,6 @@ from vision import default_model_path, load_camera_id
 def _confirmed(label: str) -> bool:
     """Only execute a hardware action after the operator confirms it."""
     return input(f"准备{label}，回车执行，输入 q 跳过：").strip().lower() != "q"
-
-
-def demo_chassis(profile: HardwareProfile) -> None:
-    """Run two short whole-vehicle motions using the configured calibration."""
-    car = create_chassis(profile)
-    try:
-        car.initialize()
-        car.enable_all()
-        if _confirmed("底盘前进"):
-            car.forward(rpm=profile.chassis_rpm, duration=10 * profile.chassis_duration)
-        # 位置模式示例：四轮按逆运动学各走 3200 脉冲（一圈）后自动返回。
-        # if _confirmed("底盘前进一圈"):
-        #     car.forward(rpm=profile.chassis_rpm, pulses=3200)
-        # if _confirmed("底盘顺时针旋转"):
-        # car.rotate_cw(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
-        # if _confirmed("底盘左移"):
-        #     car.left(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
-        # if _confirmed("底盘右移"):
-        #     car.right(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
-        # if _confirmed("底盘左前移"):
-        #     car.forward_left(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
-        # if _confirmed("底盘右前移"):
-        #     car.forward_right(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
-    finally:
-        car.stop()
-        car.disable_all()
-        car.close()
-
-
-def demo_run_one_map(profile: HardwareProfile) -> None:
-    """Run one map file with the configured calibration."""
-    car = create_chassis(profile)
-    try:
-        car.initialize()
-        car.enable_all()
-        # if _confirmed(f"运行地图 {map_path}"):
-        if _confirmed("运行地图"):
-            car.forward_left(
-                rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration
-            )
-            car.forward(
-                rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration
-            )
-            car.left(rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration)
-            # if _confirmed("往返"):
-            car.backward(
-                rpm=profile.chassis_rpm, duration=15 * profile.chassis_duration
-            )
-            car.right(rpm=profile.chassis_rpm, duration=16 * profile.chassis_duration)
-            car.backward_right(
-                rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration
-            )
-
-    finally:
-        car.stop()
-        car.disable_all()
-        car.close()
-
-
-def func_run_circle_map(car, profile):
-    """Run one map file with the configured calibration."""
-    if _confirmed("运行地图"):
-        car.forward_left(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
-        car.forward(rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration)
-        car.left(rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration)
-        car.backward_right(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
-        car.backward(rpm=profile.chassis_rpm, duration=15 * profile.chassis_duration)
-        car.right(rpm=profile.chassis_rpm, duration=16 * profile.chassis_duration)
-        car.backward_right(
-            rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration
-        )
-
-
-def func_run_half_map(car, profile):
-    """Run one map file with the configured calibration."""
-    car.forward_left(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
-    car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
-    time.sleep(1)
-    car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
-    car.left(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
-    car.backward(rpm=profile.chassis_rpm, duration=15 * profile.chassis_duration)
-    car.left(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
-    car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
-    # car.backward_right(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
-
-    # 来回测试
-    car.right(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
-    car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
-    time.sleep(0.1)
-    car.backward(rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration)
-    time.sleep(0.1)
-    car.left(rpm=profile.chassis_rpm, duration=7.5 * profile.chassis_duration)
-    car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
-    car.right(rpm=profile.chassis_rpm, duration=16 * profile.chassis_duration)
-    car.backward(rpm=profile.chassis_rpm, duration=8.5 * profile.chassis_duration)
-
-
-def run_map_by_func(profile: HardwareProfile, func) -> None:
-    """Run one map file with the configured calibration."""
-    car = create_chassis(profile)
-    try:
-        car.initialize()
-        car.enable_all()
-        if _confirmed("运行地图"):
-            func(car, profile)
-    finally:
-        car.stop()
-        car.disable_all()
-        car.close()
 
 
 def demo_arm(port: str) -> None:
@@ -236,7 +122,7 @@ def demo_material(
     *,
     focal_px: float | None = None,
 ) -> None:
-    """霍夫定位物料圆面并估距，YOLO 补充类别，按 q 退出。
+    """预览物料的像素位置和相机坐标；按 p 打印，按 q 退出。
 
     可用 ``python -m vision.hough_lock`` 单独检查圆面定位；这里使用
     :class:`vision.MaterialLocator` 跑完整流程。
@@ -270,7 +156,7 @@ def demo_material(
             focal_px=focal_px,
         ) as locator, USBCamera(camera_id, width=1280, height=720).initialize() as camera:
             print(f"摄像头编号 {camera_id}，模型 {model_path.name}；预览窗口 {window!r}，按 q 退出")
-            print("画面里只画 ASCII（cv2.putText 画不出中文），中文结论看控制台。")
+            print("画面里只画 ASCII；按 p 打印所有物料的完整结果，按 q 退出。")
             while True:
                 frame = camera.read()
                 if frame is None:
@@ -282,13 +168,27 @@ def demo_material(
 
                 report = locator.locate(frame)
                 annotated = locator.draw(frame, report)
-                best = report.best
-                headline = "no material" if best is None else f"{best.name or 'material'} {best.distance_mm:.0f}mm"
-                cv2.putText(annotated, headline, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(
+                    annotated, f"present={report.present} count={len(report.regions)}",
+                    (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
+                )
+                for index, item in enumerate(report.regions, start=1):
+                    confidence = f"{item.confidence:.2f}" if item.confidence is not None else "--"
+                    line = (
+                        f"{index}: {item.name or 'unknown'} confidence={confidence} "
+                        f"xyz=({item.x_mm:.0f},{item.y_mm:.0f},{item.z_mm:.0f})mm "
+                        f"range={item.range_mm:.0f}mm"
+                    )
+                    cv2.putText(
+                        annotated, line, (10, 24 + 26 * index),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1,
+                    )
                 cv2.imshow(window, annotated)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("p"):
+                    print(report.summary())
+                if key == ord("q"):
                     break
-            print(report.summary())
     finally:
         close_previews()
 
@@ -303,18 +203,8 @@ def demo_servo(port: str, servo_id: int = 1) -> None:
 
 
 def main() -> None:
-    profile = load_profile("windows" if os.name == "nt" else "jetson")
-
-    # 按需注释以下调用；机械臂和底盘使用同一平台配置中的步进总线端口。
-    # demo_chassis(profile)
-    # run_map_by_func(profile, func_run_half_map)
-    # demo_arm(profile.port)
-    # arm_grab(profile.port)
-    demo_vision()
-    # 物料顶部圆面定位与 30 mm 粗测距；需要更准时传入标定后的 focal_px。
-    # demo_material()
-    # 总线舵机使用独立串口；确认设备名后取消注释并填写端口。
-    # demo_servo("<舵机串口>")
+    """Run the material preview; wheel routes live in ``app.wheel``."""
+    demo_material()
 
 
 if __name__ == "__main__":

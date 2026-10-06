@@ -206,6 +206,14 @@ class MainDemoMaterialTests(unittest.TestCase):
     class FakeReport:
         best = None
 
+        @property
+        def regions(self):
+            return () if self.best is None else (self.best,)
+
+        @property
+        def present(self):
+            return bool(self.regions)
+
         def summary(self) -> str:
             return "fake"
 
@@ -238,6 +246,33 @@ class MainDemoMaterialTests(unittest.TestCase):
 
         self.assertTrue(close_previews.called)
         self.assertEqual(FakeCamera.instances[-1].device_id, 1)
+
+    def test_demo_shows_coordinates_and_prints_all_results_on_p(self) -> None:
+        import main
+
+        item = SimpleNamespace(
+            name="obj-blue", confidence=0.81,
+            x_mm=20.0, y_mm=-10.0, z_mm=75.0, range_mm=78.3,
+        )
+        with patch.object(self.FakeReport, "best", item), \
+                patch("vision.MaterialLocator", self.FakeLocator), \
+                patch("vision.USBCamera", FakeCamera), \
+                patch("vision.open_preview", return_value="vision-preview"), \
+                patch("vision.close_previews"), \
+                patch("cv2.imshow"), \
+                patch("cv2.putText") as put_text, \
+                patch("cv2.waitKey", side_effect=[ord("p"), ord("q")]), \
+                patch("builtins.print") as printed:
+            main.demo_material(model_path=Path(__file__), camera_id=1)
+
+        overlay = " ".join(call.args[1] for call in put_text.call_args_list)
+        self.assertIn("obj-blue", overlay)
+        self.assertIn("0.81", overlay)
+        self.assertIn("20", overlay)
+        self.assertIn("-10", overlay)
+        self.assertIn("75", overlay)
+        self.assertIn("78", overlay)
+        self.assertTrue(any(call.args == ("fake",) for call in printed.call_args_list))
 
 
 class ManualMenuEntryTests(unittest.TestCase):
