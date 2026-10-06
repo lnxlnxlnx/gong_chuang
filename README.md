@@ -92,7 +92,7 @@ car.close()
 
 ## 统一入口
 
-在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13、14 为夹爪测试；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集；17 为 COIN-D6 实时点云窗口（滑块或输入框调距离与角度窗口）。步进总线端口读取 `config/mecanum_hardware.json` 中当前平台的 `port`，无需每次输入 `--port`；激光测试使用独立的 `config/laser_scan.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `config/coin_d6.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
+在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13、14 为夹爪测试；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集；17 为 COIN-D6 实时点云窗口（滑块或输入框调距离与角度窗口）；18 为物料顶部圆面定位（霍夫判断存在并测距，YOLO 补充类别，见 `docs/视觉物料定位.md`）。步进总线端口读取 `config/mecanum_hardware.json` 中当前平台的 `port`，无需每次输入 `--port`；激光测试使用独立的 `config/laser_scan.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `config/coin_d6.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
 
 ```powershell
 python test.py
@@ -264,6 +264,27 @@ USB 摄像头 + YOLOv8 检测，封装为 `vision` 包，供主程序和示例�
 - `vision.open_preview()` / `vision.close_previews()`：HighGUI 预览窗口。**窗口名必须是 ASCII，并且要先显式 `namedWindow` 再 `imshow`**：本机实测中文窗口名会显示成 `??????`（Qt 后端里是 `椤圭洰瑙嗚…` 这样的乱码），不同发行版的 OpenCV 窗口后端（pip 的 Win32UI / conda-forge 的 Qt6）隐式建窗行为也不一样。所以预览入口统一用 `vision-preview` 这个名字。
 - `vision.looks_blank(frame)` / `vision.warn_blank_preview(camera_id)`：`read()` 成功但画面是纯黑/纯白时（被别的程序占用、序号指向没有画面的设备、镜头盖关着）打印排查清单，而不是让用户对着一个纯色窗口猜。
 - `vision.DistanceEstimator`：单目测距（针孔模型，需要已知类别真实宽度）。
+
+### 物料顶部圆面定位
+
+霍夫圆变换给出物料顶部圆面的圆心与像素半径。检出圆面就视为有物料；YOLO 只补充类别，
+漏检时仍返回位置和距离。顶部内侧圆面的实际直径为 30 mm，距离按
+`focal_px × 30 / (2 × radius_px)` 计算。未传焦距时，默认使用
+`top_pic_2.jpg` 在约 145 mm 实测距离下得到的一次粗标定（1280×720 时约 1012 px）。
+完整说明见 [docs/视觉物料定位.md](docs/视觉物料定位.md)。
+
+```python
+from vision import MaterialLocator, USBCamera
+
+locator = MaterialLocator(model_path="models/best.onnx")
+with locator, USBCamera(1, width=1280, height=720).initialize() as camera:
+    report = locator.locate(camera.read())
+    print(report.summary())  # 圆心、像素直径、约略距离及可选类别
+```
+
+菜单 18 是 720p 真机预览入口（`q` 退出，`p` 立刻打印结论）。需提高距离精度时，
+先在已知距离处拍摄 30 mm 圆面，按 `focal_px = 已知距离(mm) × 圆面像素直径 / 30`
+标定，再通过 `MaterialLocator(focal_px=...)` 或独立命令行入口的 `--focal` 传入。
 
 菜单 9 和 `main.py` 的视觉演示从 `config/vision.json` 读取摄像头编号。Windows 当前设为 `1`（外接 USB 摄像头），Jetson 设为 `0`；如果设备枚举顺序不同，修改对应平台的 `camera_id`。指定编号无法打开时会报错，不会自动切换到前置摄像头。
 

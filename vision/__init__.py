@@ -10,6 +10,15 @@ detection stack meant to be reused by robot applications:
     created explicitly; see the module docstring for the Windows traps).
   - :class:`vision.distance.DistanceEstimator`: monocular distance estimate.
 
+物料定位流水线（每个功能一个模块，每个模块都能单独 ``python -m`` 自测）:
+
+  - :mod:`vision.hough_lock`: 霍夫圆变换定位物料顶部圆面（圆心 + 半径）。
+  - :mod:`vision.material_yolo`: YOLO 推理出物料候选框（可只跑锁定区域）。
+  - :mod:`vision.material_presence`: 基于 YOLO 框的独立存在性辅助工具。
+  - :mod:`vision.material_class`: "是哪一种物料" + 中文标签。
+  - :mod:`vision.material_distance`: 基于 YOLO 框的独立测距辅助工具。
+  - :mod:`vision.material_locate`: 圆面定位和测距，再用 YOLO 补充类别。
+
 Example::
 
     import cv2
@@ -32,6 +41,7 @@ Example::
 
 from __future__ import annotations
 
+import importlib
 import os
 from pathlib import Path
 
@@ -46,14 +56,61 @@ from .preview import (
 )
 from .yolov8 import DEFAULT_CLASS_NAMES, Detection, YOLOv8Detector, YOLOv8ONNXDetector
 
+#: 物料定位流水线的符号 -> 定义它的模块。这些模块按需导入（见 __getattr__）：
+#: 一是 ``python -m vision.hough_lock`` 这类自测入口不会因为在包初始化时就导入过
+#: 而触发 runpy 的 "found in sys.modules" 警告，二是 ``import vision`` 不必为
+#: 用不到的功能买单。
+_LAZY_ATTRIBUTES: dict[str, str] = {
+    # hough_lock
+    "HoughRingLocator": "hough_lock",
+    "LockedRegion": "hough_lock",
+    "RingLock": "hough_lock",
+    # material_yolo
+    "MATERIAL_CLASS_NAMES": "material_yolo",
+    "MaterialYOLO": "material_yolo",
+    "is_material": "material_yolo",
+    # material_presence
+    "MaterialPresence": "material_presence",
+    "PresenceResult": "material_presence",
+    # material_class
+    "DEFAULT_MATERIAL_LABELS": "material_class",
+    "ClassResult": "material_class",
+    "MaterialCandidate": "material_class",
+    "MaterialClassifier": "material_class",
+    # material_distance
+    "MaterialDistance": "material_distance",
+    "MaterialDistanceEstimator": "material_distance",
+    # material_locate
+    "MaterialLocator": "material_locate",
+    "MaterialReport": "material_locate",
+    "RegionReport": "material_locate",
+}
+
 __all__ = [
     "BLANK_FRAME_WARNING",
     "DEFAULT_CLASS_NAMES",
+    "DEFAULT_MATERIAL_LABELS",
     "Detection",
     "DistanceEstimator",
+    "ClassResult",
+    "HoughRingLocator",
+    "LockedRegion",
+    "MATERIAL_CLASS_NAMES",
+    "MaterialCandidate",
+    "MaterialClassifier",
+    "MaterialDistance",
+    "MaterialDistanceEstimator",
+    "MaterialLocator",
+    "MaterialPresence",
+    "MaterialReport",
+    "MaterialYOLO",
     "PREVIEW_WINDOW_NAME",
+    "PresenceResult",
+    "RegionReport",
+    "RingLock",
     "USBCamera",
     "close_previews",
+    "is_material",
     "load_camera_id",
     "looks_blank",
     "open_preview",
@@ -64,6 +121,21 @@ __all__ = [
     "default_model_path",
     "create_detector",
 ]
+
+
+def __getattr__(name: str):
+    """Resolve the material-locator symbols on first use (PEP 562)."""
+    module_name = _LAZY_ATTRIBUTES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = importlib.import_module(f".{module_name}", __name__)
+    value = getattr(module, name)
+    globals()[name] = value  # 缓存，之后不再走 __getattr__
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_LAZY_ATTRIBUTES))
 
 
 def default_model_path() -> Path:

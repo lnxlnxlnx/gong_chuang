@@ -230,6 +230,69 @@ def demo_vision(
         close_previews()
 
 
+def demo_material(
+    model_path: str | Path | None = None,
+    camera_id: int | None = None,
+    *,
+    focal_px: float | None = None,
+) -> None:
+    """霍夫定位物料圆面并估距，YOLO 补充类别，按 q 退出。
+
+    可用 ``python -m vision.hough_lock`` 单独检查圆面定位；这里使用
+    :class:`vision.MaterialLocator` 跑完整流程。
+    """
+    model_path = Path(model_path) if model_path is not None else default_model_path()
+    camera_id = (
+        camera_id
+        if camera_id is not None
+        else load_camera_id("windows" if os.name == "nt" else "jetson")
+    )
+    if not model_path.is_file():
+        raise FileNotFoundError(f"未找到模型文件：{model_path}")
+    import cv2
+
+    from vision import (
+        BLANK_FRAME_WARNING,
+        MaterialLocator,
+        USBCamera,
+        close_previews,
+        looks_blank,
+        open_preview,
+        warn_blank_preview,
+    )
+
+    window = open_preview()
+    blank_frames = 0
+    warned_blank = False
+    try:
+        with MaterialLocator(
+            model_path=model_path,
+            focal_px=focal_px,
+        ) as locator, USBCamera(camera_id, width=1280, height=720).initialize() as camera:
+            print(f"摄像头编号 {camera_id}，模型 {model_path.name}；预览窗口 {window!r}，按 q 退出")
+            print("画面里只画 ASCII（cv2.putText 画不出中文），中文结论看控制台。")
+            while True:
+                frame = camera.read()
+                if frame is None:
+                    raise RuntimeError("摄像头未返回图像")
+                blank_frames = blank_frames + 1 if looks_blank(frame) else 0
+                if blank_frames >= BLANK_FRAME_WARNING and not warned_blank:
+                    warned_blank = True
+                    warn_blank_preview(camera_id)
+
+                report = locator.locate(frame)
+                annotated = locator.draw(frame, report)
+                best = report.best
+                headline = "no material" if best is None else f"{best.name or 'material'} {best.distance_mm:.0f}mm"
+                cv2.putText(annotated, headline, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.imshow(window, annotated)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+            print(report.summary())
+    finally:
+        close_previews()
+
+
 def demo_servo(port: str, servo_id: int = 1) -> None:
     """Read a bus servo's position without commanding movement."""
     servo = BusServo(port, servo_id).initialize()
@@ -248,6 +311,8 @@ def main() -> None:
     # demo_arm(profile.port)
     # arm_grab(profile.port)
     demo_vision()
+    # 物料顶部圆面定位与 30 mm 粗测距；需要更准时传入标定后的 focal_px。
+    # demo_material()
     # 总线舵机使用独立串口；确认设备名后取消注释并填写端口。
     # demo_servo("<舵机串口>")
 
