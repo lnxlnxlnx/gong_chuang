@@ -13,17 +13,17 @@
 
 ```
 ┌─ 应用代码（你写的）────────────────────────────────────┐
-│  from mecanum_config import create_chassis                │
+│  from modules.chassis.config import create_chassis        │
 │  car = create_chassis(profile).initialize()                │
 │  car.forward(rpm=60)                                       │
 └──────────────────────────┬───────────────────────────────┘
-                           │ 第 3 层 底盘门面 MecanumChassis (chassis.py)
+                           │ 第 3 层 底盘门面 MecanumChassis (modules/chassis/drive/chassis.py)
 ┌──────────────────────────▼───────────────────────────────┐
-│ 第 2 层 整车控制 MecanumDrive (mecanum.py)                 │
+│ 第 2 层 整车控制 MecanumDrive (modules/chassis/drive/mecanum.py)                 │
 │   · 四台 Emm42Driver 共享同一个 serial 对象                 │
 │   · drive() 逆运动学矩阵算出四轮转速，逐轮发 F6 帧           │
 └──────────────────────────┬───────────────────────────────┘
-                           │ 第 1 层 协议驱动 (motor_drivers/)
+                           │ 第 1 层 协议驱动 (modules/{motor,servo}/drive/)
 ┌──────────────────────────▼───────────────────────────────┐
 │ Emm42Driver ── 按 motor_id 组帧/解 ACK, 写共享串口          │
 │ BusServo    ── 按 servo_id 组帧/解 ACK                     │
@@ -32,13 +32,40 @@
                     Emm42 总线（全双工 TTL，多机并接）
 ```
 
-- **第 1 层（协议）**：`motor_drivers/emm42.py` `Emm42Driver`、`motor_drivers/bus_servo.py` `BusServo`。
-- **第 2 层（整车）**：`mecanum.py` `MecanumDrive`，四轮共享一根串口，含麦轮逆运动学。
-- **第 3 层（门面）**：`chassis.py` `MecanumChassis`，向上层应用提供的"整车动作" API。
-- **配置**：`config/mecanum_hardware.json`，硬件地址、方向修正、串口都在这里，脚本里用
-  `mecanum_config.py` 读取。
+- **第 1 层（协议）**：`modules/motor/drive/emm42.py` `Emm42Driver`、`modules/servo/drive/bus_servo.py` `BusServo`。
+- **第 2 层（整车）**：`modules/chassis/drive/mecanum.py` `MecanumDrive`，四轮共享一根串口，含麦轮逆运动学。
+- **第 3 层（门面）**：`modules/chassis/drive/chassis.py` `MecanumChassis`，向上层应用提供的"整车动作" API。
+- **配置**：`modules/chassis/config.json` 管硬件地址、方向修正与运动档位；串口不在这里，步进总线端口由 `modules/motor/config.json` 唯一持有。脚本里用
+  `modules/chassis/config.py` 读取。
 
 > 总线舵机只到第 1 层（没有整车层），用 `BusServo` 直接控制。
+
+---
+
+## 1.1 统一运动参数（机械臂与底盘一致）
+
+第 2、3 层的运动方法都使用同一套参数名，含义完全相同（算法在 `modules/motor/drive/motion.py`）：
+
+| 参数 | 含义 | 机械臂 `RobotArm` | 底盘 `MecanumChassis` / `MecanumDrive` |
+|---|---|---|---|
+| `pulses` | 位置模式：本次移动的脉冲数（正数，方向由动作方法决定） | 必填（第一个位置参数） | 可选关键字；给了就走位置模式 |
+| `duration` | 速度模式：一条速度命令持续多少秒 | 不支持（只允许相对位置模式） | 可选；与 `pulses` 互斥 |
+| `rpm` | 目标转速，缺省用配置值 | 可选关键字 | 必填（第一个位置参数） |
+| `acceleration` | 曲线加减速档位 `0..255`，缺省用配置值 | 可选关键字 | 可选 |
+| `wait` | `True`（默认）等到动作走完再返回，`False` 只发命令 | 默认 `True` | 位置模式默认 `True` |
+
+**为什么需要 `wait`**：Emm42 位置命令是"发完就返回"，驱动器不会告诉上位机什么时候停。
+不等待时，下一条位置帧会在上一条还没走完时改写目标，现象就是"上一个动作被跳过"。
+`wait=True` 按说明书给的曲线加减速公式估算耗时后等待：
+
+```
+每档加速度让转速 +1 RPM 约需 (256 - acceleration) * 50µs
+总耗时 ≈ rpm * (256 - 档位) * 50µs  +  脉冲数 / (rpm * 脉冲每圈 / 60)  +  到位余量(默认 0.15s)
+```
+
+这是估算（把减速段和串口往返折进到位余量），**不是编码器实测**；要毫秒级精确必须用
+`0x3A` 读运动状态标志（`&0x02` 到位位）轮询，当前没有实现。`MotionReport.estimated_seconds`
+会带回本次估算值，`wait=False` 时调用方可以自己拿它去等。
 
 ---
 
@@ -114,7 +141,7 @@ print("扫描到的电机 ID:", found)
 
 建议**一次只接一台**做扫描，逐台确认；全部并接后扫描结果应与面板一致。
 
-**本项目当前映射（`config/mecanum_hardware.json`）**
+**本项目当前映射（`modules/chassis/config.json`）**
 
 | 软件轮位 | 实际驱动器地址 |
 |---|---|
@@ -129,10 +156,10 @@ print("扫描到的电机 ID:", found)
 
 ## 4. 第 1 层：协议驱动 `Emm42Driver`
 
-文件：`motor_drivers/emm42.py`。**一台驱动一个对象**，都传同一个串口设备名（各自按 motor_id 组帧）。
+文件：`modules/motor/drive/emm42.py`。**一台驱动一个对象**，都传同一个串口设备名（各自按 motor_id 组帧）。
 
 ```python
-from motor_drivers import Direction, Emm42Driver, HomeMode
+from modules.motor.drive.emm42 import Direction, Emm42Driver, HomeMode
 
 # 每台电机一个对象；同一根总线可挂多台
 m1 = Emm42Driver("/dev/ttyUSB0", motor_id=1).initialize()   # 打开串口
@@ -161,6 +188,8 @@ Emm42Driver(
 | `set_speed(direction: Direction, rpm: int, acceleration: int)` | **持续正/反转**，速度 0~3000 | `F6 dir rpm accel sync` |
 | `move_relative(degrees, rpm, acceleration, *, synchronized=False)` | 相对角度移动（正角=CW） | `FD ...` |
 | `move_absolute(degrees, rpm, acceleration, *, synchronized=False)` | 绝对角度移动 | `FD ...` |
+| `move_relative_pulses(pulses, rpm, acceleration, *, synchronized=False)` | 相对脉冲数移动（正数=CW），不做角度换算 | `FD ...` |
+| `move_absolute_pulses(pulses, rpm, acceleration, *, synchronized=False)` | 绝对脉冲位置 | `FD ...` |
 | `trigger_sync_motion()` | 触发总线所有"同步标志=1"的缓存命令 | `00 FF 66 6B` |
 | `stop()` | 立即刹车（速度/位置模式通用） | `FE 98 00` |
 | `home(mode: HomeMode)` | 触发回零 | `9A mode` |
@@ -184,7 +213,7 @@ m1.close()
 
 ## 5. 第 2 层：整车控制 `MecanumDrive`
 
-文件：`mecanum.py`。四台 Emm42 共用一个串口对象（总线分时复用），提供麦轮运动学。
+文件：`modules/chassis/drive/mecanum.py`。四台 Emm42 共用一个串口对象（总线分时复用），提供麦轮运动学。
 
 ### 5.1 构造函数（真机建议走配置，见第 7 节）
 
@@ -223,7 +252,8 @@ MecanumDrive(
 | `set_wheel_speed(wheel, signed_rpm, acceleration=None)` | **正=前进、负=后退、0=停止** |
 | `set_wheel_acceleration(wheel, accel)` | 设默认加速度档 |
 | `stop_wheel(wheel)` | 单轮立即刹车 |
-| `move_wheel_relative(degrees, rpm, ...)` / `move_wheel_absolute(...)` | 单轮位置模式 |
+| `move_wheel_relative(degrees, rpm, ...)` / `move_wheel_absolute(...)` | 单轮位置模式（角度） |
+| `move_wheels_relative_pulses(fl, fr, rl, rr, rpm, ...)` / `move_wheels_absolute_pulses(...)` | 四轮位置模式（**脉冲数**，0 脉冲的轮子不下发，默认同步启动） |
 | `home_wheel(wheel, mode)` | 单轮回零 |
 
 **整车控制**
@@ -231,12 +261,14 @@ MecanumDrive(
 | 方法 | 说明 |
 |---|---|
 | `drive(vx, vy, omega, rpm, acceleration=None)` | 逆运动学入口：`vx>0`=前，`vy>0`=左，`omega>0`=逆时针；四轮转速归一化到 `rpm` |
+| `drive_pulses(vx, vy, omega, pulses, rpm, acceleration=None, *, wait=True)` | 同一张矩阵，但位移归一化到 `pulses`；`wait=True` 等估算耗时走完 |
 | `set_speeds(fl, fr, rl, rr, acceleration=None)` | 最低层整车入口：直接给 4 个带符号 RPM，绕过矩阵 |
 | `stop()` | 4 轮全部刹车 |
-| `move_wheels_relative(fl, fr, rl, rr, rpm, *, synchronized=True)` | 4 轮相对位置，默认**多机同步**（缓存 FD 后发 `00 FF 66 6B`） |
-| `move_wheels_absolute(fl, fr, rl, rr, rpm, *, synchronized=True)` | 4 轮绝对位置 |
+| `move_wheels_relative(fl, fr, rl, rr, rpm, *, synchronized=True)` | 4 轮相对位置（角度），默认**多机同步**（缓存 FD 后发 `00 FF 66 6B`） |
+| `move_wheels_absolute(fl, fr, rl, rr, rpm, *, synchronized=True)` | 4 轮绝对位置（角度） |
+| `move_wheels_relative_pulses(...)` / `move_wheels_absolute_pulses(...)` | 同上，但直接给脉冲数 |
 
-**高层方向方法**（都可由 `duration=` 限时自动停）
+**高层方向方法**（统一参数：`pulses` 位置模式 / `duration` 速度模式限时 / 都不给则持续；`wait` 控制是否阻塞）
 
 | 方法 | 方向 |
 |---|---|
@@ -245,17 +277,23 @@ MecanumDrive(
 | `rotate_cw(rpm)` / `rotate_ccw(rpm)` | 俯视顺时针 / 逆时针原地自转 |
 | `forward_left/forward_right/backward_left/backward_right(rpm)` | 四个斜向 |
 
+```python
+car.forward(rpm=60, duration=2.0)     # 速度模式：跑 2 秒后自动停（阻塞 2 秒）
+car.forward(rpm=200, pulses=3200)     # 位置模式：四轮各走 3200 脉冲后返回
+car.forward(rpm=200, pulses=3200, wait=False)   # 只发命令，不等
+```
+
 `WheelPosition` 枚举：`FL / FR / RL / RR`（注意是本项目的轮位命名，无 BL/BR）。
 
 ---
 
 ## 6. 第 3 层：底盘门面 `MecanumChassis`（最推荐上层使用）
 
-文件：`chassis.py`。把整车动作包成最简 API。**配合配置加载使用（第 7 节）**，这样
+文件：`modules/chassis/drive/chassis.py`。把整车动作包成最简 API。**配合配置加载使用（第 7 节）**，这样
 真机/Windows 切换、换装轮子都不用改应用代码。
 
 ```python
-from mecanum_config import create_chassis, load_profile
+from modules.chassis.config import create_chassis, load_profile
 
 profile = load_profile("jetson")          # 或 "windows"
 car = create_chassis(profile).initialize()
@@ -274,16 +312,16 @@ rotate_cw/rotate_ccw/forward_left/forward_right/backward_left/backward_right`，
 另外有 `enable()/enable_all()/disable()/disable_all()/stop()/set_wheel_speed()/
 move_wheels_relative()/move_wheels_absolute()/wheel(WheelPosition)`（返回底层驱动对象）。
 
-> 真机演示见 `main.py` 或 `tests/manual/mecanum_demo.py`，两处都在结束时松轴并关闭串口。
+> 底盘短动作演示见 `modules/chassis/app/demo.py`，地图路线见 `modules/chassis/app/map.py`，交互式动作测试见 `modules/chassis/test/manual/chassis.py`；入口都在结束时停机、失能并关闭串口。
 
 ---
 
-## 7. 配置加载：`mecanum_config.py`
+## 7. 配置加载：`modules/chassis/config.py`
 
-配置文件 `config/mecanum_hardware.json` 集中管理硬件参数：
+配置文件 `modules/chassis/config.json` 集中管理硬件参数：
 
 ```python
-from mecanum_config import (
+from modules.chassis.config import (
     create_chassis,   # -> MecanumChassis（上层应用推荐）
     create_drive,     # -> MecanumDrive（需要底层 API 时）
     load_profile,     # -> HardwareProfile（只读配置，不建控制对象）
@@ -303,9 +341,8 @@ car = create_chassis(profile)            # 可覆盖: create_chassis(profile, po
 | `vehicle.pattern` | 麦轮 X/O 排布 | X |
 | `vehicle.rotation_gain` | 自转速度倍率 | 1.0 |
 | `vehicle.motion_transform` | `standard`=标准矩阵 / `calibrated`=实车标定矩阵 | **calibrated** |
-| `profiles.jetson.port` | Jetson 串口 | /dev/ttyUSB0 |
-| `profiles.windows.port` | Windows 串口 | COM28 |
 | `profiles.*.chassis_motion` / `individual_wheels` | 测试脚本默认 rpm/时长 | 见文件 |
+| （串口） | 不在本文件：见 `modules/motor/config.json` 的 `windows.port` / `jetson.port` | COM14 / /dev/ttyUSB0 |
 
 ---
 
@@ -336,14 +373,18 @@ time.sleep(0.5)
 drive.stop(); drive.disable_all(); drive.close()
 ```
 
-### 例 3：位置模式（相对 + 多机同步）
+### 例 3：位置模式（相对 + 脉冲数 + 多机同步）
 ```python
 car = create_chassis(load_profile("jetson")).initialize()
 try:
     car.enable_all()
     # 四轮同步各转 180°：先缓存 4 条 FD，再发 00 FF 66 6B 同时启动
     car.move_wheels_relative(fl=180.0, fr=180.0, rl=-180.0, rr=-180.0, rpm=200, synchronized=True)
-    # 绝对位置
+    # 直接按脉冲数给（前进一圈 = 每轮 3200 脉冲），默认等动作走完
+    car.forward(rpm=200, pulses=3200)
+    # 任意方向走固定脉冲数：vx=1、vy=1（左前），最大轮位移 1600 脉冲
+    car.drive_pulses(1.0, 1.0, 0.0, pulses=1600, rpm=200)
+    # 绝对位置（角度）
     car.move_wheels_absolute(fl=0.0, fr=0.0, rl=0.0, rr=0.0, rpm=200, synchronized=True)
 finally:
     car.disable_all(); car.close()
@@ -351,7 +392,7 @@ finally:
 
 ### 例 4：直接控制单台步进（不走整车层）
 ```python
-from motor_drivers import Direction, Emm42Driver
+from modules.motor.drive.emm42 import Direction, Emm42Driver
 
 m = Emm42Driver("/dev/ttyUSB0", motor_id=1).initialize()
 m.enable(True)
@@ -363,7 +404,7 @@ m.close()
 
 ### 例 5：总线舵机（机械臂/云台类）
 ```python
-from motor_drivers import BusServo
+from modules.servo.drive.bus_servo import BusServo
 
 servo = BusServo("/dev/ttyUSB0", servo_id=1).initialize()   # 需半双工转接板
 servo.set_torque(True)

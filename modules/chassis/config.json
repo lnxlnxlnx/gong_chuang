@@ -1,0 +1,44 @@
+{
+  "vehicle": {
+    "motor_ids": {
+      "FL": 3,
+      "FR": 4,
+      "RL": 2,
+      "RR": 1
+    },
+    "wheel_signs": {
+      "FL": -1,
+      "FR": -1,
+      "RL": -1,
+      "RR": -1
+    },
+    "acceleration": 5,
+    "pattern": "X",
+    "rotation_gain": 1.0,
+    "motion_transform": "calibrated"
+  },
+  "profiles": {
+    "jetson": {
+      "individual_wheels": {
+        "rpm": 20,
+        "duration": 0.75
+      },
+      "chassis_motion": {
+        "rpm": 60,
+        "duration": 0.5,
+        "pause": 0.5
+      }
+    },
+    "windows": {
+      "individual_wheels": {
+        "rpm": 20,
+        "duration": 0.75
+      },
+      "chassis_motion": {
+        "rpm": 30,
+        "duration": 1.0,
+        "pause": 0.5
+      }
+    }
+  }
+}
