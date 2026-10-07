@@ -7,8 +7,7 @@ MENU_ENTRY = (2, "机械臂三轴")
 import argparse
 import os
 import sys
-from collections.abc import Callable
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from robot_arm import RobotArm
 from robot_arm_config import ArmConfig, load_arm_config

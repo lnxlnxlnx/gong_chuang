@@ -95,10 +95,10 @@ def demo_vision(
     blank_frames = 0
     warned_blank = False
     try:
-        with (
-            USBCamera(camera_id).initialize() as camera,
-            create_detector(model_path) as detector,
-        ):
+        # 反斜杠续行而不是括号化 with：括号化多管理器是 3.9+ 语法，Jetson 的
+        # Python 3.8 会直接 SyntaxError（见 tests/test_python38_compatibility.py）。
+        with USBCamera(camera_id).initialize() as camera, \
+                create_detector(model_path) as detector:
             print(f"摄像头编号 {camera_id}，模型 {model_path.name}；预览窗口 {window!r}，按 q 退出")
             while True:
                 frame = camera.read()
