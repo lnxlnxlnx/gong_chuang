@@ -9,7 +9,7 @@ from modules.lidar import CoinD6, ScanConfig, correct_angle
 from modules.lidar.drive.coin_d6 import LidarAckError, LidarError, LidarTimeoutError
 from modules.lidar.drive.protocol import START_COMMAND, STOP_COMMAND
 from modules.lidar.app.simulate import SimulatedLidar, encode_ack, encode_point_packet, encode_sample
-from tests.test_lidar_protocol import FakeSerial
+from modules.lidar.test.unit.test_lidar_protocol import FakeSerial
 
 
 def scan_config(**overrides) -> ScanConfig:

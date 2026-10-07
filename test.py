@@ -10,44 +10,70 @@ from pathlib import Path
 from project_paths import PROJECT_ROOT
 
 
-MANUAL_TEST_DIR = PROJECT_ROOT / "tests" / "manual"
+MANUAL_TEST_DIRS: tuple[Path, ...] = (
+    PROJECT_ROOT / "modules" / "arm" / "test" / "manual",
+    PROJECT_ROOT / "modules" / "chassis" / "test" / "manual",
+    PROJECT_ROOT / "modules" / "laser_scan" / "test" / "manual",
+    PROJECT_ROOT / "modules" / "lidar" / "test" / "manual",
+    PROJECT_ROOT / "modules" / "motor" / "test" / "manual",
+    PROJECT_ROOT / "modules" / "servo" / "test" / "manual",
+    PROJECT_ROOT / "modules" / "vision" / "test" / "manual",
+)
 
 #: 离线测试的发现根目录。测试包搬到哪里，就把根目录加到这里；
 #: ``tests/test_discovery_coverage.py`` 会在有 test_*.py 落在所有根目录之外时失败，
 #: 所以指向错位置的扫描不可能安静地少跑一个目录。
-OFFLINE_TEST_DIRS: tuple[Path, ...] = (PROJECT_ROOT / "tests",)
+OFFLINE_TEST_DIRS: tuple[Path, ...] = (PROJECT_ROOT / "tests", PROJECT_ROOT / "modules")
 
 
-def discover_manual_tests(manual_dir: Path = MANUAL_TEST_DIR) -> tuple[tuple[str, str, str], ...]:
-    """Read MENU_ENTRY declarations without importing hardware test modules."""
+def _module_name(path: Path, root: Path = PROJECT_ROOT) -> str:
+    """Return the importable dotted name of one manual script.
+
+    Scripts are addressed as ``modules.<module>.test.manual.<script>``, derived
+    from the path so moving a script keeps the menu working.  A script outside
+    ``root`` (a test fixture in a temporary directory) falls back to its stem.
+    """
+    try:
+        relative = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return path.stem
+    return ".".join(relative.with_suffix("").parts)
+
+
+def discover_manual_tests(
+    manual_dirs: tuple[Path, ...] = MANUAL_TEST_DIRS,
+    root: Path = PROJECT_ROOT,
+) -> tuple[tuple[str, str, str], ...]:
+    """Read MENU_ENTRY declarations from every module without importing them."""
     entries = []
     seen = {0, 1}
-    for path in manual_dir.glob("*.py"):
-        if path.name == "__init__.py":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in tree.body:
-            if not isinstance(node, ast.Assign) or not any(
-                isinstance(target, ast.Name) and target.id == "MENU_ENTRY"
-                for target in node.targets
-            ):
+    for manual_dir in manual_dirs:
+        for path in sorted(manual_dir.glob("*.py")):
+            if path.name == "__init__.py":
                 continue
-            try:
-                number, label = ast.literal_eval(node.value)
-            except (ValueError, TypeError) as error:
-                raise ValueError(f"{path}: MENU_ENTRY must be (number, label)") from error
-            if (
-                type(number) is not int
-                or number < 2
-                or not isinstance(label, str)
-                or not label.strip()
-            ):
-                raise ValueError(f"{path}: invalid MENU_ENTRY {number!r}, {label!r}")
-            if number in seen:
-                raise ValueError(f"{path}: duplicate menu number {number}")
-            seen.add(number)
-            entries.append((str(number), label, f"tests.manual.{path.stem}"))
-            break
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in tree.body:
+                if not isinstance(node, ast.Assign) or not any(
+                    isinstance(target, ast.Name) and target.id == "MENU_ENTRY"
+                    for target in node.targets
+                ):
+                    continue
+                try:
+                    number, label = ast.literal_eval(node.value)
+                except (ValueError, TypeError) as error:
+                    raise ValueError(f"{path}: MENU_ENTRY must be (number, label)") from error
+                if (
+                    type(number) is not int
+                    or number < 2
+                    or not isinstance(label, str)
+                    or not label.strip()
+                ):
+                    raise ValueError(f"{path}: invalid MENU_ENTRY {number!r}, {label!r}")
+                if number in seen:
+                    raise ValueError(f"{path}: duplicate menu number {number}")
+                seen.add(number)
+                entries.append((str(number), label, _module_name(path, root)))
+                break
     return tuple(sorted(entries, key=lambda entry: int(entry[0])))
 
 

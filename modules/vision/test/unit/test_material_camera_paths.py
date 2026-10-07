@@ -308,7 +308,7 @@ class ManualMenuEntryTests(unittest.TestCase):
             return frame.copy()
 
     def test_run_returns_zero_after_q(self) -> None:
-        from tests.manual import material_locate as menu
+        from modules.vision.test.manual import material_locate as menu
 
         # 手动脚本把名字直接 import 到了自己的命名空间，所以 patch 它的模块属性。
         with patch.object(menu, "MaterialLocator", self.FakeLocator), \
@@ -324,7 +324,7 @@ class ManualMenuEntryTests(unittest.TestCase):
         self.assertTrue(close_previews.called)
 
     def test_missing_model_is_reported_without_opening_a_window(self) -> None:
-        from tests.manual import material_locate as menu
+        from modules.vision.test.manual import material_locate as menu
 
         with patch.object(menu, "open_preview") as open_preview:
             result = menu.run(1, Path("no-such-model.onnx"))
@@ -333,7 +333,7 @@ class ManualMenuEntryTests(unittest.TestCase):
         open_preview.assert_not_called()
 
     def test_menu_entry_number_and_label(self) -> None:
-        from tests.manual import material_locate as menu
+        from modules.vision.test.manual import material_locate as menu
 
         self.assertEqual(menu.MENU_ENTRY, (18, "物料定位"))
         self.assertTrue(callable(menu.main))

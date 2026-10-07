@@ -6,8 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tests.test_laser_scanner import config
-from tests.test_stp23l import measurement_frame
+from modules.laser_scan.test.unit.test_laser_scanner import config
+from modules.laser_scan.test.unit.test_stp23l import measurement_frame
 
 
 class FakeReader:
@@ -23,7 +23,7 @@ class FakeReader:
 
 class FixedLaserTests(unittest.TestCase):
     def test_reports_distance_obstacle_and_invalid_frame(self):
-        from tests.manual.laser_fixed import display_distances
+        from modules.laser_scan.test.manual.laser_fixed import display_distances
 
         reader = FakeReader(([500] * 11 + [10000], [1500] * 12, [-1] * 12))
         lines = []
@@ -38,7 +38,7 @@ class FixedLaserTests(unittest.TestCase):
         ])
 
     def test_main_opens_only_lidar_port_and_closes_on_interrupt(self):
-        from tests.manual.laser_fixed import main
+        from modules.laser_scan.test.manual.laser_fixed import main
 
         class FakeSerial:
             def __init__(self, port, baudrate, timeout):

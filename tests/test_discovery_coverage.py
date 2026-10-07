@@ -97,34 +97,67 @@ class OfflineDiscoveryTests(unittest.TestCase):
         self.assertEqual(found, ["tests/test_kept.py"])
 
 
+def manual_script_paths() -> tuple[Path, ...]:
+    """Return every manual script under the declared manual directories."""
+    return tuple(
+        sorted(
+            path
+            for directory in test_launcher.MANUAL_TEST_DIRS
+            for path in directory.glob("*.py")
+            if path.name != "__init__.py"
+        )
+    )
+
+
+def expected_module_name(path: Path) -> str:
+    """Independently derive the module name the menu is supposed to import."""
+    return ".".join(path.resolve().relative_to(ROOT).with_suffix("").parts)
+
+
+def is_source(path: Path) -> bool:
+    """Return ``True`` for project source, skipping hidden, data and vendor trees."""
+    parts = path.relative_to(ROOT).parts
+    return not any(part.startswith(".") or part in SKIPPED_DIRECTORIES for part in parts)
+
+
 class ManualMenuTests(unittest.TestCase):
+    def test_manual_directories_exist(self) -> None:
+        for directory in test_launcher.MANUAL_TEST_DIRS:
+            self.assertTrue(directory.is_dir(), f"真机脚本目录不存在：{directory}")
+
     def test_every_manual_script_is_reachable_from_the_menu(self) -> None:
-        directory = test_launcher.MANUAL_TEST_DIR
-        declared = {
-            module.rsplit(".", 1)[-1]
-            for _, _, module in test_launcher.discover_manual_tests(directory)
-        }
-        on_disk = {
-            path.stem for path in directory.glob("*.py") if path.name != "__init__.py"
-        }
+        declared = {module for _, _, module in test_launcher.discover_manual_tests()}
+        on_disk = {expected_module_name(path) for path in manual_script_paths()}
         self.assertEqual(
             sorted(on_disk - declared),
             [],
-            "这些真机脚本没有 MENU_ENTRY，菜单看不到它们",
+            "这些真机脚本没有 MENU_ENTRY（或模块名不符），菜单看不到它们",
         )
+        self.assertEqual(sorted(declared - on_disk), [], "菜单声明了磁盘上不存在的脚本")
 
     def test_every_manual_script_exposes_main(self) -> None:
-        directory = test_launcher.MANUAL_TEST_DIR
         missing = []
-        for _, _, module in test_launcher.discover_manual_tests(directory):
-            path = directory / f"{module.rsplit('.', 1)[-1]}.py"
+        for path in manual_script_paths():
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             if not any(
                 isinstance(node, ast.FunctionDef) and node.name == "main"
                 for node in tree.body
             ):
-                missing.append(path.name)
+                missing.append(path.relative_to(ROOT).as_posix())
         self.assertEqual(missing, [], "菜单脚本缺少模块级 main()")
+
+    def test_no_manual_script_lives_outside_the_declared_directories(self) -> None:
+        """A manual script moved elsewhere would silently drop out of the menu."""
+        declared = {path.resolve() for path in test_launcher.MANUAL_TEST_DIRS}
+        strays = [
+            path.relative_to(ROOT).as_posix()
+            for path in sorted(ROOT.rglob("*.py"))
+            if is_source(path)
+            and path.parent.name == "manual"
+            and path.resolve().parent not in declared
+            and path.name != "__init__.py"
+        ]
+        self.assertEqual(strays, [], "这些真机脚本不在声明的目录里，菜单不会发现它们")
 
 
 if __name__ == "__main__":

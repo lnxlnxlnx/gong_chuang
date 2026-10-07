@@ -295,7 +295,7 @@ class Python38InterpreterTests(unittest.TestCase):
     def test_manual_entry_points_import_without_hardware(self) -> None:
         """The arm menu entry must import on the interpreter running this suite."""
         result = subprocess.run(
-            [sys.executable, "-c", "import tests.manual.arm"],
+            [sys.executable, "-c", "import modules.arm.test.manual.arm"],
             capture_output=True,
             text=True,
             cwd=ROOT,

@@ -7,8 +7,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from modules.servo.drive.gripper import Gripper, GripperConfig, load_gripper_config
-from tests.manual import gripper as gripper_manual
-from tests.manual.gripper import run_manual
+from modules.servo.test.manual import gripper as gripper_manual
+from modules.servo.test.manual.gripper import run_manual
 
 
 class GripperTests(unittest.TestCase):

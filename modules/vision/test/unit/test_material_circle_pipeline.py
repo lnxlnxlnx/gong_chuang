@@ -11,7 +11,8 @@ from modules.vision.drive.material_locate import MaterialLocator
 from modules.vision.drive.yolov8 import Detection
 
 
-FIXTURE = Path(__file__).parent / "fixtures" / "material_top.jpg"
+#: 视觉自带的测试图片放在 ``modules/vision/test/fixtures/``。
+FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "material_top.jpg"
 
 
 class FakeYOLO:

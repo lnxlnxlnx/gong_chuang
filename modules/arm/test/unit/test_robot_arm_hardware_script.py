@@ -8,7 +8,7 @@ from io import StringIO
 from contextlib import redirect_stderr
 from unittest.mock import patch
 
-from tests.manual import arm as position_motion
+from modules.arm.test.manual import arm as position_motion
 from modules.chassis.config import load_profile
 from modules.arm.drive.robot_arm import MotionReport
 from modules.arm.config import ArmConfig, AxisConfig

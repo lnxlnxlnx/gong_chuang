@@ -4,8 +4,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from modules.servo.drive.gripper import GripperConfig
-from tests.manual import gripper_direct
-from tests.manual.gripper_direct import run_direct_test
+from modules.servo.test.manual import gripper_direct
+from modules.servo.test.manual.gripper_direct import run_direct_test
 
 
 class GripperDirectTests(unittest.TestCase):

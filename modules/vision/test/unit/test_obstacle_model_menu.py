@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from tests.manual import obstacle_model
+from modules.vision.test.manual import obstacle_model
 
 
 def _answers(*values):
@@ -41,7 +41,7 @@ class ObstacleModelMenuTests(unittest.TestCase):
         import test as launcher
 
         self.assertIn(
-            ("15", "障碍物模型测试", "tests.manual.obstacle_model"),
+            ("15", "障碍物模型测试", "modules.vision.test.manual.obstacle_model"),
             launcher.discover_manual_tests(),
         )
 

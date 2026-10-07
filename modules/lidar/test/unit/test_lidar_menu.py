@@ -10,9 +10,9 @@ from unittest.mock import patch
 
 from modules.lidar import CoinD6, load_lidar_config
 from modules.lidar.app.simulate import SimulatedLidar
-from tests.manual import coin_d6
+from modules.lidar.test.manual import coin_d6
 from tests.scratch import scratch_directory
-from tests.test_lidar_protocol import FakeSerial
+from modules.lidar.test.unit.test_lidar_protocol import FakeSerial
 
 
 class MenuEntryTests(unittest.TestCase):

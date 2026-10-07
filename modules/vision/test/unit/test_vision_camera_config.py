@@ -33,7 +33,7 @@ class VisionCameraConfigTests(unittest.TestCase):
                     load_camera_id("windows", path)
 
     def test_menu_demo_reads_configured_camera_index(self) -> None:
-        from tests.manual import vision as vision_demo
+        from modules.vision.test.manual import vision as vision_demo
 
         with tempfile.TemporaryDirectory() as directory:
             model_path = Path(directory) / "model.onnx"

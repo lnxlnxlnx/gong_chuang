@@ -6,7 +6,7 @@ import io
 import unittest
 from contextlib import redirect_stdout
 
-from tests.manual import chassis as chassis_motion, wheels as individual_wheels
+from modules.chassis.test.manual import chassis as chassis_motion, wheels as individual_wheels
 from modules.chassis.drive.mecanum import WHEEL_ORDER, WheelPosition
 
 
