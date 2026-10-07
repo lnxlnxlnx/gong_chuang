@@ -95,7 +95,8 @@ class MecanumHardwareConfigTests(unittest.TestCase):
         self.assertIs(chassis.drive, drive)
         create_drive.assert_called_once_with(profile, port=None, acceleration=None)
 
-def test_installed_profiles_use_calibrated_motion_transform(self) -> None:
+    def test_installed_profiles_use_calibrated_motion_transform(self) -> None:
+        """The shipped profile must keep the calibrated transform, not the test default."""
         self.assertEqual(load_profile("windows").motion_transform, "calibrated")
 
 
