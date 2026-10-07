@@ -6,9 +6,9 @@ import unittest
 import math
 import numpy as np
 
-from vision.hough_lock import LockedRegion, RingLock, synthetic_rings
-from vision.material_locate import MaterialLocator
-from vision.yolov8 import Detection
+from modules.vision.drive.hough_lock import LockedRegion, RingLock, synthetic_rings
+from modules.vision.drive.material_locate import MaterialLocator
+from modules.vision.drive.yolov8 import Detection
 
 
 class FakeYOLO:

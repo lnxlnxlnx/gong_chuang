@@ -10,7 +10,7 @@ import unittest
 
 import numpy as np
 
-from vision.hough_lock import HoughRingLocator, LockedRegion, RingLock, synthetic_rings
+from modules.vision.drive.hough_lock import HoughRingLocator, LockedRegion, RingLock, synthetic_rings
 
 
 class LockedRegionTests(unittest.TestCase):

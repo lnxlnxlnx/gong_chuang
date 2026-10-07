@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from robot_arm_config import load_arm_config
+from modules.arm.config import load_arm_config
 
 
 def write_config(path: Path, *, default_pulses: int = 600, max_pulses: int = 1000) -> None:

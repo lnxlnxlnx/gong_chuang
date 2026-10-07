@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from lidar import (
+from modules.lidar import (
     DEFAULT_CONFIG_PATH,
     CoinD6,
     LidarConfig,
@@ -24,9 +24,9 @@ from lidar import (
     load_lidar_config,
     save_figure,
 )
-from lidar.live import LiveCloud
-from lidar.simulate import SimulatedLidar
-from lidar.visualize import use_cjk_font
+from modules.lidar.app.live import LiveCloud
+from modules.lidar.app.simulate import SimulatedLidar
+from modules.lidar.app.visualize import use_cjk_font
 
 from project_paths import output_path
 

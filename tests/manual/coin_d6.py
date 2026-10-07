@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
-from lidar import (
+from modules.lidar import (
     DEFAULT_CONFIG_PATH,
     CoinD6,
     LidarConfig,
@@ -28,14 +28,14 @@ from lidar import (
     save_figure,
     show_figure,
 )
-from lidar.protocol import (
+from modules.lidar.drive.protocol import (
     START_COMMAND,
     STOP_COMMAND,
     Ack,
     DeviceInfo,
     PacketReader,
 )
-from lidar.simulate import SimulatedLidar
+from modules.lidar.app.simulate import SimulatedLidar
 
 
 from project_paths import output_path

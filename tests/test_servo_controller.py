@@ -2,7 +2,7 @@
 
 import unittest
 
-from motor_drivers.servo_controller import ServoController
+from modules.servo.drive.servo_controller import ServoController
 
 
 class FakeSerial:

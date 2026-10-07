@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from motion import estimate_move_seconds
-from motor_drivers.emm42 import Direction
-from robot_arm import RobotArm
-from robot_arm_config import ArmConfig, AxisConfig
+from modules.motor.drive.motion import estimate_move_seconds
+from modules.motor.drive.emm42 import Direction
+from modules.arm.drive.robot_arm import RobotArm
+from modules.arm.config import ArmConfig, AxisConfig
 
 
 # Independent protocol fixtures: these literals intentionally do not reuse the

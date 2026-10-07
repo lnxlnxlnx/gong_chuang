@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from chassis import MecanumChassis
-from mecanum import MecanumDrive, WheelPosition
+from modules.chassis.drive.chassis import MecanumChassis
+from modules.chassis.drive.mecanum import MecanumDrive, WheelPosition
 from tests.test_mecanum import FakeSerial
 
 

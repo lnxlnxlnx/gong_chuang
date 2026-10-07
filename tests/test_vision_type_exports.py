@@ -15,7 +15,7 @@ import importlib
 import unittest
 from pathlib import Path
 
-import vision
+from modules import vision
 
 
 SOURCE = Path(vision.__file__).resolve()
@@ -56,7 +56,7 @@ def static_attributes() -> dict[str, str]:
         for statement in node.body:
             if not isinstance(statement, ast.ImportFrom) or statement.module is None:
                 continue
-            module_name = statement.module.rsplit(".", 1)[-1]
+            module_name = statement.module.lstrip(".")
             for alias in statement.names:
                 declared[alias.asname or alias.name] = module_name
     return declared
@@ -84,7 +84,7 @@ class VisionTypeExportTests(unittest.TestCase):
     def test_lazy_attributes_resolve_to_the_declared_module(self) -> None:
         for name, module_name in lazy_attributes().items():
             with self.subTest(symbol=name):
-                module = importlib.import_module(f".{module_name}", "vision")
+                module = importlib.import_module(f".{module_name}", vision.__name__)
                 self.assertIs(getattr(vision, name), getattr(module, name))
                 self.assertIn(name, vision.__all__)
 

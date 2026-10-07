@@ -4,7 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.wheel import demo, map as wheel_map
+from modules.chassis.app import demo
+from modules.chassis.app import map as wheel_map
 
 
 class FakeChassis:

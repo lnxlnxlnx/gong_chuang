@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import test as test_launcher
 from project_paths import PROJECT_ROOT
-from vision import default_model_path
+from modules.vision import default_model_path
 
 
 ROOT = PROJECT_ROOT
@@ -113,6 +113,27 @@ class EntryPointTests(unittest.TestCase):
             timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_module_self_test_entries_stay_warning_free(self) -> None:
+        """``python -m`` self-tests must not trip runpy's "found in sys.modules".
+
+        ``modules.vision`` resolves the material-locator symbols lazily on
+        purpose; a package ``__init__`` that imported its own submodules eagerly
+        would make these entry points warn (and fail under ``-W error``).
+        """
+        for module in (
+            "modules.vision.drive.hough_lock",
+            "modules.vision.drive.material_locate",
+        ):
+            with self.subTest(module=module):
+                result = subprocess.run(
+                    [sys.executable, "-W", "error::RuntimeWarning", "-m", module],
+                    capture_output=True,
+                    text=True,
+                    cwd=ROOT,
+                    timeout=180,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

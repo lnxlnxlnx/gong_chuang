@@ -18,7 +18,7 @@ import argparse
 import os
 from pathlib import Path
 
-from vision import (
+from modules.vision import (
     BLANK_FRAME_WARNING,
     MaterialLocator,
     USBCamera,

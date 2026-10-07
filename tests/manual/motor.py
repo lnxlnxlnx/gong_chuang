@@ -16,8 +16,8 @@ import os
 import sys
 import time
 
-from motor_drivers.emm42 import Direction, Emm42Driver, HomeMode
-from mecanum_config import load_profile
+from modules.motor.drive.emm42 import Direction, Emm42Driver, HomeMode
+from modules.chassis.config import load_profile
 
 
 def main() -> None:

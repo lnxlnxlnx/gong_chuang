@@ -8,9 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from chassis import MecanumChassis
-from mecanum_config import create_chassis, load_profile
-from mecanum import WheelPosition
+from modules.chassis.drive.chassis import MecanumChassis
+from modules.chassis.config import create_chassis, load_profile
+from modules.chassis.drive.mecanum import WheelPosition
 
 
 def write_config(path: Path) -> None:
@@ -86,7 +86,7 @@ class MecanumHardwareConfigTests(unittest.TestCase):
             write_config(config_path)
             profile = load_profile("jetson", config_path)
 
-        with patch("mecanum_config.create_drive") as create_drive:
+        with patch("modules.chassis.config.create_drive") as create_drive:
             drive = object()
             create_drive.return_value = drive
             chassis = create_chassis(profile)

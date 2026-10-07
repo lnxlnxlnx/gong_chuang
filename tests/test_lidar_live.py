@@ -9,10 +9,10 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
-from lidar import CoinD6, load_lidar_config
-from lidar.live import LiveCloud
-from lidar.protocol import STOP_COMMAND
-from lidar.simulate import SimulatedLidar
+from modules.lidar import CoinD6, load_lidar_config
+from modules.lidar.app.live import LiveCloud
+from modules.lidar.drive.protocol import STOP_COMMAND
+from modules.lidar.app.simulate import SimulatedLidar
 from tests.manual import coin_d6_live
 from tests.scratch import scratch_directory
 from tests.test_lidar_protocol import FakeSerial

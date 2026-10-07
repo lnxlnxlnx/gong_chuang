@@ -9,9 +9,9 @@ import os
 import sys
 from typing import Callable, Optional, Tuple
 
-from robot_arm import RobotArm
-from robot_arm_config import ArmConfig, load_arm_config
-from mecanum_config import load_profile
+from modules.arm.drive.robot_arm import RobotArm
+from modules.arm.config import ArmConfig, load_arm_config
+from modules.chassis.config import load_profile
 
 Action = Tuple[str, Optional[Callable[[int], object]]]
 

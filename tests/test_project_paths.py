@@ -31,25 +31,25 @@ TRACKED_CONFIG_NAMES = (
 #: 加载共享配置的模块：它们必须从 helper 取路径，而不是自己推算仓库根。
 #: 在旧布局下 ``parents[N]`` 恰好等于仓库根，所以只有静态检查能提前发现它。
 LOADER_MODULES = (
-    "gripper.py",
-    "laser_scanner.py",
-    "lidar/config.py",
-    "mecanum_config.py",
-    "motor_drivers/bus_servo.py",
-    "robot_arm_config.py",
-    "vision/camera.py",
+    "modules/servo/drive/gripper.py",
+    "modules/laser_scan/drive/laser_scanner.py",
+    "modules/lidar/config.py",
+    "modules/chassis/config.py",
+    "modules/servo/drive/bus_servo.py",
+    "modules/arm/config.py",
+    "modules/vision/drive/camera.py",
 )
 
 
 def loader_default_paths() -> dict[str, Path]:
     """Return each module's default configuration path, imported lazily."""
-    from gripper import DEFAULT_CONFIG_PATH as gripper_config
-    from laser_scanner import DEFAULT_CONFIG_PATH as laser_scan_config
-    from lidar.config import DEFAULT_CONFIG_PATH as lidar_config
-    from mecanum_config import DEFAULT_CONFIG_PATH as chassis_config
-    from motor_drivers.bus_servo import DEFAULT_CONFIG_PATH as servo_bus_config
-    from robot_arm_config import DEFAULT_CONFIG_PATH as arm_config
-    from vision.camera import DEFAULT_CONFIG_PATH as vision_config
+    from modules.servo.drive.gripper import DEFAULT_CONFIG_PATH as gripper_config
+    from modules.laser_scan.drive.laser_scanner import DEFAULT_CONFIG_PATH as laser_scan_config
+    from modules.lidar.config import DEFAULT_CONFIG_PATH as lidar_config
+    from modules.chassis.config import DEFAULT_CONFIG_PATH as chassis_config
+    from modules.servo.drive.bus_servo import DEFAULT_CONFIG_PATH as servo_bus_config
+    from modules.arm.config import DEFAULT_CONFIG_PATH as arm_config
+    from modules.vision.drive.camera import DEFAULT_CONFIG_PATH as vision_config
 
     return {
         "gripper": gripper_config,

@@ -17,9 +17,9 @@ from unittest.mock import patch
 
 import numpy as np
 
-from vision import hough_lock
-from vision.hough_lock import HoughRingLocator, LockedRegion, RingLock
-from vision.yolov8 import Detection
+from modules.vision.drive import hough_lock
+from modules.vision.drive.hough_lock import HoughRingLocator, LockedRegion, RingLock
+from modules.vision.drive.yolov8 import Detection
 
 
 class FakeCamera:
@@ -68,7 +68,7 @@ def detection(name: str = "obj-red", **kwargs) -> Detection:
 class PackageImportGuardTests(unittest.TestCase):
     def test_camera_helpers_are_importable_from_the_package(self) -> None:
         # 摄像头分支统一用 from vision import ...，这些名字必须在包上可见。
-        import vision
+        from modules import vision
 
         for name in (
             "BLANK_FRAME_WARNING",
@@ -83,7 +83,7 @@ class PackageImportGuardTests(unittest.TestCase):
 
     def test_the_camera_branches_do_not_import_helpers_from_the_wrong_module(self) -> None:
         # looks_blank 定义在 vision.camera；从 vision.preview 导入它是曾经的 bug。
-        from vision import camera, preview
+        from modules.vision.drive import camera, preview
 
         self.assertTrue(hasattr(camera, "looks_blank"))
         self.assertFalse(hasattr(preview, "looks_blank"))
@@ -91,9 +91,9 @@ class PackageImportGuardTests(unittest.TestCase):
 
 class HoughLockCameraTests(unittest.TestCase):
     def test_camera_branch_runs_one_frame_and_closes_the_window(self) -> None:
-        with patch("vision.USBCamera", FakeCamera), \
-                patch("vision.open_preview", return_value="vision-preview") as open_preview, \
-                patch("vision.close_previews") as close_previews, \
+        with patch("modules.vision.USBCamera", FakeCamera), \
+                patch("modules.vision.open_preview", return_value="vision-preview") as open_preview, \
+                patch("modules.vision.close_previews") as close_previews, \
                 patch("cv2.imshow") as imshow, \
                 patch("cv2.waitKey", side_effect=stop_after_one_frame()):
             result = hough_lock._run_camera(HoughRingLocator(), 1)
@@ -124,12 +124,12 @@ class MaterialYoloCameraTests(unittest.TestCase):
             return frame.copy()
 
     def test_camera_branch_runs_one_frame_and_closes_the_window(self) -> None:
-        from vision import material_yolo
+        from modules.vision.drive import material_yolo
 
         with patch.object(material_yolo, "MaterialYOLO", self.FakeYOLO), \
-                patch("vision.USBCamera", FakeCamera), \
-                patch("vision.open_preview", return_value="vision-preview"), \
-                patch("vision.close_previews") as close_previews, \
+                patch("modules.vision.USBCamera", FakeCamera), \
+                patch("modules.vision.open_preview", return_value="vision-preview"), \
+                patch("modules.vision.close_previews") as close_previews, \
                 patch("cv2.imshow") as imshow, \
                 patch("cv2.waitKey", side_effect=stop_after_one_frame()):
             result = material_yolo._run_camera(None, 1, 0.25)
@@ -174,13 +174,13 @@ class MaterialLocateCameraTests(unittest.TestCase):
         return argparse.Namespace(**settings)
 
     def run_camera(self, report) -> int:
-        from vision import material_locate
+        from modules.vision.drive import material_locate
 
         self.FakeLocator.report = report
         with patch.object(material_locate, "MaterialLocator", self.FakeLocator), \
-                patch("vision.USBCamera", FakeCamera), \
-                patch("vision.open_preview", return_value="vision-preview"), \
-                patch("vision.close_previews") as close_previews, \
+                patch("modules.vision.USBCamera", FakeCamera), \
+                patch("modules.vision.open_preview", return_value="vision-preview"), \
+                patch("modules.vision.close_previews") as close_previews, \
                 patch("cv2.imshow") as imshow, \
                 patch("cv2.waitKey", side_effect=stop_after_one_frame()):
             result = material_locate._run_camera(self.build_args())
@@ -236,10 +236,10 @@ class MainDemoMaterialTests(unittest.TestCase):
     def test_demo_runs_one_frame_and_closes_the_window(self) -> None:
         import main
 
-        with patch("vision.MaterialLocator", self.FakeLocator), \
-                patch("vision.USBCamera", FakeCamera), \
-                patch("vision.open_preview", return_value="vision-preview"), \
-                patch("vision.close_previews") as close_previews, \
+        with patch("modules.vision.MaterialLocator", self.FakeLocator), \
+                patch("modules.vision.USBCamera", FakeCamera), \
+                patch("modules.vision.open_preview", return_value="vision-preview"), \
+                patch("modules.vision.close_previews") as close_previews, \
                 patch("cv2.imshow"), \
                 patch("cv2.waitKey", side_effect=stop_after_one_frame()):
             main.demo_material(model_path=Path(__file__), camera_id=1)
@@ -255,10 +255,10 @@ class MainDemoMaterialTests(unittest.TestCase):
             x_mm=20.0, y_mm=-10.0, z_mm=75.0, range_mm=78.3,
         )
         with patch.object(self.FakeReport, "best", item), \
-                patch("vision.MaterialLocator", self.FakeLocator), \
-                patch("vision.USBCamera", FakeCamera), \
-                patch("vision.open_preview", return_value="vision-preview"), \
-                patch("vision.close_previews"), \
+                patch("modules.vision.MaterialLocator", self.FakeLocator), \
+                patch("modules.vision.USBCamera", FakeCamera), \
+                patch("modules.vision.open_preview", return_value="vision-preview"), \
+                patch("modules.vision.close_previews"), \
                 patch("cv2.imshow"), \
                 patch("cv2.putText") as put_text, \
                 patch("cv2.waitKey", side_effect=[ord("p"), ord("q")]), \

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from vision.hough_lock import LockedRegion
-from vision.material_distance import MaterialDistanceEstimator
-from vision.yolov8 import Detection
+from modules.vision.drive.hough_lock import LockedRegion
+from modules.vision.drive.material_distance import MaterialDistanceEstimator
+from modules.vision.drive.yolov8 import Detection
 
 
 def detection(name="obj-red", *, score=0.9, x1=260.0, y1=180.0, x2=380.0, y2=300.0, class_id=0):

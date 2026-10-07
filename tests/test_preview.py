@@ -7,9 +7,9 @@ from unittest.mock import patch
 
 import numpy as np
 
-from vision.camera import looks_blank
-from vision.preview import PREVIEW_WINDOW_NAME, open_preview
-from vision import preview
+from modules.vision.drive.camera import looks_blank
+from modules.vision.drive.preview import PREVIEW_WINDOW_NAME, open_preview
+from modules.vision.drive import preview
 
 
 class FakeCv2:

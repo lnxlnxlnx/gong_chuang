@@ -9,8 +9,8 @@ from pathlib import Path
 from statistics import median
 from typing import Callable
 
-from laser_scanner import DEFAULT_CONFIG_PATH, ScanConfig, load_scan_config
-from motor_drivers.stp23l import Stp23lReader
+from modules.laser_scan.drive.laser_scanner import DEFAULT_CONFIG_PATH, ScanConfig, load_scan_config
+from modules.laser_scan.drive.stp23l import Stp23lReader
 
 
 def display_distances(

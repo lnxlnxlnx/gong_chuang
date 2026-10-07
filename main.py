@@ -5,10 +5,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from motor_drivers import BusServo
-from robot_arm import RobotArm
-from robot_arm_config import load_arm_config
-from vision import default_model_path, load_camera_id
+from modules.servo.drive.bus_servo import BusServo
+from modules.arm.drive.robot_arm import RobotArm
+from modules.arm.config import load_arm_config
+from modules.vision import default_model_path, load_camera_id
 
 
 def _confirmed(label: str) -> bool:
@@ -80,7 +80,7 @@ def demo_vision(
         raise FileNotFoundError(f"未找到模型文件：{model_path}")
     import cv2
 
-    from vision import (
+    from modules.vision import (
         BLANK_FRAME_WARNING,
         USBCamera,
         close_previews,
@@ -137,7 +137,7 @@ def demo_material(
         raise FileNotFoundError(f"未找到模型文件：{model_path}")
     import cv2
 
-    from vision import (
+    from modules.vision import (
         BLANK_FRAME_WARNING,
         MaterialLocator,
         USBCamera,

@@ -8,8 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from lidar import CoinD6, load_lidar_config
-from lidar.simulate import SimulatedLidar
+from modules.lidar import CoinD6, load_lidar_config
+from modules.lidar.app.simulate import SimulatedLidar
 from tests.manual import coin_d6
 from tests.scratch import scratch_directory
 from tests.test_lidar_protocol import FakeSerial

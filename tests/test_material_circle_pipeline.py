@@ -6,9 +6,9 @@ import unittest
 import cv2
 import numpy as np
 
-from vision.hough_lock import HoughRingLocator, LockedRegion, RingLock
-from vision.material_locate import MaterialLocator
-from vision.yolov8 import Detection
+from modules.vision.drive.hough_lock import HoughRingLocator, LockedRegion, RingLock
+from modules.vision.drive.material_locate import MaterialLocator
+from modules.vision.drive.yolov8 import Detection
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "material_top.jpg"

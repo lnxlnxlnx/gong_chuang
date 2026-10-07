@@ -2,8 +2,8 @@
 
 import unittest
 
-from lidar import protocol
-from lidar.protocol import (
+from modules.lidar.drive import protocol
+from modules.lidar.drive.protocol import (
     ACK_SIZE,
     Ack,
     DeviceInfo,
@@ -18,7 +18,7 @@ from lidar.protocol import (
     point_checksum,
     upload_checksum,
 )
-from lidar.simulate import encode_device_info, encode_point_packet, encode_sample, encode_upload
+from modules.lidar.app.simulate import encode_device_info, encode_point_packet, encode_sample, encode_upload
 
 
 # One sample that encodes distance 1500 mm, intensity 100 and the高反 flag.

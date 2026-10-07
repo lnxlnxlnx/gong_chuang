@@ -6,8 +6,8 @@ import xml.etree.ElementTree as ET
 from dataclasses import replace
 from pathlib import Path
 
-from laser_scanner import ScanConfig, ScanPoint, load_scan_config, save_scan, scan_sector
-from motor_drivers.emm42 import Emm42Driver
+from modules.laser_scan.drive.laser_scanner import ScanConfig, ScanPoint, load_scan_config, save_scan, scan_sector
+from modules.motor.drive.emm42 import Emm42Driver
 
 
 class FakeMotor:

@@ -7,7 +7,7 @@ MENU_ENTRY = (12, "总线舵机测试")
 import time
 from collections.abc import Callable
 
-from motor_drivers.bus_servo import BusServo, load_bus_config
+from modules.servo.drive.bus_servo import BusServo, load_bus_config
 
 
 def _number(text: str, name: str, minimum: int, maximum: int) -> int:

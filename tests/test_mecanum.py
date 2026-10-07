@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from mecanum import MecanumDrive, WheelPosition, WHEEL_ORDER
-from motion import estimate_move_seconds
-from motor_drivers.emm42 import Direction, HomeMode
+from modules.chassis.drive.mecanum import MecanumDrive, WheelPosition, WHEEL_ORDER
+from modules.motor.drive.motion import estimate_move_seconds
+from modules.motor.drive.emm42 import Direction, HomeMode
 
 
 class FakeSerial:

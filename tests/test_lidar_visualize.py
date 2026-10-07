@@ -6,9 +6,9 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-from lidar.cloud import CloudPoint, PointCloud
-from lidar.config import CloudView
-from lidar.visualize import build_figure, render_point_cloud, save_figure
+from modules.lidar.drive.cloud import CloudPoint, PointCloud
+from modules.lidar.config import CloudView
+from modules.lidar.app.visualize import build_figure, render_point_cloud, save_figure
 from tests.scratch import scratch_directory
 
 

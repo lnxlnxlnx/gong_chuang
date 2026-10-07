@@ -19,7 +19,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from mecanum_config import DEFAULT_CONFIG_PATH, create_drive, load_profile
+from modules.chassis.config import DEFAULT_CONFIG_PATH, create_drive, load_profile
 
 
 class ChassisDrive(Protocol):

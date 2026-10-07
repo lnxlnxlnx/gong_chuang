@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vision.camera import load_camera_id
+from modules.vision.drive.camera import load_camera_id
 
 
 class VisionCameraConfigTests(unittest.TestCase):

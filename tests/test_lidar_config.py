@@ -5,7 +5,7 @@ import os
 import unittest
 from pathlib import Path
 
-from lidar.config import (
+from modules.lidar.config import (
     MAX_DISTANCE_MM,
     default_profile_name,
     describe_config,

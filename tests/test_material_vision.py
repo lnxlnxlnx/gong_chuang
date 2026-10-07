@@ -6,13 +6,13 @@ import unittest
 
 import numpy as np
 
-from vision.hough_lock import LockedRegion
-from vision.material_class import (
+from modules.vision.drive.hough_lock import LockedRegion
+from modules.vision.drive.material_class import (
     DEFAULT_MATERIAL_LABELS,
     UNKNOWN_MATERIAL_LABEL,
     MaterialClassifier,
 )
-from vision.material_presence import (
+from modules.vision.drive.material_presence import (
     REASON_LOW_SCORE,
     REASON_NO_HIT,
     REASON_NON_MATERIAL,
@@ -21,8 +21,8 @@ from vision.material_presence import (
     REASON_TOO_SMALL,
     MaterialPresence,
 )
-from vision.material_yolo import MATERIAL_CLASS_NAMES, MaterialYOLO, is_inside_region, is_material
-from vision.yolov8 import Detection
+from modules.vision.drive.material_yolo import MATERIAL_CLASS_NAMES, MaterialYOLO, is_inside_region, is_material
+from modules.vision.drive.yolov8 import Detection
 
 
 def detection(name="obj-red", *, score=0.9, x1=280.0, y1=200.0, x2=360.0, y2=280.0, class_id=0):

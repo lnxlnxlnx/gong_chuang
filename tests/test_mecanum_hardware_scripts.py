@@ -7,7 +7,7 @@ import unittest
 from contextlib import redirect_stdout
 
 from tests.manual import chassis as chassis_motion, wheels as individual_wheels
-from mecanum import WHEEL_ORDER, WheelPosition
+from modules.chassis.drive.mecanum import WHEEL_ORDER, WheelPosition
 
 
 class FakeMecanumDrive:

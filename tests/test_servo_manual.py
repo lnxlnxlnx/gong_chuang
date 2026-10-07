@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from motor_drivers.bus_servo import load_bus_config
+from modules.servo.drive.bus_servo import load_bus_config
 from tests.manual import servo
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from motion import (
+from modules.motor.drive.motion import (
     DEFAULT_SETTLE_SECONDS,
     MAX_ACCELERATION,
     cruise_seconds,

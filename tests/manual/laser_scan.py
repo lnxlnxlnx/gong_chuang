@@ -8,9 +8,9 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
-from laser_scanner import DEFAULT_CONFIG_PATH, load_scan_config, save_scan, scan_sector
-from motor_drivers.emm42 import Emm42Driver
-from motor_drivers.stp23l import Stp23lReader
+from modules.laser_scan.drive.laser_scanner import DEFAULT_CONFIG_PATH, load_scan_config, save_scan, scan_sector
+from modules.motor.drive.emm42 import Emm42Driver
+from modules.laser_scan.drive.stp23l import Stp23lReader
 from project_paths import output_path
 
 

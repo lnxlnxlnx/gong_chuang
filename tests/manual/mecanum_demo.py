@@ -18,8 +18,8 @@ MENU_ENTRY = (8, "底盘演示")
 import time
 import os
 
-from mecanum_config import create_chassis, load_profile
-from mecanum import WheelPosition
+from modules.chassis.config import create_chassis, load_profile
+from modules.chassis.drive.mecanum import WheelPosition
 
 
 def main(profile_name: str | None = None) -> None:

@@ -2,8 +2,8 @@
 
 import unittest
 
-from lidar.cloud import CloudPoint, PointCloud
-from lidar.protocol import DeviceInfo
+from modules.lidar.drive.cloud import CloudPoint, PointCloud
+from modules.lidar.drive.protocol import DeviceInfo
 from tests.scratch import scratch_directory
 
 

@@ -2,7 +2,7 @@
 
 import unittest
 
-from motor_drivers.stp23l import FRAME_SIZE, Stp23lReader, parse_measurement_frame
+from modules.laser_scan.drive.stp23l import FRAME_SIZE, Stp23lReader, parse_measurement_frame
 
 
 def measurement_frame(distances):

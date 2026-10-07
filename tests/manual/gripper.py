@@ -7,8 +7,8 @@ MENU_ENTRY = (13, "夹爪测试")
 import time
 from collections.abc import Callable
 
-from gripper import GripperConfig, load_gripper_config
-from motor_drivers.bus_servo import BusServo, load_bus_config
+from modules.servo.drive.gripper import GripperConfig, load_gripper_config
+from modules.servo.drive.bus_servo import BusServo, load_bus_config
 
 
 def run_manual(

@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from vision import DEFAULT_CLASS_NAMES, USBCamera, create_detector, default_model_path, load_camera_id
+from modules.vision import DEFAULT_CLASS_NAMES, USBCamera, create_detector, default_model_path, load_camera_id
 
 from project_paths import PROJECT_ROOT, models_path, output_path
 

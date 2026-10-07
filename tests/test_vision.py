@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from vision.distance import DistanceEstimator, focal_length_from_fov
-from vision.yolov8 import (
+from modules.vision.drive.distance import DistanceEstimator, focal_length_from_fov
+from modules.vision.drive.yolov8 import (
     DEFAULT_CLASS_NAMES,
     Detection,
     _nms,

@@ -5,8 +5,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from motor_drivers.bus_servo import BusServo
-from motor_drivers.emm42 import Direction, Emm42Driver, HomeMode
+from modules.servo.drive.bus_servo import BusServo
+from modules.motor.drive.emm42 import Direction, Emm42Driver, HomeMode
 
 
 class FakeSerial:

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from gripper import Gripper, GripperConfig, load_gripper_config
+from modules.servo.drive.gripper import Gripper, GripperConfig, load_gripper_config
 from tests.manual import gripper as gripper_manual
 from tests.manual.gripper import run_manual
 

@@ -13,7 +13,7 @@ import sys
 import time
 
 import serial
-from mecanum_config import load_profile
+from modules.chassis.config import load_profile
 
 BAUD = 115200
 

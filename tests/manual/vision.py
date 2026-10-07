@@ -17,7 +17,7 @@ import os
 import time
 from pathlib import Path
 
-from vision import (
+from modules.vision import (
     BLANK_FRAME_WARNING,
     DistanceEstimator,
     USBCamera,
