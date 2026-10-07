@@ -11,7 +11,7 @@ from typing import Callable, Optional, Tuple
 
 from modules.arm.drive.robot_arm import RobotArm
 from modules.arm.config import ArmConfig, load_arm_config
-from modules.chassis.config import load_profile
+from modules.motor.config import load_bus_config
 
 Action = Tuple[str, Optional[Callable[[int], object]]]
 
@@ -87,7 +87,7 @@ def parse_args(config: ArmConfig) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ZDT Emm42 机械臂三轴保守位置模式测试")
     default_profile = "windows" if os.name == "nt" else "jetson"
     parser.add_argument(
-        "--port", default=load_profile(default_profile).port,
+        "--port", default=load_bus_config().port,
         help="覆盖平台配置中的 Emm42 总线串口",
     )
     parser.add_argument(

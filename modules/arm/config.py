@@ -8,10 +8,7 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 from modules.motor.drive.emm42 import Emm42Driver
-from project_paths import config_path
-
-
-DEFAULT_CONFIG_PATH = config_path("robot_arm.json")
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 AXIS_NAMES = ("base", "lift", "extension")
 
 

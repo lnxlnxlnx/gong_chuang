@@ -7,7 +7,7 @@ import sys
 import time
 
 from modules.motor.drive.emm42 import Direction, Emm42Driver
-from modules.chassis.config import load_profile
+from modules.motor.config import load_bus_config
 
 
 def step(msg: str) -> None:
@@ -16,7 +16,7 @@ def step(msg: str) -> None:
 
 
 def main() -> None:
-    port = load_profile("windows" if os.name == "nt" else "jetson").port
+    port = load_bus_config().port
     motor = Emm42Driver(port, motor_id=1).initialize()
     print("[*] serial opened OK")
     try:

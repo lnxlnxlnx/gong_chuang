@@ -19,7 +19,6 @@
   },
   "profiles": {
     "jetson": {
-      "port": "/dev/ttyUSB0",
       "individual_wheels": {
         "rpm": 20,
         "duration": 0.75
@@ -31,7 +30,6 @@
       }
     },
     "windows": {
-      "port": "COM14",
       "individual_wheels": {
         "rpm": 20,
         "duration": 0.75

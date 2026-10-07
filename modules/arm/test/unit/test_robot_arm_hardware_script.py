@@ -9,7 +9,7 @@ from contextlib import redirect_stderr
 from unittest.mock import patch
 
 from modules.arm.test.manual import arm as position_motion
-from modules.chassis.config import load_profile
+from modules.motor.config import load_bus_config
 from modules.arm.drive.robot_arm import MotionReport
 from modules.arm.config import ArmConfig, AxisConfig
 
@@ -78,7 +78,7 @@ class ArmPositionMotionScriptTests(unittest.TestCase):
             args = position_motion.parse_args(config)
 
         self.assertEqual(args.pulses, 1200)
-        self.assertEqual(args.port, load_profile("windows" if os.name == "nt" else "jetson").port)
+        self.assertEqual(args.port, load_bus_config().port)
         error_output = StringIO()
         with patch("sys.argv", ["position_motion.py", "--port", "COM29", "--pulses", "5001"]):
             with redirect_stderr(error_output), self.assertRaises(SystemExit):

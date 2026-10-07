@@ -8,10 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from modules.servo.drive.servo_controller import ServoController
-from project_paths import config_path
-
-
-DEFAULT_CONFIG_PATH = config_path("servo.json")
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.json"
 
 
 @dataclass(frozen=True)

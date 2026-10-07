@@ -13,7 +13,7 @@ import sys
 import time
 
 import serial
-from modules.chassis.config import load_profile
+from modules.motor.config import load_bus_config
 
 BAUD = 115200
 
@@ -34,7 +34,7 @@ def send(ser: serial.Serial, frame: bytes) -> bytes:
 def main() -> None:
     addr = b"\x01"
     CSUM = b"\x6B"
-    port = load_profile("windows" if os.name == "nt" else "jetson").port
+    port = load_bus_config().port
 
     with serial.Serial(port, baudrate=BAUD, timeout=0.2) as ser:
         ser.reset_input_buffer()

@@ -9,18 +9,21 @@ from typing import Mapping
 
 from modules.chassis.drive.mecanum import MecanumDrive, WheelPosition
 from modules.chassis.drive.chassis import MecanumChassis
-from project_paths import config_path
+from modules.motor.config import load_bus_config
 
 
-DEFAULT_CONFIG_PATH = config_path("mecanum_hardware.json")
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 _WHEEL_NAMES = ("FL", "FR", "RL", "RR")
 
 
 @dataclass(frozen=True)
 class HardwareProfile:
-    """All calibration and test settings selected from one platform profile."""
+    """All calibration and test settings selected from one platform profile.
 
-    port: str
+    The serial port is deliberately absent: it belongs to the shared stepper bus
+    and is read from :mod:`modules.motor.config`.
+    """
+
     motor_ids: Mapping[WheelPosition, int]
     wheel_signs: Mapping[WheelPosition, int]
     acceleration: int
@@ -69,7 +72,6 @@ def load_profile(profile_name: str, config_path: Path = DEFAULT_CONFIG_PATH) -> 
     individual = _mapping(profile.get("individual_wheels"), f"profiles.{profile_name}.individual_wheels")
     chassis = _mapping(profile.get("chassis_motion"), f"profiles.{profile_name}.chassis_motion")
     return HardwareProfile(
-        port=_string(profile.get("port"), f"profiles.{profile_name}.port"),
         motor_ids=motor_ids,
         wheel_signs=wheel_signs,
         acceleration=acceleration,
@@ -90,9 +92,9 @@ def create_drive(
     port: str | None = None,
     acceleration: int | None = None,
 ) -> MecanumDrive:
-    """Create a controller using the selected profile with optional one-run overrides."""
+    """Create a controller from the profile, taking the bus port from motor config."""
     return MecanumDrive(
-        port or profile.port,
+        port if port is not None else load_bus_config().port,
         motor_ids=profile.motor_ids,
         wheel_signs=profile.wheel_signs,
         acceleration=profile.acceleration if acceleration is None else acceleration,

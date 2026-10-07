@@ -1,0 +1,8 @@
+{
+  "windows": {
+    "port": "COM14"
+  },
+  "jetson": {
+    "port": "/dev/ttyUSB0"
+  }
+}

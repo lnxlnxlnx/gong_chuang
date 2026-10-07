@@ -6,10 +6,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from modules.chassis.drive.chassis import MecanumChassis
-from modules.chassis.config import create_chassis, load_profile
+from modules.chassis.config import create_chassis, create_drive, load_profile
 from modules.chassis.drive.mecanum import WheelPosition
 
 
@@ -26,12 +27,10 @@ def write_config(path: Path) -> None:
                 },
                 "profiles": {
                     "jetson": {
-                        "port": "/dev/ttyUSB0",
                         "individual_wheels": {"rpm": 20, "duration": 0.75},
                         "chassis_motion": {"rpm": 30, "duration": 1.0, "pause": 0.5},
                     },
                     "windows": {
-                        "port": "COM3",
                         "individual_wheels": {"rpm": 15, "duration": 0.5},
                         "chassis_motion": {"rpm": 25, "duration": 0.8, "pause": 0.25},
                     },
@@ -51,7 +50,6 @@ class MecanumHardwareConfigTests(unittest.TestCase):
 
             profile = load_profile("windows", config_path)
 
-        self.assertEqual(profile.port, "COM3")
         self.assertEqual(profile.motor_ids[WheelPosition.FL], 1)
         self.assertEqual(profile.wheel_signs[WheelPosition.FR], -1)
         self.assertEqual(profile.acceleration, 5)
@@ -98,6 +96,34 @@ class MecanumHardwareConfigTests(unittest.TestCase):
     def test_installed_profiles_use_calibrated_motion_transform(self) -> None:
         """The shipped profile must keep the calibrated transform, not the test default."""
         self.assertEqual(load_profile("windows").motion_transform, "calibrated")
+
+    def test_drive_port_comes_from_the_shared_stepper_bus(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = Path(temporary_directory) / "mecanum_hardware.json"
+            write_config(config_path)
+            profile = load_profile("windows", config_path)
+
+        with patch(
+            "modules.chassis.config.load_bus_config",
+            return_value=SimpleNamespace(port="COM42"),
+        ), patch("modules.chassis.config.MecanumDrive") as drive:
+            create_drive(profile)
+
+        self.assertEqual(drive.call_args.args[0], "COM42")
+
+    def test_explicit_port_overrides_the_shared_stepper_bus(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = Path(temporary_directory) / "mecanum_hardware.json"
+            write_config(config_path)
+            profile = load_profile("windows", config_path)
+
+        with patch(
+            "modules.chassis.config.load_bus_config",
+            return_value=SimpleNamespace(port="COM42"),
+        ), patch("modules.chassis.config.MecanumDrive") as drive:
+            create_drive(profile, port="COM7")
+
+        self.assertEqual(drive.call_args.args[0], "COM7")
 
 
 if __name__ == "__main__":

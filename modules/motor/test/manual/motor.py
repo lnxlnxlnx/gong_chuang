@@ -17,11 +17,11 @@ import sys
 import time
 
 from modules.motor.drive.emm42 import Direction, Emm42Driver, HomeMode
-from modules.chassis.config import load_profile
+from modules.motor.config import load_bus_config
 
 
 def main() -> None:
-    port = load_profile("windows" if os.name == "nt" else "jetson").port
+    port = load_bus_config().port
     motor_id = 1
     print(f"[*] Motor test: {port}, id={motor_id}")
     motor = Emm42Driver(port, motor_id=motor_id).initialize()

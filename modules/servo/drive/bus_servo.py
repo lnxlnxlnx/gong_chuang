@@ -26,10 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from project_paths import config_path
-
-
-DEFAULT_CONFIG_PATH = config_path("servo.json")
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.json"
 
 
 @dataclass(frozen=True)

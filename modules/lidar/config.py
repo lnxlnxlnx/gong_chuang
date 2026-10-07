@@ -13,10 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional
 
-from project_paths import config_path
-
-
-DEFAULT_CONFIG_PATH = config_path("coin_d6.json")
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 
 COLOR_MODES = ("distance", "intensity", "angle")
 # The COIN-D6 encodes distance in 14 bits, so it can never report more than this.
