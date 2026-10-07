@@ -10,6 +10,11 @@ from pathlib import Path
 
 MANUAL_TEST_DIR = Path(__file__).resolve().parent / "tests" / "manual"
 
+#: 离线测试的发现根目录。测试包搬到哪里，就把根目录加到这里；
+#: ``tests/test_discovery_coverage.py`` 会在有 test_*.py 落在所有根目录之外时失败，
+#: 所以指向错位置的扫描不可能安静地少跑一个目录。
+OFFLINE_TEST_DIRS: tuple[Path, ...] = (Path(__file__).resolve().parent / "tests",)
+
 
 def discover_manual_tests(manual_dir: Path = MANUAL_TEST_DIR) -> tuple[tuple[str, str, str], ...]:
     """Read MENU_ENTRY declarations without importing hardware test modules."""
@@ -44,13 +49,19 @@ def discover_manual_tests(manual_dir: Path = MANUAL_TEST_DIR) -> tuple[tuple[str
     return tuple(sorted(entries, key=lambda entry: int(entry[0])))
 
 
-def run_offline_tests() -> None:
-    """Discover only test_*.py files; manual scripts never run here."""
+def offline_suite(roots: tuple[Path, ...] = OFFLINE_TEST_DIRS) -> unittest.TestSuite:
+    """Build the offline suite without running it; manual scripts are never imported."""
     root = Path(__file__).resolve().parent
-    suite = unittest.defaultTestLoader.discover(
-        start_dir=str(root / "tests"), pattern="test_*.py", top_level_dir=str(root)
+    loader = unittest.defaultTestLoader
+    return unittest.TestSuite(
+        loader.discover(start_dir=str(scan_root), pattern="test_*.py", top_level_dir=str(root))
+        for scan_root in roots
     )
-    result = unittest.TextTestRunner(verbosity=1).run(suite)
+
+
+def run_offline_tests(roots: tuple[Path, ...] = OFFLINE_TEST_DIRS) -> None:
+    """Run every discovered test; discovery tests never open hardware."""
+    result = unittest.TextTestRunner(verbosity=1).run(offline_suite(roots))
     if not result.wasSuccessful():
         raise SystemExit(1)
 
