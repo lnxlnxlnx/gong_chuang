@@ -12,7 +12,7 @@
 
 命令行自测::
 
-    python -m vision.material_distance     # 合成检测框自测，不需要摄像头/模型
+    python -m modules.vision.drive.material_distance     # 合成检测框自测，不需要摄像头/模型
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ class MaterialDistanceEstimator:
 
     Parameters:
         focal_px: horizontal focal length in pixels (see
-            :func:`vision.distance.focal_length_from_fov`).
+            :func:`modules.vision.drive.distance.focal_length_from_fov`).
         real_widths_mm: ``class name -> real width in mm``; only those classes
             get a real distance. Without it, only pixel offsets are returned.
         image_size: ``(width, height)`` used to normalise the offsets when the
@@ -84,7 +84,7 @@ class MaterialDistanceEstimator:
     def estimate(self, hit, *, region=None, frame_shape=None) -> MaterialDistance:
         """Return the distance / offsets of one detection.
 
-        ``region`` is a :class:`vision.hough_lock.LockedRegion`; when omitted the
+        ``region`` is a :class:`modules.vision.drive.hough_lock.LockedRegion`; when omitted the
         offsets are relative to the image centre.
         """
         width, height = self._frame_size(frame_shape)

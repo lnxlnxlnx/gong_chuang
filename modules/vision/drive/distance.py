@@ -37,7 +37,7 @@ class DistanceEstimator:
 
         ``None`` when the detection's class width is unknown or the box has no
         usable width.  The input may be any object exposing ``name`` and
-        ``width`` attributes (e.g. :class:`vision.yolov8.Detection`).
+        ``width`` attributes (e.g. :class:`modules.vision.drive.yolov8.Detection`).
         """
         width_mm = self.real_widths.get(detection.name)
         if width_mm is None or detection.width <= 0.0:

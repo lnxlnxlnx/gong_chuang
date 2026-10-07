@@ -52,7 +52,7 @@ def open_preview(name: str = PREVIEW_WINDOW_NAME) -> str:
     if not name.isascii():
         raise ValueError(
             f"HighGUI 窗口名必须只用 ASCII 字符，收到 {name!r}；"
-            "中文名字在 Windows 上会显示成 ????（见 vision/preview.py 顶部说明）"
+            "中文名字在 Windows 上会显示成 ????（见 modules/vision/drive/preview.py 顶部说明）"
         )
     cv2 = _cv2()
     cv2.namedWindow(name, cv2.WINDOW_NORMAL)
@@ -73,6 +73,6 @@ def warn_blank_preview(camera_id: int, frames: int = BLANK_FRAME_WARNING) -> Non
     """
     print(f"[!] 摄像头 {camera_id} 连续 {frames} 帧输出纯色画面（全黑/全白）。逐项排查：")
     print("    · 是否被别的程序占用：系统“相机”App、钉钉/腾讯会议、浏览器里的摄像头页面，关掉再试")
-    print("    · 序号是否选对：用系统“相机”App 确认能看到画面的序号，再改 config/vision.json 的 windows.camera_id")
+    print("    · 序号是否选对：用系统“相机”App 确认能看到画面的序号，再改 modules/vision/config.json 的 windows.camera_id")
     print("    · 笔记本内置摄像头：Windows 设置 → 隐私和安全性 → 相机，允许桌面应用访问")
     print("    · 镜头盖/滑盖是否关着，或正对着完全黑暗的地方")

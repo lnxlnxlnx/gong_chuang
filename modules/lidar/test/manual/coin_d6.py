@@ -1,7 +1,7 @@
 """Capture a COIN-D6 point cloud from the test menu and draw it.
 
 Menu 16.  Without ``--simulate`` the script opens the serial port from
-``config/coin_d6.json``, starts the sensor, collects whole revolutions and
+``modules/lidar/config.json``, starts the sensor, collects whole revolutions and
 writes both a CSV of raw points and a PNG point-cloud figure.
 """
 

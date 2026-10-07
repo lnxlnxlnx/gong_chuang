@@ -4,9 +4,9 @@
 
 命令行自测::
 
-    python -m vision.material_locate                   # 合成场景全流程自测（不需要硬件）
-    python -m vision.material_locate --image a.jpg     # 真模型 + 一张图片
-    python -m vision.material_locate --camera 1        # 真模型 + 摄像头预览，按 q 退出
+    python -m modules.vision.drive.material_locate                   # 合成场景全流程自测（不需要硬件）
+    python -m modules.vision.drive.material_locate --image a.jpg     # 真模型 + 一张图片
+    python -m modules.vision.drive.material_locate --camera 1        # 真模型 + 摄像头预览，按 q 退出
 """
 
 from __future__ import annotations

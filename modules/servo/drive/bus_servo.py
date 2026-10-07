@@ -31,7 +31,7 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.json"
 
 @dataclass(frozen=True)
 class BusServoConfig:
-    """Port and servo identity read from ``config/servo.json``."""
+    """Port and servo identity read from ``modules/servo/config.json``."""
 
     port: str
     baudrate: int

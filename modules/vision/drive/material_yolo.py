@@ -1,8 +1,8 @@
 """YOLO 推理物料候选：把一帧（或锁定区域）变成"这里有哪些框"。
 
-职责单一：只做 **帧 → 检测框**。不判断"有没有物料"（``vision.material_presence``）、
-不判断"是哪一种物料"（``vision.material_class``）、不算距离
-（``vision.material_distance``）。串起来用见 ``vision.material_locate``。
+职责单一：只做 **帧 → 检测框**。不判断"有没有物料"（``modules.vision.drive.material_presence``）、
+不判断"是哪一种物料"（``modules.vision.drive.material_class``）、不算距离
+（``modules.vision.drive.material_distance``）。串起来用见 ``modules.vision.drive.material_locate``。
 
 两种用法：
 
@@ -12,9 +12,9 @@
 
 命令行自测::
 
-    python -m vision.material_yolo                    # 离线自测（假检测器，不需要模型）
-    python -m vision.material_yolo --image a.jpg      # 用真模型在一张图上跑
-    python -m vision.material_yolo --camera 1         # 摄像头实时预览，按 q 退出
+    python -m modules.vision.drive.material_yolo                    # 离线自测（假检测器，不需要模型）
+    python -m modules.vision.drive.material_yolo --image a.jpg      # 用真模型在一张图上跑
+    python -m modules.vision.drive.material_yolo --camera 1         # 摄像头实时预览，按 q 退出
 """
 
 from __future__ import annotations
@@ -60,10 +60,10 @@ class MaterialYOLO:
 
     Parameters:
         model_path: ONNX (Windows) or TensorRT engine (Jetson) path; defaults
-            to :func:`vision.default_model_path`.
+            to :func:`modules.vision.default_model_path`.
         materials: class names treated as materials, used by ``materials_only``.
         detector: an already-built detector (same ``detect()`` / ``draw()`` /
-            ``close()`` interface, see :class:`vision.Detector`); injected by
+            ``close()`` interface, see :class:`modules.vision.Detector`); injected by
             tests or when sharing one model between modules. When given,
             ``model_path`` is ignored.
     """

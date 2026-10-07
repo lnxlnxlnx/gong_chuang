@@ -1,13 +1,13 @@
 """Conservative position-mode controller for the three ZDT Emm42 arm axes.
 
-参数约定（与 ``mecanum.MecanumDrive`` 完全一致，见 ``motion.py``）：
+参数约定（与 ``modules.chassis.drive.mecanum.MecanumDrive`` 完全一致，见 ``modules/motor/drive/motion.py``）：
 
 - ``pulses``：本次相对移动的脉冲数（必填，正数；方向由动作方法决定）；
-- ``rpm`` / ``acceleration``：可选覆盖 ``config/robot_arm.json`` 中的默认值；
+- ``rpm`` / ``acceleration``：可选覆盖 ``modules/arm/config.json`` 中的默认值；
 - ``wait``：``True``（默认）等到动作走完再返回，``False`` 只发命令。
 
 三个轴的驱动器是 ``Response=None``：控制帧没有 ACK，也没有到位回包，所以
-``wait`` 用 ``motion.estimate_move_seconds`` 按说明书公式估算动作耗时后等待。
+``wait`` 用 ``modules.motor.drive.motion.estimate_move_seconds`` 按说明书公式估算动作耗时后等待。
 不等待时连续调用会让后一条位置帧覆盖前一条的目标，看起来就是"上一个动作没执行完"。
 """
 
@@ -89,7 +89,7 @@ class RobotArm:
             self._motors[axis_name].enable(False)
 
     def stop_all(self) -> None:
-        """Immediately brake all axes; this is valid during position motion."""
+        """Immediately brake all axes; this is valid during position modules.motor.drive.motion."""
         for axis_name in AXIS_NAMES:
             self._motors[axis_name].stop()
 

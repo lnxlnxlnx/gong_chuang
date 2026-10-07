@@ -1,6 +1,6 @@
 """是否有物料：在锁定区域里判断"到底有没有物料"。
 
-输入是 YOLO 的检测框（``vision.material_yolo`` 的输出，任何带
+输入是 YOLO 的检测框（``modules.vision.drive.material_yolo`` 的输出，任何带
 ``name`` / ``score`` / ``x1,y1,x2,y2`` / ``width`` / ``height`` / ``center`` 的对象都行），
 输出一个明确的"是/否"+ 数量 + 代表框 + 人话理由。
 
@@ -9,7 +9,7 @@
 
 命令行自测::
 
-    python -m vision.material_presence     # 合成检测框自测，不需要摄像头/模型
+    python -m modules.vision.drive.material_presence     # 合成检测框自测，不需要摄像头/模型
 """
 
 from __future__ import annotations

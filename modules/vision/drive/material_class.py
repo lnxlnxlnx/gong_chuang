@@ -1,15 +1,15 @@
 """是哪一种物料：把检测框翻译成"哪一种物料"+ 中文标签 + 置信度。
 
-职责单一：只回答"是哪一种"。"有没有"在 ``vision.material_presence``，
-框从哪来在 ``vision.material_yolo``，多远在 ``vision.material_distance``。
+职责单一：只回答"是哪一种"。"有没有"在 ``modules.vision.drive.material_presence``，
+框从哪来在 ``modules.vision.drive.material_yolo``，多远在 ``modules.vision.drive.material_distance``。
 
-类别名来自 ``vision.yolov8.DEFAULT_CLASS_NAMES`` 里的六个 ``obj-*``；
+类别名来自 ``modules.vision.drive.yolov8.DEFAULT_CLASS_NAMES`` 里的六个 ``obj-*``；
 中文标签可以用 :data:`DEFAULT_MATERIAL_LABELS`，也可以自己传 ``labels``
 （换模型、换类别表时只改这里）。
 
 命令行自测::
 
-    python -m vision.material_class     # 合成检测框自测，不需要摄像头/模型
+    python -m modules.vision.drive.material_class     # 合成检测框自测，不需要摄像头/模型
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ class MaterialClassifier:
         materials: class names that count as materials.
         labels: class name -> Chinese label; defaults to
             :data:`DEFAULT_MATERIAL_LABELS`.
-        min_score / min_area_px: same filters as :class:`vision.material_presence`
+        min_score / min_area_px: same filters as :class:`modules.vision.drive.material_presence`
             so both modules agree on what a valid box is.
         pick: how the "top" candidate is chosen — currently always by confidence
             (kept as a parameter so a nearest-to-ring rule can be added later).

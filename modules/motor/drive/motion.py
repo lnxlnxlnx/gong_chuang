@@ -1,6 +1,6 @@
 """Shared motion parameters and Emm42 timing estimates.
 
-``robot_arm.RobotArm``（机械臂三轴）和 ``mecanum.MecanumDrive``（麦轮四轮）挂的是
+``robot_arm.RobotArm``（机械臂三轴）和 ``modules.chassis.drive.mecanum.MecanumDrive``（麦轮四轮）挂的是
 同一款 Emm42 V5.0 闭环步进驱动器，所以两个模块必须使用**同一套参数名和同一套
 "一次动作要跑多久"的算法**。
 
@@ -10,7 +10,7 @@
 |---|---|---|
 | ``pulses`` | 位置模式：本次移动的脉冲数（正数，方向由动作方法决定） | 机械臂必填；底盘可选 |
 | ``duration`` | 速度模式：一条速度命令持续多少秒 | 只有底盘支持 |
-| ``rpm`` | 目标转速；不给就用配置里的默认值 | 机械臂配置在 ``config/robot_arm.json`` |
+| ``rpm`` | 目标转速；不给就用配置里的默认值 | 机械臂配置在 ``modules/arm/config.json`` |
 | ``acceleration`` | 曲线加减速档位 ``0..255``；不给就用配置里的默认值 | ``0`` = 无曲线 |
 | ``wait`` | ``True``（默认）= 等到动作走完再返回；``False`` = 只发命令 | 见下 |
 

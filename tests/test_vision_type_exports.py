@@ -1,6 +1,6 @@
 """Keep the lazy exports and the static re-exports in step.
 
-``vision/__init__.py`` resolves the material-locator symbols through PEP 562
+``modules/vision/__init__.py`` resolves the material-locator symbols through PEP 562
 ``__getattr__`` at runtime, and re-exports them under ``if TYPE_CHECKING`` so
 static analysis sees real classes instead of ``Any``.  The two lists can drift
 in silence: a symbol missing from the type-checking block becomes ``Any`` again,

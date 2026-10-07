@@ -1,6 +1,6 @@
 """COIN-D6 scanning-lidar support.
 
-Everything an operator retunes between machines lives in ``config/coin_d6.json``:
+Everything an operator retunes between machines lives in ``modules/lidar/config.json``:
 the serial port per platform, the angle and distance window of a scan, the
 checksum/acknowledgement policy and the point-cloud rendering options.
 
@@ -9,7 +9,7 @@ checksum/acknowledgement policy and the point-cloud rendering options.
 
     config = load_lidar_config()
     with CoinD6(config.device.port, baudrate=config.device.baudrate) as lidar:
-        cloud = lidar.scan(config.scan)
+        cloud = modules.lidar.scan(config.scan)
     render_point_cloud(cloud, config.view, output_path("lidar_cloud", "scan.png"))
 """
 

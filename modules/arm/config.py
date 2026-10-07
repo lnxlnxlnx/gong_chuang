@@ -62,22 +62,22 @@ def load_arm_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ArmConfig:
     config = ArmConfig(
         pulses_per_revolution=_integer(
             motion.get("pulses_per_revolution"),
-            "motion.pulses_per_revolution",
+            "modules.motor.drive.motion.pulses_per_revolution",
             minimum=1,
             maximum=0xFFFFFFFF,
         ),
-        rpm=_integer(motion.get("rpm"), "motion.rpm", minimum=0, maximum=Emm42Driver.MAX_RPM),
+        rpm=_integer(motion.get("rpm"), "modules.motor.drive.motion.rpm", minimum=0, maximum=Emm42Driver.MAX_RPM),
         acceleration=_integer(
-            motion.get("acceleration"), "motion.acceleration", minimum=0, maximum=255),
+            motion.get("acceleration"), "modules.motor.drive.motion.acceleration", minimum=0, maximum=255),
         default_pulses=_integer(
             motion.get("default_pulses"),
-            "motion.default_pulses",
+            "modules.motor.drive.motion.default_pulses",
             minimum=1,
             maximum=0xFFFFFFFF,
         ),
         max_pulses=_integer(
             motion.get("max_pulses"),
-            "motion.max_pulses",
+            "modules.motor.drive.motion.max_pulses",
             minimum=1,
             maximum=0xFFFFFFFF,
         ),
@@ -90,7 +90,7 @@ def load_arm_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ArmConfig:
         },
     )
     if config.default_pulses > config.max_pulses:
-        raise ValueError("motion.default_pulses must not exceed motion.max_pulses")
+        raise ValueError("modules.motor.drive.motion.default_pulses must not exceed modules.motor.drive.motion.max_pulses")
     if len({axis.motor_id for axis in config.axes.values()}) != len(AXIS_NAMES):
         raise ValueError("axes motor_id values must be unique")
     return config

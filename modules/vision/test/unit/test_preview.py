@@ -32,7 +32,7 @@ class OpenPreviewTests(unittest.TestCase):
         self.assertEqual(fake.calls, [(PREVIEW_WINDOW_NAME, FakeCv2.WINDOW_NORMAL)])
 
     def test_rejects_non_ascii_window_names(self) -> None:
-        # 中文窗口名在 Windows 上会显示成 ????（见 vision/preview.py 说明）。
+        # 中文窗口名在 Windows 上会显示成 ????（见 modules/vision/drive/preview.py 说明）。
         with self.assertRaises(ValueError):
             open_preview("项目视觉演示")
 

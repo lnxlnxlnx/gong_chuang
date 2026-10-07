@@ -1,7 +1,7 @@
 """Hiwonder bus-servo command frames, verified without a physical serial device.
 
-The original ``tests/test_motor_drivers.py`` covered the Emm42 driver and the
-bus servo in one file; the two halves now live next to the driver they test.
+The one-file driver test of the old layout covered the Emm42 driver and the bus
+servo together; the two halves now live next to the driver they test.
 """
 
 from __future__ import annotations

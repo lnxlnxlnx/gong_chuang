@@ -44,7 +44,7 @@ def main() -> None:
     parser.add_argument("--model", type=Path, default=default_model_path(),
                         help="ONNX model on Windows, TensorRT engine on Jetson")
     parser.add_argument("--camera", type=int, default=None,
-                        help="override camera index from config/vision.json")
+                        help="override camera index from modules/vision/config.json")
     parser.add_argument("--width", type=int, default=640, help="camera width")
     parser.add_argument("--height", type=int, default=480, help="camera height")
     parser.add_argument("--fps", type=int, default=30, help="camera frame rate")
@@ -71,7 +71,7 @@ def main() -> None:
     estimator = DistanceEstimator(focal_px, real_widths) if real_widths else None
 
     print(f"loading model: {args.model}; camera index: {camera_id} ...")
-    # 窗口名必须是 ASCII，且要先显式建窗，见 vision/preview.py 顶部说明。
+    # 窗口名必须是 ASCII，且要先显式建窗，见 modules/vision/drive/preview.py 顶部说明。
     window = open_preview()
     blank_frames = 0
     warned_blank = False

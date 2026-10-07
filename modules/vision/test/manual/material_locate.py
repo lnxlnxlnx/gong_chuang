@@ -6,8 +6,8 @@
 打印一次结论，默认每 30 帧自动打印一次，按 ``q`` 退出。未传焦距标定值时，
 使用实拍样本的一次粗标定估算距离。
 
-霍夫定位与总流程也能分别用 ``python -m vision.hough_lock``、
-``python -m vision.material_locate`` 离线测试。
+霍夫定位与总流程也能分别用 ``python -m modules.vision.drive.hough_lock``、
+``python -m modules.vision.drive.material_locate`` 离线测试。
 """
 
 from __future__ import annotations

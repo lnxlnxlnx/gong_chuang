@@ -1,7 +1,7 @@
 """Load the editable COIN-D6 lidar settings from one JSON file.
 
 Everything an operator normally changes between machines lives in
-``config/coin_d6.json``: the serial port per platform, the scan window
+``modules/lidar/config.json``: the serial port per platform, the scan window
 (angle and distance limits) and the point-cloud rendering options.
 """
 

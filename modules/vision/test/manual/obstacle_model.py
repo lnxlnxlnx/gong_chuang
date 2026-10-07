@@ -24,16 +24,16 @@ from modules.vision import DEFAULT_CLASS_NAMES, USBCamera, create_detector, defa
 
 from project_paths import PROJECT_ROOT, models_path, output_path
 
-#: Extension of the model this platform loads (matches ``vision.default_model_path``).
+#: Extension of the model this platform loads (matches ``modules.vision.default_model_path``).
 MODEL_SUFFIX = ".engine" if os.name != "nt" else ".onnx"
 
-#: Checkpoint exported by ``python training/train.py --export-onnx``.
+#: Checkpoint exported by ``python modules/vision/training/train.py --export-onnx``.
 NEW_MODEL = models_path(f"best_obstacle{MODEL_SUFFIX}")
 
 #: Class table of the new single-class obstacle model, in training order.
 NEW_CLASS_NAMES = ["obstacle"]
 
-#: Validation split written by ``training/prepare_dataset.py``.
+#: Validation split written by ``modules/vision/training/prepare_dataset.py``.
 VAL_IMAGES = models_path("dataset", "images", "val")
 
 #: Default output directory for annotated frames.
@@ -196,7 +196,7 @@ def annotate_source(detector, cv2, source: Path, save_dir: Path) -> None:
 
 
 def ask_camera_id(prompt: Callable[[str], str]) -> int:
-    """Ask for the camera index, defaulting to ``config/vision.json``."""
+    """Ask for the camera index, defaulting to ``modules/vision/config.json``."""
     platform = "jetson" if os.name != "nt" else "windows"
     try:
         default_camera = load_camera_id(platform)
@@ -227,7 +227,7 @@ def open_camera(cv2, camera_id: int):
         return USBCamera(camera_id, width=640, height=480, fps=30).initialize()
     except RuntimeError as error:
         print(f"打不开摄像头 {camera_id}：{error}")
-        print("回菜单选 5 可以自检 0–3 号；也可以改 config/vision.json 里的 camera_id")
+        print("回菜单选 5 可以自检 0–3 号；也可以改 modules/vision/config.json 里的 camera_id")
         return None
 
 
@@ -249,7 +249,7 @@ def scan_cameras(cv2) -> None:
                   f"{brightness:.0f}" + ("（全黑：可能被占用或未授权）" if brightness < 1 else ""))
             working.append(index)
     print(f"自检结束，能出画面的序号：{working or '无'}")
-    print("把可用的序号填进 config/vision.json 对应平台的 camera_id，然后回菜单选 1 预览")
+    print("把可用的序号填进 modules/vision/config.json 对应平台的 camera_id，然后回菜单选 1 预览")
 
 
 def preview_camera(detector, cv2, prompt: Callable[[str], str]) -> None:
@@ -263,7 +263,7 @@ def preview_camera(detector, cv2, prompt: Callable[[str], str]) -> None:
         frame = first_frame(camera)
         if frame is None:
             print(f"摄像头 {camera_id} 打开了，但连续 {READ_ATTEMPTS} 次都取不到画面。常见原因：")
-            print("  · 序号不对（回菜单选 5 自检，或改 config/vision.json 的 camera_id）")
+            print("  · 序号不对（回菜单选 5 自检，或改 modules/vision/config.json 的 camera_id）")
             print("  · 被别的程序占用（相机、钉钉/腾讯会议、浏览器里的网页）")
             print("  · 笔记本内置摄像头被 Windows 隐私设置禁止桌面应用访问")
             return

@@ -113,7 +113,7 @@ class Detection:
 class Detector(Protocol):
     """The detector interface applications may inject.
 
-    :class:`YOLOv8Detector` implements it; :class:`vision.MaterialYOLO` accepts
+    :class:`YOLOv8Detector` implements it; :class:`modules.vision.MaterialYOLO` accepts
     any other object with the same three methods (its own preview helper draws
     through this interface).
     """

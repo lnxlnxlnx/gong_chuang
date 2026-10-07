@@ -13,17 +13,17 @@
 
 ```
 ┌─ 应用代码（你写的）────────────────────────────────────┐
-│  from mecanum_config import create_chassis                │
+│  from modules.chassis.config import create_chassis        │
 │  car = create_chassis(profile).initialize()                │
 │  car.forward(rpm=60)                                       │
 └──────────────────────────┬───────────────────────────────┘
-                           │ 第 3 层 底盘门面 MecanumChassis (chassis.py)
+                           │ 第 3 层 底盘门面 MecanumChassis (modules/chassis/drive/chassis.py)
 ┌──────────────────────────▼───────────────────────────────┐
-│ 第 2 层 整车控制 MecanumDrive (mecanum.py)                 │
+│ 第 2 层 整车控制 MecanumDrive (modules/chassis/drive/mecanum.py)                 │
 │   · 四台 Emm42Driver 共享同一个 serial 对象                 │
 │   · drive() 逆运动学矩阵算出四轮转速，逐轮发 F6 帧           │
 └──────────────────────────┬───────────────────────────────┘
-                           │ 第 1 层 协议驱动 (motor_drivers/)
+                           │ 第 1 层 协议驱动 (modules/{motor,servo}/drive/)
 ┌──────────────────────────▼───────────────────────────────┐
 │ Emm42Driver ── 按 motor_id 组帧/解 ACK, 写共享串口          │
 │ BusServo    ── 按 servo_id 组帧/解 ACK                     │
@@ -32,11 +32,11 @@
                     Emm42 总线（全双工 TTL，多机并接）
 ```
 
-- **第 1 层（协议）**：`motor_drivers/emm42.py` `Emm42Driver`、`motor_drivers/bus_servo.py` `BusServo`。
-- **第 2 层（整车）**：`mecanum.py` `MecanumDrive`，四轮共享一根串口，含麦轮逆运动学。
-- **第 3 层（门面）**：`chassis.py` `MecanumChassis`，向上层应用提供的"整车动作" API。
-- **配置**：`config/mecanum_hardware.json`，硬件地址、方向修正、串口都在这里，脚本里用
-  `mecanum_config.py` 读取。
+- **第 1 层（协议）**：`modules/motor/drive/emm42.py` `Emm42Driver`、`modules/servo/drive/bus_servo.py` `BusServo`。
+- **第 2 层（整车）**：`modules/chassis/drive/mecanum.py` `MecanumDrive`，四轮共享一根串口，含麦轮逆运动学。
+- **第 3 层（门面）**：`modules/chassis/drive/chassis.py` `MecanumChassis`，向上层应用提供的"整车动作" API。
+- **配置**：`modules/chassis/config.json` 管硬件地址、方向修正与运动档位；串口不在这里，步进总线端口由 `modules/motor/config.json` 唯一持有。脚本里用
+  `modules/chassis/config.py` 读取。
 
 > 总线舵机只到第 1 层（没有整车层），用 `BusServo` 直接控制。
 
@@ -44,7 +44,7 @@
 
 ## 1.1 统一运动参数（机械臂与底盘一致）
 
-第 2、3 层的运动方法都使用同一套参数名，含义完全相同（算法在 `motion.py`）：
+第 2、3 层的运动方法都使用同一套参数名，含义完全相同（算法在 `modules/motor/drive/motion.py`）：
 
 | 参数 | 含义 | 机械臂 `RobotArm` | 底盘 `MecanumChassis` / `MecanumDrive` |
 |---|---|---|---|
@@ -141,7 +141,7 @@ print("扫描到的电机 ID:", found)
 
 建议**一次只接一台**做扫描，逐台确认；全部并接后扫描结果应与面板一致。
 
-**本项目当前映射（`config/mecanum_hardware.json`）**
+**本项目当前映射（`modules/chassis/config.json`）**
 
 | 软件轮位 | 实际驱动器地址 |
 |---|---|
@@ -156,10 +156,10 @@ print("扫描到的电机 ID:", found)
 
 ## 4. 第 1 层：协议驱动 `Emm42Driver`
 
-文件：`motor_drivers/emm42.py`。**一台驱动一个对象**，都传同一个串口设备名（各自按 motor_id 组帧）。
+文件：`modules/motor/drive/emm42.py`。**一台驱动一个对象**，都传同一个串口设备名（各自按 motor_id 组帧）。
 
 ```python
-from motor_drivers import Direction, Emm42Driver, HomeMode
+from modules.motor.drive.emm42 import Direction, Emm42Driver, HomeMode
 
 # 每台电机一个对象；同一根总线可挂多台
 m1 = Emm42Driver("/dev/ttyUSB0", motor_id=1).initialize()   # 打开串口
@@ -213,7 +213,7 @@ m1.close()
 
 ## 5. 第 2 层：整车控制 `MecanumDrive`
 
-文件：`mecanum.py`。四台 Emm42 共用一个串口对象（总线分时复用），提供麦轮运动学。
+文件：`modules/chassis/drive/mecanum.py`。四台 Emm42 共用一个串口对象（总线分时复用），提供麦轮运动学。
 
 ### 5.1 构造函数（真机建议走配置，见第 7 节）
 
@@ -289,11 +289,11 @@ car.forward(rpm=200, pulses=3200, wait=False)   # 只发命令，不等
 
 ## 6. 第 3 层：底盘门面 `MecanumChassis`（最推荐上层使用）
 
-文件：`chassis.py`。把整车动作包成最简 API。**配合配置加载使用（第 7 节）**，这样
+文件：`modules/chassis/drive/chassis.py`。把整车动作包成最简 API。**配合配置加载使用（第 7 节）**，这样
 真机/Windows 切换、换装轮子都不用改应用代码。
 
 ```python
-from mecanum_config import create_chassis, load_profile
+from modules.chassis.config import create_chassis, load_profile
 
 profile = load_profile("jetson")          # 或 "windows"
 car = create_chassis(profile).initialize()
@@ -312,16 +312,16 @@ rotate_cw/rotate_ccw/forward_left/forward_right/backward_left/backward_right`，
 另外有 `enable()/enable_all()/disable()/disable_all()/stop()/set_wheel_speed()/
 move_wheels_relative()/move_wheels_absolute()/wheel(WheelPosition)`（返回底层驱动对象）。
 
-> 底盘短动作演示见 `app/wheel/demo.py`，地图路线见 `app/wheel/map.py`，交互式动作测试见 `tests/manual/chassis.py`；入口都在结束时停机、失能并关闭串口。
+> 底盘短动作演示见 `modules/chassis/app/demo.py`，地图路线见 `modules/chassis/app/map.py`，交互式动作测试见 `modules/chassis/test/manual/chassis.py`；入口都在结束时停机、失能并关闭串口。
 
 ---
 
-## 7. 配置加载：`mecanum_config.py`
+## 7. 配置加载：`modules/chassis/config.py`
 
-配置文件 `config/mecanum_hardware.json` 集中管理硬件参数：
+配置文件 `modules/chassis/config.json` 集中管理硬件参数：
 
 ```python
-from mecanum_config import (
+from modules.chassis.config import (
     create_chassis,   # -> MecanumChassis（上层应用推荐）
     create_drive,     # -> MecanumDrive（需要底层 API 时）
     load_profile,     # -> HardwareProfile（只读配置，不建控制对象）
@@ -341,9 +341,8 @@ car = create_chassis(profile)            # 可覆盖: create_chassis(profile, po
 | `vehicle.pattern` | 麦轮 X/O 排布 | X |
 | `vehicle.rotation_gain` | 自转速度倍率 | 1.0 |
 | `vehicle.motion_transform` | `standard`=标准矩阵 / `calibrated`=实车标定矩阵 | **calibrated** |
-| `profiles.jetson.port` | Jetson 串口 | /dev/ttyUSB0 |
-| `profiles.windows.port` | Windows 串口 | COM28 |
 | `profiles.*.chassis_motion` / `individual_wheels` | 测试脚本默认 rpm/时长 | 见文件 |
+| （串口） | 不在本文件：见 `modules/motor/config.json` 的 `windows.port` / `jetson.port` | COM14 / /dev/ttyUSB0 |
 
 ---
 
@@ -393,7 +392,7 @@ finally:
 
 ### 例 4：直接控制单台步进（不走整车层）
 ```python
-from motor_drivers import Direction, Emm42Driver
+from modules.motor.drive.emm42 import Direction, Emm42Driver
 
 m = Emm42Driver("/dev/ttyUSB0", motor_id=1).initialize()
 m.enable(True)
@@ -405,7 +404,7 @@ m.close()
 
 ### 例 5：总线舵机（机械臂/云台类）
 ```python
-from motor_drivers import BusServo
+from modules.servo.drive.bus_servo import BusServo
 
 servo = BusServo("/dev/ttyUSB0", servo_id=1).initialize()   # 需半双工转接板
 servo.set_torque(True)

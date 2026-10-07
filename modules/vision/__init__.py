@@ -3,21 +3,21 @@
 This package provides a self-contained USB camera + YOLOv8
 detection stack meant to be reused by robot applications:
 
-  - :class:`vision.yolov8.YOLOv8Detector`: TensorRT detection on Jetson.
-  - :class:`vision.yolov8.YOLOv8ONNXDetector`: OpenCV ONNX detection on Windows.
-  - :class:`vision.camera.USBCamera`: USB camera capture wrapper.
-  - :func:`vision.preview.open_preview`: HighGUI preview window (ASCII name,
+  - :class:`modules.vision.drive.yolov8.YOLOv8Detector`: TensorRT detection on Jetson.
+  - :class:`modules.vision.drive.yolov8.YOLOv8ONNXDetector`: OpenCV ONNX detection on Windows.
+  - :class:`modules.vision.drive.camera.USBCamera`: USB camera capture wrapper.
+  - :func:`modules.vision.drive.preview.open_preview`: HighGUI preview window (ASCII name,
     created explicitly; see the module docstring for the Windows traps).
-  - :class:`vision.distance.DistanceEstimator`: monocular distance estimate.
+  - :class:`modules.vision.drive.distance.DistanceEstimator`: monocular distance estimate.
 
 物料定位流水线（每个功能一个模块，每个模块都能单独 ``python -m`` 自测）:
 
-  - :mod:`vision.hough_lock`: 霍夫圆变换定位物料顶部圆面（圆心 + 半径）。
-  - :mod:`vision.material_yolo`: YOLO 推理出物料候选框（可只跑锁定区域）。
-  - :mod:`vision.material_presence`: 基于 YOLO 框的独立存在性辅助工具。
-  - :mod:`vision.material_class`: "是哪一种物料" + 中文标签。
-  - :mod:`vision.material_distance`: 基于 YOLO 框的独立测距辅助工具。
-  - :mod:`vision.material_locate`: 圆面定位和测距，再用 YOLO 补充类别。
+  - :mod:`modules.vision.drive.hough_lock`: 霍夫圆变换定位物料顶部圆面（圆心 + 半径）。
+  - :mod:`modules.vision.drive.material_yolo`: YOLO 推理出物料候选框（可只跑锁定区域）。
+  - :mod:`modules.vision.drive.material_presence`: 基于 YOLO 框的独立存在性辅助工具。
+  - :mod:`modules.vision.drive.material_class`: "是哪一种物料" + 中文标签。
+  - :mod:`modules.vision.drive.material_distance`: 基于 YOLO 框的独立测距辅助工具。
+  - :mod:`modules.vision.drive.material_locate`: 圆面定位和测距，再用 YOLO 补充类别。
 
 Example::
 
@@ -59,7 +59,7 @@ from .drive.yolov8 import DEFAULT_CLASS_NAMES, Detection, Detector, YOLOv8Detect
 from project_paths import models_path
 
 #: 物料定位流水线的符号 -> 定义它的模块。这些模块按需导入（见 __getattr__）：
-#: 一是 ``python -m vision.hough_lock`` 这类自测入口不会因为在包初始化时就导入过
+#: 一是 ``python -m modules.vision.drive.hough_lock`` 这类自测入口不会因为在包初始化时就导入过
 #: 而触发 runpy 的 "found in sys.modules" 警告，二是 ``import vision`` 不必为
 #: 用不到的功能买单。
 _LAZY_ATTRIBUTES: dict[str, str] = {
@@ -90,7 +90,7 @@ _LAZY_ATTRIBUTES: dict[str, str] = {
 
 if TYPE_CHECKING:
     # 与 _LAZY_ATTRIBUTES 一一对应的显式再导出：``X as X`` 才算再导出。
-    # 运行时仍由 __getattr__ 按需导入（保住 ``python -m vision.hough_lock``
+    # 运行时仍由 __getattr__ 按需导入（保住 ``python -m modules.vision.drive.hough_lock``
     # 这类自测入口不触发 runpy 的 "found in sys.modules" 警告），静态分析则
     # 从这里拿到真实类型，``from vision import MaterialLocator`` 不再是 Any。
     from .drive.hough_lock import (

@@ -5,9 +5,9 @@
 
 命令行自测::
 
-    python -m vision.hough_lock                  # 合成图自测（不需要摄像头/模型）
-    python -m vision.hough_lock --image a.jpg    # 在一张图片上跑
-    python -m vision.hough_lock --camera 1       # 摄像头实时预览，按 q 退出
+    python -m modules.vision.drive.hough_lock                  # 合成图自测（不需要摄像头/模型）
+    python -m modules.vision.drive.hough_lock --image a.jpg    # 在一张图片上跑
+    python -m modules.vision.drive.hough_lock --camera 1       # 摄像头实时预览，按 q 退出
 """
 
 from __future__ import annotations
@@ -222,7 +222,7 @@ def synthetic_rings(
 
 
 def _self_test() -> int:
-    """Run the hardware-free synthetic check used by ``python -m vision.hough_lock``."""
+    """Run the hardware-free synthetic check used by ``python -m modules.vision.drive.hough_lock``."""
     locator = HoughRingLocator()
     frame = synthetic_rings()
     lock = locator.locate(frame)

@@ -24,7 +24,7 @@ FRAME_TAIL = 0x6B
 
 
 def fixture_config(**overrides) -> ArmConfig:
-    """Explicit arm settings so the frame fixtures do not follow config/robot_arm.json.
+    """Explicit arm settings so the frame fixtures do not follow modules/arm/config.json.
 
     The editable JSON is allowed to change (the operator tunes rpm there), while
     these tests must keep checking the exact position frame layout.

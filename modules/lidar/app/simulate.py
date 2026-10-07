@@ -1,6 +1,6 @@
 """Synthetic COIN-D6 traffic: a fake sensor for tests and the no-hardware demo.
 
-The encoder mirrors :mod:`lidar.protocol` exactly, so a simulated scan exercises
+The encoder mirrors :mod:`modules.lidar.drive.protocol` exactly, so a simulated scan exercises
 the real serial session, the real frame reader and the real renderer.  It is not
 a substitute for testing against the sensor, but it proves the whole path works
 before hardware is available.
@@ -155,7 +155,7 @@ def _ray_to_circle(direction: Tuple[float, float], center: Tuple[float, float],
 class SimulatedLidar:
     """A fake serial port that streams COIN-D6 packets until stopped.
 
-    Implements the small serial surface :class:`lidar.coin_d6.CoinD6` needs, so
+    Implements the small serial surface :class:`modules.lidar.drive.coin_d6.CoinD6` needs, so
     the real driver can be driven without hardware.
     """
 

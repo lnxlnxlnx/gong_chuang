@@ -1,7 +1,7 @@
 """Exercise the camera/CLI branches of the material modules without hardware.
 
 These branches only run when a USB camera is plugged in, which is exactly how a
-wrong import (``looks_blank`` lives in ``vision.camera``, not ``vision.preview``)
+wrong import (``looks_blank`` lives in ``modules.vision.drive.camera``, not ``modules.vision.drive.preview``)
 once slipped through: nothing in the offline suite ever executed them. Here the
 camera, the preview window and the GUI calls are all faked, so imports, the
 frame loop, cleanup and return codes are covered by the normal test run.
@@ -82,7 +82,7 @@ class PackageImportGuardTests(unittest.TestCase):
                 self.assertTrue(hasattr(vision, name), f"vision.{name} 不存在")
 
     def test_the_camera_branches_do_not_import_helpers_from_the_wrong_module(self) -> None:
-        # looks_blank 定义在 vision.camera；从 vision.preview 导入它是曾经的 bug。
+        # looks_blank 定义在 modules.vision.drive.camera；从 modules.vision.drive.preview 导入它是曾经的 bug。
         from modules.vision.drive import camera, preview
 
         self.assertTrue(hasattr(camera, "looks_blank"))
@@ -276,7 +276,7 @@ class MainDemoMaterialTests(unittest.TestCase):
 
 
 class ManualMenuEntryTests(unittest.TestCase):
-    """菜单 18 的真机入口（tests/manual/material_locate.py）也要能离线跑通。"""
+    """菜单 18 的真机入口（modules/vision/test/manual/material_locate.py）也要能离线跑通。"""
 
     class FakeReport:
         class _Lock:

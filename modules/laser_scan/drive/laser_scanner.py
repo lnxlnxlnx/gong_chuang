@@ -40,9 +40,9 @@ class ScanConfig:
         if isinstance(self.motor_id, bool) or not isinstance(self.motor_id, int) or not 1 <= self.motor_id <= 255:
             raise ValueError("motor.id must be an integer in 1..255")
         if not self.motor_port or not self.lidar_port:
-            raise ValueError("motor.port and lidar.port must be configured")
+            raise ValueError("motor.port and modules.lidar.port must be configured")
         if self.motor_port == self.lidar_port:
-            raise ValueError("motor.port and lidar.port must be different serial ports")
+            raise ValueError("motor.port and modules.lidar.port must be different serial ports")
         if not isinstance(self.motor_expect_ack, bool):
             raise ValueError("motor.expect_ack must be a boolean")
         for name, value, minimum, maximum in (

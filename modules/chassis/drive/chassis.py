@@ -3,7 +3,7 @@
 `MecanumDrive` owns motor protocol and kinematics. `MecanumChassis` is the
 small application-facing facade for whole-vehicle actions.
 
-门面方法的三选一参数与机械臂一致（见 ``motion.py``）：
+门面方法的三选一参数与机械臂一致（见 ``modules/motor/drive/motion.py``）：
 
 - ``pulses=N``  ：位置模式，按逆运动学比例走 N 个脉冲，``wait`` 默认等动作走完；
 - ``duration=T``：速度模式，跑 T 秒后自动停止；

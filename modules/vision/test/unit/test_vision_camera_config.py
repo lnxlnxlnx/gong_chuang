@@ -17,7 +17,7 @@ class VisionCameraConfigTests(unittest.TestCase):
 
     def test_selects_camera_for_each_platform(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "vision.json"
+            path = Path(directory) / "modules.vision.json"
             path.write_text(json.dumps({"windows": {"camera_id": 2},
                                         "jetson": {"camera_id": 0}}), encoding="utf-8")
             self.assertEqual(load_camera_id("windows", path), 2)
@@ -25,7 +25,7 @@ class VisionCameraConfigTests(unittest.TestCase):
 
     def test_rejects_missing_or_invalid_camera_index(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "vision.json"
+            path = Path(directory) / "modules.vision.json"
             for settings in ({"windows": {}}, {"windows": {"camera_id": -1}},
                              {"windows": {"camera_id": True}}):
                 path.write_text(json.dumps(settings), encoding="utf-8")

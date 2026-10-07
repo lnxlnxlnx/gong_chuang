@@ -5,9 +5,9 @@ Run :mod:`training.prepare_dataset` once first; it writes ``data.yaml``.
 This script is a thin, reproducible wrapper around ultralytics so the whole
 job is one command with the project's paths baked in::
 
-    python training/train.py                      # yolov8n, 100 epochs, GPU 0
-    python training/train.py --epochs 300 --model yolov8s.pt
-    python training/train.py --export-onnx        # also write models/best_obstacle.onnx
+    python modules/vision/training/train.py                      # yolov8n, 100 epochs, GPU 0
+    python modules/vision/training/train.py --epochs 300 --model yolov8s.pt
+    python modules/vision/training/train.py --export-onnx        # also write models/best_obstacle.onnx
 
 Artefacts land in ``models/runs/obstacle/`` (weights, curves, confusion
 matrix).
@@ -33,7 +33,7 @@ DEFAULT_ONNX_OUT = models_path("best_obstacle.onnx")
 
 from ultralytics import YOLO  # noqa: E402  (kept below the path constants)
 
-#: Class table currently compiled into ``vision/yolov8.py``.
+#: Class table currently compiled into ``modules/vision/drive/yolov8.py``.
 DEPLOYED_CLASS_NAMES = [
     "obj-red", "obj-green", "obj-blue", "obj-yellow", "obj-light blue",
     "obj-black", "target-1", "target-2", "target-3", "zhangai",
@@ -155,7 +155,7 @@ def main(argv=None) -> int:
             imgsz=args.imgsz,
             opset=args.opset,
             simplify=True,
-            dynamic=False,  # vision.YOLOv8ONNXDetector requires a fixed input
+            dynamic=False,  # modules.vision.YOLOv8ONNXDetector requires a fixed input
         )
         destination = args.onnx_out.resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
