@@ -38,7 +38,9 @@ from lidar.protocol import (
 from lidar.simulate import SimulatedLidar
 
 
-OUTPUT_ROOT = Path("output") / "lidar_cloud"
+from project_paths import output_path
+
+OUTPUT_ROOT = output_path("lidar_cloud")
 DIAGNOSE_SECONDS = 3.0
 
 

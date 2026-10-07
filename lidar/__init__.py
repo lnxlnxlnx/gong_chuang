@@ -5,11 +5,12 @@ the serial port per platform, the angle and distance window of a scan, the
 checksum/acknowledgement policy and the point-cloud rendering options.
 
     from lidar import CoinD6, load_lidar_config, render_point_cloud
+    from project_paths import output_path
 
     config = load_lidar_config()
     with CoinD6(config.device.port, baudrate=config.device.baudrate) as lidar:
         cloud = lidar.scan(config.scan)
-    render_point_cloud(cloud, config.view, "output/lidar_cloud/scan.png")
+    render_point_cloud(cloud, config.view, output_path("lidar_cloud", "scan.png"))
 """
 
 from .cloud import CloudPoint, PointCloud

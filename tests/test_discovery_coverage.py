@@ -19,10 +19,11 @@ import unittest
 from pathlib import Path
 
 import test as test_launcher
+from project_paths import PROJECT_ROOT
 from tests.scratch import scratch_directory
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = PROJECT_ROOT
 
 #: 数据、生成产物和随仓库附带的厂商例程都不是源码，扫描必须跳过它们。
 SKIPPED_DIRECTORIES = frozenset({"__pycache__", "docs", "models", "output"})

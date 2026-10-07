@@ -7,13 +7,15 @@ import importlib
 import unittest
 from pathlib import Path
 
+from project_paths import PROJECT_ROOT
 
-MANUAL_TEST_DIR = Path(__file__).resolve().parent / "tests" / "manual"
+
+MANUAL_TEST_DIR = PROJECT_ROOT / "tests" / "manual"
 
 #: 离线测试的发现根目录。测试包搬到哪里，就把根目录加到这里；
 #: ``tests/test_discovery_coverage.py`` 会在有 test_*.py 落在所有根目录之外时失败，
 #: 所以指向错位置的扫描不可能安静地少跑一个目录。
-OFFLINE_TEST_DIRS: tuple[Path, ...] = (Path(__file__).resolve().parent / "tests",)
+OFFLINE_TEST_DIRS: tuple[Path, ...] = (PROJECT_ROOT / "tests",)
 
 
 def discover_manual_tests(manual_dir: Path = MANUAL_TEST_DIR) -> tuple[tuple[str, str, str], ...]:
@@ -51,7 +53,7 @@ def discover_manual_tests(manual_dir: Path = MANUAL_TEST_DIR) -> tuple[tuple[str
 
 def offline_suite(roots: tuple[Path, ...] = OFFLINE_TEST_DIRS) -> unittest.TestSuite:
     """Build the offline suite without running it; manual scripts are never imported."""
-    root = Path(__file__).resolve().parent
+    root = PROJECT_ROOT
     loader = unittest.defaultTestLoader
     return unittest.TestSuite(
         loader.discover(start_dir=str(scan_root), pattern="test_*.py", top_level_dir=str(root))

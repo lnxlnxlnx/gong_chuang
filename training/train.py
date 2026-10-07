@@ -25,10 +25,11 @@ import shutil
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATA = REPO_ROOT / "models" / "dataset" / "data.yaml"
-DEFAULT_PROJECT = REPO_ROOT / "models" / "runs"
-DEFAULT_ONNX_OUT = REPO_ROOT / "models" / "best_obstacle.onnx"
+from project_paths import models_path
+
+DEFAULT_DATA = models_path("dataset", "data.yaml")
+DEFAULT_PROJECT = models_path("runs")
+DEFAULT_ONNX_OUT = models_path("best_obstacle.onnx")
 
 from ultralytics import YOLO  # noqa: E402  (kept below the path constants)
 

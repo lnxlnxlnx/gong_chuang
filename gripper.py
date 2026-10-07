@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from motor_drivers.servo_controller import ServoController
+from project_paths import config_path
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "servo.json"
+DEFAULT_CONFIG_PATH = config_path("servo.json")
 
 
 @dataclass(frozen=True)

@@ -27,8 +27,10 @@ import tokenize
 import unittest
 from pathlib import Path
 
+from project_paths import PROJECT_ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
+
+ROOT = PROJECT_ROOT
 
 #: 数据、生成产物与随仓库附带的厂商例程不是本项目的源码。
 SKIPPED_PARTS = frozenset({"__pycache__", ".git", ".worktrees", "docs", "models", "output"})

@@ -9,9 +9,10 @@ from typing import Mapping
 
 from mecanum import MecanumDrive, WheelPosition
 from chassis import MecanumChassis
+from project_paths import config_path
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "mecanum_hardware.json"
+DEFAULT_CONFIG_PATH = config_path("mecanum_hardware.json")
 _WHEEL_NAMES = ("FL", "FR", "RL", "RR")
 
 

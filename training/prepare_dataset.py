@@ -30,9 +30,10 @@ import shutil
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SOURCE = REPO_ROOT / "models" / "data"
-DEFAULT_OUTPUT = REPO_ROOT / "models" / "dataset"
+from project_paths import models_path
+
+DEFAULT_SOURCE = models_path("data")
+DEFAULT_OUTPUT = models_path("dataset")
 
 #: Directory names accepted for the image / label halves of a flat dataset.
 IMAGE_DIR_NAMES = ("image", "images", "img", "JPEGImages")

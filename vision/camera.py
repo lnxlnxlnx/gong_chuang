@@ -12,8 +12,10 @@ from pathlib import Path
 
 import numpy as np
 
+from project_paths import config_path
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "vision.json"
+
+DEFAULT_CONFIG_PATH = config_path("vision.json")
 
 
 def load_camera_id(platform: str, config_path: Path = DEFAULT_CONFIG_PATH) -> int:

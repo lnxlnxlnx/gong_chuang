@@ -11,6 +11,7 @@ from pathlib import Path
 from laser_scanner import DEFAULT_CONFIG_PATH, load_scan_config, save_scan, scan_sector
 from motor_drivers.emm42 import Emm42Driver
 from motor_drivers.stp23l import Stp23lReader
+from project_paths import output_path
 
 
 def main() -> None:
@@ -20,7 +21,7 @@ def main() -> None:
     args = parser.parse_args()
     config = load_scan_config(args.config)
     prefix = args.output_prefix or (
-        Path("output/laser_scan") / datetime.now().strftime("scan-%Y%m%d-%H%M%S-%f")
+        output_path("laser_scan") / datetime.now().strftime("scan-%Y%m%d-%H%M%S-%f")
     )
     if prefix.with_suffix(".csv").exists() or prefix.with_suffix(".svg").exists():
         parser.error(f"输出文件已存在：{prefix}")

@@ -28,7 +28,9 @@ from lidar.live import LiveCloud
 from lidar.simulate import SimulatedLidar
 from lidar.visualize import use_cjk_font
 
-OUTPUT_ROOT = Path("output") / "lidar_cloud"
+from project_paths import output_path
+
+OUTPUT_ROOT = output_path("lidar_cloud")
 DISTANCE_LIMIT_MM = 16383
 ANGLE_LIMIT_DEGREES = 180.0
 REVOLUTIONS_KEPT = 2

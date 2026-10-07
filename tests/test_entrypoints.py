@@ -11,10 +11,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import test as test_launcher
+from project_paths import PROJECT_ROOT
 from vision import default_model_path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = PROJECT_ROOT
 
 
 class EntryPointTests(unittest.TestCase):

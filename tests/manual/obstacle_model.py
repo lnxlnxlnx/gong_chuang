@@ -22,22 +22,22 @@ from pathlib import Path
 
 from vision import DEFAULT_CLASS_NAMES, USBCamera, create_detector, default_model_path, load_camera_id
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from project_paths import PROJECT_ROOT, models_path, output_path
 
 #: Extension of the model this platform loads (matches ``vision.default_model_path``).
 MODEL_SUFFIX = ".engine" if os.name != "nt" else ".onnx"
 
 #: Checkpoint exported by ``python training/train.py --export-onnx``.
-NEW_MODEL = REPO_ROOT / "models" / f"best_obstacle{MODEL_SUFFIX}"
+NEW_MODEL = models_path(f"best_obstacle{MODEL_SUFFIX}")
 
 #: Class table of the new single-class obstacle model, in training order.
 NEW_CLASS_NAMES = ["obstacle"]
 
 #: Validation split written by ``training/prepare_dataset.py``.
-VAL_IMAGES = REPO_ROOT / "models" / "dataset" / "images" / "val"
+VAL_IMAGES = models_path("dataset", "images", "val")
 
 #: Default output directory for annotated frames.
-DEFAULT_SAVE = REPO_ROOT / "output" / "vision_predict"
+DEFAULT_SAVE = output_path("vision_predict")
 
 #: Extensions accepted when the source is a folder or a single image.
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -57,7 +57,7 @@ READ_ATTEMPTS = 30
 def _relative(path: Path) -> str:
     """Show a path relative to the project root when possible."""
     try:
-        return str(path.relative_to(REPO_ROOT))
+        return str(path.relative_to(PROJECT_ROOT))
     except ValueError:
         return str(path)
 

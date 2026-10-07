@@ -13,9 +13,10 @@ from pathlib import Path
 from typing import Callable, Optional, Protocol
 
 from motor_drivers.emm42 import Emm42Driver
+from project_paths import config_path
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "laser_scan.json"
+DEFAULT_CONFIG_PATH = config_path("laser_scan.json")
 
 
 @dataclass(frozen=True)

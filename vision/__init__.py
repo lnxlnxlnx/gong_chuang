@@ -56,6 +56,7 @@ from .preview import (
     warn_blank_preview,
 )
 from .yolov8 import DEFAULT_CLASS_NAMES, Detection, Detector, YOLOv8Detector, YOLOv8ONNXDetector
+from project_paths import models_path
 
 #: 物料定位流水线的符号 -> 定义它的模块。这些模块按需导入（见 __getattr__）：
 #: 一是 ``python -m vision.hough_lock`` 这类自测入口不会因为在包初始化时就导入过
@@ -178,7 +179,7 @@ def __dir__() -> list[str]:
 def default_model_path() -> Path:
     """Select the copied ONNX model on Windows or TensorRT engine on Jetson."""
     extension = ".onnx" if os.name == "nt" else ".engine"
-    return Path(__file__).resolve().parent.parent / "models" / f"best{extension}"
+    return models_path(f"best{extension}")
 
 
 def create_detector(model_path: str | Path, **kwargs) -> YOLOv8Detector:
