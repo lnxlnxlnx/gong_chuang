@@ -201,7 +201,7 @@ class MaterialLocateCameraTests(unittest.TestCase):
 
 
 class MainDemoMaterialTests(unittest.TestCase):
-    """main.demo_material is the documented entry point; cover its wiring too."""
+    """modules.vision.app.demo.demo_material is the entry point; cover its wiring too."""
 
     class FakeReport:
         best = None
@@ -234,7 +234,7 @@ class MainDemoMaterialTests(unittest.TestCase):
             return frame.copy()
 
     def test_demo_runs_one_frame_and_closes_the_window(self) -> None:
-        import main
+        from modules.vision.app import demo as vision_demo
 
         with patch("modules.vision.MaterialLocator", self.FakeLocator), \
                 patch("modules.vision.USBCamera", FakeCamera), \
@@ -242,13 +242,13 @@ class MainDemoMaterialTests(unittest.TestCase):
                 patch("modules.vision.close_previews") as close_previews, \
                 patch("cv2.imshow"), \
                 patch("cv2.waitKey", side_effect=stop_after_one_frame()):
-            main.demo_material(model_path=Path(__file__), camera_id=1)
+            vision_demo.demo_material(model_path=Path(__file__), camera_id=1)
 
         self.assertTrue(close_previews.called)
         self.assertEqual(FakeCamera.instances[-1].device_id, 1)
 
     def test_demo_shows_coordinates_and_prints_all_results_on_p(self) -> None:
-        import main
+        from modules.vision.app import demo as vision_demo
 
         item = SimpleNamespace(
             name="obj-blue", confidence=0.81,
@@ -263,7 +263,7 @@ class MainDemoMaterialTests(unittest.TestCase):
                 patch("cv2.putText") as put_text, \
                 patch("cv2.waitKey", side_effect=[ord("p"), ord("q")]), \
                 patch("builtins.print") as printed:
-            main.demo_material(model_path=Path(__file__), camera_id=1)
+            vision_demo.demo_material(model_path=Path(__file__), camera_id=1)
 
         overlay = " ".join(call.args[1] for call in put_text.call_args_list)
         self.assertIn("obj-blue", overlay)
