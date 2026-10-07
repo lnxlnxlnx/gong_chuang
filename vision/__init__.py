@@ -44,6 +44,7 @@ from __future__ import annotations
 import importlib
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .camera import USBCamera, load_camera_id, looks_blank
 from .distance import DistanceEstimator, focal_length_from_fov
@@ -85,6 +86,41 @@ _LAZY_ATTRIBUTES: dict[str, str] = {
     "MaterialReport": "material_locate",
     "RegionReport": "material_locate",
 }
+
+if TYPE_CHECKING:
+    # 与 _LAZY_ATTRIBUTES 一一对应的显式再导出：``X as X`` 才算再导出。
+    # 运行时仍由 __getattr__ 按需导入（保住 ``python -m vision.hough_lock``
+    # 这类自测入口不触发 runpy 的 "found in sys.modules" 警告），静态分析则
+    # 从这里拿到真实类型，``from vision import MaterialLocator`` 不再是 Any。
+    from .hough_lock import (
+        HoughRingLocator as HoughRingLocator,
+        LockedRegion as LockedRegion,
+        RingLock as RingLock,
+    )
+    from .material_class import (
+        DEFAULT_MATERIAL_LABELS as DEFAULT_MATERIAL_LABELS,
+        ClassResult as ClassResult,
+        MaterialCandidate as MaterialCandidate,
+        MaterialClassifier as MaterialClassifier,
+    )
+    from .material_distance import (
+        MaterialDistance as MaterialDistance,
+        MaterialDistanceEstimator as MaterialDistanceEstimator,
+    )
+    from .material_locate import (
+        MaterialLocator as MaterialLocator,
+        MaterialReport as MaterialReport,
+        RegionReport as RegionReport,
+    )
+    from .material_presence import (
+        MaterialPresence as MaterialPresence,
+        PresenceResult as PresenceResult,
+    )
+    from .material_yolo import (
+        MATERIAL_CLASS_NAMES as MATERIAL_CLASS_NAMES,
+        MaterialYOLO as MaterialYOLO,
+        is_material as is_material,
+    )
 
 __all__ = [
     "BLANK_FRAME_WARNING",
