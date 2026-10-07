@@ -174,6 +174,8 @@ def demo_material(
                 )
                 for index, item in enumerate(report.regions, start=1):
                     confidence = f"{item.confidence:.2f}" if item.confidence is not None else "--"
+                    if item.name is None:
+                        continue  # 只画有名字的物料，避免干扰
                     line = (
                         f"{index}: {item.name or 'unknown'} confidence={confidence} "
                         f"xyz=({item.x_mm:.0f},{item.y_mm:.0f},{item.z_mm:.0f})mm "
