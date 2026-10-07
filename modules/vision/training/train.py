@@ -73,8 +73,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA,
                         help="dataset yaml from prepare_dataset.py")
-    parser.add_argument("--model", default="yolov8n.pt",
-                        help="base weights or a previous checkpoint (*.pt)")
+    parser.add_argument("--model", default=str(models_path("yolov8n.pt")),
+                        help="base weights or a previous checkpoint (*.pt); "
+                             "default resolves under models/ so it does not follow the cwd")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--imgsz", type=int, default=640,
                         help="training input size; must be a multiple of 32")

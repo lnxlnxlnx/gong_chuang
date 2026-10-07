@@ -1,13 +1,19 @@
-"""Confirmed open/close test for the gripper servo."""
+"""Confirmed open/close test for the gripper on the shared bus servo.
+
+Menus 13 and 14 used to be two entries over the same 115200 bps direct path;
+this is the single merged entry.  The bus port and baud rate come from the
+servo bus configuration, while the positions come from the gripper section.
+"""
 
 from __future__ import annotations
 
 MENU_ENTRY = (13, "夹爪测试")
 
+import argparse
 import time
 from collections.abc import Callable
 
-from modules.servo.drive.gripper import GripperConfig, load_gripper_config
+from modules.servo.config import GripperConfig, load_gripper_config
 from modules.servo.drive.bus_servo import BusServo, load_bus_config
 
 
@@ -16,9 +22,14 @@ def run_manual(
     config: GripperConfig,
     *,
     prompt: Callable[[str], str] = input,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
 ) -> None:
-    """Read first; move to each configured position only after its own YES, then read back."""
+    """Read first; move to each configured position only after its own YES, then read back.
+
+    ``sleep`` defaults to :func:`time.sleep` *at call time*: a default bound at
+    definition time would ignore ``patch.object(time, "sleep")``.
+    """
+    sleep = sleep if sleep is not None else time.sleep
     print(f"夹爪舵机 {config.servo_id} 当前脉冲位置：{servo.read_position()}")
     for label, position in (("张开", config.open_position), ("闭合", config.closed_position)):
         answer = prompt(
@@ -33,18 +44,29 @@ def run_manual(
         print(f"{label}后读回：{servo.read_position()}")
 
 
+def parse_port(argv: list[str] | None = None) -> str | None:
+    """Return the optional ``--port`` override for one-off wiring checks."""
+    parser = argparse.ArgumentParser(description="夹爪测试（总线舵机直连）")
+    parser.add_argument(
+        "--port", default=None, help="覆盖 modules/servo/config.json 中的平台串口"
+    )
+    return parser.parse_args(argv).port
+
+
 def main() -> None:
-    """Open the configured bus servo, then close the UART on every exit path."""
+    """Open the bus at its configured baud rate, then close the UART on every exit path."""
+    port_override = parse_port()
     config = load_gripper_config()
     bus = load_bus_config()
-    print(f"夹爪舵机 {config.servo_id} @ {bus.port} {bus.baudrate} bps")
+    port = port_override if port_override is not None else bus.port
+    print(f"夹爪舵机 {config.servo_id} @ {port} {bus.baudrate} bps")
     try:
         servo = BusServo(
-            bus.port, config.servo_id, baudrate=bus.baudrate, timeout=0.5
+            port, config.servo_id, baudrate=bus.baudrate, timeout=0.5
         ).initialize()
     except Exception as error:
         # 端口被占用或设备名不对时直接说明，不再抛 traceback
-        print(f"无法打开 {bus.port}：{error}")
+        print(f"无法打开 {port}：{error}")
         return
     try:
         try:

@@ -32,14 +32,14 @@ LOADER_CONFIGS = (
         "modules/laser_scan/drive/laser_scanner.py",
     ),
     (
+        "modules.servo.config",
+        "modules/servo/config.json",
+        "modules/servo/config.py",
+    ),
+    (
         "modules.servo.drive.bus_servo",
         "modules/servo/config.json",
         "modules/servo/drive/bus_servo.py",
-    ),
-    (
-        "modules.servo.drive.gripper",
-        "modules/servo/config.json",
-        "modules/servo/drive/gripper.py",
     ),
     (
         "modules.vision.drive.camera",
