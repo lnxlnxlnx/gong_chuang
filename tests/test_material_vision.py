@@ -41,6 +41,10 @@ class FakeDetector:
         self.shapes.append(tuple(frame.shape))
         return list(self.hits)
 
+    def draw(self, frame, detections, fps=None):
+        """Stand in for the preview helper: return the frame unchanged."""
+        return frame.copy()
+
     def close(self) -> None:
         self.closed = True
 

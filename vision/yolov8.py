@@ -18,6 +18,7 @@ Typical usage::
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol, Sequence
 
 import numpy as np
 
@@ -107,6 +108,26 @@ class Detection:
     def center(self) -> tuple[float, float]:
         """``(cx, cy)`` center of the box in pixels."""
         return ((self.x1 + self.x2) / 2.0, (self.y1 + self.y2) / 2.0)
+
+
+class Detector(Protocol):
+    """The detector interface applications may inject.
+
+    :class:`YOLOv8Detector` implements it; :class:`vision.MaterialYOLO` accepts
+    any other object with the same three methods (its own preview helper draws
+    through this interface).
+    """
+
+    def detect(self, frame: np.ndarray) -> list[Detection]: ...
+
+    def draw(
+        self,
+        frame: np.ndarray,
+        detections: Sequence[Detection],
+        fps: float | None = None,
+    ) -> np.ndarray: ...
+
+    def close(self) -> None: ...
 
 
 def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thresh: float) -> np.ndarray:
@@ -329,7 +350,7 @@ class YOLOv8Detector:
         self.stream.synchronize()
         return self.h_output
 
-    def detect(self, frame: np.ndarray) -> list:
+    def detect(self, frame: np.ndarray) -> list[Detection]:
         """Run full detection on one BGR frame and return ``list[Detection]``."""
         blob, orig_shape, pad, scale = self.preprocess(frame, self.input_size)
         raw_output = self.infer(blob)
@@ -346,7 +367,12 @@ class YOLOv8Detector:
             for box, score, cid in zip(boxes, scores, cls_ids)
         ]
 
-    def draw(self, frame: np.ndarray, detections, fps: float | None = None) -> np.ndarray:
+    def draw(
+        self,
+        frame: np.ndarray,
+        detections: Sequence[Detection],
+        fps: float | None = None,
+    ) -> np.ndarray:
         """Draw boxes, labels and an optional FPS readout on a copy of ``frame``."""
         cv2 = _cv2()
         annotated = frame.copy()

@@ -164,7 +164,14 @@ class HoughRingLocator:
         return list(self.locate(frame).regions)
 
     # ------------------------------------------------------------------ 画图
-    def draw(self, frame: np.ndarray, lock: RingLock, *, color=(0, 0, 255), thickness: int = 2):
+    def draw(
+        self,
+        frame: np.ndarray,
+        lock: RingLock,
+        *,
+        color: tuple[int, int, int] = (0, 0, 255),
+        thickness: int = 2,
+    ) -> np.ndarray:
         """Return a copy of ``frame`` with every top circle and centre marked."""
         cv2 = _cv2()
         annotated = frame.copy()

@@ -17,9 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+import numpy as np
+
 from vision.hough_lock import HoughRingLocator, LockedRegion, RingLock
 from vision.material_class import ClassResult, MaterialClassifier
 from vision.material_yolo import MaterialYOLO
+from vision.yolov8 import Detection
 
 
 # 1280x720 照片中直径约 209 px，用户实测镜头到圆面约 145 mm：145*209/30≈1012。
@@ -92,7 +95,7 @@ class MaterialReport:
     """一帧里所有检出的物料圆面。"""
 
     lock: RingLock
-    hits: tuple
+    hits: tuple[Detection, ...]
     regions: tuple[RegionReport, ...]
 
     @property
@@ -160,7 +163,7 @@ class MaterialLocator:
         self.close()
 
     # ------------------------------------------------------------- 主流程
-    def locate(self, frame) -> MaterialReport:
+    def locate(self, frame: np.ndarray) -> MaterialReport:
         """从一帧 BGR 图像返回圆面、类别和近似相机坐标。"""
         lock = self.locator.locate(frame)
         if not lock.regions:
@@ -180,7 +183,12 @@ class MaterialLocator:
         return MaterialReport(lock=lock, hits=hits, regions=reports)
 
     def _report_for_region(
-        self, hits, region: LockedRegion, focal_px: float, width: int, height: int
+        self,
+        hits: Sequence[Detection],
+        region: LockedRegion,
+        focal_px: float,
+        width: int,
+        height: int,
     ) -> RegionReport:
         """用圆面直径估深度，再将圆心投影回相机坐标系。"""
         visible = [
@@ -199,12 +207,12 @@ class MaterialLocator:
     # ------------------------------------------------------------- 画图
     def draw(
         self,
-        frame,
+        frame: np.ndarray,
         report: MaterialReport,
         *,
-        circle_color=(0, 0, 255),
-        text_color=(0, 255, 255),
-    ):
+        circle_color: tuple[int, int, int] = (0, 0, 255),
+        text_color: tuple[int, int, int] = (0, 255, 255),
+    ) -> np.ndarray:
         """Return a copy marked with material circles and their distances."""
         import cv2
 

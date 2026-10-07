@@ -22,9 +22,14 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import TYPE_CHECKING, Iterable, Sequence
 
-from vision.yolov8 import Detection
+import numpy as np
+
+from vision.yolov8 import Detection, Detector
+
+if TYPE_CHECKING:
+    from vision.hough_lock import LockedRegion
 
 #: 比赛里的六种物料类别（与 models/data/classes.txt 的类别表对应）。
 MATERIAL_CLASS_NAMES: tuple[str, ...] = (
@@ -42,7 +47,9 @@ def is_material(name: str, materials: Iterable[str] = MATERIAL_CLASS_NAMES) -> b
     return name in set(materials)
 
 
-def is_inside_region(detection, region, *, margin: float = 0.0) -> bool:
+def is_inside_region(
+    detection: Detection, region: LockedRegion, *, margin: float = 0.0
+) -> bool:
     """Return ``True`` when a detection's centre falls inside a locked region."""
     center_x, center_y = detection.center
     return region.contains(center_x, center_y, margin=margin)
@@ -55,9 +62,10 @@ class MaterialYOLO:
         model_path: ONNX (Windows) or TensorRT engine (Jetson) path; defaults
             to :func:`vision.default_model_path`.
         materials: class names treated as materials, used by ``materials_only``.
-        detector: an already-built detector (same ``detect()``/``draw()``
-            interface); injected by tests or when sharing one model between
-            modules. When given, ``model_path`` is ignored.
+        detector: an already-built detector (same ``detect()`` / ``draw()`` /
+            ``close()`` interface, see :class:`vision.Detector`); injected by
+            tests or when sharing one model between modules. When given,
+            ``model_path`` is ignored.
     """
 
     def __init__(
@@ -68,7 +76,7 @@ class MaterialYOLO:
         iou_thresh: float = 0.45,
         class_names: Sequence[str] | None = None,
         materials: Sequence[str] = MATERIAL_CLASS_NAMES,
-        detector=None,
+        detector: Detector | None = None,
     ) -> None:
         self.model_path = Path(model_path) if model_path is not None else None
         self.conf_thresh = float(conf_thresh)
@@ -79,7 +87,7 @@ class MaterialYOLO:
 
     # ------------------------------------------------------------- 生命周期
     @property
-    def detector(self):
+    def detector(self) -> Detector:
         """Lazily build the real detector the first time it is needed."""
         if self._detector is None:
             from vision import create_detector, default_model_path
@@ -107,7 +115,7 @@ class MaterialYOLO:
         self.close()
 
     # ------------------------------------------------------------- 推理
-    def detect(self, frame, *, materials_only: bool = False) -> list[Detection]:
+    def detect(self, frame: np.ndarray, *, materials_only: bool = False) -> list[Detection]:
         """Run one inference on the whole frame."""
         hits = list(self.detector.detect(frame))
         if materials_only:
@@ -116,8 +124,8 @@ class MaterialYOLO:
 
     def detect_in_region(
         self,
-        frame,
-        region,
+        frame: np.ndarray,
+        region: LockedRegion,
         *,
         margin: float = 0.0,
         materials_only: bool = False,
@@ -153,7 +161,9 @@ class MaterialYOLO:
         return mapped
 
     @staticmethod
-    def crop_region(frame, region, *, margin: float = 0.0):
+    def crop_region(
+        frame: np.ndarray, region: LockedRegion, *, margin: float = 0.0
+    ) -> tuple[tuple[int, int, int, int] | None, tuple[int, int] | None]:
         """Return ``((x1, y1, x2, y2), (offset_x, offset_y))`` clamped to the frame.
 
         ``(None, None)`` when the region lies completely outside the frame.
@@ -194,6 +204,10 @@ def _self_test() -> int:
                 Detection(x1=x1, y1=y1, x2=x2, y2=y2, score=0.9, class_id=0, name="obj-red"),
                 Detection(x1=1.0, y1=1.0, x2=9.0, y2=9.0, score=0.8, class_id=9, name="zhangai"),
             ]
+
+        def draw(self, frame, detections, fps=None):
+            """Stand in for the preview helper: return the frame unchanged."""
+            return frame.copy()
 
         def close(self) -> None:
             pass

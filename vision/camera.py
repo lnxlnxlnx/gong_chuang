@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "vision.json"
 
@@ -88,7 +90,7 @@ class USBCamera:
         self.capture = capture
         return self
 
-    def read(self):
+    def read(self) -> np.ndarray | None:
         """Return the next BGR frame, or ``None`` if capture failed."""
         if self.capture is None:
             raise RuntimeError("USBCamera not initialized; call initialize() first")
