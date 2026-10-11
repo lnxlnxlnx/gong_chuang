@@ -1,16 +1,16 @@
 {
   "vehicle": {
     "motor_ids": {
-      "FL": 3,
-      "FR": 4,
-      "RL": 2,
-      "RR": 1
+      "FL": 1,
+      "FR": 2,
+      "RL": 3,
+      "RR": 4
     },
     "wheel_signs": {
-      "FL": -1,
-      "FR": -1,
-      "RL": -1,
-      "RR": -1
+      "FL": 1,
+      "FR": 1,
+      "RL": 1,
+      "RR": 1
     },
     "acceleration": 5,
     "pattern": "X",
