@@ -152,7 +152,7 @@ def main() -> None:
 
     missing = calibration_report(vision=vision, arm=arm_config, grasp=grasp_config)
     if missing:
-        print("还缺以下标定，先补齐再跑（详见 docs/抓取坐标链路.md）：", file=sys.stderr)
+        print("还缺以下标定，先补齐再跑（详见 modules/grasp/docs/抓取坐标链路.md）：", file=sys.stderr)
         for item in missing:
             print(f"  - {item}", file=sys.stderr)
         raise SystemExit(2)

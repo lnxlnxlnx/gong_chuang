@@ -10,7 +10,7 @@
 
 步进驱动器使用一个 USB-TTL 模块：模块 `TX -> R/A/H`、`RX -> T/B/L`、`GND -> GND`；驱动器电源独立接 `12-32 V`。
 
-总线舵机为单线、5 V 上拉的半双工 UART，波特率 115200。Jetson UART 直连时也需要按 `docs/幻尔科技总线舵机通信协议.pdf` 图 1 处理发送/接收方向与电平；USB 转接板只是另一种串口接法。普通全双工 UART 的 `TX` 与 `RX` 不能直接并接在舵机信号线上。
+总线舵机为单线、5 V 上拉的半双工 UART，波特率 115200。Jetson UART 直连时也需要按 `modules/servo/docs/幻尔科技总线舵机通信协议.pdf` 图 1 处理发送/接收方向与电平；USB 转接板只是另一种串口接法。普通全双工 UART 的 `TX` 与 `RX` 不能直接并接在舵机信号线上。
 
 运行前在 Jetson 上确认设备名：
 
@@ -93,7 +93,7 @@ car.close()
 
 ## 统一入口
 
-在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13 为夹爪测试（原来的 14「夹爪直连调试」已合并进来，编号 14 不再使用）；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集；17 为 COIN-D6 实时点云窗口（滑块或输入框调距离与角度窗口）；18 为物料顶部圆面定位（霍夫判断存在并测距，YOLO 补充类别，见 `docs/视觉物料定位.md`）；19 为**摄像头识别 + 机械臂抓取**（见 `docs/抓取坐标链路.md`），它会在打开硬件前先列出还没做的标定项并拒绝运行，只想核对标定可以用 `--observe-only`。步进总线端口读取 `modules/motor/config.json` 中当前平台的 `port`（底盘与机械臂共用这一处），舵机总线端口读取 `modules/servo/config.json`；激光测试使用独立的 `modules/laser_scan/config.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `modules/lidar/config.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
+在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13 为夹爪测试（原来的 14「夹爪直连调试」已合并进来，编号 14 不再使用）；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集；17 为 COIN-D6 实时点云窗口（滑块或输入框调距离与角度窗口）；18 为物料顶部圆面定位（霍夫判断存在并测距，YOLO 补充类别，见 `modules/vision/docs/视觉物料定位.md`）；19 为**摄像头识别 + 机械臂抓取**（见 `modules/grasp/docs/抓取坐标链路.md`），它会在打开硬件前先列出还没做的标定项并拒绝运行，只想核对标定可以用 `--observe-only`。步进总线端口读取 `modules/motor/config.json` 中当前平台的 `port`（底盘与机械臂共用这一处），舵机总线端口读取 `modules/servo/config.json`；激光测试使用独立的 `modules/laser_scan/config.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `modules/lidar/config.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
 
 ```powershell
 python test.py
@@ -114,7 +114,7 @@ python test.py
 ## D6 激光雷达（lidar）
 
 `lidar` 包封装国科光芯 COIN-D6 的串口指令与点云解析（协议见
-`docs/国科光芯/1 D6激光雷达手册资料/`），并把采集结果画成点云图：
+`modules/lidar/docs/国科光芯/1 D6激光雷达手册资料/`），并把采集结果画成点云图：
 
 - `modules.lidar.drive.protocol`：帧编解码。启动 `AA 55 F0 0F`、停止 `AA 55 F5 0A`，应答为 12 字节
   `A5 5A ...`；上传帧 `A5 5A LEN CS TYPE DATA`（`0x01` 设备信息、`0x81` 点云）；点云包为
@@ -249,6 +249,18 @@ python -c "import test; test.run_offline_tests()"
   （`test_discovery_coverage.py`、`test_project_paths.py`、`test_vision_type_exports.py`、
   `test_python38_compatibility.py`）与共享辅助 `scratch.py`。
 
+## 文档位置
+
+**文档跟着它描述的模块走**，和测试、配置是同一条规矩：
+
+- `modules/<模块>/docs/`：该模块自己的说明文档，以及它那套硬件的厂商手册与例程。
+  例如 `modules/arm/docs/`、`modules/grasp/docs/抓取坐标链路.md`、
+  `modules/motor/docs/Emm_V5.0步进闭环驱动说明书Rev1.3.pdf`。
+- `docs/`（仓库根）：只放**不属于任何单个模块**的材料（跨模块的方案参考等）。
+
+代码和文档里引用其他文档时写**仓库根相对路径**（`modules/grasp/docs/抓取坐标链路.md`），
+这样从哪个文件点进去都指向同一个地方，也方便直接 grep。
+
 真机测试从项目根目录运行菜单。开始前让车轮悬空，并确保急停措施可用：
 
 ```bash
@@ -282,7 +294,7 @@ USB 摄像头 + YOLOv8 检测，封装为 `modules.vision` 包，供主程序和
 漏检时仍返回位置和距离。顶部内侧圆面的实际直径为 30 mm，距离按
 `focal_px × 30 / (2 × radius_px)` 计算。未传焦距时，默认使用
 `top_pic_2.jpg` 在约 145 mm 实测距离下得到的一次粗标定（1280×720 时约 1012 px）。
-完整说明见 [docs/视觉物料定位.md](docs/视觉物料定位.md)。
+完整说明见 [modules/vision/docs/视觉物料定位.md](modules/vision/docs/视觉物料定位.md)。
 
 ```python
 from vision import MaterialLocator, USBCamera
@@ -308,7 +320,7 @@ Windows 使用 OpenCV ONNX 推理，需要 `opencv-python`、`numpy`。Jetson �
 模型文件放 `models/`（已 gitignore，不入库）：Windows 用 `models/best.onnx`，Jetson 用 `models/best.engine`。当前两份模型来自远端 `/home/pi/workspace/GC_robot_3G/yolov8n/`；ONNX 输入为 `1×3×640×640`，输出为 `1×14×8400`。
 类别表在 `modules/vision/drive/yolov8.py::DEFAULT_CLASS_NAMES`，与模型训练标签顺序一致；换模型时同步修改即可。
 
-自己训练障碍物模型：`models/data` 里的图片和标注用 `modules/vision/training/prepare_dataset.py` 切分，`modules/vision/training/train.py` 训练并导出 ONNX，完整流程（参数建议、预训练权重下载、上车注意事项）见 `docs/障碍物模型训练指南.md`。训练完在测试菜单选 `15. 障碍物模型测试`，按提示选择「哪个模型 / 怎么测 / 置信度阈值」即可；它会把类别表和模型绑在一起，选新模型时自动按单类 `obstacle` 解析，不会出现菜单 9 那种类名错位。
+自己训练障碍物模型：`models/data` 里的图片和标注用 `modules/vision/training/prepare_dataset.py` 切分，`modules/vision/training/train.py` 训练并导出 ONNX，完整流程（参数建议、预训练权重下载、上车注意事项）见 `modules/vision/docs/障碍物模型训练指南.md`。训练完在测试菜单选 `15. 障碍物模型测试`，按提示选择「哪个模型 / 怎么测 / 置信度阈值」即可；它会把类别表和模型绑在一起，选新模型时自动按单类 `obstacle` 解析，不会出现菜单 9 那种类名错位。
 
 ### 运行示例
 
@@ -373,7 +385,7 @@ python -m unittest modules.vision.test.unit.test_vision -v
 ## 抓取（grasp）
 
 摄像头识别 + 机械臂抓取：俯视相机测出**物料**与**爪上靶标**的位置，换算成机械臂的圆柱
-关节量，再驱动三轴和夹爪完成一次抓取。完整说明见 [docs/抓取坐标链路.md](docs/抓取坐标链路.md)。
+关节量，再驱动三轴和夹爪完成一次抓取。完整说明见 [modules/grasp/docs/抓取坐标链路.md](modules/grasp/docs/抓取坐标链路.md)。
 
 链路上每一级都独立成一个可离线自测的薄模块，依赖方向只能从上到下：
 
@@ -421,7 +433,7 @@ python -m unittest modules.vision.test.unit.test_vision -v
 抓取牵涉的标定最多，缺一项都会变成一句难懂的运行时报错，所以菜单 19 会在**打开硬件之前**
 先把缺的项一次列全并拒绝运行。实验清单（A0 确认减速比 → A 平面标定 → A′ 重标焦距 →
 B/C 标 `mm_per_motor_rev` → D 台面深度 → E 夹爪与 TCP → F 行程与安全位 → G 重复精度与背隙 →
-**H 回零零点**（用回零方案时）→ I 到位回包）见 [docs/抓取坐标链路.md](docs/抓取坐标链路.md)。
+**H 回零零点**（用回零方案时）→ I 到位回包）见 [modules/grasp/docs/抓取坐标链路.md](modules/grasp/docs/抓取坐标链路.md)。
 
 ```powershell
 python test.py                                             # 菜单选 19

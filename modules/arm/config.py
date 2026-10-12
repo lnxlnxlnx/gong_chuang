@@ -123,7 +123,7 @@ class ArmConfig:
         if self.homing is None:
             raise ValueError(
                 "homing 还没配置；要么在 config.json 里加 homing 块，"
-                "要么让位姿来源一直走相机测量（见 docs/抓取坐标链路.md）"
+                "要么让位姿来源一直走相机测量（见 modules/grasp/docs/抓取坐标链路.md）"
             )
         return self.homing
 
@@ -177,7 +177,7 @@ class ArmConfig:
         if value is None:
             raise ValueError(
                 f"axes.{axis_name}.mm_per_motor_rev 还没标定；"
-                "先用实验 B/C 测出电机一圈走多少毫米（见 docs/抓取坐标链路.md）"
+                "先用实验 B/C 测出电机一圈走多少毫米（见 modules/grasp/docs/抓取坐标链路.md）"
             )
         return value
 
@@ -186,7 +186,7 @@ class ArmConfig:
         if self.safe_pose is None:
             raise ValueError(
                 "safe_pose 还没配置；抓取流程必须先有一个已标定的安全位"
-                "（见 docs/抓取坐标链路.md）"
+                "（见 modules/grasp/docs/抓取坐标链路.md）"
             )
         return self.safe_pose
 

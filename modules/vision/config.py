@@ -4,7 +4,7 @@
 
 - ``config.json`` —— **手改**。摄像头编号，以及抓取用的目标尺寸与颜色。
 - ``calibration.json`` —— **标定产物**。像素焦距、镜头到台面的深度、平面标定结果，
-  由标定脚本写入（见 ``docs/抓取坐标链路.md``）。
+  由标定脚本写入（见 ``modules/grasp/docs/抓取坐标链路.md``）。
 
 分开的理由是它们的生命周期不同：换摄像头要改 ``config.json``，重新标定只动
 ``calibration.json``，两者不会互相覆盖，git 里也一眼能看出"这台机器标定过了"。
@@ -81,7 +81,7 @@ class VisionConfig:
         if self.plane is None:
             raise ValueError(
                 "还没有平面标定结果；先跑实验 A 写入 calibration.json"
-                "（见 docs/抓取坐标链路.md）"
+                "（见 modules/grasp/docs/抓取坐标链路.md）"
             )
         return self.plane
 
@@ -90,7 +90,7 @@ class VisionConfig:
         if self.table_depth_mm is None:
             raise ValueError(
                 "calibration.json 里还没有 table_depth_mm；"
-                "把已知直径的圆片平放在台面上量一次即可（见 docs/抓取坐标链路.md）"
+                "把已知直径的圆片平放在台面上量一次即可（见 modules/grasp/docs/抓取坐标链路.md）"
             )
         return self.table_depth_mm
 

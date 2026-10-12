@@ -10,8 +10,15 @@ Two rules keep paths honest from here on:
 * project-wide resources (``models/``, ``output/``) come from
   :data:`PROJECT_ROOT`, which this file's own location pins to the repository
   root no matter which module or directory asks;
-* a resource that belongs to one module (its own ``config.json``) is resolved
-  relative to that module's ``__file__``, so it stays correct at any depth.
+* a resource that belongs to one module (its own ``config.json``, its own
+  ``docs/``) is resolved relative to that module's ``__file__``, so it stays
+  correct at any depth.
+
+The same split applies to documentation: a module's own docs live in
+``modules/<module>/docs/`` next to the code they describe (including the vendor
+manuals for that module's hardware), and the repository-root ``docs/`` is left
+for material that belongs to no single module.  A doc that only makes sense
+next to one module's code should not sit in the root shelf.
 
 ``models/`` and ``output/`` are git-ignored and created on demand, so nothing
 here asserts their contents.

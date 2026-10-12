@@ -42,4 +42,4 @@ python test.py
 
 选择菜单 `11. 激光固定测距`：只打开 `modules.lidar.port`，不打开电机串口、不使能或移动电机。控制台持续输出每个校验通过的测距帧中有效点的中位距离、有效点数和障碍判定；按 `Ctrl+C` 关闭串口并返回菜单。没有有效点时显示“无有效数据/未知”，不会误报为无障碍。此测试可先观察静止状态下的读数稳定性；它不能单独证明电机运动已停稳。
 
-数据手册：`docs/stp23l激光模块/3.STP-23L相关手册/1.LDROBOT_STP-23L_Datasheet_CN_v1.2.pdf`。协议：同目录的 `2.LDROBOT_STP-23L_Development_Manual_CN_v0.1.pdf`。供应商 Windows Python 示例只检查起始字节、未校验整帧，故本实现依照开发手册校验完整包与校验和。
+数据手册：`modules/laser_scan/docs/stp23l激光模块/3.STP-23L相关手册/1.LDROBOT_STP-23L_Datasheet_CN_v1.2.pdf`。协议：同目录的 `2.LDROBOT_STP-23L_Development_Manual_CN_v0.1.pdf`。供应商 Windows Python 示例只检查起始字节、未校验整帧，故本实现依照开发手册校验完整包与校验和。

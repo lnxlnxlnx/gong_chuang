@@ -116,7 +116,7 @@ def linear_pulses_for_mm(
     """直线轴位移（毫米）换算成脉冲数（四舍五入，带符号）。
 
     ``mm_per_motor_rev`` 为 ``None`` 时抛 ``ValueError``：没标定就不许下发毫米指令，
-    这是 ``docs/机械臂Emm42三轴控制说明.md`` 第 7 节定下的规矩。
+    这是 ``modules/arm/docs/机械臂Emm42三轴控制说明.md`` 第 7 节定下的规矩。
 
     返回值可能是 0（位移小于半个脉冲），调用方应把它当作"已经到位"而不是发一条空帧。
     """
@@ -192,7 +192,7 @@ def height_above_table(*, table_depth_mm: float, point_depth_mm: float) -> float
     """相机深度换算成离台面高度。
 
     镜头俯视时深度沿光轴向下递增，所以台面深度减去物点深度就是高度。
-    ``table_depth_mm`` 是一次性标定的常数（见 ``docs/抓取坐标链路.md``）。
+    ``table_depth_mm`` 是一次性标定的常数（见 ``modules/grasp/docs/抓取坐标链路.md``）。
     """
     _require_finite("table_depth_mm", table_depth_mm)
     _require_finite("point_depth_mm", point_depth_mm)
