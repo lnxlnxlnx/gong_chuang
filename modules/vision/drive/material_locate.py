@@ -22,11 +22,12 @@ import numpy as np
 from modules.vision.drive.hough_lock import HoughRingLocator, LockedRegion, RingLock
 from modules.vision.drive.material_class import ClassResult, MaterialClassifier
 from modules.vision.drive.material_yolo import MaterialYOLO
+from modules.vision.drive.pinhole import (
+    DEFAULT_FOCAL_PX_AT_1280 as DEFAULT_FOCAL_PX_AT_1280,
+    PinholeCamera,
+    resolve_focal_px,
+)
 from modules.vision.drive.yolov8 import Detection
-
-
-# 1280x720 照片中直径约 209 px，用户实测镜头到圆面约 145 mm：145*209/30≈1012。
-DEFAULT_FOCAL_PX_AT_1280 = 1012.0
 
 
 @dataclass(frozen=True)
@@ -170,12 +171,8 @@ class MaterialLocator:
             return MaterialReport(lock=lock, hits=(), regions=())
         hits = tuple(self.yolo.detect(frame, materials_only=True))
         height, width = frame.shape[:2]
-        if self.focal_px is None:
-            if abs(width / height - 16 / 9) > 0.02:
-                raise ValueError("默认焦距只适用于无裁切 16:9 画幅；请传入该画幅标定后的 focal_px")
-            focal_px = DEFAULT_FOCAL_PX_AT_1280 * width / 1280
-        else:
-            focal_px = self.focal_px
+        # 画幅规则与像素焦距只有一个定义，在 modules.vision.drive.pinhole 里。
+        focal_px = resolve_focal_px(width, height, self.focal_px)
         reports = tuple(
             self._report_for_region(hits, region, focal_px, width, height)
             for region in lock.regions
@@ -195,13 +192,22 @@ class MaterialLocator:
             hit for hit in hits
             if region.contains(*hit.center, margin=self.region_margin)
         ]
-        depth_mm = focal_px * self.top_diameter_mm / (2 * region.radius)
+        fix = PinholeCamera(
+            focal_px=focal_px,
+            image_width=float(width),
+            image_height=float(height),
+        ).fix_from_circle(
+            region.center_x,
+            region.center_y,
+            region.radius,
+            self.top_diameter_mm,
+        )
         return RegionReport(
             region=region,
             classification=self.classifier.classify(visible),
-            x_mm=(region.center_x - width / 2) * depth_mm / focal_px,
-            y_mm=(region.center_y - height / 2) * depth_mm / focal_px,
-            distance_mm=depth_mm,
+            x_mm=fix.x_mm,
+            y_mm=fix.y_mm,
+            distance_mm=fix.depth_mm,
         )
 
     # ------------------------------------------------------------- 画图

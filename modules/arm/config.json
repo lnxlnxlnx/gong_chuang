@@ -12,10 +12,22 @@
       "reduction_ratio": 5
     },
     "lift": {
-      "motor_id": 6
+      "motor_id": 6,
+      "mm_per_motor_rev": null
     },
     "extension": {
-      "motor_id": 7
+      "motor_id": 7,
+      "mm_per_motor_rev": null
     }
+  },
+  "limits": {
+    "base_degrees": null,
+    "radial_mm": null,
+    "height_mm": null
+  },
+  "safe_pose": {
+    "base_degrees": null,
+    "radial_mm": null,
+    "height_mm": null
   }
 }

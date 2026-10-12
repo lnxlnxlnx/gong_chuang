@@ -4,5 +4,12 @@
   },
   "jetson": {
     "camera_id": 0
+  },
+  "targets": {
+    "material_diameter_mm": 30.0,
+    "marker_diameter_mm": null,
+    "material_bgr": null,
+    "marker_bgr": null,
+    "color_tolerance": 60.0
   }
 }

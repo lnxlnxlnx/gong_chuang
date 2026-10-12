@@ -9,6 +9,17 @@
 三个轴的驱动器是 ``Response=None``：控制帧没有 ACK，也没有到位回包，所以
 ``wait`` 用 ``modules.motor.drive.motion.estimate_move_seconds`` 按说明书公式估算动作耗时后等待。
 不等待时连续调用会让后一条位置帧覆盖前一条的目标，看起来就是"上一个动作没执行完"。
+
+对外有两组动作方法：
+
+- **动作 + 脉冲数**（``rotate_cw`` / ``move_up`` / ``move_forward`` …）：方向由方法名决定，
+  ``pulses`` 必须为正且不超过配置上限。真机测试脚本用这一组。
+- **带符号的物理量**（``move_base_degrees`` / ``move_lift_mm`` / ``move_radial_mm``）：
+  正数对应同一个 CW 方向，负数自动反向。抓取流程用这一组，因为它算出来的是
+  "从当前位姿到目标位姿的差"。后两个方法要求对应轴的 ``mm_per_motor_rev`` 已标定。
+
+两组都不检查绝对行程：行程是**绝对位姿**的限制，调用方必须在发出动作前自己用
+``modules.arm.drive.kinematics.require_reachable`` 检查。
 """
 
 from __future__ import annotations
@@ -20,6 +31,7 @@ from typing import Callable, Optional
 from modules.motor.drive.motion import DEFAULT_SETTLE_SECONDS, estimate_move_seconds
 from modules.motor.drive.emm42 import Direction, Emm42Driver, SerialPort
 from modules.arm.config import AXIS_NAMES, ArmConfig, load_arm_config
+from modules.arm.drive.kinematics import base_pulses_for_degrees, linear_pulses_for_mm
 
 
 @dataclass(frozen=True)
@@ -158,6 +170,99 @@ class RobotArm:
     ) -> MotionReport:
         """Retract the arm backward; CCW is the mechanically confirmed direction."""
         return self._move(self.EXTENSION_AXIS, Direction.CCW, pulses, rpm=rpm, acceleration=acceleration, wait=wait)
+
+    # ------------------------------------------------- 单位制相对动作（带符号）
+    #
+    # 上面六个方法是"动作 + 脉冲数"，方向由方法名决定；下面三个收**带符号的物理量**，
+    # 正数对应同一个 CW 方向，所以调用方不必自己判断该用哪个方法。抓取流程用它，
+    # 因为它算出来的是"从当前位姿到目标位姿的差"。
+    #
+    # 注意两点：
+    # - 这里不检查绝对行程。行程是**绝对位姿**的限制，由调用方在发出动作前用
+    #   ``modules.arm.drive.kinematics.require_reachable`` 检查；
+    # - 单次位移超过 ``max_pulses`` 时照旧抛 ``ValueError``。这是既有的保守上限，
+    #   标定完行程后把它提高到"单次最大位移"以上，不要在这里绕过它。
+
+    def move_base_degrees(
+        self,
+        degrees: float,
+        *,
+        rpm: Optional[int] = None,
+        acceleration: Optional[int] = None,
+        wait: bool = True,
+    ) -> MotionReport:
+        """Turn the base by a signed angle; positive is CW, negative is CCW."""
+        pulses = base_pulses_for_degrees(
+            degrees,
+            pulses_per_revolution=self.pulses_per_revolution,
+            reduction_ratio=self.config.base_reduction,
+        )
+        return self._move_signed(self.BASE_AXIS, pulses, rpm=rpm, acceleration=acceleration, wait=wait)
+
+    def move_lift_mm(
+        self,
+        millimeters: float,
+        *,
+        rpm: Optional[int] = None,
+        acceleration: Optional[int] = None,
+        wait: bool = True,
+    ) -> MotionReport:
+        """Raise (positive) or lower (negative) the lift axis by a signed distance."""
+        pulses = linear_pulses_for_mm(
+            millimeters,
+            pulses_per_revolution=self.pulses_per_revolution,
+            mm_per_motor_rev=self.config.require_mm_per_motor_rev(self.LIFT_AXIS),
+        )
+        return self._move_signed(self.LIFT_AXIS, pulses, rpm=rpm, acceleration=acceleration, wait=wait)
+
+    def move_radial_mm(
+        self,
+        millimeters: float,
+        *,
+        rpm: Optional[int] = None,
+        acceleration: Optional[int] = None,
+        wait: bool = True,
+    ) -> MotionReport:
+        """Extend (positive) or retract (negative) the arm by a signed distance."""
+        pulses = linear_pulses_for_mm(
+            millimeters,
+            pulses_per_revolution=self.pulses_per_revolution,
+            mm_per_motor_rev=self.config.require_mm_per_motor_rev(self.EXTENSION_AXIS),
+        )
+        return self._move_signed(self.EXTENSION_AXIS, pulses, rpm=rpm, acceleration=acceleration, wait=wait)
+
+    def _move_signed(
+        self,
+        axis_name: str,
+        pulses: int,
+        *,
+        rpm: Optional[int],
+        acceleration: Optional[int],
+        wait: bool,
+    ) -> MotionReport:
+        """Send a signed relative move; a sub-pulse delta sends nothing at all."""
+        if pulses == 0:
+            # 位移不足半个脉冲。调用方的意图是"已经到位"，所以既不发帧也不等待；
+            # 发一条 0 脉冲的帧只会多一次串口往返，还可能被驱动器当成空动作。
+            axis = self.config.axes[axis_name]
+            return MotionReport(
+                motor_id=axis.motor_id,
+                pulses=0,
+                motor_degrees=0.0,
+                output_degrees=(
+                    0.0 if axis.reduction_ratio is not None else None
+                ),
+                estimated_seconds=0.0,
+            )
+        direction = Direction.CW if pulses > 0 else Direction.CCW
+        return self._move(
+            axis_name,
+            direction,
+            abs(pulses),
+            rpm=rpm,
+            acceleration=acceleration,
+            wait=wait,
+        )
 
     def _move(
         self,

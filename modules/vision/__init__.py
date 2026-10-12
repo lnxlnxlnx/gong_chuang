@@ -63,6 +63,27 @@ from project_paths import models_path
 #: 而触发 runpy 的 "found in sys.modules" 警告，二是 ``import vision`` 不必为
 #: 用不到的功能买单。
 _LAZY_ATTRIBUTES: dict[str, str] = {
+    # pinhole
+    "CameraFix": "drive.pinhole",
+    "DEFAULT_FOCAL_PX_AT_1280": "drive.pinhole",
+    "PinholeCamera": "drive.pinhole",
+    "focal_px_from_known_target": "drive.pinhole",
+    "resolve_focal_px": "drive.pinhole",
+    # calibration
+    "CalibrationSample": "drive.calibration",
+    "PlaneCalibration": "drive.calibration",
+    "fit_plane_calibration": "drive.calibration",
+    # cell_targets
+    "CellTarget": "drive.cell_targets",
+    "CellTargetDetector": "drive.cell_targets",
+    "CellTargets": "drive.cell_targets",
+    "MARKER_ROLE": "drive.cell_targets",
+    "MATERIAL_ROLE": "drive.cell_targets",
+    # config
+    "TargetSettings": "config",
+    "VisionConfig": "config",
+    "load_vision_config": "config",
+    "save_vision_calibration": "config",
     # hough_lock
     "HoughRingLocator": "drive.hough_lock",
     "LockedRegion": "drive.hough_lock",
@@ -93,10 +114,35 @@ if TYPE_CHECKING:
     # 运行时仍由 __getattr__ 按需导入（保住 ``python -m modules.vision.drive.hough_lock``
     # 这类自测入口不触发 runpy 的 "found in sys.modules" 警告），静态分析则
     # 从这里拿到真实类型，``from vision import MaterialLocator`` 不再是 Any。
+    from .config import (
+        TargetSettings as TargetSettings,
+        VisionConfig as VisionConfig,
+        load_vision_config as load_vision_config,
+        save_vision_calibration as save_vision_calibration,
+    )
+    from .drive.calibration import (
+        CalibrationSample as CalibrationSample,
+        PlaneCalibration as PlaneCalibration,
+        fit_plane_calibration as fit_plane_calibration,
+    )
+    from .drive.cell_targets import (
+        MARKER_ROLE as MARKER_ROLE,
+        MATERIAL_ROLE as MATERIAL_ROLE,
+        CellTarget as CellTarget,
+        CellTargetDetector as CellTargetDetector,
+        CellTargets as CellTargets,
+    )
     from .drive.hough_lock import (
         HoughRingLocator as HoughRingLocator,
         LockedRegion as LockedRegion,
         RingLock as RingLock,
+    )
+    from .drive.pinhole import (
+        DEFAULT_FOCAL_PX_AT_1280 as DEFAULT_FOCAL_PX_AT_1280,
+        CameraFix as CameraFix,
+        PinholeCamera as PinholeCamera,
+        focal_px_from_known_target as focal_px_from_known_target,
+        resolve_focal_px as resolve_focal_px,
     )
     from .drive.material_class import (
         DEFAULT_MATERIAL_LABELS as DEFAULT_MATERIAL_LABELS,
@@ -125,7 +171,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BLANK_FRAME_WARNING",
+    "CalibrationSample",
+    "CameraFix",
+    "CellTarget",
+    "CellTargetDetector",
+    "CellTargets",
     "DEFAULT_CLASS_NAMES",
+    "DEFAULT_FOCAL_PX_AT_1280",
     "DEFAULT_MATERIAL_LABELS",
     "Detection",
     "Detector",
@@ -133,7 +185,9 @@ __all__ = [
     "ClassResult",
     "HoughRingLocator",
     "LockedRegion",
+    "MARKER_ROLE",
     "MATERIAL_CLASS_NAMES",
+    "MATERIAL_ROLE",
     "MaterialCandidate",
     "MaterialClassifier",
     "MaterialDistance",
@@ -143,15 +197,24 @@ __all__ = [
     "MaterialReport",
     "MaterialYOLO",
     "PREVIEW_WINDOW_NAME",
+    "PinholeCamera",
+    "PlaneCalibration",
     "PresenceResult",
     "RegionReport",
     "RingLock",
+    "TargetSettings",
     "USBCamera",
+    "VisionConfig",
     "close_previews",
+    "fit_plane_calibration",
+    "focal_px_from_known_target",
     "is_material",
     "load_camera_id",
+    "load_vision_config",
     "looks_blank",
     "open_preview",
+    "resolve_focal_px",
+    "save_vision_calibration",
     "warn_blank_preview",
     "YOLOv8Detector",
     "YOLOv8ONNXDetector",

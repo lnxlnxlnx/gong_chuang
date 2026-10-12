@@ -93,7 +93,7 @@ car.close()
 
 ## 统一入口
 
-在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13 为夹爪测试（原来的 14「夹爪直连调试」已合并进来，编号 14 不再使用）；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集；17 为 COIN-D6 实时点云窗口（滑块或输入框调距离与角度窗口）；18 为物料顶部圆面定位（霍夫判断存在并测距，YOLO 补充类别，见 `docs/视觉物料定位.md`）。步进总线端口读取 `modules/motor/config.json` 中当前平台的 `port`（底盘与机械臂共用这一处），舵机总线端口读取 `modules/servo/config.json`；激光测试使用独立的 `modules/laser_scan/config.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `modules/lidar/config.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
+在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13 为夹爪测试（原来的 14「夹爪直连调试」已合并进来，编号 14 不再使用）；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集；17 为 COIN-D6 实时点云窗口（滑块或输入框调距离与角度窗口）；18 为物料顶部圆面定位（霍夫判断存在并测距，YOLO 补充类别，见 `docs/视觉物料定位.md`）；19 为**摄像头识别 + 机械臂抓取**（见 `docs/抓取坐标链路.md`），它会在打开硬件前先列出还没做的标定项并拒绝运行，只想核对标定可以用 `--observe-only`。步进总线端口读取 `modules/motor/config.json` 中当前平台的 `port`（底盘与机械臂共用这一处），舵机总线端口读取 `modules/servo/config.json`；激光测试使用独立的 `modules/laser_scan/config.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `modules/lidar/config.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
 
 ```powershell
 python test.py
@@ -215,7 +215,7 @@ finally:
     servo.close()  # 只关闭串口，不会改变夹爪位置
 ```
 
-这段直接读写 `modules/servo/config.json` 中的总线串口与 `gripper` 参数，与菜单 13 是同一条通路。夹爪开合尚未与机械臂动作组成自动抓取流程。Jetson 使用前需填写 `modules/servo/config.json` 中的 `jetson.port`。
+这段直接读写 `modules/servo/config.json` 中的总线串口与 `gripper` 参数，与菜单 13 是同一条通路。**自动抓取流程**（菜单 19）走的是另一层：`modules/servo/drive/gripper.py` 的 `GripperServo` 把裸位置值收成 `open_jaws()` / `close_jaws()`，并且用位置读回判断"夹住了东西"——夹紧时读回没到闭合位就说明爪口之间有物料。菜单 13 是逐项确认的底层手动调试，两者共用同一条串口与同一份 `gripper` 参数配置。Jetson 使用前需填写 `modules/servo/config.json` 中的 `jetson.port`。
 
 `main.py` 只是一个入口，默认测试物料定位：霍夫圆面判断是否有物料，YOLO 给类别和置信度，窗口显示相机坐标 `x/y/z` 与直线距离。演示代码按模块归位：底盘短动作与地图路线在 `modules/chassis/app/`，物料定位与普通视觉预览在 `modules/vision/app/demo.py`，机械臂在 `modules/arm/app/demo.py`，舵机在 `modules/servo/app/demo.py`；除了物料定位，其余都默认不调用。
 
@@ -369,3 +369,64 @@ python -m unittest modules.vision.test.unit.test_vision -v
 ```
 
 离线单测不依赖 TensorRT 与摄像头，只验证预处理、解码、NMS、类名与测距纯计算逻辑。
+
+## 抓取（grasp）
+
+摄像头识别 + 机械臂抓取：俯视相机测出**物料**与**爪上靶标**的位置，换算成机械臂的圆柱
+关节量，再驱动三轴和夹爪完成一次抓取。完整说明见 [docs/抓取坐标链路.md](docs/抓取坐标链路.md)。
+
+链路上每一级都独立成一个可离线自测的薄模块，依赖方向只能从上到下：
+
+| 层 | 文件 | 职责 |
+|---|---|---|
+| 编排 | `modules/grasp/drive/pipeline.py` | 安全廊道、闭环微调、异常收尾；只认圆柱位姿和三个抽象接口 |
+| 感知适配 | `modules/grasp/drive/perception.py` | 一帧 → 物料位姿 + 机械臂位姿 |
+| 视觉 | `modules/vision/drive/cell_targets.py` | 同一帧里按颜色区分靶标与物料 |
+| 针孔模型 | `modules/vision/drive/pinhole.py` | 像素 ↔ 相机系毫米 |
+| 平面标定 | `modules/vision/drive/calibration.py` | 相机水平面 → 基座平面（θ 零点 + 半径） |
+| 运动学 | `modules/arm/drive/kinematics.py` | 圆柱正逆解、最短转角、mm/度 ↔ 脉冲、可达性 |
+| 夹爪 | `modules/servo/drive/gripper.py` | 开合与读回 |
+
+几个刻意的设计决定：
+
+- **中心只有三个标定参数**（基座轴像点 x/y + θ 零点），**没有缩放**——尺度由像素焦距承担，
+  再放一个缩放会和焦距互相吞掉。
+- **直线轴只需要 `mm_per_motor_rev`**，也就是丝杠导程 `L` 与减速比 `g` 的商；不必拆机量导程。
+- **相机同时是位置传感器**：仰视不动、物料不动，重看物料拿不到任何关于机械臂的信息，
+  所以闭环看的是**爪上的靶标**。也因此不需要回零：上电后测一次靶标就知道臂在哪。
+- **夹爪读回值是白送的抓取检测**：夹紧时读回没到闭合位，说明爪口之间有东西
+  （`PickResult.held_something`）。
+- **转角度前必须先缩回抬升**：伸缩臂在伸出状态下转底座会把整条臂横扫过工作区。
+  编排层强制经 `safe_pose` 走一段已知的安全廊道，并且只走最短转角。
+- **失败一律不张爪**：中途异常只停轴和失能，松开爪子会把已经抓住的物料掉下去。
+
+配置分成四份：机械常数在 `modules/arm/config.json`，相机标定结果在
+`modules/vision/calibration.json`，目标尺寸颜色在 `modules/vision/config.json`，
+**策略参数**（余量、夹持比例、闭环次数与容差）在 `modules/grasp/config.json`。
+换一台机器只重标，不改策略。
+
+### 标定
+
+抓取牵涉的标定最多，缺一项都会变成一句难懂的运行时报错，所以菜单 19 会在**打开硬件之前**
+先把缺的项一次列全并拒绝运行。实验清单（A0 确认减速比 → A 平面标定 → A′ 重标焦距 →
+B/C 标 `mm_per_motor_rev` → D 台面深度 → E 夹爪与 TCP → F 行程与安全位 → G 重复精度与背隙）
+见 [docs/抓取坐标链路.md](docs/抓取坐标链路.md)。
+
+```powershell
+python test.py                                             # 菜单选 19
+python -m modules.grasp.test.manual.grasp --observe-only   # 只看不动，核对标定
+```
+
+### 自测
+
+每层都能单独跑，不需要硬件；编排层用假机械臂 + 假夹爪 + 自洽的观测夹具跑通整条流程：
+
+```powershell
+python -m modules.vision.drive.pinhole
+python -m modules.vision.drive.calibration
+python -m modules.vision.drive.cell_targets
+python -m modules.arm.drive.kinematics
+python -m modules.servo.drive.gripper
+python -m modules.grasp.drive.pipeline
+```
+

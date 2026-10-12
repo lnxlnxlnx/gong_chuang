@@ -13,6 +13,7 @@ from project_paths import PROJECT_ROOT
 MANUAL_TEST_DIRS: tuple[Path, ...] = (
     PROJECT_ROOT / "modules" / "arm" / "test" / "manual",
     PROJECT_ROOT / "modules" / "chassis" / "test" / "manual",
+    PROJECT_ROOT / "modules" / "grasp" / "test" / "manual",
     PROJECT_ROOT / "modules" / "laser_scan" / "test" / "manual",
     PROJECT_ROOT / "modules" / "lidar" / "test" / "manual",
     PROJECT_ROOT / "modules" / "motor" / "test" / "manual",
