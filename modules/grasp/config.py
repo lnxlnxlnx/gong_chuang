@@ -43,9 +43,6 @@ class GraspConfig:
     grip_ratio: float = 0.5
     #: 靶标相对实际夹持点的竖直偏移（毫米），靶标在夹持点上方时为正。
     marker_to_grasp_mm: float = 0.0
-    #: 回零后核对 ``safe_pose`` 的容差（毫米）。单圈回零落到错误的圈上时驱动器不会报错，
-    #: 只有这一次相机校验能发现，所以容差不能放得太松。
-    home_tolerance_mm: float = 5.0
     #: 抓取流程统一使用的转速；``None`` 表示沿用 ``modules/arm/config.json`` 的值。
     motion_rpm: Optional[int] = None
     correction: CorrectionSettings = field(default_factory=CorrectionSettings)
@@ -71,7 +68,6 @@ def load_grasp_config(config_path: Path = DEFAULT_CONFIG_PATH) -> GraspConfig:
         clearance_mm=_non_negative(root.get("clearance_mm", 25.0), "clearance_mm"),
         grip_ratio=_ratio(root.get("grip_ratio", 0.5), "grip_ratio"),
         marker_to_grasp_mm=_number(root.get("marker_to_grasp_mm", 0.0), "marker_to_grasp_mm"),
-        home_tolerance_mm=_positive(root.get("home_tolerance_mm", 5.0), "home_tolerance_mm"),
         motion_rpm=_optional_rpm(root.get("motion_rpm")),
         correction=correction,
     )

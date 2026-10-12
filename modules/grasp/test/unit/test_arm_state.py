@@ -1,7 +1,7 @@
-"""机械臂状态：来源跟踪、对账策略，以及"未知"保护。
+"""机械臂状态：来源标记、共享语义，以及"未知"保护。
 
-这一层的价值全在"位姿是怎么来的"上——回零给绝对参考、相机给对账、命令量累加会漂。
-所以测试的重点不是数值，而是**来源与由此推出的策略**。
+这一层**只记状态、不做判断**，所以测试的重点不是策略，而是"事实有没有被如实记下来"：
+来源是什么、未知时会不会被拒绝、同一个实例是不是同一份状态。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class ArmStateFreshTests(unittest.TestCase):
         self.assertEqual(state.source, UNKNOWN)
         self.assertFalse(state.is_known)
         self.assertFalse(state.is_absolute)
-        self.assertFalse(state.needs_verification)
+        self.assertIsNone(state.pose)
 
     def test_an_unknown_state_refuses_to_hand_out_a_pose(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "未知"):
@@ -49,19 +49,28 @@ class ArmStateFreshTests(unittest.TestCase):
         state.mark_unknown()
 
         self.assertFalse(state.is_known)
+        self.assertIsNone(state.pose)
         self.assertEqual(state.source, UNKNOWN)
-        self.assertEqual(state.moves_since_verification, 0)
+
+    def test_marking_unknown_keeps_what_the_jaws_already_did(self) -> None:
+        """夹爪状态是"已经发生的事"，不该被位姿失效一起抹掉。"""
+        state = ArmState(pose=HOME_POSE, source=HOMED)
+        state.record_gripper(position=430, reached=False)
+
+        state.mark_unknown()
+
+        self.assertTrue(state.gripper_holds)
+        self.assertEqual(state.gripper_position, 430)
 
 
 class ArmStateSourceTests(unittest.TestCase):
-    def test_homing_is_an_absolute_reference_and_needs_no_reconciliation(self) -> None:
+    def test_homing_is_an_absolute_reference(self) -> None:
         state = ArmState()
 
         state.record_home(HOME_POSE)
 
         self.assertEqual(state.source, HOMED)
         self.assertTrue(state.is_absolute)
-        self.assertFalse(state.needs_verification)
         self.assertEqual(state.require_pose(), HOME_POSE)
 
     def test_measuring_is_also_absolute(self) -> None:
@@ -80,39 +89,38 @@ class ArmStateSourceTests(unittest.TestCase):
 
         self.assertEqual(state.source, DEAD_RECKONED)
         self.assertFalse(state.is_absolute)
+        self.assertTrue(state.is_known)
         self.assertEqual(state.require_pose(), NEXT_POSE)
 
-    def test_reconciling_resets_the_source_and_the_counter(self) -> None:
+    def test_a_measurement_restores_the_absolute_reference(self) -> None:
         state = ArmState()
         state.record_home(HOME_POSE)
         state.record_move(NEXT_POSE)
 
         state.record_measurement(NEXT_POSE)
 
+        self.assertTrue(state.is_absolute)
         self.assertEqual(state.source, MEASURED)
-        self.assertEqual(state.moves_since_verification, 0)
-        self.assertFalse(state.needs_verification)
 
 
-class ArmStateVerificationPolicyTests(unittest.TestCase):
-    def test_with_the_default_interval_every_dead_reckoned_move_asks_for_a_check(self) -> None:
-        state = ArmState(pose=HOME_POSE, source=HOMED)
-        state.record_move(NEXT_POSE)
-        self.assertTrue(state.needs_verification)
+class ArmStateSharingTests(unittest.TestCase):
+    def test_two_references_to_the_same_instance_share_one_state(self) -> None:
+        """这就是"唯一所有者"的意思：电机在别处被驱动，状态仍然只有一份。"""
+        state = ArmState()
+        elsewhere = state
 
-    def test_a_larger_interval_trades_drift_for_speed(self) -> None:
-        state = ArmState(pose=HOME_POSE, source=HOMED, verification_interval=3)
+        state.record_home(HOME_POSE)
 
-        for _ in range(2):
-            state.record_move(HOME_POSE)
-        self.assertFalse(state.needs_verification)
+        self.assertEqual(elsewhere.pose, HOME_POSE)
+        self.assertEqual(elsewhere.source, HOMED)
 
-        state.record_move(HOME_POSE)
-        self.assertTrue(state.needs_verification)
+    def test_two_instances_do_not_leak_into_each_other(self) -> None:
+        first = ArmState()
+        second = ArmState()
 
-    def test_an_unknown_state_never_asks_for_verification(self) -> None:
-        """未知状态该做的是回零或测量，而不是"对账"——没有东西可以对。"""
-        self.assertFalse(ArmState().needs_verification)
+        first.record_home(HOME_POSE)
+
+        self.assertFalse(second.is_known)
 
 
 class ArmStateGripperTests(unittest.TestCase):
@@ -139,7 +147,7 @@ class ArmStateGripperTests(unittest.TestCase):
         state.record_gripper(position=430, reached=False)
 
         described = state.summary()
-        self.assertIn("homed", described)
+        self.assertIn(HOMED, described)
         self.assertIn("夹着东西", described)
 
     def test_the_summary_says_so_when_the_jaws_have_not_moved(self) -> None:

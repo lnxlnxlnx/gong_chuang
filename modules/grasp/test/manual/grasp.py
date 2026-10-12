@@ -133,12 +133,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--home-only",
         action="store_true",
-        help="只回零并校验 safe_pose，不做抓取；用来单独验收回零是否落在正确的圈上",
-    )
-    parser.add_argument(
-        "--no-home",
-        action="store_true",
-        help="跳过回零，直接靠相机测量建立位姿（靶标必须在视野里）",
+        help="只回零，不做抓取；用来单独验收回零是否落到正确的位置",
     )
     parser.add_argument("--port", default=None, help="覆盖 Emm42 总线串口")
     parser.add_argument("--servo-port", default=None, help="覆盖舵机总线串口")
@@ -199,14 +194,11 @@ def main() -> None:
             arm.enable_all()
             gripper.initialize()
             print(f"摄像头 {camera_id}；窗口 {window!r}，按 q 关闭预览")
-            if args.no_home:
-                print("按 --no-home 跳过回零：位姿完全靠相机测靶标建立。")
-            else:
-                print("先回零并按序停在安全位，再用相机核对回零结果……")
-                parked = pipeline.home_and_park()
-                print(f"回零完成，安全位：{parked.summary()}；{pipeline.state.summary()}")
-                if args.home_only:
-                    return
+            if args.home_only:
+                # 回零是机械臂自己的动作，和抓取流程无关：这里直接调原语。
+                waited = arm.home_all()
+                print(f"回零完成（每轴等待 {waited[0]:.1f}s），位姿已可由相机测量确认。")
+                return
             run_grasp_once(pipeline=pipeline, gripper=gripper)
         finally:
             pipeline.abort()

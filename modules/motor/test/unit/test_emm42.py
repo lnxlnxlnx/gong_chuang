@@ -120,6 +120,30 @@ class Emm42DriverTests(unittest.TestCase):
         self.motor.home(HomeMode.MULTI_TURN_COLLISION)
         self.assertEqual(self.serial.writes, [bytes.fromhex("01 9A 02 00 6B")])
 
+    def test_absolute_zero_is_allowed_because_it_means_go_to_the_origin(self) -> None:
+        """绝对模式下 0 是"回原点"，是回零之后归位的唯一一条命令形式。"""
+        self.motor.move_absolute_pulses(0, rpm=300, acceleration=10)
+
+        self.assertEqual(
+            self.serial.writes,
+            [bytes.fromhex("01 FD 00 01 2C 0A 00 00 00 00 01 00 6B")],
+        )
+
+    def test_relative_zero_is_still_rejected(self) -> None:
+        """相对模式下 0 位移没有意义，照旧拒绝。"""
+        with self.assertRaisesRegex(ValueError, "relative"):
+            self.motor.move_relative_pulses(0, rpm=300, acceleration=10)
+
+        self.assertEqual(self.serial.writes, [])
+
+    def test_absolute_negative_position_still_encodes_ccw(self) -> None:
+        self.motor.move_absolute_pulses(-3200, rpm=300, acceleration=10)
+
+        self.assertEqual(
+            self.serial.writes,
+            [bytes.fromhex("01 FD 01 01 2C 0A 00 00 0C 80 01 00 6B")],
+        )
+
     def test_set_speed_rejects_invalid_rpm(self) -> None:
         with self.assertRaises(ValueError):
             self.motor.set_speed(Direction.CW, rpm=3001, acceleration=0)

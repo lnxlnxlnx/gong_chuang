@@ -216,15 +216,17 @@ class Emm42Driver:
     ) -> None:
         if isinstance(pulses, bool) or not isinstance(pulses, int):
             raise ValueError("pulses must be an integer")
-        # 位置命令不允许 0 位移
-        if pulses == 0:
-            raise ValueError("pulses must be non-zero")
+        # 相对模式下 0 位移没有意义；绝对模式下 0 是"回到原点"，必须允许——
+        # 这是回零之后归位的唯一一条命令形式。
+        if pulses == 0 and not absolute:
+            raise ValueError("pulses must be non-zero in relative mode")
         if not -0xFFFFFFFF <= pulses <= 0xFFFFFFFF:
             raise ValueError("pulses is outside the representable range")
         self._require_range("rpm", rpm, 0, self.MAX_RPM)
         self._require_range("acceleration", acceleration, 0, 255)
         self._write_position(
-            Direction.CW if pulses > 0 else Direction.CCW,
+            # 绝对模式下方向由驱动器自己算，所以 0 归到 CW 只是取一个确定值。
+            Direction.CW if pulses >= 0 else Direction.CCW,
             abs(pulses),
             rpm,
             acceleration,

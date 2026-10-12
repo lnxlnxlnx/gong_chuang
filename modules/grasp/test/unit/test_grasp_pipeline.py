@@ -9,9 +9,8 @@ from __future__ import annotations
 import math
 import unittest
 
-from modules.arm.config import ArmConfig, AxisConfig, HomingConfig
+from modules.arm.config import ArmConfig, AxisConfig
 from modules.arm.drive.kinematics import CylindricalPose, TravelLimit, normalize_degrees
-from modules.motor.drive.emm42 import HomeMode
 from modules.grasp.config import CorrectionSettings, GraspConfig
 from modules.grasp.drive.perception import CellObservation
 from modules.grasp.drive.pipeline import GraspError, GraspPipeline, _planar_error_mm
@@ -40,9 +39,6 @@ def arm_config(**overrides) -> ArmConfig:
         radial_limit=TravelLimit(40.0, 160.0),
         height_limit=TravelLimit(-5.0, 120.0),
         safe_pose=SAFE,
-        homing=HomingConfig(
-            mode=HomeMode.SINGLE_TURN_NEAREST, expected_seconds=1.0, settle_seconds=0.0
-        ),
     )
     settings.update(overrides)
     return ArmConfig(**settings)
@@ -91,18 +87,6 @@ class FakeArm:
         self.height += millimeters
         self._record("lift", millimeters)
 
-    def enable_all(self):
-        self.calls.append(("enable_all",))
-        self.events.append(("enable_all",))
-
-    def home_all(self, **_kwargs):
-        """模拟回零：三个轴各自回到零点，也就是安全姿态。"""
-        self.calls.append(("home_all",))
-        self.events.append(("home_all",))
-        self.base, self.radial, self.height = SAFE.base_degrees, SAFE.radial_mm, SAFE.height_mm
-        self._backlash = 0.0
-        self.poses.append((self.base, self.radial, self.height))
-
     def stop_all(self):
         self.calls.append(("stop_all",))
         self.events.append(("stop_all",))
@@ -146,13 +130,6 @@ class FixedObserver:
 
     def observe(self, _frame) -> CellObservation:
         return CellObservation(marker=self.marker, material=self.material)
-
-
-class MaterialOnlyObserver:
-    """只看得见物料：用来验证"回了零之后不需要靶标"。"""
-
-    def observe(self, _frame) -> CellObservation:
-        return CellObservation(marker=None, material=MATERIAL)
 
 
 class FakeGripper:
@@ -348,137 +325,6 @@ class GraspSequenceTests(unittest.TestCase):
 
         self.assertTrue(seen)
         self.assertTrue(all(rpm is None for rpm in seen), seen)
-
-
-class GraspHomingTests(unittest.TestCase):
-    """回零路径：它给出绝对参考，所以之后不再依赖爪上靶标。"""
-
-    def build(self, *, marker_after_home, marker_seen=True, backlash_mm=0.0):
-        events: list = []
-        arm = FakeArm(events, backlash_mm=backlash_mm)
-
-        class HomingObserver:
-            """回零校验时（也只在那时）才吐出靶标；其余时候只给物料。"""
-
-            def __init__(self) -> None:
-                self.calls = 0
-
-            def observe(self, _frame):
-                self.calls += 1
-                marker = marker_after_home if marker_seen else None
-                return CellObservation(marker=marker, material=MATERIAL)
-
-        gripper = FakeGripper(reached=False)
-        pipeline, _, _ = build_pipeline(
-            arm=arm, events=events, gripper=gripper, observer=HomingObserver()
-        )
-        return pipeline, arm, gripper
-
-    def test_homing_records_the_safe_pose_as_an_absolute_reference(self) -> None:
-        pipeline, arm, _ = self.build(marker_after_home=SAFE)
-
-        parked = pipeline.home_and_park()
-
-        self.assertEqual(parked, SAFE)
-        self.assertIn(("home_all",), arm.calls)
-        self.assertIn(("enable_all",), arm.calls)
-        self.assertTrue(pipeline.state.is_absolute)
-        self.assertEqual(pipeline.state.source, "homed")
-        self.assertEqual(pipeline.state.pose, SAFE)
-
-    def test_a_home_that_landed_on_the_wrong_revolution_is_caught_by_the_camera(self) -> None:
-        """驱动器对这个错误给不出任何信号（0x36 读回来一样是 0），只有相机能发现。"""
-        from modules.grasp.drive.pipeline import GraspPipeline
-
-        events: list = []
-        arm = FakeArm(events)
-
-        class WrongTurnObserver:
-            def observe(self, _frame):
-                # 回零说自己在安全位，但相机看到靶标在别处——差了一大截。
-                return CellObservation(
-                    marker=CylindricalPose(90.0, 120.0, 20.0), material=MATERIAL
-                )
-
-        pipeline = GraspPipeline(
-            arm=arm,
-            gripper=FakeGripper(reached=True),
-            observer=WrongTurnObserver(),
-            frames=lambda: None,
-            config=grasp_config(),
-            arm_config=arm_config(),
-        )
-
-        with self.assertRaisesRegex(GraspError, "错误的圈"):
-            pipeline.home_and_park()
-
-        # 失败后位姿必须打回未知，绝不能带着一个错的绝对参考继续。
-        self.assertFalse(pipeline.state.is_known)
-        self.assertIn(("stop_all",), arm.calls)
-
-    def test_a_home_that_cannot_be_checked_fails_rather_than_assuming_it_is_fine(self) -> None:
-        pipeline, _, _ = self.build(marker_after_home=None, marker_seen=False)
-
-        with self.assertRaisesRegex(GraspError, "核对"):
-            pipeline.home_and_park()
-
-        self.assertFalse(pipeline.state.is_known)
-
-    def test_pick_up_works_without_a_marker_once_homed(self) -> None:
-        """这正是"回了零就不必依赖靶标"的那条路径：整轮抓取都不需要看到靶标。"""
-        pipeline, arm, gripper = self.build(marker_after_home=SAFE)
-        # 回零 + 校验阶段还要看得见靶标；校验通过之后让它离开视野。
-        pipeline.home_and_park()
-        pipeline.observer = MaterialOnlyObserver()
-
-        result = pipeline.pick_up()
-
-        self.assertEqual(result.correction_steps, 0)
-        self.assertTrue(result.held_something)
-        self.assertIn("close", gripper.calls)
-
-    def test_without_a_home_and_without_a_marker_the_pipeline_still_refuses(self) -> None:
-        """绝对参考和靶标一个都没有时不能动：那是纯粹的猜。"""
-        events: list = []
-        arm = FakeArm(events)
-
-        class BlindObserver:
-            def observe(self, _frame):
-                return CellObservation(marker=None, material=MATERIAL)
-
-        pipeline, _, _ = build_pipeline(arm=arm, events=events, observer=BlindObserver())
-
-        with self.assertRaisesRegex(GraspError, "靶标"):
-            pipeline.pick_up()
-
-        self.assertFalse(any(event[0] == "move" for event in events), events)
-
-    def test_a_dead_reckoned_pose_without_a_marker_is_not_good_enough(self) -> None:
-        """位姿只剩推算、靶标又看不到时闭环没有反馈，必须停下。"""
-        events: list = []
-        arm = FakeArm(events)
-        pipeline, _, _ = build_pipeline(arm=arm, events=events, observer=CoupledObserver(arm, MATERIAL, events))
-        pipeline.state.record_home(SAFE)
-        pipeline.state.record_move(CylindricalPose(5.0, 45.0, 55.0))
-
-        class MaterialOnlyObserver:
-            def observe(self, _frame):
-                return CellObservation(marker=None, material=MATERIAL)
-
-        pipeline.observer = MaterialOnlyObserver()
-
-        with self.assertRaisesRegex(GraspError, "推算"):
-            pipeline.pick_up()
-
-    def test_the_gripper_result_is_recorded_in_the_state(self) -> None:
-        pipeline, _, _ = self.build(marker_after_home=SAFE)
-        pipeline.home_and_park()
-        pipeline.observer = MaterialOnlyObserver()
-
-        pipeline.pick_up()
-
-        self.assertTrue(pipeline.state.gripper_holds)
-        self.assertEqual(pipeline.state.gripper_position, 430)
 
 
 class GraspFailureTests(unittest.TestCase):

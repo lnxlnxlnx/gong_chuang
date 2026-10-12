@@ -243,5 +243,144 @@ class HomingConfigWarningTests(unittest.TestCase):
         self.assertTrue(any("safe_pose" in item for item in warnings), warnings)
 
 
+def absolute_frame(*, motor_id: int, pulses: int, rpm: int = 10, acceleration: int = 5) -> bytes:
+    """手册 6.3.1：地址 + 0xFD + 方向 + 速度(2B) + 加速度 + 脉冲数(4B) + 绝对标志 + 同步标志 + 校验。"""
+    direction = 0x00 if pulses >= 0 else 0x01
+    return (
+        bytes((motor_id, 0xFD, direction))
+        + rpm.to_bytes(2, "big")
+        + bytes((acceleration,))
+        + abs(pulses).to_bytes(4, "big")
+        + bytes((0x01, 0x00, FRAME_TAIL))
+    )
+
+
+class ZeroingFrameTests(HomingTestCase):
+    def make_zeroable_arm(self):
+        from modules.arm.drive.kinematics import TravelLimit
+
+        return self.make_arm(
+            config=fixture_config(
+                homing=HomingConfig(mode=HomeMode.SINGLE_TURN_NEAREST),
+                base_limit=TravelLimit(-110.0, 110.0),
+                radial_limit=TravelLimit(40.0, 160.0),
+                height_limit=TravelLimit(-5.0, 120.0),
+            )
+        )
+
+    def test_one_axis_goes_to_absolute_pulse_zero(self) -> None:
+        arm = self.make_zeroable_arm()
+
+        arm.move_axis_to_zero("base")
+
+        self.assertEqual(
+            self.serial.writes,
+            [absolute_frame(motor_id=MOTOR_IDS["base"], pulses=0)],
+        )
+
+    def test_all_axes_retract_and_lift_before_turning_the_base(self) -> None:
+        """顺序和回零一致：伸出状态下转底座会把整条臂横扫过工作区。"""
+        arm = self.make_zeroable_arm()
+
+        arm.move_all_to_zero()
+
+        self.assertEqual(
+            [frame[0] for frame in self.serial.writes],
+            [MOTOR_IDS["extension"], MOTOR_IDS["lift"], MOTOR_IDS["base"]],
+        )
+
+    def test_every_frame_uses_absolute_mode(self) -> None:
+        arm = self.make_zeroable_arm()
+
+        arm.move_all_to_zero()
+
+        # 帧布局：id FD dir rpm(2B) acc 脉冲数(4B) 绝对标志 同步标志 6B —— 绝对标志在第 10 字节。
+        for frame in self.serial.writes:
+            self.assertEqual(frame[10], 0x01, frame.hex(" "))
+
+
+class ZeroingWaitTests(HomingTestCase):
+    def make_zeroable_arm(self):
+        from modules.arm.drive.kinematics import TravelLimit
+
+        return self.make_arm(
+            config=fixture_config(
+                homing=HomingConfig(mode=HomeMode.SINGLE_TURN_NEAREST),
+                base_limit=TravelLimit(-110.0, 110.0),
+                radial_limit=TravelLimit(40.0, 160.0),
+                height_limit=TravelLimit(-5.0, 120.0),
+            )
+        )
+
+    def test_the_wait_is_the_worst_case_travel_of_that_axis(self) -> None:
+        """绝对模式不知道当前位置，所以等的是按行程跨度算出的最坏情况。"""
+        from modules.motor.drive.motion import estimate_move_seconds
+
+        arm = self.make_zeroable_arm()
+
+        waited = arm.move_axis_to_zero("base")
+
+        # 底座行程 220°、g=5 -> 220 * 16000 / 360 = 9778 脉冲。
+        expected = estimate_move_seconds(9778, arm.config.rpm, PULSES_PER_REVOLUTION, arm.config.acceleration)
+        self.assertAlmostEqual(waited, expected, places=9)
+        self.assertEqual(self.sleep_calls, [expected])
+
+    def test_linear_axes_use_their_own_travel_span(self) -> None:
+        arm = self.make_zeroable_arm()
+
+        arm.move_axis_to_zero("extension")
+
+        # 伸缩行程 120 mm、40 mm/电机圈 -> 120 * 3200 / 40 = 9600 脉冲。
+        self.assertEqual(len(self.sleep_calls), 1)
+        self.assertGreater(self.sleep_calls[0], 0.0)
+        self.assertEqual(
+            self.serial.writes,
+            [absolute_frame(motor_id=MOTOR_IDS["extension"], pulses=0)],
+        )
+
+    def test_wait_false_sends_the_frame_without_blocking(self) -> None:
+        arm = self.make_zeroable_arm()
+
+        waited = arm.move_all_to_zero(wait=False)
+
+        self.assertEqual(self.sleep_calls, [])
+        self.assertEqual(tuple(waited), (0.0, 0.0, 0.0))
+        self.assertEqual(len(self.serial.writes), 3)
+
+    def test_uncalibrated_travel_refuses_to_guess_the_wait(self) -> None:
+        """行程没标定就估不出归位耗时——宁可让调用方自己等，也不假装知道。"""
+        arm = self.make_arm(
+            config=fixture_config(
+                homing=HomingConfig(mode=HomeMode.SINGLE_TURN_NEAREST),
+                base_limit=None,
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "wait=False"):
+            arm.move_axis_to_zero("base")
+
+        self.assertEqual(self.serial.writes, [])
+
+    def test_uncalibrated_linear_constant_is_reported_by_name(self) -> None:
+        from modules.arm.drive.kinematics import TravelLimit
+
+        arm = self.make_arm(
+            config=fixture_config(
+                homing=HomingConfig(mode=HomeMode.SINGLE_TURN_NEAREST),
+                radial_limit=TravelLimit(40.0, 160.0),
+                axes={
+                    "base": AxisConfig(motor_id=5, reduction_ratio=5),
+                    "lift": AxisConfig(motor_id=6, mm_per_motor_rev=40.0),
+                    "extension": AxisConfig(motor_id=7),
+                },
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "mm_per_motor_rev"):
+            arm.move_axis_to_zero("extension")
+
+        self.assertEqual(self.serial.writes, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -141,6 +141,86 @@ class RobotArm:
         self.config.require_homing()
         return tuple(self.home_axis(axis_name, wait=wait) for axis_name in self.HOME_ORDER)
 
+    # ------------------------------------------------------------- 归位
+    #
+    # 回零之后驱动器的位置计数器就在 0，所以"归位"是一条**绝对模式**命令回 0——
+    # 不需要在上位机累加反向位移。前提是计数器有效，也就是**必须先回过零**；
+    # 掉电之后计数器就没了，再次上电必须重新回零。
+    #
+    # 归位顺序与回零一致：先缩回、再升降、最后转底座。
+
+    #: 轴名 -> 配置里的行程区间字段名（行程是按"量"存的，不是按轴）。
+    AXIS_LIMIT_FIELDS = {
+        BASE_AXIS: "base_limit",
+        LIFT_AXIS: "height_limit",
+        EXTENSION_AXIS: "radial_limit",
+    }
+
+    def move_axis_to_zero(
+        self,
+        axis_name: str,
+        *,
+        rpm: Optional[int] = None,
+        acceleration: Optional[int] = None,
+        wait: bool = True,
+    ) -> float:
+        """绝对模式把一根轴送回脉冲位置 0；返回本次等待的秒数。
+
+        绝对模式**不知道当前位置**，所以耗时估不出来。``wait=True`` 等的是按该轴行程跨度
+        算出的**最坏情况**——一定不会半路提前返回。行程没标定时拒绝 ``wait=True``：宁可让你
+        显式地传 ``wait=False`` 自己等，也不要假装知道什么时候到位。
+        """
+        speed = self.config.rpm if rpm is None else rpm
+        accel = self.config.acceleration if acceleration is None else acceleration
+        seconds = 0.0
+        if wait:
+            seconds = estimate_move_seconds(
+                self._zero_travel_pulses(axis_name),
+                speed,
+                self.pulses_per_revolution,
+                accel,
+                self.settle_seconds,
+            )
+        self._motors[axis_name].move_absolute_pulses(0, speed, accel)
+        if wait:
+            self._sleep(seconds)
+        return seconds
+
+    def move_all_to_zero(self, *, rpm: Optional[int] = None, acceleration: Optional[int] = None, wait: bool = True) -> Tuple[float, ...]:
+        """按 伸缩 → 升降 → 底座 的顺序把三轴送回零点（归位）。
+
+        顺序和回零一致：伸出状态下转底座会把整条臂横扫过工作区。
+        必须在**回过零之后**调用——绝对模式依赖驱动器内部的位置计数器。
+        """
+        return tuple(
+            self.move_axis_to_zero(axis_name, rpm=rpm, acceleration=acceleration, wait=wait)
+            for axis_name in self.HOME_ORDER
+        )
+
+    def _zero_travel_pulses(self, axis_name: str) -> int:
+        """归位最坏要走多少脉冲：按该轴配置的行程跨度算。"""
+        field = self.AXIS_LIMIT_FIELDS[axis_name]
+        limit = getattr(self.config, field)
+        if limit is None:
+            raise ValueError(
+                f"limits 里对应 {axis_name} 的区间还没标定（{field}），估不出归位耗时；"
+                "请传 wait=False 自己等待"
+            )
+        span = limit.maximum - limit.minimum
+        if axis_name == self.BASE_AXIS:
+            pulses = base_pulses_for_degrees(
+                span,
+                pulses_per_revolution=self.pulses_per_revolution,
+                reduction_ratio=self.config.base_reduction,
+            )
+        else:
+            pulses = linear_pulses_for_mm(
+                span,
+                pulses_per_revolution=self.pulses_per_revolution,
+                mm_per_motor_rev=self.config.require_mm_per_motor_rev(axis_name),
+            )
+        return max(1, abs(pulses))
+
     def rotate_cw(
         self,
         pulses: int,

@@ -38,7 +38,7 @@
 | 使能扭矩 | `ID F3 AB 01 00 6B` | `enable(True)` | 每次位置移动前需要使能 |
 | 失能松轴 | `ID F3 AB 00 00 6B` | `enable(False)` | 测试结束和异常清理时执行 |
 | 相对位置移动 | `ID FD dir rpm(2B) acc pulses(4B) 00 00 6B` | `move_relative(...)` | 三轴测试唯一允许的运动命令 |
-| 绝对位置移动 | `ID FD dir rpm(2B) acc pulses(4B) 01 00 6B` | `move_absolute(...)` | 未完成可靠回零和软件坐标建立前禁止用于机械臂 |
+| 绝对位置移动 | `ID FD dir rpm(2B) acc pulses(4B) 01 00 6B` | `move_absolute(...)` / `RobotArm.move_all_to_zero()` | **前提是回过零**（驱动器内部计数器有效）；回零之后用它归位。**脉冲数为 0 是合法的**——那正是"回原点" |
 | 立即停止 | `ID FE 98 00 6B` | `stop()` | 紧急停止；之后仍应失能并关闭串口 |
 | 总线同步启动 | `00 FF 66 6B` | `trigger_sync_motion()` | 仅多轴协同且各轴行程边界已验证时使用 |
 | **触发回零** | `ID 9A mode sync 6B` | `home(mode)` / `RobotArm.home_all()` | mode：`00` 单圈就近、`01` 单圈方向、`02` 多圈碰撞、`03` 多圈限位开关。**前提：已使能扭矩、未触发堵转保护、单圈零点值有效** |
@@ -155,14 +155,26 @@
 
 ## 8. 当前实现与真机测试
 
-实现文件：`modules/arm/drive/robot_arm.py`。`RobotArm` 从 `modules/arm/config.json` 读取 5、6、7 三轴地址和运动参数，并共享一条串口总线；没有速度模式、绝对位置模式或可调用方覆盖的脉冲上限（`max_pulses` 始终生效）。单次调用的 `rpm`、`acceleration` 可以覆盖配置值，但必须落在驱动器协议范围内。
+实现文件：`modules/arm/drive/robot_arm.py`。`RobotArm` 从 `modules/arm/config.json` 读取 5、6、7
+三轴地址和运动参数，并共享一条串口总线；没有速度模式，也没有可调用方覆盖的脉冲上限
+（`max_pulses` 始终生效）。单次调用的 `rpm`、`acceleration` 可以覆盖配置值，但必须落在驱动器协议范围内。
 
 | 物理动作 | API | 返回值 |
 |---|---|---|
 | 底座顺/逆时针 | `rotate_cw(pulses, *, rpm=None, acceleration=None, wait=True)` / `rotate_ccw(...)` | 电机角度和基于 `g=5` 的输出轴角度 |
 | 向上/下 | `move_up(pulses, ...)` / `move_down(pulses, ...)` | 电机脉冲数与电机角度 |
 | 向前/后 | `move_forward(pulses, ...)` / `move_backward(pulses, ...)` | 电机脉冲数与电机角度 |
+| **回零** | `home_axis(axis_name, ...)` / `home_all(...)` | 等待的秒数 |
+| **归位** | `move_axis_to_zero(axis_name, ...)` / `move_all_to_zero(...)` | 等待的秒数 |
 | 全轴安全清理 | `stop_all()`、`disable_all()`、`close()` | 无 |
+
+**回零与归位都按 `伸缩 → 升降 → 底座` 的顺序**（`RobotArm.HOME_ORDER`）：伸出状态下转底座会把
+整条臂横扫过工作区。这两件事都要求**已经回过零**——归位走的是绝对模式，依赖驱动器内部的位置
+计数器，掉电即失效。调用方必须先 `enable_all()`：手册写明触发回零的前提是"已使能扭矩、
+未触发堵转保护、单圈零点值有效"。
+
+两者的等待时长都是**保守估算**（回零按 `homing.expected_seconds`，归位按该轴的行程跨度算最坏
+情况），因为 `Response=None` 时这两件事结束都没有回包。开到位回包后可以换成真正的到位等待。
 
 另有一组**带符号的单位制**动作，抓取流程用这一组（它算出来的是"从当前位姿到目标位姿的差"）。
 正数对应同一个 CW 方向，负数自动反向：

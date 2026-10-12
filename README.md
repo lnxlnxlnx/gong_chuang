@@ -379,8 +379,8 @@ python -m unittest modules.vision.test.unit.test_vision -v
 
 | 层 | 文件 | 职责 |
 |---|---|---|
-| 编排 | `modules/grasp/drive/pipeline.py` | 安全廊道、闭环微调、回零校验、异常收尾 |
-| 状态 | `modules/grasp/drive/arm_state.py` | 位姿与夹爪状态的唯一真相源（位姿 **+ 它是怎么来的**） |
+| 编排 | `modules/grasp/drive/pipeline.py` | 安全廊道、闭环微调、异常收尾 |
+| 状态 | `modules/grasp/drive/arm_state.py` | 位姿与夹爪状态的唯一真相源（位姿 **+ 它是怎么来的**），跨模块共享 |
 | 感知适配 | `modules/grasp/drive/perception.py` | 一帧 → 物料位姿 + 机械臂位姿 |
 | 视觉 | `modules/vision/drive/cell_targets.py` | 同一帧里按颜色区分靶标与物料 |
 | 针孔模型 | `modules/vision/drive/pinhole.py` | 像素 ↔ 相机系毫米 |
@@ -393,13 +393,17 @@ python -m unittest modules.vision.test.unit.test_vision -v
 - **中心只有三个标定参数**（基座轴像点 x/y + θ 零点），**没有缩放**——尺度由像素焦距承担，
   再放一个缩放会和焦距互相吞掉。
 - **直线轴只需要 `mm_per_motor_rev`**，也就是丝杠导程 `L` 与减速比 `g` 的商；不必拆机量导程。
-- **绝对位姿有两个来源，配合使用**：`0x9A` **回零**（快、不依赖靶标）建立参考，
-  **相机测爪上靶标**负责对账。相机固定、物料不动时重看物料拿不到任何关于机械臂的信息，
-  所以闭环看的是靶标；而回零之后整轮抓取都可以不看它。
-- **回零落到"错误的圈"时驱动器不会报错**（单圈编码器，`0x36` 读回来两种情况都是 0），
-  只有相机能发现——所以 `home_and_park()` 默认在回零后立刻核对 `safe_pose`，对不上就报错。
+- **绝对位姿有两个来源，库只给原语，编排留给 main.py**：`0x9A` **回零**给出绝对参考
+  （快、不依赖靶标），**相机测爪上靶标**给出实测位姿。什么时候回零、什么时候归位、
+  要不要拿两者对一下，都由调用方决定——库里没有任何自动判断。
+- **归位靠绝对模式回 0**：`RobotArm.move_all_to_zero()`。回零之后驱动器的位置计数器就在 0，
+  不必在上位机累加反向位移。顺带修了驱动的一个限制：绝对模式原先也拒绝 0 脉冲
+  （从相对模式抄来的检查），而"回原点"正是绝对模式 0。
+- **回零落到"错误的圈"时驱动器不会报错**（单圈编码器，`0x36` 读回来两种情况都是 0）。
+  库不做自动校验，只在 `homing_warnings()` 里把不可靠的配置组合提前列出来；
+  真要兜住就由调用方拿 `measure_pose()` 和 `safe_pose` 比一下。
 - **状态记的是"位姿 + 来源"**（`homed`/`measured`/`dead_reckoned`），不是"位姿 + 一个布尔值"。
-  由此决定何时该对账：有靶标就对，没靶标且欠账就拒绝动。
+  它只记事实、不做判断，但调用方据此就能决定下一步该不该重新对账。
 - **夹爪读回值是白送的抓取检测**：夹紧时读回没到闭合位，说明爪口之间有东西
   （`PickResult.held_something`）。
 - **转角度前必须先缩回抬升**：伸缩臂在伸出状态下转底座会把整条臂横扫过工作区。
@@ -422,12 +426,12 @@ B/C 标 `mm_per_motor_rev` → D 台面深度 → E 夹爪与 TCP → F 行程�
 ```powershell
 python test.py                                             # 菜单选 19
 python -m modules.grasp.test.manual.grasp --observe-only   # 只看不动，核对标定
-python -m modules.grasp.test.manual.grasp --home-only      # 只回零并核对，验收实验 H
-python -m modules.grasp.test.manual.grasp --no-home        # 不回零，位姿全靠相机
+python -m modules.grasp.test.manual.grasp --home-only      # 只回零，验收实验 H
 ```
 
-> 用回零方案时，断电重启后**再跑一次** `--home-only`：单圈回零的多义性只在"断电时轴停在
-> 别处"时才暴露。手动把底座转过半圈再上电，如果相机核对报"对不上"，说明你确实需要限位开关。
+> 用"每次用完归位"这条路线时，断电重启后**再跑一次** `--home-only`：单圈回零的多义性只在
+> "断电时轴停在别处"时才暴露。手动把底座转过半圈再上电，如果停的位置不对，说明你确实需要
+> 限位开关。
 
 ### 自测
 
