@@ -40,6 +40,7 @@ from modules.arm.drive.kinematics import (
     shortest_angle_delta_degrees,
 )
 from modules.grasp.config import GraspConfig, load_grasp_config
+from modules.grasp.drive.arm_state import ArmState
 from modules.grasp.drive.perception import CellObservation
 from modules.servo.drive.gripper import GripperReport
 
@@ -60,6 +61,8 @@ class ArmLike(Protocol):
     def move_base_degrees(self, degrees: float, **kwargs) -> object: ...
     def move_lift_mm(self, millimeters: float, **kwargs) -> object: ...
     def move_radial_mm(self, millimeters: float, **kwargs) -> object: ...
+    def enable_all(self) -> None: ...
+    def home_all(self, **kwargs) -> object: ...
     def stop_all(self) -> None: ...
     def disable_all(self) -> None: ...
     def close(self) -> None: ...
@@ -120,6 +123,7 @@ class GraspPipeline:
         frames: Callable[[], object],
         config: Optional[GraspConfig] = None,
         arm_config: Optional[ArmConfig] = None,
+        state: Optional[ArmState] = None,
     ) -> None:
         self.arm = arm
         self.gripper = gripper
@@ -127,8 +131,9 @@ class GraspPipeline:
         self.frames = frames
         self.config = config if config is not None else load_grasp_config()
         self.arm_config = arm_config if arm_config is not None else load_arm_config()
-        #: 最近一次已知的机械臂位姿；``None`` 表示还没测过。
-        self._pose: Optional[CylindricalPose] = None
+        #: 位姿与夹爪状态的唯一真相源。默认自己建一个；需要跨模块共享时传进来。
+        #: 传进来的实例若已经记录过回零结果，流程就能在没有靶标的情况下直接跑。
+        self.state = state if state is not None else ArmState()
 
     # ------------------------------------------------------------- 观测
     def observe(self) -> CellObservation:
@@ -136,20 +141,57 @@ class GraspPipeline:
         return self.observer.observe(self.frames())
 
     def measure_pose(self) -> CylindricalPose:
-        """用相机重新测量机械臂当前位姿（靠爪上靶标），并刷新内部状态。"""
+        """用相机测量机械臂当前位姿（靠爪上靶标），并记进状态。
+
+        这是"主动对账"：看不到靶标就报错，而不是沿用旧位姿。
+        """
         observation = self.observe()
         if observation.marker is None:
             raise GraspError(
                 "画面里看不到夹爪靶标；先确认 targets.marker_diameter_mm 和靶标颜色已配置，"
                 "且靶标装在爪顶、朝向镜头"
             )
-        self._pose = _normalized(observation.marker)
-        return self._pose
+        self.state.record_measurement(_normalized(observation.marker))
+        return self.state.require_pose()
 
     @property
     def pose(self) -> Optional[CylindricalPose]:
-        """最近一次已知位姿；没测过就是 ``None``。"""
-        return self._pose
+        """最近一次已知位姿；未知就是 ``None``。"""
+        return self.state.pose
+
+    def _update_pose(self, observation: CellObservation) -> None:
+        """看到靶标就顺手对一次账；看不到就不动状态。
+
+        位姿可以来自回零（绝对参考）或上一轮的对账，所以**靶标不是必需的**。
+        但没有靶标又完全不知道位姿时，后面任何运动都是猜的——那时才必须报错。
+        """
+        if observation.marker is not None:
+            self.state.record_measurement(_normalized(observation.marker))
+
+    def _require_known_pose(self) -> CylindricalPose:
+        """内部用：只要求"知道位姿"，不问够不够信。"""
+        if not self.state.is_known:
+            raise GraspError(
+                "既看不到夹爪靶标、也没有已知位姿：先回零，或让靶标进入视野后再动"
+            )
+        return self.state.require_pose()
+
+    def _require_trustworthy(self, observation: CellObservation) -> CylindricalPose:
+        """在每一轮动作的**边界**上校验位姿够不够信。
+
+        这是唯一该问"要不要对账"的地方：一轮开始时有靶标就顺手对账，没有靶标就得确认
+        没有欠账。中途不再重复判断——同一轮里的几步移动是连续的，不该走两步就翻脸。
+        """
+        if not self.state.is_known:
+            raise GraspError(
+                "既看不到夹爪靶标、也没有已知位姿：先回零，或让靶标进入视野后再动"
+            )
+        if observation.marker is None and self.state.needs_verification:
+            raise GraspError(
+                "位姿已经靠推算走了不少步，又没有靶标可以核对："
+                "先回零，或让靶标进入视野对一次账"
+            )
+        return self.state.require_pose()
 
     # ------------------------------------------------------------- 主流程
     def pick_up(self) -> PickResult:
@@ -159,10 +201,13 @@ class GraspPipeline:
         下降段是**盲走**：爪子压上去会遮住物料，所以微调必须在下降之前收敛完。
         """
         try:
-            observation = self._observe_both()
-            material = observation.material
-            if material is None:  # _observe_both 已保证，这里只为类型收窄
+            observation = self.observe()
+            if observation.material is None:
                 raise GraspError("画面里没有物料")
+            material = observation.material
+            # 看到靶标就顺手对账；看不到就沿用回零或上一轮留下的位姿。
+            self._update_pose(observation)
+            self._require_trustworthy(observation)
 
             grasp_height = marker_height_for_grasp(
                 material_height_mm=material.height_mm,
@@ -180,13 +225,13 @@ class GraspPipeline:
             correction_steps = self._visual_align()
 
             # 微调之后就地下降：物料没动，所以降到当前 (θ, r) 正上方即可。
-            if self._pose is None:
-                raise GraspError("内部状态丢失了机械臂位姿")
+            current = self._require_known_pose()
             grasp_pose = CylindricalPose(
-                self._pose.base_degrees, self._pose.radial_mm, grasp_height
+                current.base_degrees, current.radial_mm, grasp_height
             )
             self._command(grasp_pose)
             report = self.gripper.close_jaws()
+            self.state.record_gripper(position=report.position, reached=report.reached)
 
             self._command(
                 CylindricalPose(
@@ -209,11 +254,12 @@ class GraspPipeline:
 
     def place_at(self, pose: CylindricalPose) -> GripperReport:
         """把手里拿的东西放到指定位姿：过去 → 下降 → 张开 → 退回安全位。"""
-        self.measure_pose()
+        self._establish_pose()
         self._require_reachable(pose)
         try:
             self._command(pose)
             report = self.gripper.open_jaws()
+            self.state.record_gripper(position=report.position, reached=report.reached)
             self._command(
                 CylindricalPose(
                     pose.base_degrees,
@@ -229,15 +275,61 @@ class GraspPipeline:
 
     def park(self) -> CylindricalPose:
         """退到安全位并停下；每个循环开始或结束时用它。"""
-        self.measure_pose()
+        self._establish_pose()
         try:
             self._command(self.arm_config.require_safe_pose())
         except Exception:
             self.abort()
             raise
-        if self._pose is None:
-            raise GraspError("内部状态丢失了机械臂位姿")
-        return self._pose
+        return self._require_known_pose()
+
+    def home_and_park(self, *, verify: bool = True) -> CylindricalPose:
+        """按序回零并停在安全位，把状态确立为绝对参考。
+
+        顺序由 :attr:`RobotArm.HOME_ORDER` 固定为**伸缩 → 升降 → 底座**：先缩回、再升降、
+        最后转底座，和运动时的安全廊道是同一条规矩。因此这要求三个轴的零点都设在安全姿态
+        上，回零结束时机臂正好停在 ``safe_pose``。
+
+        ``verify=True`` 时回零后立刻用相机对一次账。**这一步不能省**：单圈回零落到错误的
+        圈上时驱动器给不出任何异常信号，``0x36`` 读回来一样是 0，只有外部观测能发现。
+        对不上就直接报错，不要带着一个错的绝对参考继续。
+        """
+        safe_pose = self.arm_config.require_safe_pose()
+        self.arm_config.require_homing()
+        try:
+            self.arm.enable_all()
+            self.arm.home_all()
+            self.state.record_home(safe_pose)
+            if verify:
+                self._verify_home(safe_pose)
+        except Exception:
+            self.state.mark_unknown()
+            self.abort()
+            raise
+        return safe_pose
+
+    def _verify_home(self, expected: CylindricalPose) -> None:
+        """回零后用相机核对：对不上就说明落到了错误的圈。
+
+        核对通过时**不改位姿来源**：参考仍然是回零（驱动器自己走到零点，重复精度通常优于
+        相机标定残差），相机在这里只是确认，不是重新定位。
+        """
+        observation = self.observe()
+        if observation.marker is None:
+            raise GraspError(
+                "回零后看不到靶标，无法核对回零是否落在正确的圈上；"
+                "把靶标转进视野，或确认它没有被挡住"
+            )
+        measured = _normalized(observation.marker)
+        error = _planar_error_mm(measured, expected)
+        height_error = abs(measured.height_mm - expected.height_mm)
+        if error > self.config.home_tolerance_mm or height_error > self.config.home_tolerance_mm:
+            raise GraspError(
+                f"回零结果与 safe_pose 对不上：平面差 {error:.1f} mm、高度差 "
+                f"{height_error:.1f} mm（容差 {self.config.home_tolerance_mm:.1f} mm）。"
+                "多半是单圈回零落到了错误的圈上——驱动器不会报这个错，"
+                "只有这里能发现。检查断电前是否停在零点附近，或改用多圈有限位开关回零"
+            )
 
     def abort(self) -> None:
         """失败路径的统一收尾：停三轴、失能。
@@ -259,24 +351,21 @@ class GraspPipeline:
     # ------------------------------------------------------------- 运动
     def _command(self, target: CylindricalPose) -> None:
         """走到 ``target``；要转角度时先经安全廊道缩回抬升。"""
-        if self._pose is None:
-            raise GraspError("还不知道机械臂当前位置；先 measure_pose()")
+        current = self._require_known_pose()
         target = _normalized(target)
         self._require_reachable(target)
-        delta_base = shortest_angle_delta_degrees(
-            self._pose.base_degrees, target.base_degrees
-        )
+        delta_base = shortest_angle_delta_degrees(current.base_degrees, target.base_degrees)
         if abs(delta_base) <= ANGLE_EPSILON_DEGREES:
             # 不转角度：先对齐平面，再改高度（下降落到物料上是这条路径）。
             self._advance(
-                CylindricalPose(target.base_degrees, target.radial_mm, self._pose.height_mm)
+                CylindricalPose(target.base_degrees, target.radial_mm, current.height_mm)
             )
             self._advance(target)
             return
         safe = self.arm_config.require_safe_pose()
         for waypoint in (
-            CylindricalPose(self._pose.base_degrees, safe.radial_mm, self._pose.height_mm),
-            CylindricalPose(self._pose.base_degrees, safe.radial_mm, safe.height_mm),
+            CylindricalPose(current.base_degrees, safe.radial_mm, current.height_mm),
+            CylindricalPose(current.base_degrees, safe.radial_mm, safe.height_mm),
             CylindricalPose(target.base_degrees, safe.radial_mm, safe.height_mm),
             CylindricalPose(target.base_degrees, target.radial_mm, safe.height_mm),
             target,
@@ -285,22 +374,19 @@ class GraspPipeline:
 
     def _advance(self, waypoint: CylindricalPose) -> None:
         """走到只差一个坐标的 ``waypoint``；顺序固定为 伸缩 → 升降 → 旋转。"""
-        if self._pose is None:
-            raise GraspError("还不知道机械臂当前位置；先 measure_pose()")
+        current = self._require_known_pose()
         self._require_reachable(waypoint)
-        delta_base = shortest_angle_delta_degrees(
-            self._pose.base_degrees, waypoint.base_degrees
-        )
-        delta_radial = waypoint.radial_mm - self._pose.radial_mm
-        delta_height = waypoint.height_mm - self._pose.height_mm
+        delta_base = shortest_angle_delta_degrees(current.base_degrees, waypoint.base_degrees)
+        delta_radial = waypoint.radial_mm - current.radial_mm
+        delta_height = waypoint.height_mm - current.height_mm
         if abs(delta_radial) > LENGTH_EPSILON_MM:
             self._move(self.arm.move_radial_mm, delta_radial)
         if abs(delta_height) > LENGTH_EPSILON_MM:
             self._move(self.arm.move_lift_mm, delta_height)
         if abs(delta_base) > ANGLE_EPSILON_DEGREES:
             self._move(self.arm.move_base_degrees, delta_base)
-        # 命令发出且 wait=True 已等完，就把内部状态推进到 waypoint（角度照测量域归一）。
-        self._pose = _normalized(waypoint)
+        # 命令发出且 wait=True 已等完，就把状态推进到 waypoint（角度照测量域归一）。
+        self.state.record_move(_normalized(waypoint))
 
     def _move(self, action: Callable[..., object], value: float) -> None:
         rpm = self.config.motion_rpm
@@ -315,17 +401,23 @@ class GraspPipeline:
         只动平面对（θ, r），不动高度。固定相机看固定物料是拿不到反馈的，所以这里看的是
         **爪上的靶标**：它的平面位置就是机械臂的平面位置。
 
-        迭代用尽仍未进容差时**报错而不继续**：此时下降多半会抓空，响亮地失败比悄悄抓空好。
+        目标丢了就看位姿够不够信：
+        - 位姿来自回零或刚测过（绝对参考）→ **跳过微调**，直接按当前位姿走。这正是"回了零
+          就不必依赖靶标"的那条路径；
+        - 位姿未知或只剩推算 → 报错。闭环没有反馈还继续下降，等于带着累积误差撞下去。
+
+        迭代用尽仍未进容差时同样报错：此时下降多半会抓空，响亮地失败比悄悄抓空好。
         真机上偶尔收敛慢是正常的，调大 ``correction.iterations`` 或放宽
         ``tolerance_mm``，不要靠忽略这个错误来解决。
         """
         last_error = float("inf")
         for step in range(self.config.correction.iterations):
-            observation = self._observe_both()
+            observation = self.observe()
             marker, material = observation.marker, observation.material
-            if marker is None or material is None:  # _observe_both 已保证
-                raise GraspError("闭环微调时丢了目标")
-            self._pose = _normalized(marker)
+            if marker is None or material is None:
+                return self._skip_alignment(step, marker, material)
+            marker = _normalized(marker)
+            self.state.record_measurement(marker)
             last_error = _planar_error_mm(marker, material)
             if last_error <= self.config.correction.tolerance_mm:
                 return step
@@ -338,7 +430,7 @@ class GraspPipeline:
                 self._move(self.arm.move_radial_mm, delta_radial)
             if abs(delta_base) > ANGLE_EPSILON_DEGREES:
                 self._move(self.arm.move_base_degrees, delta_base)
-            self._pose = _normalized(
+            self.state.record_move(
                 CylindricalPose(
                     marker.base_degrees + delta_base,
                     marker.radial_mm + delta_radial,
@@ -351,18 +443,22 @@ class GraspPipeline:
             "先看标定残差 rms_mm，再考虑调大 correction.iterations 或 tolerance_mm"
         )
 
+    def _skip_alignment(self, step: int, marker, material) -> int:
+        """靶标看不到时跳过微调。
+
+        边界校验已经在 :meth:`_require_trustworthy` 里做过了，这里不再重复判断；只有物料
+        不见了才是硬错误——那说明任务本身出了问题，不是位姿的问题。
+        """
+        if material is None:
+            raise GraspError("闭环微调时物料不见了；确认它没有被爪子挡住或移走")
+        return step
+
     # ------------------------------------------------------------- 校验
-    def _observe_both(self) -> CellObservation:
-        """观测并要求靶标和物料都在；把位姿刷成测量值。"""
+    def _establish_pose(self) -> CylindricalPose:
+        """确保有一个可信位姿：能看到靶标就对账，看不到就要求没有欠账。"""
         observation = self.observe()
-        if observation.marker is None and observation.material is None:
-            raise GraspError("画面里既没有靶标也没有物料")
-        if observation.marker is None:
-            raise GraspError("画面里看不到夹爪靶标；闭环没有反馈就无法继续")
-        if observation.material is None:
-            raise GraspError("画面里没有物料")
-        self._pose = _normalized(observation.marker)
-        return observation
+        self._update_pose(observation)
+        return self._require_trustworthy(observation)
 
     def _require_reachable(self, pose: CylindricalPose) -> None:
         try:

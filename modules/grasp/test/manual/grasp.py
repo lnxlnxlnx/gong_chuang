@@ -73,6 +73,9 @@ def calibration_report(
         missing.append(
             "抓取：marker_to_grasp_mm 还是 0；除非靶标正好在夹持点高度，否则必须实测后填上"
         )
+    # 回零自身的配置问题（safe_pose 缺失、单圈回零却超出一个电机圈……）由 ArmConfig 判断，
+    # 这里只是把它的结论并进同一份清单，不再重写一遍规则。
+    missing.extend(f"回零：{item}" for item in arm.homing_warnings())
     return missing
 
 
@@ -127,6 +130,16 @@ def run_grasp_once(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="摄像头识别 + 机械臂抓取")
     parser.add_argument("--observe-only", action="store_true", help="只看不动：打印观测后退出")
+    parser.add_argument(
+        "--home-only",
+        action="store_true",
+        help="只回零并校验 safe_pose，不做抓取；用来单独验收回零是否落在正确的圈上",
+    )
+    parser.add_argument(
+        "--no-home",
+        action="store_true",
+        help="跳过回零，直接靠相机测量建立位姿（靶标必须在视野里）",
+    )
     parser.add_argument("--port", default=None, help="覆盖 Emm42 总线串口")
     parser.add_argument("--servo-port", default=None, help="覆盖舵机总线串口")
     parser.add_argument("--camera", type=int, default=None, help="覆盖摄像头编号")
@@ -186,6 +199,14 @@ def main() -> None:
             arm.enable_all()
             gripper.initialize()
             print(f"摄像头 {camera_id}；窗口 {window!r}，按 q 关闭预览")
+            if args.no_home:
+                print("按 --no-home 跳过回零：位姿完全靠相机测靶标建立。")
+            else:
+                print("先回零并按序停在安全位，再用相机核对回零结果……")
+                parked = pipeline.home_and_park()
+                print(f"回零完成，安全位：{parked.summary()}；{pipeline.state.summary()}")
+                if args.home_only:
+                    return
             run_grasp_once(pipeline=pipeline, gripper=gripper)
         finally:
             pipeline.abort()

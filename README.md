@@ -379,7 +379,8 @@ python -m unittest modules.vision.test.unit.test_vision -v
 
 | 层 | 文件 | 职责 |
 |---|---|---|
-| 编排 | `modules/grasp/drive/pipeline.py` | 安全廊道、闭环微调、异常收尾；只认圆柱位姿和三个抽象接口 |
+| 编排 | `modules/grasp/drive/pipeline.py` | 安全廊道、闭环微调、回零校验、异常收尾 |
+| 状态 | `modules/grasp/drive/arm_state.py` | 位姿与夹爪状态的唯一真相源（位姿 **+ 它是怎么来的**） |
 | 感知适配 | `modules/grasp/drive/perception.py` | 一帧 → 物料位姿 + 机械臂位姿 |
 | 视觉 | `modules/vision/drive/cell_targets.py` | 同一帧里按颜色区分靶标与物料 |
 | 针孔模型 | `modules/vision/drive/pinhole.py` | 像素 ↔ 相机系毫米 |
@@ -392,15 +393,21 @@ python -m unittest modules.vision.test.unit.test_vision -v
 - **中心只有三个标定参数**（基座轴像点 x/y + θ 零点），**没有缩放**——尺度由像素焦距承担，
   再放一个缩放会和焦距互相吞掉。
 - **直线轴只需要 `mm_per_motor_rev`**，也就是丝杠导程 `L` 与减速比 `g` 的商；不必拆机量导程。
-- **相机同时是位置传感器**：仰视不动、物料不动，重看物料拿不到任何关于机械臂的信息，
-  所以闭环看的是**爪上的靶标**。也因此不需要回零：上电后测一次靶标就知道臂在哪。
+- **绝对位姿有两个来源，配合使用**：`0x9A` **回零**（快、不依赖靶标）建立参考，
+  **相机测爪上靶标**负责对账。相机固定、物料不动时重看物料拿不到任何关于机械臂的信息，
+  所以闭环看的是靶标；而回零之后整轮抓取都可以不看它。
+- **回零落到"错误的圈"时驱动器不会报错**（单圈编码器，`0x36` 读回来两种情况都是 0），
+  只有相机能发现——所以 `home_and_park()` 默认在回零后立刻核对 `safe_pose`，对不上就报错。
+- **状态记的是"位姿 + 来源"**（`homed`/`measured`/`dead_reckoned`），不是"位姿 + 一个布尔值"。
+  由此决定何时该对账：有靶标就对，没靶标且欠账就拒绝动。
 - **夹爪读回值是白送的抓取检测**：夹紧时读回没到闭合位，说明爪口之间有东西
   （`PickResult.held_something`）。
 - **转角度前必须先缩回抬升**：伸缩臂在伸出状态下转底座会把整条臂横扫过工作区。
-  编排层强制经 `safe_pose` 走一段已知的安全廊道，并且只走最短转角。
+  编排层强制经 `safe_pose` 走一段已知的安全廊道，并且只走最短转角。回零也照这条规矩来：
+  顺序固定为**伸缩 → 升降 → 底座**。
 - **失败一律不张爪**：中途异常只停轴和失能，松开爪子会把已经抓住的物料掉下去。
 
-配置分成四份：机械常数在 `modules/arm/config.json`，相机标定结果在
+配置分成四份：机械常数（含回零模式）在 `modules/arm/config.json`，相机标定结果在
 `modules/vision/calibration.json`，目标尺寸颜色在 `modules/vision/config.json`，
 **策略参数**（余量、夹持比例、闭环次数与容差）在 `modules/grasp/config.json`。
 换一台机器只重标，不改策略。
@@ -409,13 +416,18 @@ python -m unittest modules.vision.test.unit.test_vision -v
 
 抓取牵涉的标定最多，缺一项都会变成一句难懂的运行时报错，所以菜单 19 会在**打开硬件之前**
 先把缺的项一次列全并拒绝运行。实验清单（A0 确认减速比 → A 平面标定 → A′ 重标焦距 →
-B/C 标 `mm_per_motor_rev` → D 台面深度 → E 夹爪与 TCP → F 行程与安全位 → G 重复精度与背隙）
-见 [docs/抓取坐标链路.md](docs/抓取坐标链路.md)。
+B/C 标 `mm_per_motor_rev` → D 台面深度 → E 夹爪与 TCP → F 行程与安全位 → G 重复精度与背隙 →
+**H 回零零点**（用回零方案时）→ I 到位回包）见 [docs/抓取坐标链路.md](docs/抓取坐标链路.md)。
 
 ```powershell
 python test.py                                             # 菜单选 19
 python -m modules.grasp.test.manual.grasp --observe-only   # 只看不动，核对标定
+python -m modules.grasp.test.manual.grasp --home-only      # 只回零并核对，验收实验 H
+python -m modules.grasp.test.manual.grasp --no-home        # 不回零，位姿全靠相机
 ```
+
+> 用回零方案时，断电重启后**再跑一次** `--home-only`：单圈回零的多义性只在"断电时轴停在
+> 别处"时才暴露。手动把底座转过半圈再上电，如果相机核对报"对不上"，说明你确实需要限位开关。
 
 ### 自测
 
@@ -427,6 +439,7 @@ python -m modules.vision.drive.calibration
 python -m modules.vision.drive.cell_targets
 python -m modules.arm.drive.kinematics
 python -m modules.servo.drive.gripper
+python -m modules.grasp.drive.arm_state
 python -m modules.grasp.drive.pipeline
 ```
 

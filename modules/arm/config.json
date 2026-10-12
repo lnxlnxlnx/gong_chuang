@@ -20,6 +20,11 @@
       "mm_per_motor_rev": null
     }
   },
+  "homing": {
+    "mode": "nearest",
+    "expected_seconds": 12.0,
+    "settle_seconds": 0.5
+  },
   "limits": {
     "base_degrees": null,
     "radial_mm": null,

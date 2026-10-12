@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from modules.motor.drive.motion import DEFAULT_SETTLE_SECONDS, estimate_move_seconds
 from modules.motor.drive.emm42 import Direction, Emm42Driver, SerialPort
@@ -104,6 +104,42 @@ class RobotArm:
         """Immediately brake all axes; this is valid during position modules.motor.drive.motion."""
         for axis_name in AXIS_NAMES:
             self._motors[axis_name].stop()
+
+    # ------------------------------------------------------------- 回零
+    #
+    # 手册 7.1：单圈零点可以用驱动器菜单 ``O_Set → Set O``（或 ``0x93`` 命令）在**任意
+    # 姿态**设定，所以"回零"的语义是"回到你指定的那个姿态"。把三个轴的零点都设在安全
+    # 姿态上，回零结束时机械臂就停在 ``safe_pose``，不必再额外走一段。
+    #
+    # 手册 6.3.2 还写明触发回零的前提：**已使能扭矩、未触发堵转保护、单圈零点值有效**，
+    # 所以调用方必须先 ``enable_all()``。
+
+    #: 回零顺序：先缩回、再升降、最后转底座——和运动时的安全廊道是同一条规矩。
+    HOME_ORDER = (EXTENSION_AXIS, LIFT_AXIS, BASE_AXIS)
+
+    def home_axis(self, axis_name: str, *, wait: bool = True) -> float:
+        """Trigger one axis's homing; return how long was (or should be) waited.
+
+        回零耗时不确定，而 5/6/7 号驱动器是 ``Response=None``，回零结束不会回任何包，
+        所以 ``wait=True`` 只能等一个保守时长（``homing.expected_seconds + settle_seconds``）。
+        把驱动器菜单的 ``Response`` 改成 ``Reached``/``Both`` 并解析到位回包之后，
+        这里就能换成真正的到位等待。
+        """
+        homing = self.config.require_homing()
+        self._motors[axis_name].home(homing.mode)
+        if wait:
+            self._sleep(homing.wait_seconds)
+        return homing.wait_seconds
+
+    def home_all(self, *, wait: bool = True) -> Tuple[float, ...]:
+        """Home extension → lift → base so the arm can never sweep while extended.
+
+        单圈回零的零点在一圈里只有一个，所以**断电时轴必须停在零点附近**，否则会就近落到
+        错误的圈上——而且驱动器自己看不出来（``0x36`` 读回来一样是 0）。这一点只能靠外部
+        观测发现，见 ``modules.grasp.drive.pipeline`` 的回零校验。
+        """
+        self.config.require_homing()
+        return tuple(self.home_axis(axis_name, wait=wait) for axis_name in self.HOME_ORDER)
 
     def rotate_cw(
         self,
