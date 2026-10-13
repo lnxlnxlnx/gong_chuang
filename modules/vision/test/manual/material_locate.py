@@ -30,7 +30,7 @@ from modules.vision import (
     warn_blank_preview,
 )
 from modules.vision.config import TargetSettings, load_vision_config
-from modules.vision.drive.material_locate import parse_bgr, parse_depth_range
+from modules.vision.drive.material_locate import parse_bgr, parse_depth_range, parse_palette
 
 #: 每这么多帧打印一次中文结论。
 PRINT_EVERY = 30
@@ -73,6 +73,11 @@ def parse_args() -> argparse.Namespace:
                         default=targets.material_bgr,
                         help="物料顶面参考颜色 B,G,R（例如 165,252,114）；"
                              "默认读 config.json 的 targets.material_bgr，给了它就走颜色块定位")
+    parser.add_argument("--palette", dest="material_palette", type=parse_palette,
+                        default=targets.material_palette or None,
+                        help='物料调色板 "green:165,252,114;blue:248,122,41"；'
+                             "默认读 config.json 的 targets.material_palette，"
+                             "换物料颜色只改这里就行")
     parser.add_argument("--tolerance", type=float, default=targets.color_tolerance,
                         help=f"颜色容差（默认 {targets.color_tolerance}）")
     parser.add_argument("--diameter", type=float, default=targets.material_diameter_mm,
@@ -89,6 +94,7 @@ def run(
     conf: float = 0.25,
     depth_range: tuple[float, float] | None = None,
     material_bgr: tuple[float, float, float] | None = None,
+    material_palette: dict[str, tuple[float, float, float]] | None = None,
     colour_tolerance: float = 60.0,
     top_diameter_mm: float = 30.0,
 ) -> int:
@@ -112,6 +118,7 @@ def run(
             focal_px=focal_px,
             depth_range_mm=depth_range,
             material_bgr=material_bgr,
+            material_palette=material_palette,
             colour_tolerance=colour_tolerance,
             top_diameter_mm=top_diameter_mm,
         ) as locator, USBCamera(camera_id, width=1280, height=720).initialize() as camera:
@@ -121,7 +128,11 @@ def run(
             else:
                 print(f"工作距离先验 {depth_range[0]:.0f}–{depth_range[1]:.0f} mm，"
                       "半径窗口按针孔模型算")
-            if material_bgr is None:
+            if material_palette:
+                names = "、".join(material_palette)
+                print(f"物料调色板 {names}，容差 {colour_tolerance:.0f}："
+                      "走颜色块定位，夹爪与背景不进掩膜")
+            elif material_bgr is None:
                 print("没有物料颜色：走霍夫圆 + 形状判据（夹爪圆弧可能被当成候选）")
             else:
                 print(f"物料颜色 BGR={material_bgr}，容差 {colour_tolerance:.0f}："
@@ -173,6 +184,7 @@ def main() -> None:
             conf=args.conf,
             depth_range=args.depth_range,
             material_bgr=args.material_bgr,
+            material_palette=args.material_palette,
             colour_tolerance=args.tolerance,
             top_diameter_mm=args.diameter,
         )

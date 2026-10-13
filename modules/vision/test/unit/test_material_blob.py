@@ -7,8 +7,12 @@ import unittest
 import numpy as np
 
 from modules.vision.drive.hough_lock import synthetic_rings
-from modules.vision.drive.material_blob import ColourBlobLocator, synthetic_scene
-from modules.vision.drive.material_locate import MaterialLocator, parse_bgr
+from modules.vision.drive.material_blob import (
+    ColourBlobLocator,
+    normalize_references,
+    synthetic_scene,
+)
+from modules.vision.drive.material_locate import MaterialLocator, parse_bgr, parse_palette
 
 from modules.vision.test.unit.test_material_locate import FakeYOLO
 
@@ -30,12 +34,57 @@ class ColourBlobLocatorTests(unittest.TestCase):
         self.assertAlmostEqual(region.radius, 90.0, delta=4)
 
     def test_the_jaw_and_the_table_never_enter_the_mask(self) -> None:
+        """白色夹爪和深色台面与参考色差得远，掩膜里不该有它们。"""
         mask = self.locator.mask(self.frame)
-        self.assertLess(int((mask > 0).sum()), 1.2 * np.pi * 90**2)
+        self.assertGreater(int(mask[240, 300]), 0)      # 物料顶面在掩膜里
+        self.assertEqual(int(mask[140, 300]), 0)        # 夹爪不在
+        self.assertEqual(int(mask[460, 10]), 0)         # 台面不在
+        self.assertLess(int((mask > 0).sum()), 0.5 * mask.size)  # 掩膜远小于整幅
 
     def test_radius_window_filters_by_equivalent_radius(self) -> None:
         self.assertEqual(len(self.locator.locate(self.frame, min_radius=150, max_radius=300)), 0)
         self.assertEqual(len(self.locator.locate(self.frame, min_radius=60, max_radius=120)), 1)
+
+    def test_a_same_coloured_bracket_is_not_a_material(self) -> None:
+        """调色板里有蓝色时，同色的 3D 打印件也会命中颜色；靠形状把它挡掉。"""
+        loose = ColourBlobLocator(MATERIAL_BGR, max_boundary_variation=None, min_fill_ratio=None)
+        self.assertEqual(len(self.locator.locate(self.frame)), 1)
+        self.assertGreater(len(loose.locate(self.frame)), 1)
+
+    def test_a_clipped_same_coloured_bracket_is_dropped_by_the_fill_ratio(self) -> None:
+        """被画面切掉的打印件量不出边界起伏，要靠填充率兜住。"""
+        import cv2
+
+        frame = np.full((480, 640, 3), (40, 70, 55), dtype=np.uint8)
+        cv2.rectangle(frame, (420, -60), (620, 40), MATERIAL_BGR, -1)   # 顶部被切掉
+        locator = ColourBlobLocator(MATERIAL_BGR)
+        self.assertEqual(locator.boundary_variation(
+            locator.mask_for(frame, MATERIAL_BGR),
+            cv2.connectedComponentsWithStats(locator.mask_for(frame, MATERIAL_BGR))[2][1],
+            cv2.connectedComponentsWithStats(locator.mask_for(frame, MATERIAL_BGR))[3][1],
+        ), None)
+        self.assertEqual(len(locator.locate(frame)), 0)
+
+    def test_a_blob_touching_the_frame_edge_is_kept(self) -> None:
+        """贴边的色块起伏测不准，不能因此把物料丢掉。"""
+        import cv2
+
+        frame = np.full((200, 200, 3), (40, 70, 55), dtype=np.uint8)
+        cv2.rectangle(frame, (0, 60), (60, 140), MATERIAL_BGR, -1)
+        self.assertEqual(len(self.locator.locate(frame)), 1)
+
+    def test_palette_keeps_one_region_per_object(self) -> None:
+        palette = ColourBlobLocator({"green": MATERIAL_BGR, "blue": (248.0, 122.0, 41.0)})
+        self.assertEqual(len(palette.locate(self.frame)), 1)
+
+    def test_normalize_references_accepts_one_colour_a_list_or_a_palette(self) -> None:
+        self.assertEqual(normalize_references(MATERIAL_BGR), (MATERIAL_BGR,))
+        self.assertEqual(len(normalize_references([MATERIAL_BGR, (1.0, 2.0, 3.0)])), 2)
+        self.assertEqual(len(normalize_references({"green": MATERIAL_BGR})), 1)
+        for bad in ({}, [], "green", ((1.0, 2.0),)):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    normalize_references(bad)
 
     def test_a_frame_without_the_colour_gives_nothing(self) -> None:
         self.assertEqual(len(self.locator.locate(synthetic_rings())), 0)
@@ -134,6 +183,55 @@ class ParseColourTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     parse_bgr(bad)
+
+    def test_palette_text_is_parsed(self) -> None:
+        self.assertEqual(
+            parse_palette("green:165,252,114;blue:248,122,41"),
+            {"green": (165.0, 252.0, 114.0), "blue": (248.0, 122.0, 41.0)},
+        )
+        self.assertEqual(
+            parse_palette({"green": (165.0, 252.0, 114.0)}),
+            {"green": (165.0, 252.0, 114.0)},
+        )
+        self.assertIsNone(parse_palette(None))
+        self.assertIsNone(parse_palette(""))
+
+    def test_invalid_palette_text_is_rejected(self) -> None:
+        for bad in ("green", "green:", ":165,252,114", "green:1,2"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    parse_palette(bad)
+
+
+class PaletteFallbackTests(unittest.TestCase):
+    """调色板里没有这块料时，退回霍夫并在报告里说清楚，而不是"什么都看不见"。"""
+
+    def test_a_palette_miss_falls_back_to_the_shape_judge(self) -> None:
+        locator = MaterialLocator(
+            yolo=FakeYOLO(), focal_px=500.0,
+            material_palette={"blue": (248.0, 122.0, 41.0)},   # 画面里其实是绿料
+        )
+        report = locator.locate(synthetic_scene())
+        self.assertTrue(locator.colour_first)
+        self.assertTrue(report.colour_fallback)
+        self.assertIn("调色板里没有这块料", report.summary())
+
+    def test_a_palette_hit_does_not_fall_back(self) -> None:
+        locator = MaterialLocator(
+            yolo=FakeYOLO(), focal_px=500.0,
+            material_palette={"green": MATERIAL_BGR},
+        )
+        report = locator.locate(synthetic_scene())
+        self.assertFalse(report.colour_fallback)
+        self.assertEqual(len(report.faces), 1)
+
+    def test_the_palette_wins_over_a_single_colour(self) -> None:
+        locator = MaterialLocator(
+            yolo=FakeYOLO(), focal_px=500.0,
+            material_bgr=(1.0, 2.0, 3.0),
+            material_palette={"green": MATERIAL_BGR},
+        )
+        self.assertEqual(locator.locator.references, (MATERIAL_BGR,))
 
 
 if __name__ == "__main__":

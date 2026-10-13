@@ -348,8 +348,9 @@ with locator, USBCamera(1, width=1280, height=720).initialize() as camera:
 标定，再通过 `MaterialLocator(focal_px=...)` 或独立命令行入口的 `--focal` 传入。
 **相机离物料很近（约 7–12 cm 这种机位）时要配两样东西**：`modules/vision/config.json`
 的 `targets.working_distance_mm`（例如 `[55.0, 160.0]`，霍夫半径窗口按针孔模型算）
-和 `targets.material_bgr`（物料顶面颜色，配了就改走颜色块定位，夹爪圆弧不再被当成物料）；
-菜单 18 可用 `--depth 60,85`、`--bgr 165,252,114` 临时覆盖。
+和 `targets.material_palette`（物料调色板，例如 `{"green": [165,252,114], "blue": [248,122,41]}`；
+配了就改走颜色块定位，夹爪圆弧不再被当成物料，**换一块料只加一行**）；
+菜单 18 可用 `--depth 60,85`、`--palette "green:165,252,114"` 临时覆盖。
 取距离请用 `report.best`（没有通过校验的顶面时是 `None`），不要取 `report.regions[0]`。
 详见 [modules/vision/docs/视觉物料定位.md](modules/vision/docs/视觉物料定位.md)。
 

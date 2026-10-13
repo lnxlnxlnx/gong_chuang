@@ -53,6 +53,9 @@ class TargetSettings:
     #: 相机到物料顶面的深度范围 ``(近, 远)`` 毫米；``None`` 表示不设先验。
     #: 给了它，物料定位的霍夫半径窗口就按针孔模型算，夹爪弧线一类的假圆会被排除。
     working_distance_mm: Optional[Tuple[float, float]] = None
+    #: 物料调色板 ``{类别名: (B, G, R)}``。换一块料只在这里加一行，不用改代码；
+    #: 给了它，物料定位就走颜色块（夹爪、台面、线材进不了掩膜）。空表示不按颜色区分。
+    material_palette: Mapping[str, Tuple[float, float, float]] = field(default_factory=dict)
 
     @property
     def can_split_by_color(self) -> bool:
@@ -215,7 +218,21 @@ def _targets(value: object) -> TargetSettings:
         working_distance_mm=_optional_depth_range(
             document.get("working_distance_mm"), "targets.working_distance_mm"
         ),
+        material_palette=_material_palette(
+            document.get("material_palette"), "targets.material_palette"
+        ),
     )
+
+
+def _material_palette(value: object, name: str) -> Mapping[str, Tuple[float, float, float]]:
+    """读 ``{"green": [165, 252, 114], ...}``；空对象表示不按颜色区分。"""
+    if value is None:
+        return {}
+    document = _mapping(value, name)
+    palette = {}
+    for key, colour in document.items():
+        palette[str(key)] = _optional_bgr(colour, f"{name}.{key}")  # type: ignore[assignment]
+    return palette
 
 
 def _plane_calibration(value: object) -> Optional[PlaneCalibration]:

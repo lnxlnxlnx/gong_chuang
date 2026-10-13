@@ -15,7 +15,7 @@ import argparse
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -111,6 +111,8 @@ class MaterialReport:
     focal_px: float | None = None
     #: 本帧实际使用的半径窗口 ``(最小, 最大)``；没配深度窗口时为 ``None``。
     radius_window_px: tuple[float, float] | None = None
+    #: 颜色块一个都没找到、退回霍夫形状判据时为 ``True``（多半是调色板没配这块料）。
+    colour_fallback: bool = False
 
     @property
     def present(self) -> bool:
@@ -153,6 +155,9 @@ class MaterialReport:
             f"检出 {len(self.regions)} 个候选圆面（接受 {len(self.faces)} 个，"
             f"丢掉 {len(self.rejected)} 个），YOLO 检出 {len(self.hits)} 个框"
         ]
+        if self.colour_fallback:
+            lines.append("  调色板里没有这块料：已退回霍夫的形状判据，"
+                         "请把它的颜色加进 targets.material_palette")
         if self.radius_window_px is not None:
             low, high = self.radius_window_px
             lines.append(f"  半径窗口 {low:.0f}–{high:.0f} px（按工作距离先验）")
@@ -176,7 +181,11 @@ class MaterialLocator:
             :class:`ColourBlobLocator` when ``material_bgr`` is given.
         material_bgr: 物料顶面的参考颜色（BGR）。给了它就以**颜色块**为准
             （夹爪、背景、线材根本进不了掩膜），不再用霍夫猜圆；``None`` 表示
-            不按颜色区分，走霍夫的形状判据。
+            不按颜色区分，走霍夫的形状判据。参见 ``material_palette``。
+        material_palette: ``{"green": [165,252,114], "blue": [248,122,41]}`` 这样的
+            **调色板**：换物料颜色只改配置，不用改代码。给了它就优先于
+            ``material_bgr``。颜色块一个都没找到时会自动退回霍夫的形状判据
+            （报告里 ``colour_fallback`` 为 True），免得"忘了配颜色"变成"什么都看不见"。
         colour_tolerance: 颜色容差（BGR 欧氏距离）。
         depth_range_mm: 相机到物料顶面的深度范围 ``(近, 远)``，单位毫米。给了它，
             每一帧的半径窗口就由针孔模型算出来（而不是按画幅猜）：近端给出大半径。
@@ -198,6 +207,7 @@ class MaterialLocator:
         top_diameter_mm: float = 30.0,
         depth_range_mm: tuple[float, float] | None = None,
         material_bgr: tuple[float, float, float] | None = None,
+        material_palette: Mapping[str, Sequence[float]] | None = None,
         colour_tolerance: float = 60.0,
     ) -> None:
         if focal_px is not None and focal_px <= 0:
@@ -208,13 +218,21 @@ class MaterialLocator:
             None if material_bgr is None
             else tuple(float(channel) for channel in material_bgr)
         )
+        self.material_palette = (
+            None if material_palette is None
+            else {str(name): tuple(float(c) for c in value)
+                  for name, value in dict(material_palette).items()}
+        )
         self.colour_tolerance = float(colour_tolerance)
         if locator is not None:
             self.locator = locator
+        elif self.material_palette:
+            self.locator = ColourBlobLocator(self.material_palette, tolerance=self.colour_tolerance)
         elif self.material_bgr is not None:
             self.locator = ColourBlobLocator(self.material_bgr, tolerance=self.colour_tolerance)
         else:
             self.locator = HoughRingLocator()
+        self._fallback_locator: HoughRingLocator | None = None
         self.yolo = (
             yolo
             if yolo is not None
@@ -244,33 +262,31 @@ class MaterialLocator:
     @property
     def colour_first(self) -> bool:
         """配了物料颜色时，颜色块就是判据，不再用形状指标否决它。"""
-        return self.material_bgr is not None and isinstance(self.locator, ColourBlobLocator)
+        return (
+            (self.material_palette is not None or self.material_bgr is not None)
+            and isinstance(self.locator, ColourBlobLocator)
+        )
 
     # ------------------------------------------------------------- 主流程
     def locate(self, frame: np.ndarray) -> MaterialReport:
         """从一帧 BGR 图像返回圆面、类别和近似相机坐标。"""
         height, width = frame.shape[:2]
         window = self.radius_window(width, height)
-        lock = self._locate_circles(frame, window, self.locator)
-        # 每个候选只量一次顶面质量，下面生成报告时直接复用（近距机位下这一步最贵）。
-        qualities = self._face_qualities(frame, lock)
-        if not self.colour_first and not any(
-            quality.looks_like_face for quality in qualities.values()
-        ):
-            # 严格参数没找到"像顶面的圆"时才放松 Canny 阈值：近距离焦画面里真实
-            # 圆边的梯度被摊平，严格参数只剩夹爪弧线。放松只在这里发生，所以锐利
-            # 画面（以及没有近距问题的机位）行为不变。
-            relaxed = self._relaxed_locator()
-            if relaxed is not None:
-                candidate = self._locate_circles(frame, window, relaxed)
-                candidate_qualities = self._face_qualities(frame, candidate)
-                if any(quality.looks_like_face for quality in candidate_qualities.values()):
-                    lock, qualities = candidate, candidate_qualities
+        lock, qualities = self._locate_and_verify(frame, window, self.locator)
+        fell_back = False
+        if self.colour_first and not lock.regions:
+            # 调色板里没有这块料时会一个色块都找不到；退回霍夫的形状判据，
+            # 至少还能看见"有个圆面"，并在报告里说清是退回来的结果。
+            fallback = self._hough_fallback()
+            candidate, candidate_qualities = self._locate_and_verify(frame, window, fallback)
+            if candidate.regions:
+                lock, qualities = candidate, candidate_qualities
+                fell_back = True
         focal_px = self.resolved_focal_px(width, height, required=bool(lock.regions))
         if not lock.regions:
             return MaterialReport(
                 lock=lock, hits=(), regions=(),
-                focal_px=focal_px, radius_window_px=window,
+                focal_px=focal_px, radius_window_px=window, colour_fallback=fell_back,
             )
         hits = tuple(self.yolo.detect(frame, materials_only=True))
         # 画幅规则与像素焦距只有一个定义，在 modules.vision.drive.pinhole 里。
@@ -281,8 +297,34 @@ class MaterialLocator:
         )
         return MaterialReport(
             lock=lock, hits=hits, regions=reports,
-            focal_px=focal_px, radius_window_px=window,
+            focal_px=focal_px, radius_window_px=window, colour_fallback=fell_back,
         )
+
+    def _locate_and_verify(self, frame: np.ndarray, window, locator):
+        """定位一次并量出每个候选的顶面质量，返回 ``(lock, qualities)``。
+
+        严格参数没找到"像顶面的圆"时才放松 Canny 阈值（近距离焦画面里真实圆边的
+        梯度被摊平，严格参数只剩夹爪弧线）。放松只在这里发生，所以锐利画面
+        （以及没有近距问题的机位）行为不变。
+        """
+        lock = self._locate_circles(frame, window, locator)
+        qualities = self._face_qualities(frame, lock)
+        if self.colour_first or any(quality.looks_like_face for quality in qualities.values()):
+            return lock, qualities
+        relaxed = self._relaxed_locator(locator)
+        if relaxed is None:
+            return lock, qualities
+        candidate = self._locate_circles(frame, window, relaxed)
+        candidate_qualities = self._face_qualities(frame, candidate)
+        if any(quality.looks_like_face for quality in candidate_qualities.values()):
+            return candidate, candidate_qualities
+        return lock, qualities
+
+    def _hough_fallback(self) -> HoughRingLocator:
+        """颜色没配到时的退路：霍夫 + 形状判据（懒建，只有真需要时才存在）。"""
+        if self._fallback_locator is None:
+            self._fallback_locator = HoughRingLocator()
+        return self._fallback_locator
 
     def _locate_circles(self, frame: np.ndarray, window, locator) -> RingLock:
         """用（可选的）半径窗口调一次圆定位器。"""
@@ -290,9 +332,9 @@ class MaterialLocator:
             return locator.locate(frame)
         return locator.locate(frame, min_radius=window[0], max_radius=window[1])
 
-    def _relaxed_locator(self):
+    def _relaxed_locator(self, locator):
         """放松版圆定位器；注入的定位器没有这个能力时返回 ``None``。"""
-        factory = getattr(self.locator, "relaxed", None)
+        factory = getattr(locator, "relaxed", None)
         return None if factory is None else factory()
 
     def _materials(self) -> tuple[str, ...]:
@@ -481,6 +523,29 @@ def parse_bgr(text) -> tuple[float, float, float] | None:
     return (values[0], values[1], values[2])
 
 
+def parse_palette(text) -> dict[str, tuple[float, float, float]] | None:
+    """把 ``"green:165,252,114;blue:248,122,41"`` 解析成调色板；空值返回 ``None``。
+
+    也接受已经是 ``{名字: (B, G, R)}`` 的字典（配置读出来的就是那种）。
+    """
+    if text is None or text == "":
+        return None
+    if isinstance(text, Mapping):
+        return {str(name): parse_bgr(value) for name, value in text.items()}
+    palette = {}
+    for entry in str(text).replace("；", ";").split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, _, colour = entry.partition(":")
+        if not name.strip() or not colour.strip():
+            raise ValueError('调色板要写成 "green:165,252,114;blue:248,122,41"')
+        palette[name.strip()] = parse_bgr(colour)
+    if not palette:
+        raise ValueError('调色板至少要有一项，例如 "green:165,252,114"')
+    return palette
+
+
 def _run_image(args) -> int:
     import cv2
 
@@ -541,6 +606,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--bgr", dest="material_bgr", type=parse_bgr, default=None,
                         help='物料顶面参考颜色 "B,G,R"，例如 "165,252,114"；'
                              "给了它就走颜色块定位，不再用霍夫猜圆")
+    parser.add_argument("--palette", dest="material_palette", type=parse_palette, default=None,
+                        help='物料调色板 "green:165,252,114;blue:248,122,41"；'
+                             "换物料颜色只改这里")
     parser.add_argument("--tolerance", type=float, default=60.0, help="颜色容差（默认 60）")
     args = parser.parse_args(argv)
     if args.camera is not None:
