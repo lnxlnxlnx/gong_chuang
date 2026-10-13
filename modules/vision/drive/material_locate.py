@@ -218,15 +218,18 @@ class MaterialLocator:
         height, width = frame.shape[:2]
         window = self.radius_window(width, height)
         lock = self._locate_circles(frame, window, self.locator)
-        if not self._has_face(frame, lock):
+        # 每个候选只量一次顶面质量，下面生成报告时直接复用（7 cm 机位下这一步最贵）。
+        qualities = self._face_qualities(frame, lock)
+        if not any(quality.looks_like_face for quality in qualities.values()):
             # 严格参数没找到"像顶面的圆"时才放松 Canny 阈值：近距离焦画面里真实
             # 圆边的梯度被摊平，严格参数只剩夹爪弧线。放松只在这里发生，所以锐利
             # 画面（以及没有近距问题的机位）行为不变。
             relaxed = self._relaxed_locator()
             if relaxed is not None:
                 candidate = self._locate_circles(frame, window, relaxed)
-                if self._has_face(frame, candidate):
-                    lock = candidate
+                candidate_qualities = self._face_qualities(frame, candidate)
+                if any(quality.looks_like_face for quality in candidate_qualities.values()):
+                    lock, qualities = candidate, candidate_qualities
         focal_px = self.resolved_focal_px(width, height, required=bool(lock.regions))
         if not lock.regions:
             return MaterialReport(
@@ -237,7 +240,7 @@ class MaterialLocator:
         # 画幅规则与像素焦距只有一个定义，在 modules.vision.drive.pinhole 里。
         focal_px = resolve_focal_px(width, height, self.focal_px)
         reports = tuple(
-            self._report_for_region(frame, hits, region, focal_px, width, height)
+            self._report_for_region(frame, hits, region, qualities[region], focal_px, width, height)
             for region in lock.regions
         )
         return MaterialReport(
@@ -257,9 +260,9 @@ class MaterialLocator:
         return None if factory is None else factory()
 
     @staticmethod
-    def _has_face(frame: np.ndarray, lock: RingLock) -> bool:
-        """这一批锁定圆面里有没有一个真的像物料顶面。"""
-        return any(measure_face(frame, region).looks_like_face for region in lock.regions)
+    def _face_qualities(frame: np.ndarray, lock: RingLock) -> dict:
+        """这一批锁定圆面各自的顶面质量。"""
+        return {region: measure_face(frame, region) for region in lock.regions}
 
     def radius_window(self, width: int, height: int) -> tuple[float, float] | None:
         """按 ``depth_range_mm`` 先验算本帧的霍夫半径窗口；没配就返回 ``None``。"""
@@ -286,6 +289,7 @@ class MaterialLocator:
         frame: np.ndarray,
         hits: Sequence[Detection],
         region: LockedRegion,
+        face: FaceQuality,
         focal_px: float,
         width: int,
         height: int,
@@ -308,7 +312,7 @@ class MaterialLocator:
         return RegionReport(
             region=region,
             classification=self.classifier.classify(visible),
-            face=measure_face(frame, region),
+            face=face,
             x_mm=fix.x_mm,
             y_mm=fix.y_mm,
             distance_mm=fix.depth_mm,

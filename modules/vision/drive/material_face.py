@@ -33,8 +33,12 @@ DEFAULT_INTERIOR_RATIO = 0.75
 #: 圆周外侧取样半径占圆面半径的比例：边缘就在这两圈之间。
 DEFAULT_OUTER_RATIO = 1.25
 
-#: 圆周上取多少个方向的样本。
-DEFAULT_RAYS = 72
+#: 圆周上取多少个方向的样本。36 个方向（每 10°）足够分辨"整圈都是边"和"背景上一块平地"，
+#: 又比 72 个省一半时间——每帧每个候选圆都要算一次。
+DEFAULT_RAYS = 36
+
+#: 内部统计的抽样步长：半径超过这个像素数就隔一个像素取一个（大圆面本来就有几万个像素）。
+STRIDE_RADIUS_PX = 60
 
 #: 内圈灰度与外侧灰度差多少才算"这里有一条径向边缘"。
 DEFAULT_EDGE_THRESHOLD = 25.0
@@ -117,16 +121,21 @@ def measure_face(
 
 
 def interior_std(gray: np.ndarray, region: LockedRegion, *, ratio: float = DEFAULT_INTERIOR_RATIO) -> float:
-    """圆面内部（半径 ``ratio`` 倍以内）的灰度标准差。"""
+    """圆面内部（半径 ``ratio`` 倍以内）的灰度标准差。
+
+    大圆面按 :data:`STRIDE_RADIUS_PX` 隔点取样：标准差不需要每个像素都算，
+    而 7 cm 机位下一个顶面就有十几万像素，逐点算是每帧最贵的一步。
+    """
     sample_radius = max(1.0, region.radius * ratio)
+    stride = 1 if region.radius < STRIDE_RADIUS_PX else 2
     x1 = int(max(0, np.floor(region.center_x - sample_radius)))
     x2 = int(min(gray.shape[1], np.ceil(region.center_x + sample_radius) + 1))
     y1 = int(max(0, np.floor(region.center_y - sample_radius)))
     y2 = int(min(gray.shape[0], np.ceil(region.center_y + sample_radius) + 1))
-    if x2 - x1 < 2 or y2 - y1 < 2:
+    if x2 - x1 < 3 or y2 - y1 < 3:
         return float("inf")
-    crop = gray[y1:y2, x1:x2]
-    ys, xs = np.ogrid[y1:y2, x1:x2]
+    crop = gray[y1:y2:stride, x1:x2:stride]
+    ys, xs = np.ogrid[y1:y2:stride, x1:x2:stride]
     inside = (xs - region.center_x) ** 2 + (ys - region.center_y) ** 2 <= sample_radius**2
     values = crop[inside]
     if values.size < 8:
