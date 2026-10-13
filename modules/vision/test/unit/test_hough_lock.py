@@ -10,7 +10,25 @@ import unittest
 
 import numpy as np
 
-from modules.vision.drive.hough_lock import HoughRingLocator, LockedRegion, RingLock, synthetic_rings
+from modules.vision.drive.hough_lock import (
+    RELAXED_PARAM1,
+    HoughRingLocator,
+    LockedRegion,
+    RingLock,
+    synthetic_rings,
+)
+
+
+def soft_disc(width: int = 640, height: int = 480, radius: int = 90, sigma: float = 8.0):
+    """A bright disc with a deliberately defocused edge (no camera needed)."""
+    import cv2
+    import numpy as np
+
+    frame = np.full((height, width), 70, dtype=np.float32)
+    ys, xs = np.ogrid[:height, :width]
+    frame[(xs - width // 2) ** 2 + (ys - height // 2) ** 2 <= radius * radius] = 210
+    blurred = cv2.GaussianBlur(frame, (0, 0), sigma)
+    return cv2.cvtColor(blurred.astype(np.uint8), cv2.COLOR_GRAY2BGR)
 
 
 class LockedRegionTests(unittest.TestCase):
@@ -115,6 +133,61 @@ class HoughRingLocatorTests(unittest.TestCase):
     def test_rejects_an_empty_frame(self) -> None:
         with self.assertRaises(ValueError):
             HoughRingLocator().preprocess(np.zeros((0, 0, 3), dtype=np.uint8))
+
+
+class PerCallWindowTests(unittest.TestCase):
+    """半径窗口可以逐帧给：调用方知道工作距离时用它代替"按画幅猜"。"""
+
+    def test_call_window_replaces_the_instance_window(self) -> None:
+        locator = HoughRingLocator()
+        self.assertEqual(len(locator.locate(synthetic_rings(), min_radius=15, max_radius=25)), 0)
+        lock = locator.locate(synthetic_rings(), min_radius=35, max_radius=50)
+        self.assertEqual(len(lock), 3)
+        for region in lock.regions:
+            self.assertAlmostEqual(region.radius, 40.0, delta=8)
+
+    def test_instance_window_is_untouched_after_a_call_override(self) -> None:
+        locator = HoughRingLocator(min_radius=35, max_radius=50)
+        locator.locate(synthetic_rings(), min_radius=15, max_radius=25)
+        self.assertEqual(len(locator.locate(synthetic_rings())), 3)
+
+    def test_invalid_call_window_is_rejected(self) -> None:
+        locator = HoughRingLocator()
+        for kwargs in ({"min_radius": 0}, {"max_radius": 0},
+                       {"min_radius": 50, "max_radius": 50}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    locator.locate(synthetic_rings(), **kwargs)
+
+
+class RelaxedLocatorTests(unittest.TestCase):
+    """离焦画面：严格 Canny 阈值找不到的圆，放松后要能找到。"""
+
+    def test_relaxed_lowers_the_canny_threshold_and_keeps_the_rest(self) -> None:
+        locator = HoughRingLocator(param1=100.0, param2=30.0, dp=1.5,
+                                   min_radius=10, max_radius=200, min_distance=20)
+        relaxed = locator.relaxed()
+        self.assertEqual(relaxed.param1, RELAXED_PARAM1)
+        self.assertLess(relaxed.param1, locator.param1)
+        self.assertEqual(
+            (relaxed.param2, relaxed.dp, relaxed.min_radius, relaxed.max_radius,
+             relaxed.min_distance),
+            (locator.param2, locator.dp, locator.min_radius, locator.max_radius,
+             locator.min_distance),
+        )
+
+    def test_relaxed_never_raises_the_threshold(self) -> None:
+        locator = HoughRingLocator(param1=RELAXED_PARAM1 / 2)
+        self.assertEqual(locator.relaxed().param1, locator.param1)
+
+    def test_a_soft_disc_needs_the_relaxed_threshold(self) -> None:
+        frame = soft_disc()
+        strict = HoughRingLocator(param1=100.0, min_radius=60, max_radius=130, min_distance=100)
+        self.assertEqual(len(strict.locate(frame)), 0)
+        relaxed = strict.relaxed().locate(frame)
+        self.assertEqual(len(relaxed), 1)
+        self.assertAlmostEqual(relaxed.regions[0].radius, 90.0, delta=6)
+        self.assertAlmostEqual(relaxed.regions[0].center_x, 320.0, delta=4)
 
 
 class SyntheticSceneTests(unittest.TestCase):

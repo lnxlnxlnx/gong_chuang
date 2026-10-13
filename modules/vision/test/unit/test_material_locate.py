@@ -6,8 +6,8 @@ import unittest
 import math
 import numpy as np
 
-from modules.vision.drive.hough_lock import LockedRegion, RingLock, synthetic_rings
-from modules.vision.drive.material_locate import MaterialLocator
+from modules.vision.drive.hough_lock import HoughRingLocator, LockedRegion, RingLock, synthetic_rings
+from modules.vision.drive.material_locate import MaterialLocator, parse_depth_range
 from modules.vision.drive.yolov8 import Detection
 
 
@@ -27,6 +27,18 @@ class FixedCircleLocator:
 
     def locate(self, _frame):
         return RingLock((LockedRegion(400.0, 200.0, 60.0),))
+
+
+class RecordingLocator:
+    """Record the window the locator was called with."""
+
+    def __init__(self, regions=()):
+        self.regions = tuple(regions)
+        self.calls = []
+
+    def locate(self, _frame, **kwargs):
+        self.calls.append(kwargs)
+        return RingLock(self.regions)
 
 
 def hit(name, score, x):
@@ -122,6 +134,153 @@ class MaterialLocatorTests(unittest.TestCase):
         self.assertIsNone(item.name)
         self.assertIsNone(item.confidence)
         self.assertEqual((item.x_mm, item.y_mm, item.z_mm), (20.0, -10.0, 75.0))
+
+
+class WorkingDistanceWindowTests(unittest.TestCase):
+    """工作距离先验 → 霍夫半径窗口；没配就先验为空，行为与以前一致。"""
+
+    def test_working_distance_is_turned_into_a_radius_window(self) -> None:
+        locator = RecordingLocator()
+        report = MaterialLocator(
+            locator=locator, yolo=FakeYOLO(), focal_px=1012.0, depth_range_mm=(60.0, 80.0)
+        ).locate(np.zeros((720, 1280, 3), dtype=np.uint8))
+
+        window = locator.calls[0]
+        self.assertAlmostEqual(window["min_radius"], 1012.0 * 30 / 160.0)
+        self.assertAlmostEqual(window["max_radius"], 1012.0 * 30 / 120.0)
+        self.assertEqual(report.radius_window_px, (window["min_radius"], window["max_radius"]))
+        self.assertEqual(report.focal_px, 1012.0)
+
+    def test_without_a_prior_the_locator_keeps_its_own_window(self) -> None:
+        locator = RecordingLocator()
+        report = MaterialLocator(locator=locator, yolo=FakeYOLO(), focal_px=500.0).locate(
+            np.zeros((480, 640, 3), dtype=np.uint8)
+        )
+        self.assertEqual(locator.calls, [{}])
+        self.assertIsNone(report.radius_window_px)
+
+    def test_the_window_scales_with_the_frame_width(self) -> None:
+        locator = RecordingLocator()
+        MaterialLocator(
+            locator=locator, yolo=FakeYOLO(), depth_range_mm=(60.0, 80.0)
+        ).locate(np.zeros((360, 640, 3), dtype=np.uint8))
+        window = locator.calls[0]
+        self.assertAlmostEqual(window["min_radius"], (1012.0 / 2) * 30 / 160.0)
+        self.assertAlmostEqual(window["max_radius"], (1012.0 / 2) * 30 / 120.0)
+
+    def test_invalid_depth_ranges_are_rejected(self) -> None:
+        for depth in ((80.0, 60.0), (70.0, 70.0), (0.0, 80.0), 70.0):
+            with self.subTest(depth=depth):
+                with self.assertRaises(ValueError):
+                    MaterialLocator(yolo=FakeYOLO(), focal_px=1012.0, depth_range_mm=depth)
+
+    def test_parse_depth_range_reads_the_command_line_form(self) -> None:
+        self.assertEqual(parse_depth_range("60,85"), (60.0, 85.0))
+        self.assertEqual(parse_depth_range("60，85"), (60.0, 85.0))
+        self.assertIsNone(parse_depth_range(None))
+        self.assertIsNone(parse_depth_range(""))
+        for bad in ("60", "85,60", "a,b"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    parse_depth_range(bad)
+
+
+class BestCircleTests(unittest.TestCase):
+    """YOLO 沉默时不能随便挑一个圆：那正是距离跳变的来源。"""
+
+    @staticmethod
+    def scene():
+        """一帧里有：单色亮圆面、内部不匀的干扰圆、平坦背景。"""
+        frame = np.full((480, 640), 60.0)
+        ys, xs = np.ogrid[:480, :640]
+        frame[240:250, 120:520] = 250.0
+        frame[(xs - 320) ** 2 + (ys - 240) ** 2 <= 70**2] = 200.0
+        return np.repeat(frame.astype(np.uint8)[:, :, None], 3, axis=2), (
+            LockedRegion(center_x=320.0, center_y=240.0, radius=70.0),
+            LockedRegion(center_x=320.0, center_y=245.0, radius=140.0),
+            LockedRegion(center_x=560.0, center_y=400.0, radius=60.0),
+        )
+
+    def test_best_picks_the_most_face_like_circle_when_yolo_is_silent(self) -> None:
+        frame, regions = self.scene()
+        report = MaterialLocator(
+            locator=RecordingLocator(regions), yolo=FakeYOLO(), focal_px=500.0
+        ).locate(frame)
+
+        self.assertEqual(len(report.regions), 3)
+        self.assertEqual(len(report.faces), 1)
+        self.assertEqual(report.best.region, regions[0])
+        self.assertAlmostEqual(report.best.distance_mm, 500.0 * 30 / 140.0)
+
+    def test_best_is_none_when_nothing_looks_like_a_top_face(self) -> None:
+        frame = np.full((480, 640, 3), 90, dtype=np.uint8)
+        report = MaterialLocator(
+            locator=RecordingLocator((LockedRegion(320.0, 240.0, 70.0),)),
+            yolo=FakeYOLO(),
+            focal_px=500.0,
+        ).locate(frame)
+
+        self.assertTrue(report.present)
+        self.assertEqual(report.faces, ())
+        self.assertIsNone(report.best)
+        self.assertIn("距离不可用", report.summary())
+
+    def test_classification_still_wins_over_uniformity(self) -> None:
+        frame, regions = self.scene()
+        hit = Detection(x1=530, y1=370, x2=590, y2=430, score=0.8, class_id=2, name="obj-blue")
+        report = MaterialLocator(
+            locator=RecordingLocator(regions), yolo=FakeYOLO([hit]), focal_px=500.0
+        ).locate(frame)
+
+        self.assertEqual(report.best.region, regions[2])
+        self.assertEqual(report.best.name, "obj-blue")
+
+    def test_summary_shows_the_window_and_the_chosen_circle(self) -> None:
+        frame, regions = self.scene()
+        report = MaterialLocator(
+            locator=RecordingLocator(regions), yolo=FakeYOLO(), focal_px=500.0,
+            depth_range_mm=(60.0, 80.0),
+        ).locate(frame)
+        summary = report.summary()
+        self.assertIn("半径窗口", summary)
+        self.assertIn("采用：", summary)
+        self.assertIn("1 个像顶面", summary)
+
+
+class RelaxedFallbackTests(unittest.TestCase):
+    """离焦画面：严格霍夫参数找不到顶面时，自动放松阈值再来一次。"""
+
+    @staticmethod
+    def soft_frame():
+        import cv2
+
+        frame = np.full((480, 640), 70, dtype=np.float32)
+        ys, xs = np.ogrid[:480, :640]
+        frame[(xs - 320) ** 2 + (ys - 240) ** 2 <= 90**2] = 210
+        blurred = cv2.GaussianBlur(frame, (0, 0), 8.0)
+        return cv2.cvtColor(blurred.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+
+    def test_a_soft_frame_is_locked_through_the_relaxed_locator(self) -> None:
+        frame = self.soft_frame()
+        strict = HoughRingLocator(param1=100.0, min_radius=60, max_radius=130, min_distance=100)
+        self.assertEqual(len(strict.locate(frame)), 0)
+
+        report = MaterialLocator(locator=strict, yolo=FakeYOLO(), focal_px=500.0).locate(frame)
+        self.assertEqual(len(report.regions), 1)
+        self.assertIsNotNone(report.best)
+        self.assertAlmostEqual(report.best.distance_mm, 500.0 * 30 / 180.0, delta=10.0)
+
+    def test_a_sharp_frame_never_needs_the_fallback(self) -> None:
+        frame = synthetic_rings()
+        recorder = RecordingLocator(RingLock(()).regions)
+        MaterialLocator(locator=recorder, yolo=FakeYOLO(), focal_px=300.0).locate(frame)
+        self.assertEqual(recorder.calls, [{}])
+
+    def test_an_injected_locator_without_relaxed_is_left_alone(self) -> None:
+        report = MaterialLocator(
+            locator=FixedCircleLocator(), yolo=FakeYOLO(), focal_px=300.0
+        ).locate(np.zeros((480, 640, 3), dtype=np.uint8))
+        self.assertEqual(len(report.regions), 1)
 
 
 if __name__ == "__main__":

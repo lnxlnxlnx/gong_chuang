@@ -102,6 +102,28 @@ class PinholeCamera:
             raise ValueError("diameter_mm must be positive")
         return self.focal_px * diameter_mm / (2.0 * radius_px)
 
+    def radius_from_depth(self, depth_mm: float, diameter_mm: float) -> float:
+        """:meth:`depth_from_radius` 的反函数：已知深度反推像素半径。
+
+        这是「相机装在固定高度、物料顶面就在那个高度附近」时的先验：
+        深度范围一给，圆面半径的合理窗口就唯一确定了，霍夫不必再去猜尺度。
+        """
+        if not depth_mm > 0:
+            raise ValueError("depth_mm must be positive")
+        if not diameter_mm > 0:
+            raise ValueError("diameter_mm must be positive")
+        return self.focal_px * diameter_mm / (2.0 * depth_mm)
+
+    def radius_range_for_depth(
+        self, depth_range_mm: tuple[float, float], diameter_mm: float
+    ) -> tuple[float, float]:
+        """把深度范围换算成 ``(最小半径, 最大半径)``；近端给出的是大半径。"""
+        near_mm, far_mm = normalize_depth_range(depth_range_mm)
+        return (
+            self.radius_from_depth(far_mm, diameter_mm),
+            self.radius_from_depth(near_mm, diameter_mm),
+        )
+
     def fix_from_circle(
         self,
         center_x_px: float,
@@ -136,6 +158,24 @@ def resolve_focal_px(width: int, height: int, focal_px: Optional[float] = None) 
     if height <= 0 or abs(width / height - DEFAULT_FRAME_ASPECT_RATIO) > ASPECT_RATIO_TOLERANCE:
         raise ValueError("默认焦距只适用于无裁切 16:9 画幅；请传入该画幅标定后的 focal_px")
     return DEFAULT_FOCAL_PX_AT_1280 * width / 1280.0
+
+
+def normalize_depth_range(depth_range_mm) -> Tuple[float, float]:
+    """校验并返回 ``(近端, 远端)`` 深度范围，单位毫米。
+
+    深度范围是「相机装好之后物料顶面大概在哪个深度」的先验：有了它，圆面半径的
+    合理窗口就由针孔模型唯一确定（:meth:`PinholeCamera.radius_range_for_depth`），
+    霍夫不必再猜尺度，也就不会把远处一块平坦背景凑成圆。近端必须严格小于远端。
+    """
+    try:
+        near_mm, far_mm = depth_range_mm
+    except (TypeError, ValueError) as error:
+        raise ValueError("depth_range_mm must be a (near_mm, far_mm) pair") from error
+    if not near_mm > 0 or not far_mm > 0:
+        raise ValueError("depth_range_mm must be positive")
+    if not near_mm < far_mm:
+        raise ValueError("depth_range_mm must have near_mm < far_mm")
+    return (float(near_mm), float(far_mm))
 
 
 def focal_px_from_known_target(
@@ -189,7 +229,22 @@ def _self_test() -> int:
     # 焦距标定公式：145 mm 处 209 px 的 30 mm 圆面。
     assert abs(focal_px_from_known_target(distance_mm=145, pixel_diameter=209, real_diameter_mm=30) - 1010.2) < 0.5
 
-    print("针孔模型自测通过：测距、投影、焦距标定与画幅规则都正确。")
+    # 半径与深度互为反函数：70 mm 处 30 mm 圆面应当约 217 px。
+    assert abs(camera.radius_from_depth(70.0, 30.0) - DEFAULT_FOCAL_PX_AT_1280 * 30 / 140) < 1e-9
+    assert abs(camera.depth_from_radius(camera.radius_from_depth(70.0, 30.0), 30.0) - 70.0) < 1e-9
+    window = camera.radius_range_for_depth((60.0, 80.0), 30.0)
+    assert window[0] < window[1], window
+    assert abs(window[0] - camera.radius_from_depth(80.0, 30.0)) < 1e-9
+    assert abs(window[1] - camera.radius_from_depth(60.0, 30.0)) < 1e-9
+    for bad in ((80.0, 60.0), (0.0, 80.0), 70.0, (70.0,)):
+        try:
+            normalize_depth_range(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法深度范围必须报错：{bad!r}")
+
+    print("针孔模型自测通过：测距、投影、焦距标定、深度窗口与画幅规则都正确。")
     return 0
 
 

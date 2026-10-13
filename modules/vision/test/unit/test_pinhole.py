@@ -9,6 +9,7 @@ from modules.vision.drive.pinhole import (
     CameraFix,
     PinholeCamera,
     focal_px_from_known_target,
+    normalize_depth_range,
     resolve_focal_px,
 )
 
@@ -90,6 +91,47 @@ class PinholeFrameRuleTests(unittest.TestCase):
     def test_empty_image_size_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             PinholeCamera(focal_px=1000.0, image_width=0, image_height=720)
+
+
+class DepthRangeTests(unittest.TestCase):
+    """深度先验 → 像素半径窗口：这是"相机装多高"唯一进去的地方。"""
+
+    def setUp(self) -> None:
+        self.camera = PinholeCamera(
+            focal_px=DEFAULT_FOCAL_PX_AT_1280, image_width=1280, image_height=720
+        )
+
+    def test_radius_and_depth_are_inverses(self) -> None:
+        radius = self.camera.radius_from_depth(70.0, 30.0)
+        self.assertAlmostEqual(radius, 1012.0 * 30 / 140.0, places=9)
+        self.assertAlmostEqual(self.camera.depth_from_radius(radius, 30.0), 70.0, places=9)
+
+    def test_near_end_gives_the_big_radius(self) -> None:
+        low, high = self.camera.radius_range_for_depth((60.0, 80.0), 30.0)
+        self.assertLess(low, high)
+        self.assertAlmostEqual(low, self.camera.radius_from_depth(80.0, 30.0), places=9)
+        self.assertAlmostEqual(high, self.camera.radius_from_depth(60.0, 30.0), places=9)
+
+    def test_seven_centimetre_working_distance_gives_the_measured_radius(self) -> None:
+        """实测：7 cm 处 30 mm 顶面约 217 px（433 px 直径）。"""
+        low, high = self.camera.radius_range_for_depth((60.0, 85.0), 30.0)
+        self.assertLess(low, 217.0)
+        self.assertGreater(high, 217.0)
+
+    def test_invalid_inputs_are_rejected(self) -> None:
+        for depth in (0.0, -5.0):
+            with self.subTest(depth=depth):
+                with self.assertRaises(ValueError):
+                    self.camera.radius_from_depth(depth, 30.0)
+        with self.assertRaises(ValueError):
+            self.camera.radius_from_depth(70.0, 0.0)
+
+    def test_depth_range_must_be_ordered_and_positive(self) -> None:
+        self.assertEqual(normalize_depth_range((60, 85)), (60.0, 85.0))
+        for bad in ((85, 60), (70, 70), (0, 80), (-1, 80), 70.0, (70.0,), (1, 2, 3)):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    normalize_depth_range(bad)
 
 
 class FocalCalibrationTests(unittest.TestCase):

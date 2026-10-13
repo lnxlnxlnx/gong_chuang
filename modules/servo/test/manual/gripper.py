@@ -24,7 +24,10 @@ def run_manual(
     prompt: Callable[[str], str] = input,
     sleep: Callable[[float], None] | None = None,
 ) -> None:
-    """Read first; move to each configured position only after its own YES, then read back.
+    """Read first; move to each configured position on its own confirmation, then read back.
+
+    ``回车``就是确认——和转盘测试、机械臂测试用同一套手感；``q`` 结束剩下的动作，
+    其他任何输入跳过这一项。
 
     ``sleep`` defaults to :func:`time.sleep` *at call time*: a default bound at
     definition time would ignore ``patch.object(time, "sleep")``.
@@ -32,11 +35,18 @@ def run_manual(
     sleep = sleep if sleep is not None else time.sleep
     print(f"夹爪舵机 {config.servo_id} 当前脉冲位置：{servo.read_position()}")
     for label, position in (("张开", config.open_position), ("闭合", config.closed_position)):
-        answer = prompt(
-            f"夹爪将{label}到 {position} 脉冲，耗时 {config.duration_ms} 毫秒。"
-            "确认夹爪有活动空间后输入 YES 执行，其他输入跳过："
+        answer = (
+            prompt(
+                f"夹爪将{label}到 {position} 脉冲，耗时 {config.duration_ms} 毫秒。"
+                "确认夹爪有活动空间后按回车执行，输入 q 结束，其他输入跳过："
+            )
+            .strip()
+            .lower()
         )
-        if answer.strip() != "YES":
+        if answer == "q":
+            print("已结束后续夹爪动作")
+            return
+        if answer:
             print(f"已跳过{label}")
             continue
         servo.set_position(position, config.duration_ms)

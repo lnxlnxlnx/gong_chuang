@@ -26,6 +26,15 @@ def _cv2():
     return cv2
 
 
+#: 严格参数一无所获时退回来的 Canny 高阈值。
+#:
+#: 默认 100 只适合锐利画面。近距（约 7 cm）离焦时物料顶面那圈边的梯度被摊平，
+#: 100 会只剩夹爪那种高对比弧线，于是锁定到半径偏大的假圆（实测 248 px / 61 mm
+#: 对真值 218 px / 70 mm）；50 才留得住真实圆边。放松只在严格参数没找到"像顶面
+#: 的圆"时发生，见 ``modules.vision.drive.material_locate``。
+RELAXED_PARAM1 = 50.0
+
+
 @dataclass(frozen=True)
 class LockedRegion:
     """一个被锁定的圆形区域（像素坐标，原点在画面左上角）。"""
@@ -97,7 +106,13 @@ class RingLock:
 
 
 class HoughRingLocator:
-    """定位物料顶部圆面；半径窗口默认按帧尺寸计算。"""
+    """定位物料顶部圆面；半径窗口默认按帧尺寸计算。
+
+    ``param1`` 是 Canny 的高阈值。画面锐利时 100 足够；画面发虚（近距、离焦）时
+    真实圆边的梯度被摊平，阈值太高会只剩夹爪那种高对比弧线，于是锁定到错误的圆，
+    半径偏大、距离跟着偏小——所以要按实际画面放宽，见
+    :data:`modules.vision.drive.material_locate.DEFAULT_PARAM1`。
+    """
 
     def __init__(
         self,
@@ -130,6 +145,22 @@ class HoughRingLocator:
         self.param1 = float(param1)
         self.param2 = float(param2)
 
+    def relaxed(self) -> "HoughRingLocator":
+        """Return a copy with a lower Canny threshold, for soft (defocused) frames.
+
+        只在严格参数一无所获时用：放松会带来更多候选圆，必须配合
+        ``modules.vision.drive.material_face`` 的顶面判据挑出真正的那一个。
+        """
+        return HoughRingLocator(
+            expected=self.expected,
+            min_radius=self.min_radius,
+            max_radius=self.max_radius,
+            min_distance=self.min_distance,
+            dp=self.dp,
+            param1=min(self.param1, RELAXED_PARAM1),
+            param2=self.param2,
+        )
+
     def preprocess(self, frame: np.ndarray) -> np.ndarray:
         """Return the smoothed grayscale image used by HoughCircles."""
         cv2 = _cv2()
@@ -138,12 +169,32 @@ class HoughRingLocator:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         return cv2.medianBlur(gray, 5)
 
-    def locate(self, frame: np.ndarray) -> RingLock:
-        """Locate top faces in image coordinates, left to right."""
+    def locate(
+        self,
+        frame: np.ndarray,
+        *,
+        min_radius: int | None = None,
+        max_radius: int | None = None,
+    ) -> RingLock:
+        """Locate top faces in image coordinates, left to right.
+
+        ``min_radius`` / ``max_radius`` override the instance window for this
+        call only.  调用方知道物料顶面大概在什么深度时，应当把针孔模型算出来的
+        半径窗口传进来：霍夫的尺度先验越准，越不会把背景上凑出来的圆当成物料。
+        """
+        min_radius = self.min_radius if min_radius is None else round(min_radius)
+        max_radius = self.max_radius if max_radius is None else round(max_radius)
+        if min_radius is not None and min_radius < 1:
+            raise ValueError("min_radius must be positive")
+        if max_radius is not None and max_radius < 1:
+            raise ValueError("max_radius must be positive")
+        if min_radius is not None and max_radius is not None and max_radius <= min_radius:
+            raise ValueError("max_radius must exceed min_radius")
+
         gray = self.preprocess(frame)
         height, width = gray.shape
-        min_radius = self.min_radius if self.min_radius is not None else max(8, round(width * 0.02))
-        max_radius = self.max_radius if self.max_radius is not None else round(min(width, height) * 0.36)
+        min_radius = min_radius if min_radius is not None else max(8, round(width * 0.02))
+        max_radius = max_radius if max_radius is not None else round(min(width, height) * 0.36)
         min_distance = self.min_distance if self.min_distance is not None else max(1, round(min(width, height) * 0.08))
         circles = _cv2().HoughCircles(
             gray,
@@ -159,9 +210,15 @@ class HoughRingLocator:
         regions.sort(key=lambda region: region.center_x)
         return RingLock(tuple(regions), self.expected)
 
-    def locate_regions(self, frame: np.ndarray) -> list[LockedRegion]:
+    def locate_regions(
+        self,
+        frame: np.ndarray,
+        *,
+        min_radius: int | None = None,
+        max_radius: int | None = None,
+    ) -> list[LockedRegion]:
         """Return material top circles as a plain list (left to right)."""
-        return list(self.locate(frame).regions)
+        return list(self.locate(frame, min_radius=min_radius, max_radius=max_radius).regions)
 
     # ------------------------------------------------------------------ 画图
     def draw(

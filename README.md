@@ -93,7 +93,7 @@ car.close()
 
 ## 统一入口
 
-在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13 为夹爪测试（原来的 14「夹爪直连调试」已合并进来，编号 14 不再使用）；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集；17 为 COIN-D6 实时点云窗口（滑块或输入框调距离与角度窗口）；18 为物料顶部圆面定位（霍夫判断存在并测距，YOLO 补充类别，见 `modules/vision/docs/视觉物料定位.md`）；19 为**摄像头识别 + 机械臂抓取**（见 `modules/grasp/docs/抓取坐标链路.md`），它会在打开硬件前先列出还没做的标定项并拒绝运行，只想核对标定可以用 `--observe-only`。步进总线端口读取 `modules/motor/config.json` 中当前平台的 `port`（底盘与机械臂共用这一处），舵机总线端口读取 `modules/servo/config.json`；激光测试使用独立的 `modules/laser_scan/config.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `modules/lidar/config.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
+在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13 为夹爪测试（原来的 14「夹爪直连调试」已合并进来，编号 14 不再使用）；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集；17 为 COIN-D6 实时点云窗口（滑块或输入框调距离与角度窗口）；18 为物料顶部圆面定位（霍夫判断存在并测距，YOLO 补充类别，见 `modules/vision/docs/视觉物料定位.md`）；19 为**摄像头识别 + 机械臂抓取**（见 `modules/grasp/docs/抓取坐标链路.md`），它会在打开硬件前先列出还没做的标定项并拒绝运行，只想核对标定可以用 `--observe-only`；20 为**转盘测试**（三工位分度盘，见 `modules/servo/docs/转盘控制说明.md`）。步进总线端口读取 `modules/motor/config.json` 中当前平台的 `port`（底盘与机械臂共用这一处），舵机总线端口读取 `modules/servo/config.json`；激光测试使用独立的 `modules/laser_scan/config.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `modules/lidar/config.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
 
 ```powershell
 python test.py
@@ -107,9 +107,47 @@ python test.py
 
 ### 夹爪测试
 
-菜单 `13. 夹爪测试` 走**同一条 115200 bps 直连通路**，使用 `BusServo`：串口与波特率取 `modules/servo/config.json` 的平台 `port` 与 `bus.baudrate`（也可用 `--port` 临时覆盖），舵机 ID 取 `gripper.servo_id`，位置和耗时取 `gripper` 下的 `open_position` / `closed_position` / `duration_ms`。它先读位置，再对张开、闭合分别要求大写 `YES`，每次动作后读回实际位置。**300/500 只是随意选定的试动值，后续必须按真实夹爪行程修改，不能视为最终张开与夹紧位置。** 旧工程那套 9600 bps 多舵机控制板协议（`ServoController` 与 `Gripper` 类）已随本次重构删除，当前硬件只走直连通路。
+菜单 `13. 夹爪测试` 走**同一条 115200 bps 直连通路**，使用 `BusServo`：串口与波特率取 `modules/servo/config.json` 的平台 `port` 与 `bus.baudrate`（也可用 `--port` 临时覆盖），舵机 ID 取 `gripper.servo_id`，位置和耗时取 `gripper` 下的 `open_position` / `closed_position` / `duration_ms`。它先读位置，再对张开、闭合分别要求确认（**按回车执行，输入 `q` 结束**），每次动作后读回实际位置。**300/500 只是随意选定的试动值，后续必须按真实夹爪行程修改，不能视为最终张开与夹紧位置。** 旧工程那套 9600 bps 多舵机控制板协议（`ServoController` 与 `Gripper` 类）已随本次重构删除，当前硬件只走直连通路。
 
 完整说明、Jetson 迁移步骤及直连调试记录见 `夹爪控制板使用说明.md`。
+
+### 转盘测试
+
+菜单 `20. 转盘测试` 走**同一条舵机总线**，驱动的是三工位分度转盘（舵机 ID **2**，与夹爪 ID 1
+区分）。位置、耗时和工位表取 `modules/servo/config.json` 的 `turntable` 段：
+
+```json
+"turntable": {
+  "servo_id": 2,
+  "duration_ms": 1500,
+  "stations": { "home": 0, "station_2": 500, "station_3": 1000 }
+}
+```
+
+`stations` 是**工位名 → 舵机位置**（0..1000 对应 0..240°），必须有一个叫 `home` 的工位，
+`go_home()` 就是走到它。脚本先读当前位置，再按 `home` → 其余工位逐个要求确认：
+**按回车执行，输入 `q` 结束，其他输入跳过这一项**。
+每次动作后读回核对并打印"到位 / 未到位（差 ±N）"。
+
+```python
+from modules.servo.drive.turntable import TurntableServo
+
+with TurntableServo("COM14") as turntable:      # 端口也可从总线配置取
+    turntable.go_home()                          # 回零：走到 home 工位
+    turntable.go_to_station("station_3")         # 转到三号物料放取位
+    print(turntable.at_station("station_3"))     # 读回判断，不是"我发过命令"
+```
+
+**转盘的分度盘最怕累计误差，所以这一层只提供绝对位置命令**，没有"相对转多少下"的接口。
+**总线舵机上没有"触发回零"这个动作**（它内部一直是绝对位置，不像 Emm42 的计数器掉电即失效），
+所以"回零"就是走到 `home` 工位这一个动作；要改"哪是 0"得用舵机的偏差标定（指令 17/18），
+属于装机时做一次的事，本层不封装。完整说明见 [modules/servo/docs/转盘控制说明.md](modules/servo/docs/转盘控制说明.md)。
+
+> `0 / 500 / 1000` 是现场给出的三个工位位置（正好相隔 120°），**尚未在真机上逐点核对**。
+> 装机后先用菜单 20 走一遍确认，再把实测值回填到 `stations`。
+
+**转盘和机械臂的互锁不在本层**：转盘转动会撞到停在料盘上方的机械臂，而本层不知道机械臂在哪，
+所以调用方必须在转动前保证机械臂已让开——和机械臂那边"伸出状态下不许转底座"是同一条规矩。
 
 ## D6 激光雷达（lidar）
 
@@ -197,7 +235,7 @@ python -m unittest modules.lidar.test.unit.test_lidar_protocol modules.lidar.tes
   modules.lidar.test.unit.test_lidar_cloud modules.lidar.test.unit.test_lidar_visualize modules.lidar.test.unit.test_lidar_menu -v
 ```
 
-`modules/servo/test/manual/gripper.py`（菜单 13）不会在导入时执行动作。夹爪直连调试可运行同一个脚本，逐项输入 `YES` 后依次试动 300 和 500：
+`modules/servo/test/manual/gripper.py`（菜单 13）不会在导入时执行动作。夹爪直连调试可运行同一个脚本，逐项按回车确认后依次试动 300 和 500：
 
 ```python
 import time
@@ -308,6 +346,11 @@ with locator, USBCamera(1, width=1280, height=720).initialize() as camera:
 菜单 18 是 720p 真机预览入口（`q` 退出，`p` 立刻打印结论）。需提高距离精度时，
 先在已知距离处拍摄 30 mm 圆面，按 `focal_px = 已知距离(mm) × 圆面像素直径 / 30`
 标定，再通过 `MaterialLocator(focal_px=...)` 或独立命令行入口的 `--focal` 传入。
+**相机离物料很近（约 7 cm 这种机位）时还要在 `modules/vision/config.json` 里写
+`targets.working_distance_mm`（例如 `[60.0, 85.0]`）**：霍夫的半径窗口按针孔模型算，
+夹爪圆弧一类的假圆会被排除，距离才稳定；菜单 18 可用 `--depth 60,85` 临时覆盖。
+取距离请用 `report.best`（没有像顶面的圆时是 `None`），不要取 `report.regions[0]`。
+详见 [modules/vision/docs/视觉物料定位.md](modules/vision/docs/视觉物料定位.md)。
 
 菜单 9 和 `main.py` 的视觉演示从 `modules/vision/config.json` 读取摄像头编号。Windows 当前设为 `1`（外接 USB 摄像头），Jetson 设为 `0`；如果设备枚举顺序不同，修改对应平台的 `camera_id`。指定编号无法打开时会报错，不会自动切换到前置摄像头。
 
@@ -455,6 +498,7 @@ python -m modules.vision.drive.calibration
 python -m modules.vision.drive.cell_targets
 python -m modules.arm.drive.kinematics
 python -m modules.servo.drive.gripper
+python -m modules.servo.drive.turntable
 python -m modules.grasp.drive.arm_state
 python -m modules.grasp.drive.pipeline
 ```

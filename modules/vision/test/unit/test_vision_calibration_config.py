@@ -63,6 +63,10 @@ class VisionTargetSettingsTests(unittest.TestCase):
             {"marker_diameter_mm": -5},
             {"material_bgr": [1, 2]},
             {"color_tolerance": 0},
+            {"working_distance_mm": [85, 60]},
+            {"working_distance_mm": [0, 80]},
+            {"working_distance_mm": [70]},
+            {"working_distance_mm": "60,80"},
         ):
             with self.subTest(targets=targets):
                 with tempfile.TemporaryDirectory() as directory:
@@ -70,6 +74,22 @@ class VisionTargetSettingsTests(unittest.TestCase):
                     write_config(config_path, {"windows": {"camera_id": 1}, "targets": targets})
                     with self.assertRaises(ValueError):
                         load_vision_config(config_path, Path(directory) / "absent.json")
+
+    def test_working_distance_is_read_as_a_near_far_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            write_config(
+                config_path,
+                {"windows": {"camera_id": 1},
+                 "targets": {"working_distance_mm": [60, 85.5]}},
+            )
+
+            config = load_vision_config(config_path, Path(directory) / "absent.json")
+
+        self.assertEqual(config.targets.working_distance_mm, (60.0, 85.5))
+
+    def test_missing_working_distance_means_no_prior(self) -> None:
+        self.assertIsNone(TargetSettings().working_distance_mm)
 
     def test_unknown_platform_is_reported_by_the_accessor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

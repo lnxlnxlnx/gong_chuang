@@ -29,12 +29,23 @@ from modules.vision import (
     open_preview,
     warn_blank_preview,
 )
+from modules.vision.config import load_vision_config
+from modules.vision.drive.material_locate import parse_depth_range
 
 #: 每这么多帧打印一次中文结论。
 PRINT_EVERY = 30
 
 #: 连续读不到这么多帧就认为摄像头掉线，退出预览。
 MAX_MISSES = 30
+
+
+def configured_working_distance() -> tuple[float, float] | None:
+    """读 ``config.json`` 的 ``targets.working_distance_mm``；读不出来就当没配。"""
+    try:
+        return load_vision_config().targets.working_distance_mm
+    except ValueError as error:
+        print(f"config.json 读不出工作距离先验（{error}），这一轮不设半径窗口")
+        return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,6 +55,7 @@ def parse_args() -> argparse.Namespace:
         default_camera = load_camera_id(platform)
     except ValueError:
         default_camera = 0
+    default_depth = configured_working_distance()
     parser.add_argument("--model", type=Path, default=default_model_path(),
                         help="模型路径（Windows 默认 best.onnx，Jetson 默认 best.engine）")
     parser.add_argument("--camera", type=int, default=default_camera,
@@ -51,6 +63,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conf", type=float, default=0.25, help="置信度阈值（默认 0.25）")
     parser.add_argument("--focal", type=float, default=None,
                         help="标定后的当前画幅水平像素焦距；不传则用实拍样本粗标定")
+    parser.add_argument("--depth", dest="depth_range", type=parse_depth_range,
+                        default=default_depth,
+                        help='相机到物料顶面的深度范围（毫米），例如 "60,80"；'
+                             "默认读 config.json 的 targets.working_distance_mm"
+                             f"（当前 {default_depth}）")
     return parser.parse_args()
 
 
@@ -60,6 +77,7 @@ def run(
     *,
     focal_px: float | None = None,
     conf: float = 0.25,
+    depth_range: tuple[float, float] | None = None,
 ) -> int:
     """Open the camera and print the material verdict until q is pressed."""
     import cv2
@@ -79,8 +97,14 @@ def run(
             model_path=model_path,
             conf_thresh=conf,
             focal_px=focal_px,
+            depth_range_mm=depth_range,
         ) as locator, USBCamera(camera_id, width=1280, height=720).initialize() as camera:
             print(f"摄像头 {camera_id}，窗口 {window!r}；按 q 退出，按 p 立刻打印结论")
+            if depth_range is None:
+                print("没有工作距离先验：霍夫按画幅猜半径，夹爪弧线可能被当成物料")
+            else:
+                print(f"工作距离先验 {depth_range[0]:.0f}–{depth_range[1]:.0f} mm，"
+                      "半径窗口按针孔模型算")
             while True:
                 frame = camera.read()
                 if frame is None:
@@ -125,6 +149,7 @@ def main() -> None:
             args.model,
             focal_px=args.focal,
             conf=args.conf,
+            depth_range=args.depth_range,
         )
     )
 

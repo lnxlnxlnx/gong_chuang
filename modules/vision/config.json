@@ -10,6 +10,7 @@
     "marker_diameter_mm": null,
     "material_bgr": null,
     "marker_bgr": null,
-    "color_tolerance": 60.0
+    "color_tolerance": 60.0,
+    "working_distance_mm": [60.0, 85.0]
   }
 }

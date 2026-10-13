@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -56,21 +58,38 @@ class GripperManualTests(unittest.TestCase):
             servo_id=1, open_position=300, closed_position=500, duration_ms=1000
         )
 
-    def test_manual_actions_require_individual_yes(self) -> None:
+    def test_manual_actions_require_individual_confirmation(self) -> None:
         servo = Mock()
         servo.read_position.return_value = 400
-        answers = iter(["no", "YES"])
+        answers = iter(["no", ""])
         run_manual(servo, self.config, prompt=lambda _: next(answers), sleep=Mock())
-        # 只有第二项得到 YES：第一次不会发送任何位置指令
+        # 只有第二项得到确认（回车）：第一次不会发送任何位置指令
         servo.set_position.assert_called_once_with(500, 1000)
-        # 起始位置读一次，张开的 YES 被拒绝所以没有读回，闭合后读回一次
+        # 起始位置读一次，张开的确认被跳过所以没有读回，闭合后读回一次
         self.assertEqual(servo.read_position.call_count, 2)
+
+    def test_pressing_enter_executes_instead_of_skipping(self) -> None:
+        """这次改动的核心：以前空输入（回车）等于跳过，现在等于执行。"""
+        servo = Mock()
+        servo.read_position.return_value = 300
+        answers = iter(["", "no"])
+        run_manual(servo, self.config, prompt=lambda _: next(answers), sleep=Mock())
+        servo.set_position.assert_called_once_with(300, 1000)
+
+    def test_q_stops_the_remaining_actions(self) -> None:
+        servo = Mock()
+        servo.read_position.return_value = 400
+        answers = iter(["", "q"])
+        with redirect_stdout(io.StringIO()) as output:
+            run_manual(servo, self.config, prompt=lambda _: next(answers), sleep=Mock())
+        servo.set_position.assert_called_once_with(300, 1000)
+        self.assertIn("已结束后续夹爪动作", output.getvalue())
 
     def test_confirmed_actions_send_both_positions_in_order(self) -> None:
         servo = Mock()
         servo.read_position.side_effect = [506, 300, 499]
         sleep = Mock()
-        run_manual(servo, self.config, prompt=lambda _: "YES", sleep=sleep)
+        run_manual(servo, self.config, prompt=lambda _: "", sleep=sleep)
         self.assertEqual(
             [call.args for call in servo.set_position.call_args_list],
             [(300, 1000), (500, 1000)],
@@ -82,14 +101,14 @@ class GripperManualTests(unittest.TestCase):
         servo = Mock()
         servo.read_position.return_value = 400
         with patch.object(gripper_manual.time, "sleep") as sleep:
-            run_manual(servo, self.config, prompt=lambda _: "YES")
+            run_manual(servo, self.config, prompt=lambda _: "")
         self.assertEqual(sleep.call_count, 2)
 
     def test_manual_does_not_move_when_servo_does_not_answer(self) -> None:
         servo = Mock()
         servo.read_position.side_effect = TimeoutError("no response")
         with self.assertRaises(TimeoutError):
-            run_manual(servo, self.config, prompt=lambda _: "YES", sleep=Mock())
+            run_manual(servo, self.config, prompt=lambda _: "", sleep=Mock())
         servo.set_position.assert_not_called()
 
 

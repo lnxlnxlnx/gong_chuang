@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Mapping, Optional, Tuple
 
 from modules.vision.drive.calibration import PlaneCalibration
+from modules.vision.drive.pinhole import normalize_depth_range
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 DEFAULT_CALIBRATION_PATH = Path(__file__).resolve().parent / "calibration.json"
@@ -49,6 +50,9 @@ class TargetSettings:
     marker_bgr: Optional[Tuple[float, float, float]] = None
     #: 颜色匹配容差。
     color_tolerance: float = DEFAULT_COLOR_TOLERANCE
+    #: 相机到物料顶面的深度范围 ``(近, 远)`` 毫米；``None`` 表示不设先验。
+    #: 给了它，物料定位的霍夫半径窗口就按针孔模型算，夹爪弧线一类的假圆会被排除。
+    working_distance_mm: Optional[Tuple[float, float]] = None
 
     @property
     def can_split_by_color(self) -> bool:
@@ -208,6 +212,9 @@ def _targets(value: object) -> TargetSettings:
             document.get("color_tolerance", DEFAULT_COLOR_TOLERANCE),
             "targets.color_tolerance",
         ),
+        working_distance_mm=_optional_depth_range(
+            document.get("working_distance_mm"), "targets.working_distance_mm"
+        ),
     )
 
 
@@ -260,3 +267,15 @@ def _optional_bgr(value: object, name: str) -> Optional[Tuple[float, float, floa
     if not isinstance(value, (list, tuple)) or len(value) != 3:
         raise ValueError(f"{name} must be a three-element [B, G, R] list or null")
     return tuple(_number(channel, f"{name}[{index}]") for index, channel in enumerate(value))  # type: ignore[return-value]
+
+
+def _optional_depth_range(value: object, name: str) -> Optional[Tuple[float, float]]:
+    """读 ``[近, 远]`` 毫米；校验规则与针孔模型那边共用一份。"""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"{name} must be a two-element [near_mm, far_mm] list or null")
+    try:
+        return normalize_depth_range((_number(value[0], name), _number(value[1], name)))
+    except ValueError as error:
+        raise ValueError(f"{name}: {error}") from error
