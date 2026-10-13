@@ -29,8 +29,8 @@ from modules.vision import (
     open_preview,
     warn_blank_preview,
 )
-from modules.vision.config import load_vision_config
-from modules.vision.drive.material_locate import parse_depth_range
+from modules.vision.config import TargetSettings, load_vision_config
+from modules.vision.drive.material_locate import parse_bgr, parse_depth_range
 
 #: 每这么多帧打印一次中文结论。
 PRINT_EVERY = 30
@@ -39,13 +39,13 @@ PRINT_EVERY = 30
 MAX_MISSES = 30
 
 
-def configured_working_distance() -> tuple[float, float] | None:
-    """读 ``config.json`` 的 ``targets.working_distance_mm``；读不出来就当没配。"""
+def configured_targets():
+    """读 ``config.json`` 的 ``targets`` 块；读不出来就当没配。"""
     try:
-        return load_vision_config().targets.working_distance_mm
+        return load_vision_config().targets
     except ValueError as error:
-        print(f"config.json 读不出工作距离先验（{error}），这一轮不设半径窗口")
-        return None
+        print(f"config.json 读不出物料参数（{error}），这一轮按默认值跑")
+        return TargetSettings()
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,7 +55,8 @@ def parse_args() -> argparse.Namespace:
         default_camera = load_camera_id(platform)
     except ValueError:
         default_camera = 0
-    default_depth = configured_working_distance()
+    targets = configured_targets()
+    default_depth = targets.working_distance_mm
     parser.add_argument("--model", type=Path, default=default_model_path(),
                         help="模型路径（Windows 默认 best.onnx，Jetson 默认 best.engine）")
     parser.add_argument("--camera", type=int, default=default_camera,
@@ -68,6 +69,15 @@ def parse_args() -> argparse.Namespace:
                         help='相机到物料顶面的深度范围（毫米），例如 "60,80"；'
                              "默认读 config.json 的 targets.working_distance_mm"
                              f"（当前 {default_depth}）")
+    parser.add_argument("--bgr", dest="material_bgr", type=parse_bgr,
+                        default=targets.material_bgr,
+                        help="物料顶面参考颜色 B,G,R（例如 165,252,114）；"
+                             "默认读 config.json 的 targets.material_bgr，给了它就走颜色块定位")
+    parser.add_argument("--tolerance", type=float, default=targets.color_tolerance,
+                        help=f"颜色容差（默认 {targets.color_tolerance}）")
+    parser.add_argument("--diameter", type=float, default=targets.material_diameter_mm,
+                        help="物料顶面真实直径（毫米），默认读 config.json 的 "
+                             f"targets.material_diameter_mm（当前 {targets.material_diameter_mm}）")
     return parser.parse_args()
 
 
@@ -78,6 +88,9 @@ def run(
     focal_px: float | None = None,
     conf: float = 0.25,
     depth_range: tuple[float, float] | None = None,
+    material_bgr: tuple[float, float, float] | None = None,
+    colour_tolerance: float = 60.0,
+    top_diameter_mm: float = 30.0,
 ) -> int:
     """Open the camera and print the material verdict until q is pressed."""
     import cv2
@@ -98,13 +111,22 @@ def run(
             conf_thresh=conf,
             focal_px=focal_px,
             depth_range_mm=depth_range,
+            material_bgr=material_bgr,
+            colour_tolerance=colour_tolerance,
+            top_diameter_mm=top_diameter_mm,
         ) as locator, USBCamera(camera_id, width=1280, height=720).initialize() as camera:
             print(f"摄像头 {camera_id}，窗口 {window!r}；按 q 退出，按 p 立刻打印结论")
             if depth_range is None:
-                print("没有工作距离先验：霍夫按画幅猜半径，夹爪弧线可能被当成物料")
+                print("没有工作距离先验：半径窗口按画幅猜，远处的同色物体可能被当成物料")
             else:
                 print(f"工作距离先验 {depth_range[0]:.0f}–{depth_range[1]:.0f} mm，"
                       "半径窗口按针孔模型算")
+            if material_bgr is None:
+                print("没有物料颜色：走霍夫圆 + 形状判据（夹爪圆弧可能被当成候选）")
+            else:
+                print(f"物料颜色 BGR={material_bgr}，容差 {colour_tolerance:.0f}："
+                      "走颜色块定位，夹爪与背景不进掩膜")
+            print(f"顶面真实直径按 {top_diameter_mm:.1f} mm 折算距离")
             while True:
                 frame = camera.read()
                 if frame is None:
@@ -150,6 +172,9 @@ def main() -> None:
             focal_px=args.focal,
             conf=args.conf,
             depth_range=args.depth_range,
+            material_bgr=args.material_bgr,
+            colour_tolerance=args.tolerance,
+            top_diameter_mm=args.diameter,
         )
     )
 

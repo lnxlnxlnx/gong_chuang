@@ -244,7 +244,8 @@ class BestCircleTests(unittest.TestCase):
         summary = report.summary()
         self.assertIn("半径窗口", summary)
         self.assertIn("采用：", summary)
-        self.assertIn("1 个像顶面", summary)
+        self.assertIn("接受 1 个", summary)
+        self.assertIn("丢掉 2 个", summary)
 
 
 class RelaxedFallbackTests(unittest.TestCase):

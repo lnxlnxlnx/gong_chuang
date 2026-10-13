@@ -168,7 +168,8 @@ class MaterialLocateCameraTests(unittest.TestCase):
 
     def build_args(self, **overrides) -> argparse.Namespace:
         settings = dict(
-            model=None, camera=1, conf=0.25, focal=None, depth_range=None
+            model=None, camera=1, conf=0.25, focal=None, depth_range=None,
+            material_bgr=None, tolerance=60.0,
         )
         settings.update(overrides)
         return argparse.Namespace(**settings)

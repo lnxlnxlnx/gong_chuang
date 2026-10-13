@@ -75,14 +75,16 @@ class MaterialYOLO:
         conf_thresh: float = 0.25,
         iou_thresh: float = 0.45,
         class_names: Sequence[str] | None = None,
-        materials: Sequence[str] = MATERIAL_CLASS_NAMES,
+        materials: Sequence[str] | None = None,
         detector: Detector | None = None,
     ) -> None:
         self.model_path = Path(model_path) if model_path is not None else None
         self.conf_thresh = float(conf_thresh)
         self.iou_thresh = float(iou_thresh)
         self.class_names = list(class_names) if class_names is not None else None
-        self.materials = tuple(materials)
+        self.materials = (
+            tuple(materials) if materials is not None else tuple(MATERIAL_CLASS_NAMES)
+        )
         self._detector = detector
 
     # ------------------------------------------------------------- 生命周期
@@ -115,11 +117,26 @@ class MaterialYOLO:
         self.close()
 
     # ------------------------------------------------------------- 推理
+    @property
+    def effective_materials(self) -> tuple[str, ...]:
+        """这一帧按哪些类别名算物料。
+
+        模型自己的类别表里**一个 ``obj-*`` 都没有**时（例如新导出的
+        ``{0: 'red', 1: 'yellow', 2: 'blue', 3: 'green'}`` 四分类物料模型），
+        说明它是专用模型：所有类别都算物料。否则仍按 ``self.materials`` 过滤，
+        免得 ``zhangai`` 这类非物料类别混进来。
+        """
+        names = tuple(getattr(self.detector, "class_names", ()) or ())
+        if names and not any(name in set(MATERIAL_CLASS_NAMES) for name in names):
+            return names
+        return self.materials
+
     def detect(self, frame: np.ndarray, *, materials_only: bool = False) -> list[Detection]:
         """Run one inference on the whole frame."""
         hits = list(self.detector.detect(frame))
         if materials_only:
-            hits = [hit for hit in hits if is_material(hit.name, self.materials)]
+            materials = set(self.effective_materials)
+            hits = [hit for hit in hits if hit.name in materials]
         return hits
 
     def detect_in_region(
@@ -154,7 +171,8 @@ class MaterialYOLO:
             for hit in hits
         ]
         if materials_only:
-            mapped = [hit for hit in mapped if is_material(hit.name, self.materials)]
+            materials = set(self.effective_materials)
+            mapped = [hit for hit in mapped if hit.name in materials]
         if not keep_outside:
             grown = region.expanded(margin) if margin else region
             mapped = [hit for hit in mapped if is_inside_region(hit, grown)]

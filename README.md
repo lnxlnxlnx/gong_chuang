@@ -346,10 +346,11 @@ with locator, USBCamera(1, width=1280, height=720).initialize() as camera:
 菜单 18 是 720p 真机预览入口（`q` 退出，`p` 立刻打印结论）。需提高距离精度时，
 先在已知距离处拍摄 30 mm 圆面，按 `focal_px = 已知距离(mm) × 圆面像素直径 / 30`
 标定，再通过 `MaterialLocator(focal_px=...)` 或独立命令行入口的 `--focal` 传入。
-**相机离物料很近（约 7 cm 这种机位）时还要在 `modules/vision/config.json` 里写
-`targets.working_distance_mm`（例如 `[60.0, 85.0]`）**：霍夫的半径窗口按针孔模型算，
-夹爪圆弧一类的假圆会被排除，距离才稳定；菜单 18 可用 `--depth 60,85` 临时覆盖。
-取距离请用 `report.best`（没有像顶面的圆时是 `None`），不要取 `report.regions[0]`。
+**相机离物料很近（约 7–12 cm 这种机位）时要配两样东西**：`modules/vision/config.json`
+的 `targets.working_distance_mm`（例如 `[55.0, 160.0]`，霍夫半径窗口按针孔模型算）
+和 `targets.material_bgr`（物料顶面颜色，配了就改走颜色块定位，夹爪圆弧不再被当成物料）；
+菜单 18 可用 `--depth 60,85`、`--bgr 165,252,114` 临时覆盖。
+取距离请用 `report.best`（没有通过校验的顶面时是 `None`），不要取 `report.regions[0]`。
 详见 [modules/vision/docs/视觉物料定位.md](modules/vision/docs/视觉物料定位.md)。
 
 菜单 9 和 `main.py` 的视觉演示从 `modules/vision/config.json` 读取摄像头编号。Windows 当前设为 `1`（外接 USB 摄像头），Jetson 设为 `0`；如果设备枚举顺序不同，修改对应平台的 `camera_id`。指定编号无法打开时会报错，不会自动切换到前置摄像头。

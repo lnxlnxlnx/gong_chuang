@@ -17,7 +17,9 @@ Typical usage::
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, Sequence
 
 import numpy as np
@@ -31,6 +33,10 @@ DEFAULT_CLASS_NAMES = [
 #: Decode thresholds used when not overridden by the caller.
 DEFAULT_CONF_THRESH = 0.25
 DEFAULT_IOU_THRESH = 0.45
+
+#: 方形输入的默认边长。ONNX 通道优先问模型自己（见 :func:`resolve_onnx_metadata`），
+#: TensorRT 通道优先问引擎自己；这个常量只是两者都问不出来时的兜底。
+DEFAULT_INPUT_SIZE = 640
 
 #: Fill color used for letterbox padding when resizing into the square input.
 _LETTERBOX_FILL = 114
@@ -65,6 +71,45 @@ def class_name(class_id: int, class_names) -> str:
     if 0 <= class_id < len(class_names):
         return class_names[class_id]
     return str(class_id)
+
+
+def resolve_onnx_metadata(model_path) -> tuple[int | None, list[str] | None]:
+    """读 ONNX 文件自身的输入边长与类别表；读不出来时返回 ``(None, None)``。
+
+    模型换了就得跟着改的两件事——输入尺寸和类别表——都写在 ONNX 里，能从文件本身
+    读出来就不该再靠代码里的常量猜。装了 ``onnx`` 才读（Windows 上用 OpenCV 跑
+    推理并不需要它），没装就退回默认值：输入 640、类别表 ``DEFAULT_CLASS_NAMES``。
+
+    实测教训：新导出的 320×320 四分类模型配上写死的 640 输入，OpenCV 会在
+    Reshape 层直接抛 ``computeShapeByReshapeMask`` 断言失败。
+    """
+    try:
+        import onnx
+    except ImportError:
+        return None, None
+    try:
+        model = onnx.load(str(model_path), load_external_data=False)
+    except Exception:  # onnx 对损坏/异构文件抛的异常类型不定，探测失败就当读不出来
+        return None, None
+
+    size: int | None = None
+    for value in model.graph.input:
+        dimensions = [dimension.dim_value for dimension in value.type.tensor_type.shape.dim]
+        if len(dimensions) == 4 and dimensions[2] > 0 and dimensions[3] > 0:
+            size = int(dimensions[2])
+            break
+
+    names: list[str] | None = None
+    for prop in model.metadata_props:
+        if prop.key != "names":
+            continue
+        try:
+            table = ast.literal_eval(prop.value)
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(table, dict) and table:
+            names = [str(table[key]) for key in sorted(table)]
+    return size, names
 
 
 def _class_color(class_id: int, colors) -> tuple[int, int, int]:
@@ -228,7 +273,7 @@ class YOLOv8Detector:
     def __init__(self, engine_path: str, *, class_names=None,
                  conf_thresh: float = DEFAULT_CONF_THRESH,
                  iou_thresh: float = DEFAULT_IOU_THRESH,
-                 colors=None):
+                 colors=None, input_size: int | None = None):
         # Lazy imports: tensorrt/pycuda must not be required just to import
         # this module.  pycuda.autoinit is imported here (not at module level)
         # to avoid conflicts when the vision code runs in child processes.
@@ -247,7 +292,7 @@ class YOLOv8Detector:
         self.context = None
         self.input_shape = None
         self.output_shape = None
-        self.input_size = 640
+        self.input_size = DEFAULT_INPUT_SIZE
         self.h_input = None
         self.h_output = None
         self.d_input = None
@@ -255,6 +300,12 @@ class YOLOv8Detector:
         self.stream = None
 
         self._load_engine(engine_path)
+        if input_size is not None and int(input_size) != self.input_size:
+            # 引擎的输入尺寸写在引擎里；配置里写的不一致就直接说清楚，
+            # 别等到第一帧推理时才崩在 reshape 上。
+            raise ValueError(
+                f"配置的模型输入边长 {int(input_size)} 与引擎的 {self.input_size} 不一致：{engine_path}"
+            )
         self._alloc_buffers()
         self._warmup()
 
@@ -424,19 +475,31 @@ class YOLOv8Detector:
 class YOLOv8ONNXDetector(YOLOv8Detector):
     """Run the same YOLOv8 preprocessing and decoding with OpenCV on Windows.
 
-    The supplied competition ONNX model has a fixed 640×640 input. This
-    adapter owns only model loading and inference; detection results and
-    drawing remain identical to the TensorRT implementation.
+    输入边长与类别表**优先从 ONNX 文件自身读**（``resolve_onnx_metadata``）：换模型
+    （例如新导出的 320×320 四分类）时不必再改代码。装了 ``onnx`` 才读得到，
+    读不出来就退回 640 输入和 ``DEFAULT_CLASS_NAMES``。这个适配器只负责模型加载与
+    推理，检测结果与画图跟 TensorRT 实现完全一致。
     """
 
     def __init__(self, model_path: str, *, class_names=None,
                  conf_thresh: float = DEFAULT_CONF_THRESH,
-                 iou_thresh: float = DEFAULT_IOU_THRESH, colors=None):
-        self.class_names = list(class_names) if class_names else list(DEFAULT_CLASS_NAMES)
+                 iou_thresh: float = DEFAULT_IOU_THRESH, colors=None,
+                 input_size: int | None = None):
+        detected_size, detected_names = resolve_onnx_metadata(model_path)
+        if input_size is not None and detected_size and int(input_size) != int(detected_size):
+            raise ValueError(
+                f"配置的模型输入边长 {int(input_size)} 与 {model_path} 里的 {detected_size} 不一致"
+            )
+        self.model_path = str(model_path)
+        self.detected_class_names = detected_names
+        self.class_names = (
+            list(class_names) if class_names
+            else (list(detected_names) if detected_names else list(DEFAULT_CLASS_NAMES))
+        )
         self.conf_thresh = conf_thresh
         self.iou_thresh = iou_thresh
         self.colors = colors
-        self.input_size = 640
+        self.input_size = int(detected_size or input_size or DEFAULT_INPUT_SIZE)
         self.net = _cv2().dnn.readNetFromONNX(model_path)
 
     def infer(self, blob: np.ndarray) -> np.ndarray:

@@ -65,7 +65,6 @@ class ClassResult:
 
 class MaterialClassifier:
     """Pick the material class of a detection set.
-
     Parameters:
         materials: class names that count as materials.
         labels: class name -> Chinese label; defaults to
@@ -90,20 +89,32 @@ class MaterialClassifier:
         self.min_area_px = float(min_area_px)
 
     def label_for(self, name: str) -> str:
-        """Return the Chinese label of a class name (``未知物料`` when unknown)."""
-        return self.labels.get(name, UNKNOWN_MATERIAL_LABEL)
+        """Return the Chinese label of a class name (``未知物料`` when unknown).
+
+        模型换一版、类别名从 ``obj-green`` 变成 ``green`` 时，标签不该跟着丢：
+        先按原名查，再按 ``obj-`` 前缀补查一次。
+        """
+        label = self.labels.get(name)
+        if label is None and not name.startswith("obj-"):
+            label = self.labels.get(f"obj-{name}")
+        return label if label is not None else UNKNOWN_MATERIAL_LABEL
 
     def describe(self, hit) -> MaterialCandidate:
         """Turn one detection into a candidate (no filtering)."""
         return MaterialCandidate(name=hit.name, label=self.label_for(hit.name), score=float(hit.score))
 
-    def classify(self, hits: Iterable) -> ClassResult:
-        """Return the best material class among ``hits`` (or an empty result)."""
+    def classify(self, hits: Iterable, *, materials: Sequence[str] | None = None) -> ClassResult:
+        """Return the best material class among ``hits`` (or an empty result).
+
+        ``materials`` 可以在这一帧覆盖类别表：换了模型（类别名不再是 ``obj-*``）时，
+        调用方按模型自己声明的类别传进来，不必重建分类器。
+        """
+        accepted = set(self.materials if materials is None else materials)
         candidates = sorted(
             (
                 self.describe(hit)
                 for hit in hits
-                if hit.name in set(self.materials)
+                if hit.name in accepted
                 and hit.score >= self.min_score
                 and float(hit.width) * float(hit.height) >= self.min_area_px
             ),

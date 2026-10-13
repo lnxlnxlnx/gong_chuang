@@ -20,6 +20,7 @@ from typing import Sequence
 import numpy as np
 
 from modules.vision.drive.hough_lock import HoughRingLocator, LockedRegion, RingLock
+from modules.vision.drive.material_blob import ColourBlobLocator
 from modules.vision.drive.material_class import ClassResult, MaterialClassifier
 from modules.vision.drive.material_face import FaceQuality, measure_face
 from modules.vision.drive.material_yolo import MaterialYOLO
@@ -40,6 +41,9 @@ class RegionReport:
     classification: ClassResult
     #: 这个圆面"像不像物料顶面"：内部均匀度与边界支撑，见 ``material_face``。
     face: FaceQuality
+    #: 最终是否按物料顶面接受。配了物料颜色时由颜色块决定（见 ``material_blob``），
+    #: 否则由 ``face.looks_like_face`` 决定。
+    accepted: bool
     # 采用图像中心为主点、水平和竖直像素焦距相等的近似针孔模型。
     x_mm: float
     y_mm: float
@@ -115,17 +119,23 @@ class MaterialReport:
 
     @property
     def faces(self) -> tuple[RegionReport, ...]:
-        """内部均匀、边界完整，真的像物料顶面的那些圆面。"""
-        return tuple(report for report in self.regions if report.face.looks_like_face)
+        """最终按物料顶面接受的圆面。"""
+        return tuple(report for report in self.regions if report.accepted)
+
+    @property
+    def rejected(self) -> tuple[RegionReport, ...]:
+        """被丢掉的候选：霍夫在夹爪圆弧、背景纹理上凑出来的圆。"""
+        return tuple(report for report in self.regions if not report.accepted)
 
     @property
     def best(self) -> RegionReport | None:
-        """Prefer a classified material; otherwise the most face-like circle.
+        """Prefer a classified material; otherwise the largest accepted face.
 
         YOLO 认出类别时按置信度取（原行为）。YOLO 一个框都没给时**不能取第一个圆**：
         霍夫在夹爪、背景上凑出来的圆半径各不相同，取错一个距离就差好几毫米，
-        而下游（逆运动学）只拿到一个数。这时改取最像物料顶面的那个——先要求边界
-        完整，再比内部谁更均匀；一个都不像就返回 ``None``，让调用方看见"没锁定"。
+        而下游（逆运动学）只拿到一个数。这时取**半径最大的那个已接受顶面**：
+        同一个物料的顶面常常被凑出大小两个同心圆（内侧亮面 + 整块顶面），
+        小的那个会把距离报远，大的才是物体真正的边界。一个都没有就返回 ``None``。
         """
         if not self.regions:
             return None
@@ -135,23 +145,25 @@ class MaterialReport:
         faces = self.faces
         if not faces:
             return None
-        return min(faces, key=lambda report: report.face.interior_std)
+        return max(faces, key=lambda report: report.region.radius)
 
     def summary(self) -> str:
         """List circles left to right, including unclassified ones."""
         lines = [
-            f"检出 {len(self.regions)} 个物料圆面（其中 {len(self.faces)} 个像顶面），"
-            f"YOLO 检出 {len(self.hits)} 个框"
+            f"检出 {len(self.regions)} 个候选圆面（接受 {len(self.faces)} 个，"
+            f"丢掉 {len(self.rejected)} 个），YOLO 检出 {len(self.hits)} 个框"
         ]
         if self.radius_window_px is not None:
             low, high = self.radius_window_px
             lines.append(f"  半径窗口 {low:.0f}–{high:.0f} px（按工作距离先验）")
-        for index, report in enumerate(self.regions, start=1):
+        for index, report in enumerate(self.faces, start=1):
             lines.append(f"  物料 {index}: {report.summary()}")
+        for report in self.rejected:
+            lines.append(f"  丢掉: {report.summary()}")
         best = self.best
         lines.append(
             "  采用：" + (best.summary() if best is not None
-                          else "没有像物料顶面的圆面，距离不可用")
+                          else "没有通过校验的顶面，距离不可用")
         )
         return "\n".join(lines)
 
@@ -160,17 +172,22 @@ class MaterialLocator:
     """Locate top faces first, then classify YOLO boxes inside each circle.
 
     Parameters:
-        locator: injected circle locator; defaults to :class:`HoughRingLocator`.
+        locator: injected circle locator; defaults to :class:`HoughRingLocator`, or to
+            :class:`ColourBlobLocator` when ``material_bgr`` is given.
+        material_bgr: 物料顶面的参考颜色（BGR）。给了它就以**颜色块**为准
+            （夹爪、背景、线材根本进不了掩膜），不再用霍夫猜圆；``None`` 表示
+            不按颜色区分，走霍夫的形状判据。
+        colour_tolerance: 颜色容差（BGR 欧氏距离）。
         depth_range_mm: 相机到物料顶面的深度范围 ``(近, 远)``，单位毫米。给了它，
-            每一帧的霍夫半径窗口就由针孔模型算出来（而不是按画幅猜）：近端给出
-            大半径。这是"相机装在固定高度"这个物理事实的唯一去处，也是把夹爪弧线、
-            背景平坦区这类假圆排除掉的关键。``None`` 表示不设先验（原行为）。
+            每一帧的半径窗口就由针孔模型算出来（而不是按画幅猜）：近端给出大半径。
+            这是"相机装在固定高度"这个物理事实的唯一去处，也是把远处的同色物体、
+            夹爪圆弧这类假圆排除掉的关键。``None`` 表示不设先验（原行为）。
     """
 
     def __init__(
         self,
         *,
-        locator: HoughRingLocator | None = None,
+        locator=None,
         yolo: MaterialYOLO | None = None,
         classifier: MaterialClassifier | None = None,
         model_path: str | Path | None = None,
@@ -180,12 +197,24 @@ class MaterialLocator:
         focal_px: float | None = None,
         top_diameter_mm: float = 30.0,
         depth_range_mm: tuple[float, float] | None = None,
+        material_bgr: tuple[float, float, float] | None = None,
+        colour_tolerance: float = 60.0,
     ) -> None:
         if focal_px is not None and focal_px <= 0:
             raise ValueError("focal_px must be positive")
         if top_diameter_mm <= 0:
             raise ValueError("top_diameter_mm must be positive")
-        self.locator = locator if locator is not None else HoughRingLocator()
+        self.material_bgr = (
+            None if material_bgr is None
+            else tuple(float(channel) for channel in material_bgr)
+        )
+        self.colour_tolerance = float(colour_tolerance)
+        if locator is not None:
+            self.locator = locator
+        elif self.material_bgr is not None:
+            self.locator = ColourBlobLocator(self.material_bgr, tolerance=self.colour_tolerance)
+        else:
+            self.locator = HoughRingLocator()
         self.yolo = (
             yolo
             if yolo is not None
@@ -212,15 +241,22 @@ class MaterialLocator:
     def __exit__(self, *_exc) -> None:
         self.close()
 
+    @property
+    def colour_first(self) -> bool:
+        """配了物料颜色时，颜色块就是判据，不再用形状指标否决它。"""
+        return self.material_bgr is not None and isinstance(self.locator, ColourBlobLocator)
+
     # ------------------------------------------------------------- 主流程
     def locate(self, frame: np.ndarray) -> MaterialReport:
         """从一帧 BGR 图像返回圆面、类别和近似相机坐标。"""
         height, width = frame.shape[:2]
         window = self.radius_window(width, height)
         lock = self._locate_circles(frame, window, self.locator)
-        # 每个候选只量一次顶面质量，下面生成报告时直接复用（7 cm 机位下这一步最贵）。
+        # 每个候选只量一次顶面质量，下面生成报告时直接复用（近距机位下这一步最贵）。
         qualities = self._face_qualities(frame, lock)
-        if not any(quality.looks_like_face for quality in qualities.values()):
+        if not self.colour_first and not any(
+            quality.looks_like_face for quality in qualities.values()
+        ):
             # 严格参数没找到"像顶面的圆"时才放松 Canny 阈值：近距离焦画面里真实
             # 圆边的梯度被摊平，严格参数只剩夹爪弧线。放松只在这里发生，所以锐利
             # 画面（以及没有近距问题的机位）行为不变。
@@ -258,6 +294,15 @@ class MaterialLocator:
         """放松版圆定位器；注入的定位器没有这个能力时返回 ``None``。"""
         factory = getattr(self.locator, "relaxed", None)
         return None if factory is None else factory()
+
+    def _materials(self) -> tuple[str, ...]:
+        """这一帧按哪些类别名算物料。
+
+        ``MaterialYOLO`` 会在模型自己不声明 ``obj-*`` 时把所有类别都当物料
+        （换了模型不必改代码）；注入的假检测器没有这条信息时退回分类器默认表。
+        """
+        names = getattr(self.yolo, "effective_materials", None)
+        return tuple(names) if names else tuple(self.classifier.materials)
 
     @staticmethod
     def _face_qualities(frame: np.ndarray, lock: RingLock) -> dict:
@@ -311,8 +356,9 @@ class MaterialLocator:
         )
         return RegionReport(
             region=region,
-            classification=self.classifier.classify(visible),
+            classification=self.classifier.classify(visible, materials=self._materials()),
             face=face,
+            accepted=self.colour_first or face.looks_like_face,
             x_mm=fix.x_mm,
             y_mm=fix.y_mm,
             distance_mm=fix.depth_mm,
@@ -327,38 +373,42 @@ class MaterialLocator:
         circle_color: tuple[int, int, int] = (0, 0, 255),
         text_color: tuple[int, int, int] = (0, 255, 255),
         best_color: tuple[int, int, int] = (0, 255, 0),
+        rejected_color: tuple[int, int, int] = (128, 128, 128),
     ) -> np.ndarray:
         """Return a copy marked with material circles and their distances.
 
-        被 ``report.best`` 选中的那个圆画成 ``best_color``（默认绿色）并加粗：
-        下游拿哪个数一眼就能对上。
+        被 ``report.best`` 选中的那个圆画成 ``best_color``（默认绿色）并加粗；
+        其余通过的画成 ``circle_color``；**被丢掉的候选画成灰色细圈并标 rejected**，
+        不再让夹爪圆弧看起来像物料。
         """
         import cv2
 
         annotated = frame.copy()
         chosen = report.best
         chosen_region = None if chosen is None else chosen.region
+        accepted = {id(item.region) for item in report.faces}
         for index, region in enumerate(report.lock.regions, start=1):
             centre = (int(round(region.center_x)), int(round(region.center_y)))
             is_best = region is chosen_region
-            cv2.circle(
-                annotated,
-                centre,
-                int(round(region.radius)),
-                best_color if is_best else circle_color,
-                3 if is_best else 2,
-            )
+            kept = id(region) in accepted
+            if is_best:
+                color, thickness, tag = best_color, 3, f"material{index}*"
+            elif kept:
+                color, thickness, tag = circle_color, 2, f"material{index}"
+            else:
+                color, thickness, tag = rejected_color, 1, f"rejected{index}"
+            cv2.circle(annotated, centre, int(round(region.radius)), color, thickness)
             cv2.putText(
                 annotated,
-                f"material{index}" + ("*" if is_best else ""),
+                tag,
                 (centre[0] - 20, centre[1] - int(region.radius) - 6),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
-                best_color if is_best else circle_color,
+                color,
                 1,
             )
 
-        for region_report in report.regions:
+        for region_report in report.faces:
             centre = (
                 int(region_report.region.center_x),
                 int(region_report.region.center_y),
@@ -415,6 +465,22 @@ def parse_depth_range(text: str | None) -> tuple[float, float] | None:
     return normalize_depth_range((float(parts[0]), float(parts[1])))
 
 
+def parse_bgr(text) -> tuple[float, float, float] | None:
+    """把 ``"165,252,114"``（或 ``[165, 252, 114]``）解析成 BGR 三元组。"""
+    if text is None or text == "":
+        return None
+    if isinstance(text, str):
+        parts = text.replace("，", ",").split(",")
+        values = [float(part) for part in parts]
+    else:
+        values = [float(channel) for channel in text]
+    if len(values) != 3:
+        raise ValueError('物料颜色要写成 "B,G,R"，例如 "165,252,114"')
+    if any(not 0 <= channel <= 255 for channel in values):
+        raise ValueError("物料颜色的每个通道都要在 0–255 之间")
+    return (values[0], values[1], values[2])
+
+
 def _run_image(args) -> int:
     import cv2
 
@@ -423,7 +489,8 @@ def _run_image(args) -> int:
         print(f"读不出图片：{args.image}")
         return 1
     with MaterialLocator(model_path=args.model, conf_thresh=args.conf, focal_px=args.focal,
-                         depth_range_mm=args.depth_range) as locator:
+                         depth_range_mm=args.depth_range, material_bgr=args.material_bgr,
+                         colour_tolerance=args.tolerance) as locator:
         report = locator.locate(frame)
         print(report.summary())
         if args.save is not None:
@@ -442,7 +509,8 @@ def _run_camera(args) -> int:
     try:
         with MaterialLocator(
             model_path=args.model, conf_thresh=args.conf, focal_px=args.focal,
-            depth_range_mm=args.depth_range,
+            depth_range_mm=args.depth_range, material_bgr=args.material_bgr,
+            colour_tolerance=args.tolerance,
         ) as locator, USBCamera(args.camera, width=1280, height=720).initialize() as camera:
             print(f"摄像头 {args.camera}；窗口 {window!r}，按 q 退出")
             while True:
@@ -469,7 +537,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="当前画幅标定后的水平像素焦距；不传则用实拍样本粗标定")
     parser.add_argument("--depth", dest="depth_range", type=parse_depth_range, default=None,
                         help='相机到物料顶面的深度范围（毫米），例如 "60,80"；'
-                             "给了它半径窗口就按针孔模型算，夹爪弧线等假圆会被排除")
+                             "给了它半径窗口就按针孔模型算，夹爪弧线、远处同色物体都会被排除")
+    parser.add_argument("--bgr", dest="material_bgr", type=parse_bgr, default=None,
+                        help='物料顶面参考颜色 "B,G,R"，例如 "165,252,114"；'
+                             "给了它就走颜色块定位，不再用霍夫猜圆")
+    parser.add_argument("--tolerance", type=float, default=60.0, help="颜色容差（默认 60）")
     args = parser.parse_args(argv)
     if args.camera is not None:
         return _run_camera(args)
