@@ -3,7 +3,7 @@
     "port": "COM14"
   },
   "jetson": {
-    "port": ""
+    "port": "/dev/ttyUSB0"
   },
   "bus": {
     "baudrate": 115200,
