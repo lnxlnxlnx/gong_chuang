@@ -10,6 +10,7 @@ from modules.vision.drive.hough_lock import synthetic_rings
 from modules.vision.drive.material_blob import (
     ColourBlobLocator,
     normalize_references,
+    sample_reference,
     synthetic_scene,
 )
 from modules.vision.drive.material_locate import MaterialLocator, parse_bgr, parse_palette
@@ -201,6 +202,50 @@ class ParseColourTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     parse_palette(bad)
+
+
+class SampledColourTests(unittest.TestCase):
+    """调色板没配的颜色：从模型框里现取参考色，换料不必先量颜色。"""
+
+    @staticmethod
+    def red_frame():
+        import cv2
+
+        frame = np.full((480, 640, 3), (40, 70, 55), dtype=np.uint8)
+        cv2.circle(frame, (320, 240), 90, (30, 40, 210), -1)     # 红料，调色板里没有
+        return frame
+
+    def test_a_colour_outside_the_palette_is_learned_from_the_model_box(self) -> None:
+        from modules.vision.drive.yolov8 import Detection
+
+        frame = self.red_frame()
+        hit = Detection(x1=230.0, y1=150.0, x2=410.0, y2=330.0, score=0.9, class_id=0, name="red")
+        locator = MaterialLocator(
+            yolo=FakeYOLO([hit]), focal_px=500.0,
+            material_palette={"green": MATERIAL_BGR},
+        )
+        report = locator.locate(frame)
+
+        self.assertEqual(report.colour_source, "model")
+        self.assertFalse(report.colour_fallback)
+        self.assertEqual(len(report.faces), 1)
+        self.assertEqual(report.best.name, "red")
+        self.assertAlmostEqual(report.best.region.radius, 90.0, delta=4)
+        self.assertIn("参考色是从模型框里现取的", report.summary())
+
+    def test_sample_reference_reads_the_centre_of_the_box(self) -> None:
+        frame = self.red_frame()
+        colour = sample_reference(frame, (230.0, 150.0, 410.0, 330.0))
+        self.assertIsNotNone(colour)
+        self.assertGreater(colour[2], colour[0])          # 红通道最大
+        self.assertIsNone(sample_reference(frame, (0.0, 0.0, 3.0, 3.0)))
+
+    def test_without_a_model_box_it_still_falls_back_to_hough(self) -> None:
+        report = MaterialLocator(
+            yolo=FakeYOLO(), focal_px=500.0, material_palette={"green": MATERIAL_BGR}
+        ).locate(self.red_frame())
+        self.assertIsNone(report.colour_source)
+        self.assertEqual(report.regions, ())
 
 
 class PaletteFallbackTests(unittest.TestCase):

@@ -71,7 +71,12 @@ def normalize_references(value) -> tuple[tuple[float, float, float], ...]:
 
 
 #: 掩膜形态学去噪/补洞的核大小（像素）：先开运算去散点，再闭运算补回顶面高光打出的洞。
-DEFAULT_OPEN_PX = 5
+#:
+#: 开运算取 15 是有讲究的：画面里常有**同色的细长结构**——红料旁边就是红色线材，
+#: 掩膜会把料和线连成一块，填充率掉到 0.53、边界起伏涨到 0.38，于是真料被判掉。
+#: 实测 5 px 连在一起、11 px 分开、15 px 起就是干净的圆（fill 0.96 / var 0.04）。
+#: 代价是半径小于 15 px 的同色块会消失，而这个尺度本来也测不准距离。
+DEFAULT_OPEN_PX = 15
 DEFAULT_CLOSE_PX = 9
 
 #: 小于这么多像素的色块不当物料（噪点、反光、背景上一小块同色）。
@@ -339,6 +344,34 @@ def synthetic_scene(width: int = 640, height: int = 480):
     return frame
 
 
+def sample_reference(frame: np.ndarray, box) -> tuple[float, float, float] | None:
+    """从检测框里估出这块料的参考色（``box`` 是 ``(x1, y1, x2, y2)``）。
+
+    取框**中心那半块**像素的中位色：模型的框一般贴着一块料，中心基本就是料本身，
+    边角上才有台面/背景。这样"换一块料"就不必先去量颜色，模型认得出就够。
+    参考色的亮度不影响匹配（匹配只看色相 + 亮度下限），所以阴影里的暗红也照样能用。
+    """
+    cv2 = _cv2()
+    if frame is None or getattr(frame, "size", 0) == 0:
+        raise ValueError("frame is empty")
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = (int(round(float(value))) for value in box)
+    x1, x2 = max(0, min(x1, width)), max(0, min(x2, width))
+    y1, y2 = max(0, min(y1, height)), max(0, min(y2, height))
+    if x2 - x1 < 4 or y2 - y1 < 4:
+        return None
+    centre = frame[
+        y1 + (y2 - y1) // 4: y2 - (y2 - y1) // 4,
+        x1 + (x2 - x1) // 4: x2 - (x2 - x1) // 4,
+        :3,
+    ]
+    if centre.size < 3 * 16:
+        centre = frame[y1:y2, x1:x2, :3]
+    if centre.size < 3 * 16:
+        return None
+    return tuple(float(value) for value in np.median(centre.reshape(-1, 3), axis=0))
+
+
 def _self_test() -> int:
     frame = synthetic_scene()
     locator = ColourBlobLocator((114.0, 252.0, 165.0))
@@ -387,12 +420,19 @@ def _self_test() -> int:
     if not ColourBlobLocator((114.0, 252.0, 165.0)).locate(edge_frame).regions:
         problems.append("贴边的色块不该因为测不准起伏而被丢掉")
 
+    # 从检测框里估参考色：换一块料不必先量颜色
+    sampled = sample_reference(synthetic_scene(), (210, 150, 390, 330))
+    if sampled is None or max(abs(a - b) for a, b in zip(sampled, (114.0, 252.0, 165.0))) > 2:
+        problems.append(f"从框中心估出来的参考色不对：{sampled}")
+    if sample_reference(frame, (0, 0, 3, 3)) is not None:
+        problems.append("太小的框应当估不出参考色")
+
     if problems:
         print("\n自测失败：")
         for problem in problems:
             print(f"  · {problem}")
         return 1
-    print("\n自测通过：颜色块提取、噪点过滤、半径窗口与调色板去重都正确。")
+    print("\n自测通过：颜色块提取、噪点过滤、半径窗口、调色板去重与参考色取样都正确。")
     return 0
 
 

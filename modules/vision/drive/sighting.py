@@ -135,6 +135,10 @@ class MaterialSighting:
     edge_support: Optional[float] = None
     edge_directions: Optional[int] = None
     straight_distance_mm: Optional[float] = None
+    #: 这一条是什么时候收到的（``time.monotonic()`` 秒）。用来判断"手上这帧是不是过期了"：
+    #: 机械臂在动的时候，拿一份几百毫秒前的坐标去解算，解出来的位置已经不成立了。
+    #: 纯解析（离线回放）时为 ``None``。
+    received_at: Optional[float] = None
     #: 原始行，原样保留：真机上出问题时最想看到的就是"到底收到了什么"。
     raw: str = ""
 
@@ -162,8 +166,11 @@ class MaterialSighting:
         return "；".join(parts)
 
 
-def parse_sighting(line: str) -> MaterialSighting:
+def parse_sighting(line: str, *, received_at: Optional[float] = None) -> MaterialSighting:
     """把一行镜头文本解析成 :class:`MaterialSighting`。
+
+    ``received_at`` 由接收方传入（``time.monotonic()`` 秒）；离线回放时不传，
+    留在 ``None`` 上，表示"这条没有时间戳"。
 
     :raises SightingParseError: 没有「物料 N:」编号，或者没有 ``xyz=`` 坐标。
         这两种情况下拿不到可用的目标位置，**必须**响亮地失败。
@@ -201,6 +208,7 @@ def parse_sighting(line: str) -> MaterialSighting:
         edge_support=_number(_EDGE_SUPPORT, text),
         edge_directions=None if directions is None else int(directions),
         straight_distance_mm=_number(_STRAIGHT_DISTANCE, text),
+        received_at=received_at,
         raw=text,
     )
 

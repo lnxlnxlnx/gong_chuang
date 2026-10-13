@@ -31,6 +31,9 @@ class CorrectionSettings:
     tolerance_mm: float = 3.0
     #: 每次只走误差的这个比例，留出过冲余量；(0, 1]。
     gain: float = 0.8
+    #: 要转的角度超过这么多度时，先缩回 ``retract_radius_mm`` 再转（安全廊道）。
+    #: 实测这个角度以下就地转是安全的：爪子本来就悬在物料上方几十毫米。
+    rotation_corridor_degrees: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,10 @@ class GraspConfig:
     marker_to_grasp_mm: float = 0.0
     #: 抓取流程统一使用的转速；``None`` 表示沿用 ``modules/arm/config.json`` 的值。
     motion_rpm: Optional[int] = None
+    #: 要转的角度超过 ``correction.rotation_corridor_degrees`` 时，先把伸缩轴缩到这个
+    #: 半径再去转。伸出状态下横扫底座会把整条臂扫过工作区，这是**机械结构上的**风险，
+    #: 与高度无关，所以哪怕只做 x/y 对准也必须走一步缩回。``None`` 表示不缩回。
+    retract_radius_mm: Optional[float] = None
     correction: CorrectionSettings = field(default_factory=CorrectionSettings)
 
 
@@ -69,6 +76,9 @@ def load_grasp_config(config_path: Path = DEFAULT_CONFIG_PATH) -> GraspConfig:
         grip_ratio=_ratio(root.get("grip_ratio", 0.5), "grip_ratio"),
         marker_to_grasp_mm=_number(root.get("marker_to_grasp_mm", 0.0), "marker_to_grasp_mm"),
         motion_rpm=_optional_rpm(root.get("motion_rpm")),
+        retract_radius_mm=_optional_non_negative(
+            root.get("retract_radius_mm"), "retract_radius_mm"
+        ),
         correction=correction,
     )
 
@@ -84,6 +94,10 @@ def _correction(document: Mapping[str, object]) -> CorrectionSettings:
         iterations=iterations,
         tolerance_mm=_positive(document.get("tolerance_mm", 3.0), "correction.tolerance_mm"),
         gain=gain,
+        rotation_corridor_degrees=_positive(
+            document.get("rotation_corridor_degrees", 5.0),
+            "correction.rotation_corridor_degrees",
+        ),
     )
 
 
@@ -93,6 +107,12 @@ def _optional_rpm(value: object) -> Optional[int]:
     if type(value) is not int or not 1 <= value <= Emm42Driver.MAX_RPM:
         raise ValueError(f"motion_rpm must be an integer in 1..{Emm42Driver.MAX_RPM} or null")
     return value
+
+
+def _optional_non_negative(value: object, name: str) -> Optional[float]:
+    if value is None:
+        return None
+    return _non_negative(value, name)
 
 
 def _mapping(value: object, name: str) -> Mapping[str, object]:

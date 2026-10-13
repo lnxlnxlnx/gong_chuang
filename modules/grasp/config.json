@@ -3,9 +3,11 @@
   "grip_ratio": 0.5,
   "marker_to_grasp_mm": 0.0,
   "motion_rpm": null,
+  "retract_radius_mm": null,
   "correction": {
     "iterations": 3,
     "tolerance_mm": 3.0,
-    "gain": 0.8
+    "gain": 0.8,
+    "rotation_corridor_degrees": 5.0
   }
 }

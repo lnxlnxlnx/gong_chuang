@@ -20,7 +20,7 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from modules.vision.drive.hough_lock import HoughRingLocator, LockedRegion, RingLock
-from modules.vision.drive.material_blob import ColourBlobLocator
+from modules.vision.drive.material_blob import ColourBlobLocator, sample_reference
 from modules.vision.drive.material_class import ClassResult, MaterialClassifier
 from modules.vision.drive.material_face import FaceQuality, measure_face
 from modules.vision.drive.material_yolo import MaterialYOLO
@@ -111,8 +111,14 @@ class MaterialReport:
     focal_px: float | None = None
     #: 本帧实际使用的半径窗口 ``(最小, 最大)``；没配深度窗口时为 ``None``。
     radius_window_px: tuple[float, float] | None = None
-    #: 颜色块一个都没找到、退回霍夫形状判据时为 ``True``（多半是调色板没配这块料）。
-    colour_fallback: bool = False
+    #: 这一帧的候选是从哪来的：``"palette"`` 配置的调色板 / ``"model"`` 模型框里现取的
+    #: 参考色 / ``"hough"`` 颜色没配上、退回霍夫的形状判据；``None`` 表示什么都没找到。
+    colour_source: str | None = None
+
+    @property
+    def colour_fallback(self) -> bool:
+        """颜色块一个都没找到、退回霍夫形状判据时为 ``True``（多半是调色板没配这块料）。"""
+        return self.colour_source == "hough"
 
     @property
     def present(self) -> bool:
@@ -157,8 +163,11 @@ class MaterialReport:
             f"检出 {len(self.regions)} 个候选圆面（接受 {len(self.faces)} 个，"
             f"丢掉 {len(self.rejected)} 个），YOLO 检出 {len(self.hits)} 个框"
         ]
-        if self.colour_fallback:
-            lines.append("  调色板里没有这块料：已退回霍夫的形状判据，"
+        if self.colour_source == "model":
+            lines.append("  调色板里没有这块料：参考色是从模型框里现取的"
+                         "（要固定下来就把它加进 targets.material_palette）")
+        elif self.colour_fallback:
+            lines.append("  调色板里没有这块料，模型也没认出来：已退回霍夫的形状判据，"
                          "请把它的颜色加进 targets.material_palette")
         if self.radius_window_px is not None:
             low, high = self.radius_window_px
@@ -276,14 +285,24 @@ class MaterialLocator:
         window = self.radius_window(width, height)
         lock = self._locate_circles(frame, window, self.locator)
         qualities = self._face_qualities(frame, lock)
-        colour_path = bool(lock.regions)
-        fell_back = False
-        if self.colour_first and not lock.regions:
-            # 调色板里没有这块料时会一个色块都找不到；退回霍夫的形状判据，
-            # 至少还能看见"有个圆面"，并在报告里说清是退回来的结果。
-            lock, qualities = self._locate_hough(frame, window)
-            colour_path = False
-            fell_back = bool(lock.regions)
+        source = "palette" if lock.regions else None
+        hits: tuple[Detection, ...] = ()
+        if not lock.regions and self.colour_first:
+            # 调色板里没有这块料。先问模型：它认出来了，就从它框的中心取一次参考色，
+            # 拿这个参考色再分割一遍——换一块料（红、黄……）就不必先量颜色。
+            hits = tuple(self.yolo.detect(frame, materials_only=True))
+            sampled = self._sampled_palette(frame, hits)
+            if sampled:
+                trial = ColourBlobLocator(sampled, tolerance=self.colour_tolerance)
+                candidate = self._locate_circles(frame, window, trial)
+                if candidate.regions:
+                    lock = candidate
+                    qualities = self._face_qualities(frame, candidate)
+                    source = "model"
+            if not lock.regions:
+                # 模型也没认出来：退回霍夫的形状判据，并在报告里说清是退回来的结果。
+                lock, qualities = self._locate_hough(frame, window)
+                source = "hough" if lock.regions else None
         elif not any(quality.looks_like_face for quality in qualities.values()):
             # 主定位器支持放松时有第二遍：近距离焦画面里真实圆边的梯度被摊平，
             # 严格 Canny 阈值只剩夹爪弧线。锐利画面第一遍就找到顶面，不会跑第二遍。
@@ -291,23 +310,34 @@ class MaterialLocator:
         focal_px = self.resolved_focal_px(width, height, required=bool(lock.regions))
         if not lock.regions:
             return MaterialReport(
-                lock=lock, hits=(), regions=(),
-                focal_px=focal_px, radius_window_px=window, colour_fallback=fell_back,
+                lock=lock, hits=hits, regions=(), focal_px=focal_px,
+                radius_window_px=window, colour_source=source,
             )
-        hits = tuple(self.yolo.detect(frame, materials_only=True))
+        if not hits:
+            hits = tuple(self.yolo.detect(frame, materials_only=True))
         # 画幅规则与像素焦距只有一个定义，在 modules.vision.drive.pinhole 里。
         focal_px = resolve_focal_px(width, height, self.focal_px)
         reports = tuple(
             self._report_for_region(
                 frame, hits, region, qualities[region], focal_px, width, height,
-                colour_path=colour_path,
+                colour_path=source in ("palette", "model"),
             )
             for region in lock.regions
         )
         return MaterialReport(
-            lock=lock, hits=hits, regions=reports,
-            focal_px=focal_px, radius_window_px=window, colour_fallback=fell_back,
+            lock=lock, hits=hits, regions=reports, focal_px=focal_px,
+            radius_window_px=window, colour_source=source,
         )
+
+    @staticmethod
+    def _sampled_palette(frame: np.ndarray, hits: Sequence[Detection]) -> dict:
+        """从模型框里现取参考色；取不出来就返回空（调用方会走别的退路）。"""
+        sampled = {}
+        for hit in hits:
+            colour = sample_reference(frame, (hit.x1, hit.y1, hit.x2, hit.y2))
+            if colour is not None:
+                sampled[hit.name] = colour
+        return sampled
 
     def _locate_hough(self, frame: np.ndarray, window):
         """退回霍夫那一路，含"严格参数没找到顶面就放松 Canny 阈值再试一次"。"""

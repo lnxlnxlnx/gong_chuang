@@ -36,6 +36,7 @@ import json
 import queue
 import socket
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Mapping, Optional, Tuple
@@ -251,6 +252,53 @@ class CameraLink:
         except queue.Empty:
             return None
 
+    def frame(
+        self,
+        *,
+        max_age_seconds: Optional[float] = None,
+        timeout: Optional[float] = None,
+    ) -> Optional[Tuple[MaterialSighting, ...]]:
+        """把队列里当前压着的观测收成**一组**返回（同一批、去重后按物料编号排序）。
+
+        为什么需要它：一帧画面里的爪上靶标和物料是**两条独立的消息**，分两次到达。
+        如果按"最新一条"逐条取，第二次取到的可能又是靶标，永远凑不齐一对。
+
+        两个参数：
+
+        - ``timeout``：队列为空时最多等这么久（秒），等到第一条就把它同批的伙伴一起收走；
+        - ``max_age_seconds``：只收"新到这么多秒以内"的观测；更旧的一条都不返回。
+          机械臂动过之后再拿几秒前的坐标，算出来的位置早就不成立了。
+
+        没有可用观测时返回 ``None``（而不是空元组：空元组会让调用方以为"收到了一帧，
+        只是里面什么都没"，那是另一回事）。
+        """
+        first = self.get(timeout=timeout)
+        if first is None:
+            return None
+        collected = [first]
+        # 把已经到达的同批伙伴收走，不阻塞等待"还没来的"。
+        while True:
+            item = self.get(timeout=0.0)
+            if item is None:
+                break
+            collected.append(item)
+
+        if max_age_seconds is not None:
+            now = time.monotonic()
+            collected = [
+                item
+                for item in collected
+                if item.received_at is None or now - item.received_at <= max_age_seconds
+            ]
+        if not collected:
+            return None
+
+        # 同一个物料可能被连报几条（镜头端每帧都发）：只留最新的一条。
+        freshest: dict = {}
+        for item in collected:
+            freshest[item.material_id] = item
+        return tuple(freshest[key] for key in sorted(freshest))
+
     @property
     def pending(self) -> int:
         """队列里还压着多少条。"""
@@ -263,7 +311,12 @@ class CameraLink:
             return tuple(self._rejected)
 
     def clear(self) -> None:
-        """清空队列与诊断记录。"""
+        """清空队列与统计，回到"从头开始"的状态。
+
+        三个计数器一起归零（``received`` / ``rejected_count`` / ``connections``）：
+        只清队列不清计数会让人看着一个对不上队列的累计值，反而更难判断链路状态。
+        连接本身不断——清统计不该把镜头端踢下线。
+        """
         while True:
             try:
                 self._queue.get_nowait()
@@ -271,7 +324,9 @@ class CameraLink:
                 break
         with self._lock:
             self._rejected.clear()
+        self.received = 0
         self.rejected_count = 0
+        self.connections = 0
 
     # ------------------------------------------------------------- 接收线程
     def _serve(self) -> None:
@@ -425,8 +480,10 @@ def _self_test() -> int:
             assert newest.x_mm == 4.0, newest
             assert link.pending == 0, link.pending
 
-            # FIFO 取法不跳条。
-            link.clear()
+            # FIFO 取法不跳条。先排空队列而不是 clear()：clear 会把计数器也归零，
+            # 而后面还要用 received / connections 核对"断线重连"。
+            while link.get(timeout=0.0) is not None:
+                pass
             for index in range(3):
                 client.sendall(f"物料 {index}: xyz=({index},0,100) mm\n".encode("utf-8"))
             assert _wait_for(lambda: link.pending == 3), link.pending
@@ -434,15 +491,19 @@ def _self_test() -> int:
             assert first is not None and first.material_id == 0, first
             assert link.pending == 2, link.pending
 
+            # clear() 连统计一起归零（它是"从头开始"，不是"只清队列"）。
             link.clear()
-            assert link.pending == 0 and link.rejected == () and link.rejected_count == 0, link
+            assert link.pending == 0 and link.received == 0, (link.pending, link.received)
+            assert link.rejected == () and link.rejected_count == 0, link.rejected
+            assert link.connections == 0, link.connections
 
         # 对面断开之后，链路自己活着，新的连接还能进来。
+        # connections 由接收线程在 accept 时自增，所以这里等它，而不是直接读。
         assert _wait_for(lambda: not link.connected), "对端断开后 connected 必须变假"
         with socket.create_connection(("127.0.0.1", link.port), timeout=5.0) as client:
+            assert _wait_for(lambda: link.connections == 1), link.connections
             client.sendall((sample + "\n").encode("utf-8"))
-            assert _wait_for(lambda: link.received == 11), link.received
-            assert link.connections == 2, link.connections
+            assert _wait_for(lambda: link.received == 1), link.received
         assert link.error is None, link.error
 
     # 端口被占用时必须响亮地失败，而不是静默地收不到东西。
