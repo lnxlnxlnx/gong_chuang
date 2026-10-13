@@ -22,7 +22,7 @@ from modules.vision import (
     DistanceEstimator,
     USBCamera,
     close_previews,
-    create_detector,
+    create_configured_detector,
     default_model_path,
     load_camera_id,
     looks_blank,
@@ -48,13 +48,13 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=640, help="camera width")
     parser.add_argument("--height", type=int, default=480, help="camera height")
     parser.add_argument("--fps", type=int, default=30, help="camera frame rate")
-    parser.add_argument("--conf", type=float, default=0.25,
-                        help="confidence threshold (default: 0.25)")
-    parser.add_argument("--iou", type=float, default=0.45,
-                        help="NMS IoU threshold (default: 0.45)")
+    parser.add_argument("--conf", type=float, default=None,
+                        help="confidence threshold; defaults to model.conf_thresh in config.json")
+    parser.add_argument("--iou", type=float, default=None,
+                        help="NMS IoU threshold; defaults to model.iou_thresh in config.json")
     parser.add_argument("--real-widths", default=None,
                         help='comma-separated class widths in mm, e.g. '
-                             '"obj-red=120,zhangai=80"; enables distance readout')
+                             '"red=120,blue=80"; enables distance readout')
     parser.add_argument("--max-fps", type=float, default=30.0,
                         help="cap on the displayed FPS (default: 30)")
     args = parser.parse_args()
@@ -76,8 +76,8 @@ def main() -> None:
     blank_frames = 0
     warned_blank = False
     try:
-        with create_detector(args.model, conf_thresh=args.conf,
-                            iou_thresh=args.iou) as detector, \
+        with create_configured_detector(model_path=args.model, conf_thresh=args.conf,
+                                       iou_thresh=args.iou) as detector, \
                 USBCamera(camera_id, width=args.width, height=args.height,
                           fps=args.fps).initialize() as camera:
             print(f"preview running in window {window!r}; press q to quit")

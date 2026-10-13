@@ -24,11 +24,16 @@ from typing import Protocol, Sequence
 
 import numpy as np
 
-#: Default competition class table, indexed by the model's training label order.
-DEFAULT_CLASS_NAMES = [
-    "obj-red", "obj-green", "obj-blue", "obj-yellow", "obj-light blue",
-    "obj-black", "target-1", "target-2", "target-3", "zhangai",
-]
+#: 内置类别表，索引即训练时的类别顺序。
+#:
+#: 当前物料模型（``models/best.onnx``，四类）在 ONNX 元数据里写的是
+#: ``{0: 'red', 1: 'yellow', 2: 'blue', 3: 'green'}``，也就是"1 红 2 黄 3 蓝 4 绿"，
+#: 这张表必须一字不差地对上：**框的坐标由模型给出，类名由这张表按索引查**，
+#: 表错了框还是准的、类名会整体错位。
+#:
+#: 换模型优先改 ``modules/vision/config.json`` 的 ``model.class_names``；
+#: 这里只是没有配置（以及 ONNX 里也没有元数据）时的兜底。
+DEFAULT_CLASS_NAMES = ["red", "yellow", "blue", "green"]
 
 #: Decode thresholds used when not overridden by the caller.
 DEFAULT_CONF_THRESH = 0.25
@@ -36,7 +41,8 @@ DEFAULT_IOU_THRESH = 0.45
 
 #: 方形输入的默认边长。ONNX 通道优先问模型自己（见 :func:`resolve_onnx_metadata`），
 #: TensorRT 通道优先问引擎自己；这个常量只是两者都问不出来时的兜底。
-DEFAULT_INPUT_SIZE = 640
+#: 当前模型是 320×320（ONNX 元数据 ``imgsz``）。
+DEFAULT_INPUT_SIZE = 320
 
 #: Fill color used for letterbox padding when resizing into the square input.
 _LETTERBOX_FILL = 114
@@ -78,7 +84,12 @@ def resolve_onnx_metadata(model_path) -> tuple[int | None, list[str] | None]:
 
     模型换了就得跟着改的两件事——输入尺寸和类别表——都写在 ONNX 里，能从文件本身
     读出来就不该再靠代码里的常量猜。装了 ``onnx`` 才读（Windows 上用 OpenCV 跑
-    推理并不需要它），没装就退回默认值：输入 640、类别表 ``DEFAULT_CLASS_NAMES``。
+    推理并不需要它），没装就退回默认值：输入 :data:`DEFAULT_INPUT_SIZE`、
+    类别表 :data:`DEFAULT_CLASS_NAMES`。
+
+    **TensorRT 引擎没有这条退路**：``.engine`` 里只有张量名和形状，ONNX 的
+    ``names`` 元数据不会跟过去。板上要正确的类名，只能靠
+    ``modules/vision/config.json`` 的 ``model.class_names`` 或内置表。
 
     实测教训：新导出的 320×320 四分类模型配上写死的 640 输入，OpenCV 会在
     Reshape 层直接抛 ``computeShapeByReshapeMask`` 断言失败。
@@ -477,8 +488,8 @@ class YOLOv8ONNXDetector(YOLOv8Detector):
 
     输入边长与类别表**优先从 ONNX 文件自身读**（``resolve_onnx_metadata``）：换模型
     （例如新导出的 320×320 四分类）时不必再改代码。装了 ``onnx`` 才读得到，
-    读不出来就退回 640 输入和 ``DEFAULT_CLASS_NAMES``。这个适配器只负责模型加载与
-    推理，检测结果与画图跟 TensorRT 实现完全一致。
+    读不出来就退回 :data:`DEFAULT_INPUT_SIZE` 输入和 :data:`DEFAULT_CLASS_NAMES`。
+    这个适配器只负责模型加载与推理，检测结果与画图跟 TensorRT 实现完全一致。
     """
 
     def __init__(self, model_path: str, *, class_names=None,

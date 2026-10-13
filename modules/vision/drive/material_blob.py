@@ -81,14 +81,28 @@ DEFAULT_MIN_AREA_PX = 500
 #:
 #: 调色板里有蓝色，画面里的蓝色 3D 打印件也会命中同一颜色——光靠颜色分不开。
 #: 但物料顶面是个**圆**，结构件不是。实测边界起伏：物料 0.02（7 cm）/ 0.11（蓝色）/
-#: 0.17（12 cm，顶面外圈有台阶），蓝色打印件 0.38–0.51。取 0.25 两边都留 1.5 倍余量。
-DEFAULT_MAX_BOUNDARY_VARIATION = 0.25
+#: 0.17–0.31（顶面被光照分成亮暗两块时，掩膜边界会毛糙），蓝色打印件 0.38–0.51。
+#: 取 0.35：真顶面最差的一帧 0.31 仍有富余，打印件最"圆"的一帧 0.38 也还被挡住。
+DEFAULT_MAX_BOUNDARY_VARIATION = 0.35
 
 #: 填充率下限：等效半径 / 外接圆半径。
 #:
-#: 边界起伏只能用在**完整入画**的色块上；贴着画面边缘的打印件量不出起伏，
-#: 就得靠这一项：物料顶面的填充率是 0.87–0.96，被画面切掉一半的打印件只有 0.46。
-DEFAULT_MIN_FILL_RATIO = 0.75
+#: 边界起伏只能用在**完整入画**的色块上；贴着画面边缘、或者顶面有一半落在阴影里
+#: （掩膜只剩亮的那半）时，就得靠这一项。实测：物料顶面 0.74–0.96，
+#: 同色的打印件/结构件 0.36–0.53。取 0.65 两边都留 15% 以上余量。
+DEFAULT_MIN_FILL_RATIO = 0.65
+
+#: 色相容差（OpenCV 的 0–179 标度）。
+#:
+#: 参考色是**在某一盏灯下**取的，换了光照、搬了机位，同一个物料的 BGR 会整片平移：
+#: 实测同一块绿料在两种光照下是 (165,252,114) 与 (130,204,48)，BGR 欧氏距离 88——
+#: 早就超出容差 60，于是"换了个位置就识别不到"。但这两者的**色相**只差 5
+#: （71 与 76），而台面那种暗绿差 14 以上。所以按色相匹配、按亮度设下限。
+DEFAULT_HUE_TOLERANCE = 10.0
+
+#: 亮度下限：候选像素的 V 至少是参考色 V 的这个倍数。
+#: 台面与物料色相接近，差的就是明暗（实测 V 85 对 204–252），取 0.65 分开两边。
+DEFAULT_VALUE_RATIO = 0.65
 
 
 class ColourBlobLocator:
@@ -119,6 +133,8 @@ class ColourBlobLocator:
         reference_bgr,
         *,
         tolerance: float = 60.0,
+        hue_tolerance: float = DEFAULT_HUE_TOLERANCE,
+        value_ratio: float = DEFAULT_VALUE_RATIO,
         min_area_px: float = DEFAULT_MIN_AREA_PX,
         min_radius: float | None = None,
         max_radius: float | None = None,
@@ -127,8 +143,10 @@ class ColourBlobLocator:
         open_px: int = DEFAULT_OPEN_PX,
         close_px: int = DEFAULT_CLOSE_PX,
     ) -> None:
-        if tolerance <= 0:
-            raise ValueError("tolerance must be positive")
+        if tolerance <= 0 or hue_tolerance <= 0:
+            raise ValueError("tolerance and hue_tolerance must be positive")
+        if not 0 < value_ratio <= 1:
+            raise ValueError("value_ratio must be within (0, 1]")
         if min_area_px < 1:
             raise ValueError("min_area_px must be positive")
         if min_radius is not None and min_radius < 1:
@@ -144,6 +162,8 @@ class ColourBlobLocator:
         self.references = normalize_references(reference_bgr)
         self.reference_bgr = self.references[0]
         self.tolerance = float(tolerance)
+        self.hue_tolerance = float(hue_tolerance)
+        self.value_ratio = float(value_ratio)
         self.min_area_px = float(min_area_px)
         self.min_radius = min_radius
         self.max_radius = max_radius
@@ -154,17 +174,32 @@ class ColourBlobLocator:
 
     # ------------------------------------------------------------------ 颜色
     def mask_for(self, frame: np.ndarray, reference) -> np.ndarray:
-        """某一个参考色的二值掩膜（``uint8``，255 表示在容差内）。"""
+        """某一个参考色的二值掩膜（``uint8``，255 表示算这块颜色）。
+
+        两条**或**关系：BGR 距离在 ``tolerance`` 内（同一盏灯下的原样命中），或者
+        色相在 ``hue_tolerance`` 内且亮度不低于参考色 V 的 ``value_ratio`` 倍
+        （换了光照、搬了机位以后仍然认得出）。
+        """
         cv2 = _cv2()
         if frame is None or getattr(frame, "size", 0) == 0:
             raise ValueError("frame is empty")
         if frame.ndim != 3 or frame.shape[2] < 3:
             raise ValueError("frame must be a BGR image")
-        difference = frame[:, :, :3].astype(np.float32) - np.asarray(
-            reference, dtype=np.float32
-        )[None, None, :]
+        reference = np.asarray(reference, dtype=np.float32)
+        difference = frame[:, :, :3].astype(np.float32) - reference[None, None, :]
         distance = np.sqrt((difference**2).sum(axis=2))
         mask = (distance <= self.tolerance).astype(np.uint8) * 255
+
+        hsv = cv2.cvtColor(frame[:, :, :3], cv2.COLOR_BGR2HSV)
+        reference_hsv = cv2.cvtColor(
+            np.uint8([[np.clip(reference, 0, 255)]]), cv2.COLOR_BGR2HSV
+        )[0, 0]
+        hue_delta = np.abs(hsv[:, :, 0].astype(np.int16) - int(reference_hsv[0]))
+        hue_delta = np.minimum(hue_delta, 180 - hue_delta)
+        value_floor = self.value_ratio * float(reference_hsv[2])
+        similar = (hue_delta <= self.hue_tolerance) & (hsv[:, :, 2] >= value_floor)
+        mask[similar] = 255
+
         if self.open_px >= 3:
             kernel = np.ones((self.open_px, self.open_px), np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)

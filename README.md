@@ -337,6 +337,8 @@ USB 摄像头 + YOLOv8 检测，封装为 `modules.vision` 包，供主程序和
 ```python
 from vision import MaterialLocator, USBCamera
 
+# 模型路径/类别表/阈值默认全部来自 modules/vision/config.json；
+# 要临时换一个模型才传 model_path。
 locator = MaterialLocator(model_path="models/best.onnx")
 with locator, USBCamera(1, width=1280, height=720).initialize() as camera:
     report = locator.locate(camera.read())
@@ -362,8 +364,39 @@ Windows 使用 OpenCV ONNX 推理，需要 `opencv-python`、`numpy`。Jetson �
 
 ### 模型
 
-模型文件放 `models/`（已 gitignore，不入库）：Windows 用 `models/best.onnx`，Jetson 用 `models/best.engine`。当前两份模型来自远端 `/home/pi/workspace/GC_robot_3G/yolov8n/`；ONNX 输入为 `1×3×640×640`，输出为 `1×14×8400`。
-类别表在 `modules/vision/drive/yolov8.py::DEFAULT_CLASS_NAMES`，与模型训练标签顺序一致；换模型时同步修改即可。
+**用哪个模型由 `modules/vision/config.json` 的 `model` 块决定**，代码里不再写死文件名：
+
+```json
+"model": {
+  "backend": "auto",
+  "onnx": "models/best.onnx",
+  "engine": "models/best.engine",
+  "class_names": ["red", "yellow", "blue", "green"],
+  "materials": null,
+  "input_size": 320,
+  "conf_thresh": 0.25,
+  "iou_thresh": 0.45
+}
+```
+
+- `backend`：`auto`（默认）按平台选——Windows 走 OpenCV ONNX，Jetson 走 TensorRT；也可以写死 `"onnx"` / `"tensorrt"` 强制一条通道。
+- `class_names`：**顺序必须等于训练时的类别顺序**（也就是 ONNX 元数据里的 `names`）。框的坐标由模型给出、类名按这张表查，表错了框还是准的、类名会整体错位。
+- `materials`：这张表里哪些算物料；`null` 表示全部算（当前四分类模型四类都是物料）。写进来的名字必须在 `class_names` 里，否则启动就报错。
+- `input_size`：方形输入边长；`null` 表示让代码去问模型/引擎自己。**TensorRT 引擎问得到，ONNX 只有装了 `onnx` 才问得到**，所以这里建议显式写。
+- 相对路径按**项目根**解析，不按当前工作目录。
+
+模型文件放 `models/`（已 gitignore，不入库）。当前物料模型是四分类：ONNX 输入 `1×3×320×320`，输出 `1×8×2100`（4 个坐标 + 4 类），类别 `{0:red, 1:yellow, 2:blue, 3:green}`，即 1 红 2 黄 3 蓝 4 绿。
+
+`models/best.engine` 是 TensorRT 引擎，**只能在 Jetson 本机生成**（它跟板子的 GPU 架构和 TensorRT 版本绑定，从 PC 拷过去反序列化会失败）。在板上：
+
+```bash
+cd ~/gong_chuang
+/home/pi/miniforge3/envs/tensorrt/bin/python -m modules.vision.training.build_engine
+```
+
+它会读上面那个 `model` 块、用 `trtexec` 构建、然后自动跑一次验收（报张量与耗时）。完整步骤、实测数据和常见故障见 `modules/vision/docs/Jetson模型部署.md`。
+
+换模型的完整流程：训练导出新 ONNX → 改 `model.class_names` / `input_size` → 拷 ONNX 到板上 → `build_engine --force` → `--check --image` 验收。
 
 自己训练障碍物模型：`models/data` 里的图片和标注用 `modules/vision/training/prepare_dataset.py` 切分，`modules/vision/training/train.py` 训练并导出 ONNX，完整流程（参数建议、预训练权重下载、上车注意事项）见 `modules/vision/docs/障碍物模型训练指南.md`。训练完在测试菜单选 `15. 障碍物模型测试`，按提示选择「哪个模型 / 怎么测 / 置信度阈值」即可；它会把类别表和模型绑在一起，选新模型时自动按单类 `obstacle` 解析，不会出现菜单 9 那种类名错位。
 
@@ -373,7 +406,8 @@ Windows 使用 OpenCV ONNX 推理，需要 `opencv-python`、`numpy`。Jetson �
 cd /home/pi/gong_chuang
 source /home/pi/miniforge3/bin/activate tensorrt
 
-# 在菜单中选择 9；Windows 默认 best.onnx，Jetson 默认 best.engine
+# 在菜单中选择 9；用的模型读 modules/vision/config.json 的 model 块
+# （Windows 是 best.onnx，Jetson 是板上生成的 best.engine）
 python test.py
 ```
 

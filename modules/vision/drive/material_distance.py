@@ -144,9 +144,9 @@ def _synthetic_hits():
 
     return {
         # 框宽 120 px；焦距 560 px、真实宽度 60 mm -> 560*60/120 = 280 mm
-        "red": Detection(x1=260.0, y1=180.0, x2=380.0, y2=300.0, score=0.9, class_id=0, name="obj-red"),
+        "red": Detection(x1=260.0, y1=180.0, x2=380.0, y2=300.0, score=0.9, class_id=0, name="red"),
         # 离锁定圆心更近的一个
-        "blue": Detection(x1=330.0, y1=240.0, x2=390.0, y2=300.0, score=0.8, class_id=2, name="obj-blue"),
+        "blue": Detection(x1=330.0, y1=240.0, x2=390.0, y2=300.0, score=0.8, class_id=2, name="blue"),
     }
 
 
@@ -156,7 +156,7 @@ def _self_test() -> int:
     hits = _synthetic_hits()
     estimator = MaterialDistanceEstimator(
         focal_px=560.0,
-        real_widths_mm={"obj-red": 60.0, "obj-blue": 50.0},
+        real_widths_mm={"red": 60.0, "blue": 50.0},
         image_size=(640, 480),
     )
     region = LockedRegion(center_x=320.0, center_y=240.0, radius=80.0)
@@ -185,7 +185,7 @@ def _self_test() -> int:
         problems.append(f"蓝框针孔距离应为 {560.0 * 50.0 / 60.0:.1f} mm，实际 {blue.distance_mm}")
 
     ordered = estimator.estimate_all([hits["red"], hits["blue"]], region=region, frame_shape=(480, 640))
-    if [item.name for item in ordered] != ["obj-red", "obj-blue"]:
+    if [item.name for item in ordered] != ["red", "blue"]:
         problems.append(f"estimate_all 应按离圆心由近到远排序，实际 {[item.name for item in ordered]}")
 
     # 没标定真实宽度：只给像素量，绝不编造一个距离

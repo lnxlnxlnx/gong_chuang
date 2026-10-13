@@ -1,0 +1,8 @@
+{
+  "host": "0.0.0.0",
+  "port": 50007,
+  "queue_size": 8,
+  "accept_timeout_seconds": 30.0,
+  "read_timeout_seconds": 1.0,
+  "encoding": "utf-8"
+}

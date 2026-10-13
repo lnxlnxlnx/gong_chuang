@@ -2,7 +2,7 @@
 
 两个文件、两种性质，刻意分开：
 
-- ``config.json`` —— **手改**。摄像头编号，以及抓取用的目标尺寸与颜色。
+- ``config.json`` —— **手改**。摄像头编号、**用哪个模型**，以及抓取用的目标尺寸与颜色。
 - ``calibration.json`` —— **标定产物**。像素焦距、镜头到台面的深度、平面标定结果，
   由标定脚本写入（见 ``modules/grasp/docs/抓取坐标链路.md``）。
 
@@ -11,17 +11,30 @@
 
 ``config.json`` 里的 ``targets`` 块整体可选。缺失时物料按默认 30 mm 圆面处理，
 靶标视为未配置——此时抓取流程必须在打开摄像头之前拒绝启动，而不是拿一个假直径去算距离。
+
+``config.json`` 里的 ``model`` 块决定"加载哪个模型文件"（见 :class:`ModelSettings`）。
+它是**唯一**换模型的地方：文件路径、类别表、输入边长、阈值都在这里，代码里不再写死
+``models/best.onnx`` / ``best.engine``。相对路径按项目根解析（不是当前工作目录），
+绝对路径原样使用。整块缺失时全部走内置默认值，行为与加这个块之前一致。
 """
 
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
 
+from project_paths import PROJECT_ROOT
 from modules.vision.drive.calibration import PlaneCalibration
 from modules.vision.drive.pinhole import normalize_depth_range
+from modules.vision.drive.yolov8 import (
+    DEFAULT_CLASS_NAMES,
+    DEFAULT_CONF_THRESH,
+    DEFAULT_INPUT_SIZE,
+    DEFAULT_IOU_THRESH,
+)
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 DEFAULT_CALIBRATION_PATH = Path(__file__).resolve().parent / "calibration.json"
@@ -34,6 +47,163 @@ DEFAULT_COLOR_TOLERANCE = 60.0
 
 #: 标定脚本支持的平台名，与 ``config.json`` 顶层键一致。
 PLATFORMS = ("windows", "jetson")
+
+#: 没配 ``model.onnx`` 时的 ONNX 路径（相对项目根）。
+DEFAULT_ONNX_MODEL = "models/best.onnx"
+
+#: 没配 ``model.engine`` 时的 TensorRT 引擎路径（相对项目根）。
+DEFAULT_ENGINE_MODEL = "models/best.engine"
+
+#: 推理后端名。``auto`` 按平台选：Windows 走 OpenCV ONNX，Jetson 走 TensorRT。
+BACKEND_AUTO = "auto"
+BACKEND_TENSORRT = "tensorrt"
+BACKEND_ONNX = "onnx"
+BACKENDS = (BACKEND_AUTO, BACKEND_TENSORRT, BACKEND_ONNX)
+
+
+def current_platform() -> str:
+    """本机对应的配置平台名：Windows 是 ``"windows"``，Jetson/Linux 是 ``"jetson"``。"""
+    return "windows" if os.name == "nt" else "jetson"
+
+
+def _project_file(value: str) -> Path:
+    """配置里的模型路径：相对路径按项目根解析（不按当前工作目录）。"""
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+@dataclass(frozen=True)
+class ModelSettings:
+    """用哪个模型文件、它有哪些类别、怎么解码——全部来自 ``config.json``。
+
+    换模型的完整流程就是改这一个块，然后（Jetson 上）用
+    :mod:`modules.vision.training.build_engine` 重新生成引擎。
+    """
+
+    #: ``"auto"`` / ``"tensorrt"`` / ``"onnx"``。
+    backend: str = BACKEND_AUTO
+    #: OpenCV ONNX 通道要加载的文件。
+    onnx_path: Path = field(default_factory=lambda: _project_file(DEFAULT_ONNX_MODEL))
+    #: TensorRT 通道要加载的文件；引擎与板子/GPU/TensorRT 版本绑定，只能在 Jetson 上生成。
+    engine_path: Path = field(default_factory=lambda: _project_file(DEFAULT_ENGINE_MODEL))
+    #: 类别名，顺序必须与训练时的类别索引一致（ONNX 的 ``names`` 元数据）。
+    class_names: Tuple[str, ...] = tuple(DEFAULT_CLASS_NAMES)
+    #: :attr:`class_names` 里算作物料的子集；没配时等于全部类别。
+    materials: Tuple[str, ...] = tuple(DEFAULT_CLASS_NAMES)
+    #: 模型输入边长（正方形）；``None`` 表示让代码去问模型自己。
+    input_size: Optional[int] = None
+    #: 解码阈值。
+    conf_thresh: float = DEFAULT_CONF_THRESH
+    iou_thresh: float = DEFAULT_IOU_THRESH
+    #: 读取它的那份 config.json，只用于打印提示。
+    source: Optional[Path] = None
+
+    def resolve_backend(self, platform: Optional[str] = None) -> str:
+        """本平台实际用哪个后端：显式配了就听配置的，``auto`` 才按平台猜。"""
+        if self.backend != BACKEND_AUTO:
+            return self.backend
+        return BACKEND_ONNX if (platform or current_platform()) == "windows" else BACKEND_TENSORRT
+
+    def path_for(self, backend: str) -> Path:
+        """某个后端要加载的文件路径。"""
+        return self.engine_path if backend == BACKEND_TENSORRT else self.onnx_path
+
+    def model_path(self, platform: Optional[str] = None) -> Path:
+        """本平台默认加载的模型文件路径。"""
+        return self.path_for(self.resolve_backend(platform))
+
+
+def load_model_settings(config_path: Path = DEFAULT_CONFIG_PATH) -> ModelSettings:
+    """读 ``config.json`` 的 ``model`` 块；整块缺失时返回内置默认值。"""
+    config_path = Path(config_path)
+    document = _read_json(config_path, "vision configuration") if config_path.exists() else {}
+    root = _mapping(document, "root")
+    value = root.get("model")
+    if value is None:
+        return ModelSettings(source=config_path)
+    return _model_settings(_mapping(value, "model"), config_path)
+
+
+def _model_settings(document: Mapping[str, object], source: Path) -> ModelSettings:
+    backend = document.get("backend", BACKEND_AUTO)
+    if backend not in BACKENDS:
+        raise ValueError(f"model.backend 必须是 {'/'.join(BACKENDS)} 之一，实际是 {backend!r}")
+    class_names = _class_names(document.get("class_names"))
+    materials = _materials(document.get("materials"), class_names)
+    return ModelSettings(
+        backend=str(backend),
+        onnx_path=_model_file(document.get("onnx"), DEFAULT_ONNX_MODEL, "model.onnx"),
+        engine_path=_model_file(document.get("engine"), DEFAULT_ENGINE_MODEL, "model.engine"),
+        class_names=class_names,
+        materials=materials,
+        input_size=_optional_input_size(document.get("input_size")),
+        conf_thresh=_probability(
+            document.get("conf_thresh"), DEFAULT_CONF_THRESH, "model.conf_thresh"
+        ),
+        iou_thresh=_probability(document.get("iou_thresh"), DEFAULT_IOU_THRESH, "model.iou_thresh"),
+        source=source,
+    )
+
+
+def _model_file(value: object, fallback: str, name: str) -> Path:
+    if value is None:
+        return _project_file(fallback)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} 必须是非空字符串路径，或 null 表示用默认值 {fallback}")
+    return _project_file(value.strip())
+
+
+def _class_names(value: object) -> Tuple[str, ...]:
+    """读类别表；``null`` 表示沿用内置表（见 ``yolov8.DEFAULT_CLASS_NAMES``）。"""
+    if value is None:
+        return tuple(DEFAULT_CLASS_NAMES)
+    return _name_list(value, "model.class_names")
+
+
+def _materials(value: object, class_names: Tuple[str, ...]) -> Tuple[str, ...]:
+    """读"哪些类别算物料"；``null`` 表示全部类别都算。"""
+    if value is None:
+        return class_names
+    names = _name_list(value, "model.materials")
+    unknown = [name for name in names if name not in set(class_names)]
+    if unknown:
+        # 写错一个名字就会让那一类永远被判成"非物料"，静默漏检；这里直接拒绝启动。
+        raise ValueError(
+            f"model.materials 里的 {', '.join(unknown)} 不在 model.class_names "
+            f"（{', '.join(class_names)}）里"
+        )
+    return names
+
+
+def _name_list(value: object, name: str) -> Tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(f"{name} 必须是非空的类别名列表，或 null")
+    names = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{name}[{index}] 必须是非空字符串")
+        names.append(item.strip())
+    if len(set(names)) != len(names):
+        raise ValueError(f"{name} 里有重复的类别名")
+    return tuple(names)
+
+
+def _optional_input_size(value: object) -> Optional[int]:
+    """读输入边长；``null`` 表示让代码去问模型/引擎自己（问不出来才用兜底值）。"""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("model.input_size 必须是正整数（方形输入的边长），或 null")
+    return int(value)
+
+
+def _probability(value: object, fallback: float, name: str) -> float:
+    if value is None:
+        return float(fallback)
+    number = _number(value, name)
+    if not 0.0 <= number <= 1.0:
+        raise ValueError(f"{name} 要在 0–1 之间")
+    return number
 
 
 @dataclass(frozen=True)

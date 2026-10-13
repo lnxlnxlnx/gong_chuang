@@ -59,7 +59,7 @@ def stop_after_one_frame():
     return fake_wait_key
 
 
-def detection(name: str = "obj-red", **kwargs) -> Detection:
+def detection(name: str = "red", **kwargs) -> Detection:
     settings = dict(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.9, class_id=0)
     settings.update(kwargs)
     return Detection(name=name, **settings)
@@ -108,7 +108,7 @@ class HoughLockCameraTests(unittest.TestCase):
 class MaterialYoloCameraTests(unittest.TestCase):
     class FakeYOLO:
         def __init__(self, *_args, **_kwargs) -> None:
-            self.materials = ("obj-red",)
+            self.materials = ("red",)
             self.detector = self
 
         def __enter__(self):
@@ -193,7 +193,7 @@ class MaterialLocateCameraTests(unittest.TestCase):
         self.assertEqual(self.run_camera(self.FakeReport(best=None)), 0)
 
     def test_camera_branch_with_a_material(self) -> None:
-        best = SimpleNamespace(name="obj-red", classification=SimpleNamespace(score=0.91))
+        best = SimpleNamespace(name="red", classification=SimpleNamespace(score=0.91))
         self.assertEqual(self.run_camera(self.FakeReport(best=best)), 0)
 
     def test_camera_requests_720p(self) -> None:
@@ -252,7 +252,7 @@ class MainDemoMaterialTests(unittest.TestCase):
         from modules.vision.app import demo as vision_demo
 
         item = SimpleNamespace(
-            name="obj-blue", confidence=0.81,
+            name="blue", confidence=0.81,
             x_mm=20.0, y_mm=-10.0, z_mm=75.0, range_mm=78.3,
         )
         with patch.object(self.FakeReport, "best", item), \
@@ -267,7 +267,7 @@ class MainDemoMaterialTests(unittest.TestCase):
             vision_demo.demo_material(model_path=Path(__file__), camera_id=1)
 
         overlay = " ".join(call.args[1] for call in put_text.call_args_list)
-        self.assertIn("obj-blue", overlay)
+        self.assertIn("blue", overlay)
         self.assertIn("0.81", overlay)
         self.assertIn("20", overlay)
         self.assertIn("-10", overlay)

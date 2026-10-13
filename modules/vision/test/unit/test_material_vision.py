@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -25,7 +26,7 @@ from modules.vision.drive.material_yolo import MATERIAL_CLASS_NAMES, MaterialYOL
 from modules.vision.drive.yolov8 import Detection
 
 
-def detection(name="obj-red", *, score=0.9, x1=280.0, y1=200.0, x2=360.0, y2=280.0, class_id=0):
+def detection(name="red", *, score=0.9, x1=280.0, y1=200.0, x2=360.0, y2=280.0, class_id=0):
     return Detection(x1=x1, y1=y1, x2=x2, y2=y2, score=score, class_id=class_id, name=name)
 
 
@@ -50,15 +51,14 @@ class FakeDetector:
 
 
 class MaterialClassTableTests(unittest.TestCase):
-    def test_material_class_names_match_the_competition_table(self) -> None:
-        self.assertEqual(
-            MATERIAL_CLASS_NAMES,
-            ("obj-red", "obj-green", "obj-blue", "obj-yellow", "obj-light blue", "obj-black"),
-        )
+    def test_material_class_names_match_the_deployed_model(self) -> None:
+        # 四分类物料模型：四类都是物料，中文标签一一对应。
+        self.assertEqual(MATERIAL_CLASS_NAMES, ("red", "yellow", "blue", "green"))
         self.assertEqual(set(DEFAULT_MATERIAL_LABELS), set(MATERIAL_CLASS_NAMES))
 
     def test_is_material(self) -> None:
-        self.assertTrue(is_material("obj-red"))
+        self.assertTrue(is_material("red"))
+        self.assertTrue(is_material("green"))
         self.assertFalse(is_material("target-1"))
         self.assertFalse(is_material("zhangai"))
 
@@ -74,12 +74,31 @@ class MaterialYOLOTests(unittest.TestCase):
         self.frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
     def test_detect_returns_everything_and_can_filter_materials(self) -> None:
-        fake = FakeDetector([detection("obj-red"), detection("target-1", class_id=6)])
-        yolo = MaterialYOLO(detector=fake)
+        fake = FakeDetector([detection("red"), detection("target-1", class_id=6)])
+        # materials 显式传死：这条测的是"筛选"本身，不该随 config.json 变。
+        yolo = MaterialYOLO(detector=fake, materials=("red",))
 
         self.assertEqual(len(yolo.detect(self.frame)), 2)
-        self.assertEqual([hit.name for hit in yolo.detect(self.frame, materials_only=True)], ["obj-red"])
+        self.assertEqual([hit.name for hit in yolo.detect(self.frame, materials_only=True)], ["red"])
         self.assertEqual(fake.shapes, [(480, 640, 3), (480, 640, 3)])
+
+    def test_material_set_comes_from_the_model_config(self) -> None:
+        """没显式给 materials 时按 config.json 的 model.materials/m.class_names 来。"""
+        fake = FakeDetector([detection("red"), detection("blue", class_id=2)])
+        with patch("modules.vision.drive.material_yolo._configured_materials",
+                   return_value=("red",)):
+            yolo = MaterialYOLO(detector=fake)
+            self.assertEqual(yolo.effective_materials, ("red",))
+            self.assertEqual(
+                [hit.name for hit in yolo.detect(self.frame, materials_only=True)], ["red"]
+            )
+
+    def test_explicit_materials_win_over_the_config(self) -> None:
+        fake = FakeDetector([detection("red")])
+        with patch("modules.vision.drive.material_yolo._configured_materials",
+                   return_value=("blue",)):
+            yolo = MaterialYOLO(detector=fake, materials=("red",))
+        self.assertEqual(yolo.effective_materials, ("red",))
 
     def test_detect_in_region_maps_boxes_back_to_the_frame(self) -> None:
         fake = FakeDetector([detection(x1=4.0, y1=6.0, x2=40.0, y2=42.0)])
@@ -128,7 +147,7 @@ class MaterialPresenceTests(unittest.TestCase):
         self.assertTrue(result.present)
         self.assertEqual(result.count, 1)
         self.assertEqual(result.reason, REASON_OK)
-        self.assertEqual(result.best.name, "obj-red")
+        self.assertEqual(result.best.name, "red")
 
     def test_reports_every_rejection_reason(self) -> None:
         cases = [
@@ -146,7 +165,7 @@ class MaterialPresenceTests(unittest.TestCase):
                 self.assertIsNone(result.best)
 
     def test_dominant_reason_is_reported_when_nothing_passes(self) -> None:
-        weak = [detection(score=0.1), detection("obj-green", score=0.2, class_id=1)]
+        weak = [detection(score=0.1), detection("green", score=0.2, class_id=1)]
         self.assertEqual(self.presence.check(weak, self.region).reason, REASON_LOW_SCORE)
 
     def test_any_class_can_count_as_material(self) -> None:
@@ -167,8 +186,8 @@ class MaterialPresenceTests(unittest.TestCase):
 
     def test_pick_nearest_prefers_the_closest_box(self) -> None:
         # 两个框都在圆内：near 更靠圆心，far 置信度更高
-        near = detection("obj-red", x1=300.0, y1=220.0, x2=340.0, y2=260.0)
-        far = detection("obj-blue", score=0.95, class_id=2, x1=350.0, y1=220.0, x2=390.0, y2=260.0)
+        near = detection("red", x1=300.0, y1=220.0, x2=340.0, y2=260.0)
+        far = detection("blue", score=0.95, class_id=2, x1=350.0, y1=220.0, x2=390.0, y2=260.0)
 
         by_score = self.presence.check([near, far], self.region)
         self.assertIs(by_score.best, far)
@@ -198,17 +217,17 @@ class MaterialClassifierTests(unittest.TestCase):
 
     def test_picks_the_most_confident_material_and_labels_it(self) -> None:
         hits = [
-            detection("obj-blue", score=0.6, class_id=2),
-            detection("obj-red", score=0.9),
+            detection("blue", score=0.6, class_id=2),
+            detection("red", score=0.9),
             detection("zhangai", score=0.99, class_id=9),
         ]
         result = self.classifier.classify(hits)
 
         self.assertTrue(result.found)
-        self.assertEqual(result.name, "obj-red")
+        self.assertEqual(result.name, "red")
         self.assertEqual(result.label, "红色物料")
         self.assertAlmostEqual(result.score, 0.9)
-        self.assertEqual(result.names, ("obj-red", "obj-blue"))
+        self.assertEqual(result.names, ("red", "blue"))
         self.assertEqual(len(result.candidates), 2)
 
     def test_empty_result_when_nothing_qualifies(self) -> None:
@@ -229,14 +248,19 @@ class MaterialClassifierTests(unittest.TestCase):
         self.assertEqual(result.label, UNKNOWN_MATERIAL_LABEL)
 
     def test_describe_does_not_filter(self) -> None:
-        candidate = self.classifier.describe(detection("obj-black", score=0.05, class_id=5))
-        self.assertEqual(candidate.name, "obj-black")
-        self.assertEqual(candidate.label, "黑色物料")
+        candidate = self.classifier.describe(detection("blue", score=0.05, class_id=2))
+        self.assertEqual(candidate.name, "blue")
+        self.assertEqual(candidate.label, "蓝色物料")
         self.assertAlmostEqual(candidate.score, 0.05)
 
     def test_label_for_known_and_unknown(self) -> None:
-        self.assertEqual(self.classifier.label_for("obj-light blue"), "浅蓝物料")
+        self.assertEqual(self.classifier.label_for("green"), "绿色物料")
         self.assertEqual(self.classifier.label_for("whatever"), UNKNOWN_MATERIAL_LABEL)
+
+    def test_legacy_obj_prefixed_names_still_get_a_label(self) -> None:
+        """老模型（``obj-red`` 那一版）的类别名不该因为换表就丢掉中文标签。"""
+        classifier = MaterialClassifier(labels={"obj-red": "红色物料"})
+        self.assertEqual(classifier.label_for("red"), "红色物料")
 
 
 if __name__ == "__main__":

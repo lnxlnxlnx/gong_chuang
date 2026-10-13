@@ -5,6 +5,16 @@
   "jetson": {
     "camera_id": 0
   },
+  "model": {
+    "backend": "auto",
+    "onnx": "models/best.onnx",
+    "engine": "models/best.engine",
+    "class_names": ["red", "yellow", "blue", "green"],
+    "materials": null,
+    "input_size": 320,
+    "conf_thresh": 0.25,
+    "iou_thresh": 0.45
+  },
   "targets": {
     "material_diameter_mm": 30.0,
     "marker_diameter_mm": null,

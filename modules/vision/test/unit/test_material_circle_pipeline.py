@@ -57,12 +57,12 @@ class MaterialCirclePipelineTests(unittest.TestCase):
     def test_yolo_classifies_but_its_box_width_does_not_set_distance(self):
         hit = Detection(
             x1=150, y1=150, x2=170, y2=170,
-            score=0.9, class_id=2, name="obj-blue",
+            score=0.9, class_id=2, name="blue",
         )
         report = MaterialLocator(yolo=FakeYOLO([hit]), focal_px=300).locate(material_frame())
 
         self.assertTrue(report.present)
-        self.assertEqual(report.regions[0].name, "obj-blue")
+        self.assertEqual(report.regions[0].name, "blue")
         self.assertAlmostEqual(
             report.regions[0].distance_mm,
             300 * 30 / (2 * report.regions[0].region.radius),
@@ -71,7 +71,7 @@ class MaterialCirclePipelineTests(unittest.TestCase):
     def test_yolo_box_without_a_circle_is_not_a_material(self):
         hit = Detection(
             x1=100, y1=100, x2=200, y2=200,
-            score=0.9, class_id=2, name="obj-blue",
+            score=0.9, class_id=2, name="blue",
         )
         frame = np.full((320, 320, 3), 128, dtype=np.uint8)
         report = MaterialLocator(yolo=FakeYOLO([hit]), focal_px=300).locate(frame)

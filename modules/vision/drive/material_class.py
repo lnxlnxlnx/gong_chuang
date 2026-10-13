@@ -3,9 +3,9 @@
 职责单一：只回答"是哪一种"。"有没有"在 ``modules.vision.drive.material_presence``，
 框从哪来在 ``modules.vision.drive.material_yolo``，多远在 ``modules.vision.drive.material_distance``。
 
-类别名来自 ``modules.vision.drive.yolov8.DEFAULT_CLASS_NAMES`` 里的六个 ``obj-*``；
-中文标签可以用 :data:`DEFAULT_MATERIAL_LABELS`，也可以自己传 ``labels``
-（换模型、换类别表时只改这里）。
+类别名来自模型自己的类别表（``config.json`` 的 ``model.class_names``，见
+``modules.vision.drive.yolov8.DEFAULT_CLASS_NAMES`` 的兜底）；中文标签用
+:data:`DEFAULT_MATERIAL_LABELS`，也可以自己传 ``labels``（换模型、换类别表时改这里）。
 
 命令行自测::
 
@@ -20,14 +20,15 @@ from typing import Iterable, Mapping, Sequence
 
 from modules.vision.drive.material_yolo import MATERIAL_CLASS_NAMES
 
-#: 比赛六种物料的中文标签，用于打印 / 画在画面上。
+#: 四种物料的中文标签，用于打印 / 画在画面上。
+#:
+#: 键必须和模型输出的类别名一致（当前四分类模型是 ``red`` / ``yellow`` / ``blue`` / ``green``）；
+#: 换模型时改 ``modules/vision/config.json`` 的 ``model.class_names``，再在这里补对应的中文。
 DEFAULT_MATERIAL_LABELS: dict[str, str] = {
-    "obj-red": "红色物料",
-    "obj-green": "绿色物料",
-    "obj-blue": "蓝色物料",
-    "obj-yellow": "黄色物料",
-    "obj-light blue": "浅蓝物料",
-    "obj-black": "黑色物料",
+    "red": "红色物料",
+    "yellow": "黄色物料",
+    "blue": "蓝色物料",
+    "green": "绿色物料",
 }
 
 #: 类别不在标签表里时用的中文名。
@@ -138,11 +139,11 @@ def _synthetic_hits():
     from modules.vision.drive.yolov8 import Detection
 
     return {
-        "red": Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.90, class_id=0, name="obj-red"),
-        "blue": Detection(x1=100.0, y1=200.0, x2=180.0, y2=280.0, score=0.80, class_id=2, name="obj-blue"),
-        "weak": Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.05, class_id=1, name="obj-green"),
+        "red": Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.90, class_id=0, name="red"),
+        "blue": Detection(x1=100.0, y1=200.0, x2=180.0, y2=280.0, score=0.80, class_id=2, name="blue"),
+        "weak": Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.05, class_id=3, name="green"),
         "other": Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.95, class_id=6, name="target-1"),
-        "alien": Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.70, class_id=3, name="obj-purple"),
+        "alien": Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.70, class_id=3, name="purple"),
     }
 
 
@@ -152,12 +153,12 @@ def _self_test() -> int:
     problems: list[str] = []
 
     best = classifier.classify([hits["red"], hits["blue"], hits["weak"], hits["other"]])
-    if not best.found or best.name != "obj-red" or best.label != "红色物料":
-        problems.append(f"应判为 obj-red/红色物料，实际 {best.name}/{best.label}")
+    if not best.found or best.name != "red" or best.label != "红色物料":
+        problems.append(f"应判为 red/红色物料，实际 {best.name}/{best.label}")
     if abs(best.score - 0.90) > 1e-9:
         problems.append(f"置信度应为 0.90，实际 {best.score}")
-    if best.names != ("obj-red", "obj-blue"):
-        problems.append(f"候选类别应为 (obj-red, obj-blue)，实际 {best.names}")
+    if best.names != ("red", "blue"):
+        problems.append(f"候选类别应为 (red, blue)，实际 {best.names}")
     if len(best.candidates) != 2:
         problems.append(f"候选应过滤掉低置信度与非物料，实际 {len(best.candidates)} 个")
 
@@ -170,8 +171,8 @@ def _self_test() -> int:
         problems.append("非物料类别不应被当成物料")
 
     # 换过类别表时，未知类别要能落到"未知物料"而不是崩掉
-    alien = MaterialClassifier(materials=("obj-purple",)).classify([hits["alien"]])
-    if not alien.found or alien.name != "obj-purple" or alien.label != UNKNOWN_MATERIAL_LABEL:
+    alien = MaterialClassifier(materials=("purple",)).classify([hits["alien"]])
+    if not alien.found or alien.name != "purple" or alien.label != UNKNOWN_MATERIAL_LABEL:
         problems.append(f"未知类别应落到 {UNKNOWN_MATERIAL_LABEL}，实际 {alien.label}")
 
     described = classifier.describe(hits["blue"])

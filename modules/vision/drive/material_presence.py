@@ -149,11 +149,11 @@ def _synthetic_hits():
     from modules.vision.drive.yolov8 import Detection
 
     return {
-        "good": Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.88, class_id=0, name="obj-red"),
-        "weak": Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.10, class_id=1, name="obj-green"),
-        "tiny": Detection(x1=300.0, y1=220.0, x2=306.0, y2=226.0, score=0.70, class_id=2, name="obj-blue"),
+        "good": Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.88, class_id=0, name="red"),
+        "weak": Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.10, class_id=3, name="green"),
+        "tiny": Detection(x1=300.0, y1=220.0, x2=306.0, y2=226.0, score=0.70, class_id=2, name="blue"),
         "other": Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.90, class_id=6, name="target-1"),
-        "far": Detection(x1=10.0, y1=10.0, x2=90.0, y2=90.0, score=0.85, class_id=3, name="obj-yellow"),
+        "far": Detection(x1=10.0, y1=10.0, x2=90.0, y2=90.0, score=0.85, class_id=1, name="yellow"),
     }
 
 

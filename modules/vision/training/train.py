@@ -33,11 +33,20 @@ DEFAULT_ONNX_OUT = models_path("best_obstacle.onnx")
 
 from ultralytics import YOLO  # noqa: E402  (kept below the path constants)
 
-#: Class table currently compiled into ``modules/vision/drive/yolov8.py``.
-DEPLOYED_CLASS_NAMES = [
-    "obj-red", "obj-green", "obj-blue", "obj-yellow", "obj-light blue",
-    "obj-black", "target-1", "target-2", "target-3", "zhangai",
-]
+def deployed_class_names() -> list[str]:
+    """当前部署的那份类别表（``config.json`` 的 ``model.class_names``）。
+
+    读不到配置就用 ``yolov8.DEFAULT_CLASS_NAMES`` 兜底——这只是为了把提醒打得准一点，
+    读失败不该让训练跑不起来。
+    """
+    try:
+        from modules.vision.config import load_model_settings
+
+        return list(load_model_settings().class_names)
+    except (ImportError, OSError, ValueError):
+        from modules.vision.drive.yolov8 import DEFAULT_CLASS_NAMES
+
+        return list(DEFAULT_CLASS_NAMES)
 
 
 def read_num_classes(data_yaml: Path) -> int | None:
@@ -54,15 +63,16 @@ def read_num_classes(data_yaml: Path) -> int | None:
 
 def warn_about_class_table(num_classes: int | None) -> None:
     """Explain what must change when the new model cannot replace the old one."""
-    if num_classes is None or num_classes == len(DEPLOYED_CLASS_NAMES):
+    deployed = deployed_class_names()
+    if num_classes is None or num_classes == len(deployed):
         return
     print("\n" + "=" * 72)
     print(f"NOTE: this dataset has {num_classes} class(es) but the running robot")
-    print(f"      expects {len(DEPLOYED_CLASS_NAMES)}: {', '.join(DEPLOYED_CLASS_NAMES)}")
-    print("      The exported single-class model already outputs correct boxes, but")
-    print("      the label text will be wrong until the class table matches. Either")
-    print(f"      set vision/yolov8.py::DEFAULT_CLASS_NAMES to the {num_classes} new")
-    print("      name(s), or pass class_names=[...] to create_detector().")
+    print(f"      expects {len(deployed)}: {', '.join(deployed)}")
+    print("      The exported model already outputs correct boxes, but the label text")
+    print("      will be wrong until the class table matches. Change")
+    print("      modules/vision/config.json -> model.class_names (and model.input_size)")
+    print("      to the new model, or pass class_names=[...] to create_detector().")
     print("=" * 72 + "\n")
 
 
@@ -161,8 +171,10 @@ def main(argv=None) -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(exported, destination)
         print(f"exported ONNX : {destination}")
-        print("windows reads models/best.onnx -- back up the old file before "
-              "replacing it, or point create_detector() at the new path")
+        print("next: point modules/vision/config.json -> model.onnx at this file, set")
+        print(f"      model.class_names / model.input_size (this export is {args.imgsz}px),")
+        print("      then rebuild the TensorRT engine on the Jetson:")
+        print("      python -m modules.vision.training.build_engine --force")
     return 0
 
 

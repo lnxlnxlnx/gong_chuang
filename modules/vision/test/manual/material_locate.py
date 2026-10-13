@@ -58,10 +58,12 @@ def parse_args() -> argparse.Namespace:
     targets = configured_targets()
     default_depth = targets.working_distance_mm
     parser.add_argument("--model", type=Path, default=default_model_path(),
-                        help="模型路径（Windows 默认 best.onnx，Jetson 默认 best.engine）")
+                        help="模型路径（默认读 config.json 的 model 块："
+                             "Windows 是 best.onnx，Jetson 是 best.engine）")
     parser.add_argument("--camera", type=int, default=default_camera,
                         help=f"摄像头序号（默认读 config/vision.json：{default_camera}）")
-    parser.add_argument("--conf", type=float, default=0.25, help="置信度阈值（默认 0.25）")
+    parser.add_argument("--conf", type=float, default=None,
+                        help="置信度阈值；默认读 config.json 的 model.conf_thresh")
     parser.add_argument("--focal", type=float, default=None,
                         help="标定后的当前画幅水平像素焦距；不传则用实拍样本粗标定")
     parser.add_argument("--depth", dest="depth_range", type=parse_depth_range,
@@ -91,7 +93,7 @@ def run(
     model_path: Path,
     *,
     focal_px: float | None = None,
-    conf: float = 0.25,
+    conf: float | None = None,
     depth_range: tuple[float, float] | None = None,
     material_bgr: tuple[float, float, float] | None = None,
     material_palette: dict[str, tuple[float, float, float]] | None = None,
@@ -103,7 +105,8 @@ def run(
 
     if not Path(model_path).is_file():
         print(f"找不到模型文件：{model_path}")
-        print("Windows 放 models/best.onnx，Jetson 放 models/best.engine")
+        print("默认路径写在 modules/vision/config.json 的 model 块；"
+              "Jetson 上 engine 要用 build_engine 在板上生成")
         return 1
 
     window = open_preview()

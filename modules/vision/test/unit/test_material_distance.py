@@ -9,7 +9,7 @@ from modules.vision.drive.material_distance import MaterialDistanceEstimator
 from modules.vision.drive.yolov8 import Detection
 
 
-def detection(name="obj-red", *, score=0.9, x1=260.0, y1=180.0, x2=380.0, y2=300.0, class_id=0):
+def detection(name="red", *, score=0.9, x1=260.0, y1=180.0, x2=380.0, y2=300.0, class_id=0):
     return Detection(x1=x1, y1=y1, x2=x2, y2=y2, score=score, class_id=class_id, name=name)
 
 
@@ -17,7 +17,7 @@ class CalibratedDistanceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.estimator = MaterialDistanceEstimator(
             focal_px=560.0,
-            real_widths_mm={"obj-red": 60.0, "obj-blue": 50.0},
+            real_widths_mm={"red": 60.0, "blue": 50.0},
             image_size=(640, 480),
         )
         self.region = LockedRegion(center_x=320.0, center_y=240.0, radius=80.0)
@@ -49,9 +49,9 @@ class CalibratedDistanceTests(unittest.TestCase):
         self.assertAlmostEqual(result.relative_y, 30.0 / 240.0)
 
     def test_estimate_all_sorts_by_distance_to_the_ring(self) -> None:
-        near = detection("obj-blue", x1=330.0, y1=240.0, x2=390.0, y2=300.0, class_id=2)
+        near = detection("blue", x1=330.0, y1=240.0, x2=390.0, y2=300.0, class_id=2)
         results = self.estimator.estimate_all([detection(), near], region=self.region, frame_shape=(480, 640))
-        self.assertEqual([item.name for item in results], ["obj-red", "obj-blue"])
+        self.assertEqual([item.name for item in results], ["red", "blue"])
 
     def test_frame_shape_overrides_the_configured_image_size(self) -> None:
         result = self.estimator.estimate(detection(), frame_shape=(600, 800, 3))
@@ -80,8 +80,8 @@ class UncalibratedDistanceTests(unittest.TestCase):
         self.assertAlmostEqual(result.offset_y_px, 0.0)
 
     def test_unknown_class_stays_uncalibrated_even_with_other_widths(self) -> None:
-        estimator = MaterialDistanceEstimator(focal_px=560.0, real_widths_mm={"obj-red": 60.0})
-        result = estimator.estimate(detection("obj-green", class_id=1), frame_shape=(480, 640))
+        estimator = MaterialDistanceEstimator(focal_px=560.0, real_widths_mm={"red": 60.0})
+        result = estimator.estimate(detection("green", class_id=1), frame_shape=(480, 640))
         self.assertIsNone(result.distance_mm)
 
     def test_configured_image_size_is_used_when_no_frame_shape_is_given(self) -> None:

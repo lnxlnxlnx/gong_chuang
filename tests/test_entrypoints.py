@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import test as test_launcher
 from project_paths import PROJECT_ROOT
-from modules.vision import default_model_path
+from modules.vision import default_model_path, load_model_settings
 
 
 ROOT = PROJECT_ROOT
@@ -79,10 +79,15 @@ class EntryPointTests(unittest.TestCase):
         import_module.assert_called_once_with("modules.lidar.test.manual.coin_d6_live")
 
     def test_vision_demo_selects_the_local_model_format(self) -> None:
+        """模型路径来自 config.json 的 model 块，不是代码里的 os.name 分支。"""
         model_path = default_model_path()
         expected = ".onnx" if os.name == "nt" else ".engine"
         self.assertEqual(model_path.suffix, expected)
         self.assertEqual(model_path.name, f"best{expected}")
+        # 两平台各自的文件都在配置里指明，换模型时改的是这里。
+        settings = load_model_settings()
+        self.assertEqual(settings.onnx_path.name, "best.onnx")
+        self.assertEqual(settings.engine_path.name, "best.engine")
 
     def test_menu_dispatches_arm_and_returns_to_menu(self) -> None:
         with patch("builtins.input", side_effect=["2", "0"]):

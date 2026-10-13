@@ -26,25 +26,37 @@ from typing import TYPE_CHECKING, Iterable, Sequence
 
 import numpy as np
 
-from modules.vision.drive.yolov8 import Detection, Detector
+from modules.vision.drive.yolov8 import DEFAULT_CLASS_NAMES, Detection, Detector
 
 if TYPE_CHECKING:
     from modules.vision.drive.hough_lock import LockedRegion
 
-#: 比赛里的六种物料类别（与 models/data/classes.txt 的类别表对应）。
-MATERIAL_CLASS_NAMES: tuple[str, ...] = (
-    "obj-red",
-    "obj-green",
-    "obj-blue",
-    "obj-yellow",
-    "obj-light blue",
-    "obj-black",
-)
+#: 算作物料的类别名。当前物料模型是专用的四分类（``red`` / ``yellow`` / ``blue`` /
+#: ``green``），四类都是物料，所以这里就是模型的类别表本身；换模型改
+#: ``modules/vision/config.json`` 的 ``model.class_names``（和可选的 ``model.materials``），
+#: 这里是没配置时的兜底。
+MATERIAL_CLASS_NAMES: tuple[str, ...] = tuple(DEFAULT_CLASS_NAMES)
 
 
 def is_material(name: str, materials: Iterable[str] = MATERIAL_CLASS_NAMES) -> bool:
     """Return ``True`` when ``name`` is one of the material classes."""
     return name in set(materials)
+
+
+def _configured_materials() -> tuple[str, ...]:
+    """``config.json`` 的 ``model.materials``；没配或读不出来时返回空元组。
+
+    读配置失败（文件坏了、字段写错）不该把整条流水线拖死：这里是"想更精确一点"的
+    增强，失败就退回内置表，让上游按老行为跑。
+    """
+    try:
+        from modules.vision.config import load_model_settings
+    except ImportError:  # 单独跑本模块的自测时也可能走到这里
+        return ()
+    try:
+        return tuple(load_model_settings().materials)
+    except (OSError, ValueError):
+        return ()
 
 
 def is_inside_region(
@@ -60,8 +72,12 @@ class MaterialYOLO:
 
     Parameters:
         model_path: ONNX (Windows) or TensorRT engine (Jetson) path; defaults
-            to :func:`modules.vision.default_model_path`.
-        materials: class names treated as materials, used by ``materials_only``.
+            to :func:`modules.vision.default_model_path`, which reads
+            ``modules/vision/config.json``.
+        conf_thresh / iou_thresh / class_names: ``None`` 表示"按 ``config.json`` 的
+            ``model`` 块来"。显式传值只用于临时试验，正常部署不要在代码里写死。
+        materials: class names treated as materials, used by ``materials_only``;
+            ``None`` 表示按配置（见 :attr:`effective_materials`）。
         detector: an already-built detector (same ``detect()`` / ``draw()`` /
             ``close()`` interface, see :class:`modules.vision.Detector`); injected by
             tests or when sharing one model between modules. When given,
@@ -72,19 +88,18 @@ class MaterialYOLO:
         self,
         model_path: str | Path | None = None,
         *,
-        conf_thresh: float = 0.25,
-        iou_thresh: float = 0.45,
+        conf_thresh: float | None = None,
+        iou_thresh: float | None = None,
         class_names: Sequence[str] | None = None,
         materials: Sequence[str] | None = None,
         detector: Detector | None = None,
     ) -> None:
         self.model_path = Path(model_path) if model_path is not None else None
-        self.conf_thresh = float(conf_thresh)
-        self.iou_thresh = float(iou_thresh)
+        # None = "还没定，等建检测器时问配置"；显式给了就一直是它。
+        self.conf_thresh = None if conf_thresh is None else float(conf_thresh)
+        self.iou_thresh = None if iou_thresh is None else float(iou_thresh)
         self.class_names = list(class_names) if class_names is not None else None
-        self.materials = (
-            tuple(materials) if materials is not None else tuple(MATERIAL_CLASS_NAMES)
-        )
+        self._materials = tuple(materials) if materials is not None else None
         self._detector = detector
 
     # ------------------------------------------------------------- 生命周期
@@ -92,15 +107,16 @@ class MaterialYOLO:
     def detector(self) -> Detector:
         """Lazily build the real detector the first time it is needed."""
         if self._detector is None:
-            from modules.vision import create_detector, default_model_path
+            from modules.vision import create_configured_detector
 
-            path = self.model_path if self.model_path is not None else default_model_path()
-            if not Path(path).is_file():
-                raise FileNotFoundError(f"未找到模型文件：{path}")
-            kwargs = {"conf_thresh": self.conf_thresh, "iou_thresh": self.iou_thresh}
-            if self.class_names is not None:
-                kwargs["class_names"] = self.class_names
-            self._detector = create_detector(path, **kwargs)
+            # 路径、类别表、输入边长、阈值全部可以来自 config.json；
+            # 这里显式传进去的才是覆盖值（None 表示不覆盖）。
+            self._detector = create_configured_detector(
+                model_path=self.model_path,
+                class_names=self.class_names,
+                conf_thresh=self.conf_thresh,
+                iou_thresh=self.iou_thresh,
+            )
         return self._detector
 
     def close(self) -> None:
@@ -118,18 +134,30 @@ class MaterialYOLO:
 
     # ------------------------------------------------------------- 推理
     @property
+    def materials(self) -> tuple[str, ...]:
+        """算作物料的类别名；等价于 :attr:`effective_materials`，保留旧名字。"""
+        return self.effective_materials
+
+    @property
     def effective_materials(self) -> tuple[str, ...]:
         """这一帧按哪些类别名算物料。
 
-        模型自己的类别表里**一个 ``obj-*`` 都没有**时（例如新导出的
-        ``{0: 'red', 1: 'yellow', 2: 'blue', 3: 'green'}`` 四分类物料模型），
-        说明它是专用模型：所有类别都算物料。否则仍按 ``self.materials`` 过滤，
-        免得 ``zhangai`` 这类非物料类别混进来。
+        优先级：构造时显式传的 ``materials`` → ``config.json`` 的 ``model.materials``
+        （留空表示 ``model.class_names`` 全部算物料）→ 内置表。
+
+        最后一档是给"没配置、也读不出模型类别表"的旧场景兜底：模型的类别名跟内置表
+        完全对不上时，说明它换了一套命名（例如老比赛的 ``obj-*`` 十类表），
+        那就按它自己声明的全部类别算——一个专用模型不该因为改了命名就把所有框过滤掉。
         """
+        if self._materials is not None:
+            return self._materials
+        configured = _configured_materials()
+        if configured:
+            return configured
         names = tuple(getattr(self.detector, "class_names", ()) or ())
-        if names and not any(name in set(MATERIAL_CLASS_NAMES) for name in names):
+        if names and not (set(names) & set(MATERIAL_CLASS_NAMES)):
             return names
-        return self.materials
+        return tuple(MATERIAL_CLASS_NAMES)
 
     def detect(self, frame: np.ndarray, *, materials_only: bool = False) -> list[Detection]:
         """Run one inference on the whole frame."""
@@ -219,7 +247,7 @@ def _self_test() -> int:
             self.shapes.append(tuple(frame.shape))
             x1, y1, x2, y2 = self.box
             return [
-                Detection(x1=x1, y1=y1, x2=x2, y2=y2, score=0.9, class_id=0, name="obj-red"),
+                Detection(x1=x1, y1=y1, x2=x2, y2=y2, score=0.9, class_id=0, name="red"),
                 Detection(x1=1.0, y1=1.0, x2=9.0, y2=9.0, score=0.8, class_id=9, name="zhangai"),
             ]
 
@@ -233,7 +261,8 @@ def _self_test() -> int:
     frame = _fake_frame()
     region = LockedRegion(center_x=200.0, center_y=150.0, radius=60.0)
     fake = FakeDetector()
-    yolo = MaterialYOLO(detector=fake)
+    # materials 显式传死：这个自测只验裁剪/映射/筛选，不该随 config.json 变。
+    yolo = MaterialYOLO(detector=fake, materials=("red",))
 
     everything = yolo.detect(frame)
     materials = yolo.detect(frame, materials_only=True)
@@ -244,8 +273,8 @@ def _self_test() -> int:
         problems.append(f"整帧推理拿到的不是完整帧：{fake.shapes[0][:2]} != {frame.shape[:2]}")
     if len(everything) != 2:
         problems.append(f"整帧推理应返回 2 个框，实际 {len(everything)}")
-    if [hit.name for hit in materials] != ["obj-red"]:
-        problems.append(f"只要物料时应只剩 obj-red，实际 {[hit.name for hit in materials]}")
+    if [hit.name for hit in materials] != ["red"]:
+        problems.append(f"只要物料时应只剩 red，实际 {[hit.name for hit in materials]}")
 
     # 锁定区域 (200,150) r=60 + margin 10 -> 裁剪框 (130,80)-(270,220)；
     # 假检测器的框在裁剪图 (4,6)-(40,42)，映射回整帧应为 (134,86)-(170,122)。
@@ -260,12 +289,12 @@ def _self_test() -> int:
 
     # 框落在裁剪图左上角时，映射回整帧后在圆外，应当被丢掉。
     corner = FakeDetector(box=(1.0, 1.0, 9.0, 9.0))
-    outside = MaterialYOLO(detector=corner).detect_in_region(
+    outside = MaterialYOLO(detector=corner, materials=("red",)).detect_in_region(
         frame, LockedRegion(center_x=500.0, center_y=400.0, radius=40.0), materials_only=True
     )
     if outside:
         problems.append(f"区域外的目标不应保留，实际 {[hit.name for hit in outside]}")
-    kept_outside = MaterialYOLO(detector=corner).detect_in_region(
+    kept_outside = MaterialYOLO(detector=corner, materials=("red",)).detect_in_region(
         frame,
         LockedRegion(center_x=500.0, center_y=400.0, radius=40.0),
         materials_only=True,
@@ -285,7 +314,7 @@ def _self_test() -> int:
     return 0
 
 
-def _run_image(model_path, image_path: Path, conf: float) -> int:
+def _run_image(model_path, image_path: Path, conf: float | None) -> int:
     import cv2
 
     frame = cv2.imread(str(image_path))
@@ -296,12 +325,13 @@ def _run_image(model_path, image_path: Path, conf: float) -> int:
         hits = yolo.detect(frame)
         materials = [hit for hit in hits if is_material(hit.name, yolo.materials)]
         print(f"{image_path}：检出 {len(hits)} 个框，其中物料 {len(materials)} 个")
+        print(f"  输入 {yolo.detector.input_size}，类别表 {list(yolo.detector.class_names)}")
         for hit in hits:
             print(f"  {hit.name:<14} score={hit.score:.2f} box=({hit.x1:.0f},{hit.y1:.0f})-({hit.x2:.0f},{hit.y2:.0f})")
     return 0
 
 
-def _run_camera(model_path, camera_id: int, conf: float) -> int:
+def _run_camera(model_path, camera_id: int, conf: float | None) -> int:
     import cv2
 
     from modules.vision import (
@@ -348,10 +378,13 @@ def _run_camera(model_path, camera_id: int, conf: float) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="YOLO 推理物料候选")
-    parser.add_argument("--model", type=Path, default=None, help="模型路径（默认按平台选 models/best.onnx 或 best.engine）")
+    parser.add_argument("--model", type=Path, default=None,
+                        help="模型路径；默认取 modules/vision/config.json 的 model 块"
+                             "（Windows 是 ONNX，Jetson 是 TensorRT engine）")
     parser.add_argument("--image", type=Path, help="在一张图片上跑真模型")
     parser.add_argument("--camera", type=int, help="打开摄像头实时预览")
-    parser.add_argument("--conf", type=float, default=0.25, help="置信度阈值（默认 0.25）")
+    parser.add_argument("--conf", type=float, default=None,
+                        help="置信度阈值；默认取 config.json 的 model.conf_thresh")
     args = parser.parse_args(argv)
 
     if args.camera is not None:

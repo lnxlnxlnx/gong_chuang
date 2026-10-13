@@ -42,9 +42,8 @@ Example::
 from __future__ import annotations
 
 import importlib
-import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 from .drive.camera import USBCamera, load_camera_id, looks_blank
 from .drive.distance import DistanceEstimator, focal_length_from_fov
@@ -56,7 +55,6 @@ from .drive.preview import (
     warn_blank_preview,
 )
 from .drive.yolov8 import DEFAULT_CLASS_NAMES, Detection, Detector, YOLOv8Detector, YOLOv8ONNXDetector
-from project_paths import models_path
 
 #: 物料定位流水线的符号 -> 定义它的模块。这些模块按需导入（见 __getattr__）：
 #: 一是 ``python -m modules.vision.drive.hough_lock`` 这类自测入口不会因为在包初始化时就导入过
@@ -80,8 +78,11 @@ _LAZY_ATTRIBUTES: dict[str, str] = {
     "MARKER_ROLE": "drive.cell_targets",
     "MATERIAL_ROLE": "drive.cell_targets",
     # config
+    "ModelSettings": "config",
     "TargetSettings": "config",
     "VisionConfig": "config",
+    "current_platform": "config",
+    "load_model_settings": "config",
     "load_vision_config": "config",
     "save_vision_calibration": "config",
     # hough_lock
@@ -115,8 +116,11 @@ if TYPE_CHECKING:
     # 这类自测入口不触发 runpy 的 "found in sys.modules" 警告），静态分析则
     # 从这里拿到真实类型，``from vision import MaterialLocator`` 不再是 Any。
     from .config import (
+        ModelSettings as ModelSettings,
         TargetSettings as TargetSettings,
         VisionConfig as VisionConfig,
+        current_platform as current_platform,
+        load_model_settings as load_model_settings,
         load_vision_config as load_vision_config,
         save_vision_calibration as save_vision_calibration,
     )
@@ -196,6 +200,7 @@ __all__ = [
     "MaterialPresence",
     "MaterialReport",
     "MaterialYOLO",
+    "ModelSettings",
     "PREVIEW_WINDOW_NAME",
     "PinholeCamera",
     "PlaneCalibration",
@@ -206,13 +211,17 @@ __all__ = [
     "USBCamera",
     "VisionConfig",
     "close_previews",
+    "create_configured_detector",
+    "current_platform",
     "fit_plane_calibration",
     "focal_px_from_known_target",
     "is_material",
     "load_camera_id",
+    "load_model_settings",
     "load_vision_config",
     "looks_blank",
     "open_preview",
+    "require_model_path",
     "resolve_focal_px",
     "save_vision_calibration",
     "warn_blank_preview",
@@ -240,14 +249,82 @@ def __dir__() -> list[str]:
 
 
 def default_model_path() -> Path:
-    """Select the copied ONNX model on Windows or TensorRT engine on Jetson."""
-    extension = ".onnx" if os.name == "nt" else ".engine"
-    return models_path(f"best{extension}")
+    """本平台默认加载的模型文件，取自 ``modules/vision/config.json`` 的 ``model`` 块。
+
+    ``model.backend`` 是 ``auto``（默认）时：Windows 取 ``model.onnx``（OpenCV 推理），
+    Jetson 取 ``model.engine``（TensorRT 推理）。想在某平台上强制另一条通道，
+    把 ``backend`` 写成 ``"onnx"`` 或 ``"tensorrt"``。
+    """
+    from .config import load_model_settings
+
+    return load_model_settings().model_path()
 
 
-def create_detector(model_path: str | Path, **kwargs) -> YOLOv8Detector:
-    """Open a detector matching the explicitly selected model file format."""
+def require_model_path(settings: "ModelSettings | None" = None) -> Path:
+    """同 :func:`default_model_path`，但文件不存在时直接说清楚该做什么。"""
+    from .config import BACKEND_TENSORRT, load_model_settings
+
+    settings = settings if settings is not None else load_model_settings()
+    path = settings.model_path()
+    if path.is_file():
+        return path
+    if settings.resolve_backend() == BACKEND_TENSORRT:
+        raise FileNotFoundError(
+            f"未找到 TensorRT 引擎：{path}\n"
+            "引擎与板子/GPU/TensorRT 版本绑定，只能在 Jetson 上生成：\n"
+            "    python -m modules.vision.training.build_engine\n"
+            "（换成 OpenCV 的 ONNX 通道：把 modules/vision/config.json 的 "
+            'model.backend 改成 "onnx"）'
+        )
+    raise FileNotFoundError(
+        f"未找到模型文件：{path}\n"
+        "把导出的模型放到这个路径，或改 modules/vision/config.json 的 model.onnx"
+    )
+
+
+def create_configured_detector(
+    *,
+    model_path: str | Path | None = None,
+    class_names: "Sequence[str] | None" = None,
+    conf_thresh: float | None = None,
+    iou_thresh: float | None = None,
+    input_size: int | None = None,
+    settings: "ModelSettings | None" = None,
+) -> Detector:
+    """按 ``config.json`` 建检测器；显式传进来的参数才覆盖配置。
+
+    这是"换模型只改配置"的落点：路径、类别表、输入边长、阈值都从这里进。
+    显式参数是给临时试验和测试用的。
+    """
+    from .config import load_model_settings
+
+    settings = settings if settings is not None else load_model_settings()
+    path = Path(model_path) if model_path is not None else require_model_path(settings)
+
+    kwargs = {
+        "class_names": list(class_names) if class_names else list(settings.class_names),
+        "conf_thresh": settings.conf_thresh if conf_thresh is None else float(conf_thresh),
+        "iou_thresh": settings.iou_thresh if iou_thresh is None else float(iou_thresh),
+    }
+    size = settings.input_size if input_size is None else input_size
+    if size is not None:
+        # 引擎的尺寸写在引擎里，探针会把配置和它对一遍；ONNX 没有这条退路，
+        # 只能靠配置（或 onnx 元数据）告诉它输入多大。
+        kwargs["input_size"] = int(size)
+    return create_detector(path, **kwargs)
+
+
+def create_detector(model_path: str | Path | None = None, **kwargs) -> Detector:
+    """Open a detector matching the explicitly selected model file format.
+
+    ``model_path`` 为 ``None`` 时等价于 :func:`create_configured_detector`
+    （即完全按 ``config.json`` 来）。
+    """
+    if model_path is None:
+        return create_configured_detector(**kwargs)
     path = Path(model_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"未找到模型文件：{path}")
     if path.suffix == ".onnx":
         return YOLOv8ONNXDetector(str(path), **kwargs)
     if path.suffix == ".engine":

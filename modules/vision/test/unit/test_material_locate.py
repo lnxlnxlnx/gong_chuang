@@ -50,7 +50,7 @@ class MaterialLocatorTests(unittest.TestCase):
     def setUp(self):
         self.frame = synthetic_rings()
         self.locator = MaterialLocator(
-            yolo=FakeYOLO([hit("obj-red", 0.9, 160), hit("obj-blue", 0.7, 480)]),
+            yolo=FakeYOLO([hit("red", 0.9, 160), hit("blue", 0.7, 480)]),
             focal_px=300,
         )
         self.report = self.locator.locate(self.frame)
@@ -59,7 +59,7 @@ class MaterialLocatorTests(unittest.TestCase):
         self.assertEqual(len(self.report.regions), 3)
         self.assertTrue(self.report.present)
         self.assertEqual([region.name for region in self.report.regions],
-                         ["obj-red", None, "obj-blue"])
+                         ["red", None, "blue"])
         self.assertTrue(all(region.present for region in self.report.regions))
 
     def test_distance_uses_circle_diameter(self):
@@ -68,11 +68,11 @@ class MaterialLocatorTests(unittest.TestCase):
                                    300 * 30 / (2 * region.region.radius))
 
     def test_best_prefers_the_highest_classification_score(self):
-        self.assertEqual(self.report.best.name, "obj-red")
+        self.assertEqual(self.report.best.name, "red")
 
     def test_summary_keeps_the_unknown_category_and_distance(self):
         summary = self.report.summary()
-        self.assertIn("obj-red", summary)
+        self.assertIn("red", summary)
         self.assertIn("blue", summary)
         self.assertIn("mm", summary)
         self.assertIn("3", summary)
@@ -107,14 +107,14 @@ class MaterialLocatorTests(unittest.TestCase):
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         locator = MaterialLocator(
             locator=FixedCircleLocator(),
-            yolo=FakeYOLO([Detection(380, 180, 420, 220, 0.8, 2, "obj-blue")]),
+            yolo=FakeYOLO([Detection(380, 180, 420, 220, 0.8, 2, "blue")]),
             focal_px=300,
         )
 
         report = locator.locate(frame)
         item = report.regions[0]
         self.assertTrue(report.present)
-        self.assertEqual(item.name, "obj-blue")
+        self.assertEqual(item.name, "blue")
         self.assertAlmostEqual(item.confidence, 0.8)
         self.assertEqual((item.center_x_px, item.center_y_px), (400.0, 200.0))
         self.assertAlmostEqual(item.x_mm, 20.0)
@@ -227,13 +227,13 @@ class BestCircleTests(unittest.TestCase):
 
     def test_classification_still_wins_over_uniformity(self) -> None:
         frame, regions = self.scene()
-        hit = Detection(x1=530, y1=370, x2=590, y2=430, score=0.8, class_id=2, name="obj-blue")
+        hit = Detection(x1=530, y1=370, x2=590, y2=430, score=0.8, class_id=2, name="blue")
         report = MaterialLocator(
             locator=RecordingLocator(regions), yolo=FakeYOLO([hit]), focal_px=500.0
         ).locate(frame)
 
         self.assertEqual(report.best.region, regions[2])
-        self.assertEqual(report.best.name, "obj-blue")
+        self.assertEqual(report.best.name, "blue")
 
     def test_summary_shows_the_window_and_the_chosen_circle(self) -> None:
         frame, regions = self.scene()

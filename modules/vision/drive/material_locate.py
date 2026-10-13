@@ -141,10 +141,12 @@ class MaterialReport:
         """
         if not self.regions:
             return None
-        classified = [report for report in self.regions if report.classification.found]
+        # **只在通过校验的候选里挑**：模型框到的区域也可能是被丢掉的夹爪圆弧，
+        # 拿它去算逆解就等于把"已知不对"的数当答案。
+        faces = self.faces
+        classified = [report for report in faces if report.classification.found]
         if classified:
             return max(classified, key=lambda report: report.classification.score)
-        faces = self.faces
         if not faces:
             return None
         return max(faces, key=lambda report: report.region.radius)
@@ -200,8 +202,8 @@ class MaterialLocator:
         yolo: MaterialYOLO | None = None,
         classifier: MaterialClassifier | None = None,
         model_path: str | Path | None = None,
-        conf_thresh: float = 0.25,
-        iou_thresh: float = 0.45,
+        conf_thresh: float | None = None,
+        iou_thresh: float | None = None,
         region_margin: float = 0.0,
         focal_px: float | None = None,
         top_diameter_mm: float = 30.0,
@@ -272,16 +274,20 @@ class MaterialLocator:
         """从一帧 BGR 图像返回圆面、类别和近似相机坐标。"""
         height, width = frame.shape[:2]
         window = self.radius_window(width, height)
-        lock, qualities = self._locate_and_verify(frame, window, self.locator)
+        lock = self._locate_circles(frame, window, self.locator)
+        qualities = self._face_qualities(frame, lock)
+        colour_path = bool(lock.regions)
         fell_back = False
         if self.colour_first and not lock.regions:
             # 调色板里没有这块料时会一个色块都找不到；退回霍夫的形状判据，
             # 至少还能看见"有个圆面"，并在报告里说清是退回来的结果。
-            fallback = self._hough_fallback()
-            candidate, candidate_qualities = self._locate_and_verify(frame, window, fallback)
-            if candidate.regions:
-                lock, qualities = candidate, candidate_qualities
-                fell_back = True
+            lock, qualities = self._locate_hough(frame, window)
+            colour_path = False
+            fell_back = bool(lock.regions)
+        elif not any(quality.looks_like_face for quality in qualities.values()):
+            # 主定位器支持放松时有第二遍：近距离焦画面里真实圆边的梯度被摊平，
+            # 严格 Canny 阈值只剩夹爪弧线。锐利画面第一遍就找到顶面，不会跑第二遍。
+            lock, qualities = self._retry_relaxed(frame, window, self.locator, lock, qualities)
         focal_px = self.resolved_focal_px(width, height, required=bool(lock.regions))
         if not lock.regions:
             return MaterialReport(
@@ -292,7 +298,10 @@ class MaterialLocator:
         # 画幅规则与像素焦距只有一个定义，在 modules.vision.drive.pinhole 里。
         focal_px = resolve_focal_px(width, height, self.focal_px)
         reports = tuple(
-            self._report_for_region(frame, hits, region, qualities[region], focal_px, width, height)
+            self._report_for_region(
+                frame, hits, region, qualities[region], focal_px, width, height,
+                colour_path=colour_path,
+            )
             for region in lock.regions
         )
         return MaterialReport(
@@ -300,21 +309,25 @@ class MaterialLocator:
             focal_px=focal_px, radius_window_px=window, colour_fallback=fell_back,
         )
 
-    def _locate_and_verify(self, frame: np.ndarray, window, locator):
-        """定位一次并量出每个候选的顶面质量，返回 ``(lock, qualities)``。
-
-        严格参数没找到"像顶面的圆"时才放松 Canny 阈值（近距离焦画面里真实圆边的
-        梯度被摊平，严格参数只剩夹爪弧线）。放松只在这里发生，所以锐利画面
-        （以及没有近距问题的机位）行为不变。
-        """
+    def _locate_hough(self, frame: np.ndarray, window):
+        """退回霍夫那一路，含"严格参数没找到顶面就放松 Canny 阈值再试一次"。"""
+        locator = self._hough_fallback()
         lock = self._locate_circles(frame, window, locator)
         qualities = self._face_qualities(frame, lock)
-        if self.colour_first or any(quality.looks_like_face for quality in qualities.values()):
+        return self._retry_relaxed(frame, window, locator, lock, qualities)
+
+    def _retry_relaxed(self, frame: np.ndarray, window, locator, lock, qualities):
+        """严格参数没找到像顶面的圆时，用放松版定位器再跑一遍。
+
+        放松只在这里发生（而且只在第一遍一无所获时），所以锐利画面、以及没有近距
+        离焦问题的机位行为完全不变。
+        """
+        if any(quality.looks_like_face for quality in qualities.values()):
             return lock, qualities
-        relaxed = self._relaxed_locator(locator)
-        if relaxed is None:
+        factory = getattr(locator, "relaxed", None)
+        if factory is None:
             return lock, qualities
-        candidate = self._locate_circles(frame, window, relaxed)
+        candidate = self._locate_circles(frame, window, factory())
         candidate_qualities = self._face_qualities(frame, candidate)
         if any(quality.looks_like_face for quality in candidate_qualities.values()):
             return candidate, candidate_qualities
@@ -332,11 +345,6 @@ class MaterialLocator:
             return locator.locate(frame)
         return locator.locate(frame, min_radius=window[0], max_radius=window[1])
 
-    def _relaxed_locator(self, locator):
-        """放松版圆定位器；注入的定位器没有这个能力时返回 ``None``。"""
-        factory = getattr(locator, "relaxed", None)
-        return None if factory is None else factory()
-
     def _materials(self) -> tuple[str, ...]:
         """这一帧按哪些类别名算物料。
 
@@ -350,6 +358,24 @@ class MaterialLocator:
     def _face_qualities(frame: np.ndarray, lock: RingLock) -> dict:
         """这一批锁定圆面各自的顶面质量。"""
         return {region: measure_face(frame, region) for region in lock.regions}
+
+    @staticmethod
+    def _accepted(region: LockedRegion, face: FaceQuality, hits, *, colour_path: bool) -> bool:
+        """最终认不认这个候选：**形状判据通过，或者模型给它盖了章**。
+
+        两条证据互相补：顶面被光照分成亮暗两块时，颜色掩膜的边界会毛糙、形状判据
+        可能不通过，但模型照样框得准；反过来模型在近距离焦画面里可能一个框都没有，
+        这时只能信形状。走霍夫那一路（``colour_path=False``）时没有颜色证据，
+        就只认形状判据——上一版在这里漏了一刀，把退回来的几十个假圆全当物料了。
+        """
+        if face.looks_like_face:
+            return True
+        if not colour_path:
+            return False
+        return any(
+            region.contains(*hit.center) or _inside_box(region.center_x, region.center_y, hit)
+            for hit in hits
+        )
 
     def radius_window(self, width: int, height: int) -> tuple[float, float] | None:
         """按 ``depth_range_mm`` 先验算本帧的霍夫半径窗口；没配就返回 ``None``。"""
@@ -380,6 +406,8 @@ class MaterialLocator:
         focal_px: float,
         width: int,
         height: int,
+        *,
+        colour_path: bool,
     ) -> RegionReport:
         """用圆面直径估深度，再将圆心投影回相机坐标系。"""
         visible = [
@@ -400,7 +428,7 @@ class MaterialLocator:
             region=region,
             classification=self.classifier.classify(visible, materials=self._materials()),
             face=face,
-            accepted=self.colour_first or face.looks_like_face,
+            accepted=self._accepted(region, face, hits, colour_path=colour_path),
             x_mm=fix.x_mm,
             y_mm=fix.y_mm,
             distance_mm=fix.depth_mm,
@@ -495,6 +523,11 @@ def _self_test() -> int:
         return 1
     print("自测通过：圆面决定存在与距离，YOLO 漏检只影响类别。")
     return 0
+
+
+def _inside_box(x: float, y: float, hit) -> bool:
+    """点是否落在检测框里（给"模型盖章"用，也不需要重叠面积那么讲究）。"""
+    return hit.x1 <= x <= hit.x2 and hit.y1 <= y <= hit.y2
 
 
 def parse_depth_range(text: str | None) -> tuple[float, float] | None:
@@ -597,7 +630,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--image", type=Path, help="在一张图片上跑全流程")
     parser.add_argument("--camera", type=int, help="打开摄像头实时预览")
     parser.add_argument("--save", type=Path, help="保存图片标注（只对 --image 有效）")
-    parser.add_argument("--conf", type=float, default=0.25, help="YOLO 分类阈值")
+    parser.add_argument("--conf", type=float, default=None,
+                        help="YOLO 分类阈值；默认取 config.json 的 model.conf_thresh")
     parser.add_argument("--focal", type=float, default=None,
                         help="当前画幅标定后的水平像素焦距；不传则用实拍样本粗标定")
     parser.add_argument("--depth", dest="depth_range", type=parse_depth_range, default=None,
