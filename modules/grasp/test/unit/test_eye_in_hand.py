@@ -28,9 +28,13 @@ from modules.grasp.drive.eye_in_hand import (
     ServoConfig,
     ServoError,
     ServoJacobian,
+    ServoResult,
     ServoTarget,
+    ZDescentResult,
+    align_and_descend,
     align_x_y,
     descend_z,
+    find_object,
     load_jacobian,
     load_object_selector,
     load_servo_config,
@@ -50,6 +54,11 @@ def sighting(material_id: int, x: float, y: float, color: str = "green", *, stam
         f"物料 {material_id}: {color}物料（{color}），xyz=({x:.6f},{y:.6f},113.2) mm",
         received_at=stamp,
     )
+
+
+def sighting_at(x: float, y: float, z: float):
+    """和 :func:`sighting` 一样，但 z 可以指定——升降的测试要 z 真的会变。"""
+    return parse_sighting(f"物料 4: green物料（green），xyz=({x:.6f},{y:.6f},{z:.6f}) mm")
 
 
 class ServoJacobianTests(unittest.TestCase):
@@ -902,6 +911,291 @@ class PulseStepTests(unittest.TestCase):
         arm = self.Arm()
         self.assertEqual(retract_extension(arm, ServoConfig(), pulses=40), 40)
         self.assertEqual(arm.calls, [("back", 40)])
+
+
+class LiftRig:
+    """升降假臂：z 随脉冲线性变化，动作记在 ``calls`` 里。"""
+
+    def __init__(self, *, z_mm: float = 67.0, slope: float = 0.0121) -> None:
+        self.z = z_mm
+        self.slope = slope
+        self.calls: List[Tuple[str, int]] = []
+
+    def move_up(self, pulses, **_kwargs):
+        self.calls.append(("up", pulses))
+        self.z += pulses * self.slope
+
+    def move_down(self, pulses, **_kwargs):
+        self.calls.append(("down", pulses))
+        self.z -= pulses * self.slope
+
+    @property
+    def up_pulses(self) -> List[int]:
+        return [pulses for kind, pulses in self.calls if kind == "up"]
+
+
+class CoupledZLink:
+    """读数直接取假臂当前的 z——画面静止，所以一次停稳测量就是两次读。"""
+
+    def __init__(self, rig: LiftRig, *, x: float = 0.0, y: float = 0.0) -> None:
+        self.rig = rig
+        self.x, self.y = x, y
+        self.error = None
+        self.reads = 0
+
+    def frame(self, **_kwargs):
+        self.reads += 1
+        return (sighting_at(self.x, self.y, self.rig.z),)
+
+
+class BlindLink:
+    """画面里什么都没有的假镜头。"""
+
+    error = None
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def frame(self, **_kwargs):
+        self.reads += 1
+        return None
+
+
+class SafeLiftTests(unittest.TestCase):
+    """转底盘前抬到安全高度：标过灵敏度就一步算到位，没标才一段段试。
+
+    为什么值得单独测：每一步后面都跟一次停稳测量（实测约 537 ms），
+    旧写法最坏要 20 步，而按灵敏度算通常 2 步就到。
+    """
+
+    def make(self, *, z_mm: float = 67.0, slope: float = 0.0121, **overrides):
+        rig = LiftRig(z_mm=z_mm, slope=slope)
+        link = CoupledZLink(rig)
+        return rig, link, ServoConfig(**overrides)
+
+    def test_the_calibrated_scale_reaches_the_safe_height_in_two_segments(self) -> None:
+        rig, link, config = self.make()
+        raised = servo.raise_before_rotating(
+            rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        )
+
+        self.assertGreaterEqual(rig.z, config.safe_lift_z_mm)
+        self.assertEqual(raised, sum(rig.up_pulses))
+        # 第一段被单段上限夹住（按灵敏度算出来要 2782），第二段是算出来的零头。
+        self.assertEqual(rig.up_pulses[0], config.safe_lift_max_pulses_per_step)
+        self.assertEqual(len(rig.up_pulses), 2)
+        # 三次测量（进段一次、修正一次、确认一次），每次两次定位。
+        self.assertLessEqual(link.reads, 8)
+
+    def test_without_the_scale_it_walks_in_fixed_segments(self) -> None:
+        rig, link, config = self.make()
+        raised = servo.raise_before_rotating(rig, link, ObjectSelector(), config)
+
+        self.assertGreaterEqual(rig.z, config.safe_lift_z_mm)
+        self.assertEqual(set(rig.up_pulses), {config.safe_lift_step_pulses})
+        # 固定步长要明显更多段——这正是"按灵敏度算"省下来的地方。
+        self.assertGreater(len(rig.up_pulses), 2)
+        self.assertEqual(raised, sum(rig.up_pulses))
+
+    def test_the_scale_path_can_be_switched_off(self) -> None:
+        rig, link, config = self.make(safe_lift_use_scale=False)
+        servo.raise_before_rotating(
+            rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        )
+        self.assertEqual(set(rig.up_pulses), {config.safe_lift_step_pulses})
+
+    def test_the_computed_segment_is_capped(self) -> None:
+        rig, link, config = self.make(safe_lift_max_pulses_per_step=400)
+        servo.raise_before_rotating(
+            rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        )
+        self.assertEqual(rig.up_pulses[0], 400)
+
+    def test_already_high_enough_costs_one_measurement_and_no_motion(self) -> None:
+        rig, link, config = self.make(z_mm=105.0)
+        raised = servo.raise_before_rotating(
+            rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        )
+
+        self.assertEqual(raised, 0)
+        self.assertEqual(rig.calls, [])
+        self.assertEqual(link.reads, 2)  # 一次停稳测量 = 两次定位
+
+    def test_a_lift_that_changes_nothing_is_reported_instead_of_pushed(self) -> None:
+        rig, link, config = self.make(slope=0.0)  # 已经到行程端点：走多少都不变
+        raised = servo.raise_before_rotating(
+            rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        )
+
+        self.assertEqual(len(rig.up_pulses), 1)  # 只试一段就停，不接着往上顶
+        self.assertEqual(raised, config.safe_lift_max_pulses_per_step)
+
+    def test_a_lift_that_barely_moves_is_also_treated_as_an_endstop(self) -> None:
+        """到端点时物块几乎不动、只剩画面噪声：判据不能只看"是不是恰好 0"。"""
+        rig, link, config = self.make(slope=0.00005)
+        raised = servo.raise_before_rotating(
+            rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        )
+
+        self.assertEqual(len(rig.up_pulses), 1)
+        self.assertEqual(raised, config.safe_lift_max_pulses_per_step)
+
+    def test_without_a_scale_a_dead_lift_stops_after_two_segments(self) -> None:
+        rig, link, config = self.make(slope=0.0)
+        raised = servo.raise_before_rotating(rig, link, ObjectSelector(), config)
+
+        # 没有灵敏度可参照，所以第一段没法判；两段都不动就收手（而不是顶满 20 段）。
+        self.assertEqual(len(rig.up_pulses), 2)
+        self.assertEqual(raised, 2 * config.safe_lift_step_pulses)
+
+
+class FindObjectTests(unittest.TestCase):
+    def test_a_missing_object_does_not_pay_the_settle_wait_at_every_step(self) -> None:
+        """看不到物块时只快速探几帧；旧写法每步都要等到 settle_timeout 才认输。"""
+        rig = LiftRig()
+        link = BlindLink()
+        config = ServoConfig(
+            settle_timeout_seconds=30.0, settle_poll_seconds=0.25, find_max_steps=3
+        )
+
+        started = time.monotonic()
+        found = find_object(rig, link, ObjectSelector(), config)
+        elapsed = time.monotonic() - started
+
+        self.assertFalse(found)
+        self.assertLess(elapsed, 1.0)  # 旧写法这里要 3 × 30 s
+        self.assertEqual(link.reads, 3 * servo.VISIBILITY_PROBE_FRAMES)
+        self.assertEqual(len(rig.up_pulses), 3)  # 每一步仍然照抬
+
+
+class EnsureSafeHeightTests(unittest.TestCase):
+    """``align_x_y`` 的"要不要先查安全高度"开关：省一次测量，但不能省错地方。"""
+
+    def rig(self):
+        jacobian = ServoJacobian(
+            base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091
+        )
+        arm = FakeArm(jacobian)
+        link = BufferedLink(arm)
+        target = ServoTarget(x_mm=arm.offset[0], y_mm=arm.offset[1])
+        return arm, link, target, jacobian
+
+    def test_the_check_is_skipped_only_when_the_caller_asks(self) -> None:
+        arm, link, target, jacobian = self.rig()
+        config = ServoConfig()
+
+        with patch.object(servo, "raise_before_rotating") as check:
+            result = align_x_y(
+                arm, link, ObjectSelector(), target, jacobian, config,
+                ensure_safe_height=False,
+            )
+        check.assert_not_called()
+        self.assertTrue(result.aligned)
+
+        with patch.object(servo, "raise_before_rotating") as check:
+            align_x_y(arm, link, ObjectSelector(), target, jacobian, config)
+        check.assert_called_once()
+
+    def test_the_calibrated_scale_is_handed_to_the_check(self) -> None:
+        arm, link, target, jacobian = self.rig()
+        scale = LiftScale(dz_per_pulse=0.0121)
+
+        with patch.object(servo, "raise_before_rotating") as check:
+            align_x_y(
+                arm, link, ObjectSelector(), target, jacobian, ServoConfig(),
+                lift_scale=scale,
+            )
+
+        self.assertEqual(check.call_args.kwargs["scale"], scale)
+
+
+class AlignAndDescendTests(unittest.TestCase):
+    """一键就位：四步的顺序、参数传递、耗时记录。"""
+
+    def canned(self, order: List[str]):
+        def lift(*_args, **_kwargs):
+            order.append("lift")
+            return 250
+
+        def align(*_args, **kwargs):
+            order.append("align")
+            self.assertFalse(kwargs["ensure_safe_height"])
+            return ServoResult(
+                target=ServoTarget(x_mm=0.0, y_mm=0.0),
+                readings=((0.4, -0.5),),
+                error_x=0.4,
+                error_y=-0.5,
+                base_pulses=10,
+                radial_pulses=-4,
+                iterations=1,
+                tolerance_mm=2.0,
+            )
+
+        def down(*_args, **_kwargs):
+            order.append("down")
+            return ZDescentResult(
+                pulses=2200, planar_mm=0.64, start_z_mm=100.0, seconds=1.2
+            )
+
+        def back(*_args, **_kwargs):
+            order.append("back")
+            return 150
+
+        return lift, align, down, back
+
+    def run_it(self, order: List[str], seen: Optional[dict] = None, **overrides):
+        lift, align, down, back = self.canned(order)
+        if seen is not None:
+            # 想看命令行覆盖有没有传下去，就把两个脉冲步骤包一层记录。
+            # 先存原名再重新绑定，否则闭包里的 down 指的是包好的那个自己。
+            original_down, original_back = down, back
+
+            def record_down(*_args, **kwargs):
+                seen["z"] = kwargs.get("pulses")
+                return original_down()
+
+            def record_back(*_args, **kwargs):
+                seen["retract"] = kwargs.get("pulses")
+                return original_back()
+
+            down, back = record_down, record_back
+        jacobian = ServoJacobian(
+            base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091
+        )
+        with patch.object(servo, "raise_before_rotating", side_effect=lift), patch.object(
+            servo, "align_x_y", side_effect=align
+        ), patch.object(servo, "descend_z", side_effect=down), patch.object(
+            servo, "retract_extension", side_effect=back
+        ):
+            return align_and_descend(
+                arm=None,
+                link=None,
+                selector=ObjectSelector(),
+                target=ServoTarget(x_mm=0.0, y_mm=0.0),
+                jacobian=jacobian,
+                config=ServoConfig(),
+                **overrides,
+            )
+
+    def test_the_four_steps_run_in_the_documented_order(self) -> None:
+        order: List[str] = []
+        result = self.run_it(order)
+
+        self.assertEqual(order, ["lift", "align", "down", "back"])
+        self.assertEqual(result.raised_pulses, 250)
+        self.assertEqual(result.retracted_pulses, 150)
+        self.assertEqual(result.descent.pulses, 2200)
+        self.assertTrue(result.aligned.aligned)
+        self.assertGreaterEqual(result.total_seconds, 0.0)
+        summary = result.summary()
+        for keyword in ("就位完成", "抬升 250", "下降 2200", "后缩 150"):
+            self.assertIn(keyword, summary)
+
+    def test_the_overrides_reach_the_two_pulse_steps(self) -> None:
+        seen: dict = {}
+        self.run_it([], seen=seen, z_pulses=800, retract_pulses=40)
+
+        self.assertEqual(seen, {"z": 800, "retract": 40})
 
 
 if __name__ == "__main__":

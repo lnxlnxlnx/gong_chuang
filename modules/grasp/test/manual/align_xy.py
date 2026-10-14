@@ -11,6 +11,9 @@
 ## 用法
 
 ```powershell
+# **一键就位**：抬到安全高度 -> x/y 对准 -> z 下降 -> 伸缩后缩，每段都报耗时
+python -m modules.grasp.test.manual.align_xy --align-and-descend
+
 # 只看不动：实时打印物块读数、目标读数、误差，以及打算走多少脉冲
 python -m modules.grasp.test.manual.align_xy --status
 
@@ -27,6 +30,23 @@ python -m modules.grasp.test.manual.align_xy --follow
 # 平面稳定之后往下走：升降下降 + 伸缩后缩（两个固定脉冲数）
 python -m modules.grasp.test.manual.align_xy --align-z
 ```
+
+## 时间花在哪（本机实测）
+
+| 环节 | 实测 | 说明 |
+|---|---|---|
+| `camera.read()` | 32 ms | 30 fps 一帧 |
+| 每帧定位 | 178 ms | Hough + YOLO，**单帧地板价** |
+| 一次取帧 | 221 ms | 丢 2 帧 + 读 + 定位 |
+| 一次**停稳测量** | 537 ms | 闭环每测一次至少两次定位 |
+
+所以"少测几次"比"少动几下"更值钱。几处提速（都在 ``modules/grasp/eye_in_hand.json`` 里可关）：
+
+- 抬到安全高度：标过 ``lift_scale`` 就按"还差多少毫米"**一步算到位**（夹在
+  ``safe_lift_max_pulses_per_step`` 内），而不是 500 脉冲一段地试——最多省十几段测量；
+- 粗调阶段用 ``coarse_settle_tolerance_mm`` 判停稳（远的时候不必为了 0.4 mm 多等帧）；
+- ``--follow`` 只在第一轮查安全高度（高度在跟随期间不会变）；
+- ``--align-and-descend`` 一次走完四步，并把每段耗时打出来。
 
 ## z 这一步是开环的：两个可改的脉冲数
 
@@ -58,7 +78,7 @@ x/y 是闭环（只在平面里动）；**平面一旦对准**，剩下的两步
 
 from __future__ import annotations
 
-MENU_ENTRY = (21, "x/y 对准物块（对准后可 z 下降）")
+MENU_ENTRY = (21, "x/y 对准物块（含一键就位）")
 
 import argparse
 import math
@@ -70,12 +90,14 @@ from modules.arm.drive.robot_arm import RobotArm
 from modules.grasp.drive.camera_source import CameraFrameSource
 from modules.grasp.drive.eye_in_hand import (
     FrameSource,
+    LiftScale,
     ObjectSelector,
     ServoConfig,
     ServoError,
     ServoJacobian,
     ServoTarget,
     _move_lift,
+    align_and_descend,
     align_x_y,
     align_z,
     descend_z,
@@ -253,7 +275,14 @@ def run_calibrate(
 
 
 def run_align(
-    *, arm: RobotArm, source: FrameSource, selector, target, jacobian, config
+    *,
+    arm: RobotArm,
+    source: FrameSource,
+    selector,
+    target,
+    jacobian,
+    config,
+    lift_scale: Optional[LiftScale] = None,
 ) -> int:
     """真动：闭环把物块伺服到目标读数（对准就停）。"""
     print("开始 x/y 对准（只动 底座旋转 与 伸缩，高度不动）")
@@ -262,7 +291,10 @@ def run_align(
     print(f"  容差 {config.tolerance_mm:.1f} mm，最多测量 {config.max_iterations} 次")
     print(f"  每轴脉冲预算 {config.max_total_pulses}（没有标定行程，这是唯一的兜底）\n")
 
-    result = align_x_y(arm, source, selector, target, jacobian, config, on_message=_say)
+    result = align_x_y(
+        arm, source, selector, target, jacobian, config,
+        lift_scale=lift_scale, on_message=_say,
+    )
     print(f"\n{result.summary()}")
     print(
         f"下一步：--align-z（升降下降 {config.z_descend_pulses} 脉冲 + 伸缩后缩 "
@@ -272,12 +304,22 @@ def run_align(
 
 
 def run_follow(
-    *, arm: RobotArm, source: FrameSource, selector, target, jacobian, config
+    *,
+    arm: RobotArm,
+    source: FrameSource,
+    selector,
+    target,
+    jacobian,
+    config,
+    lift_scale: Optional[LiftScale] = None,
 ) -> int:
     """跟随：物块被移动时持续把它伺服回目标读数。
 
     每一轮都会重新测量并按当前误差算脉冲；物块不动时误差本来就在容差内，
     于是那一轮只花一次测量、不发任何动作帧。所以"静止"和"被推动"是同一段代码。
+
+    **安全高度只在第一轮查**：跟随期间这套代码不动高度，重复查一次就是白花一次
+    停稳测量（实测约 0.5 s）。要是中途有人手动动过升降，Ctrl+C 重跑一次即可。
     """
     print("开始跟随（只动 底座旋转 与 伸缩，高度不动）")
     print(f"  {target.summary()}；{jacobian.summary()}")
@@ -292,7 +334,14 @@ def run_follow(
             started = time.monotonic()
             try:
                 result = align_x_y(
-                    arm, source, selector, target, jacobian, config
+                    arm,
+                    source,
+                    selector,
+                    target,
+                    jacobian,
+                    config,
+                    ensure_safe_height=rounds == 1,
+                    lift_scale=lift_scale,
                 )
             except ServoError as problem:
                 # 跟随过程中"这一帧没看到物块"是常见的（手挡住、移出视野），
@@ -300,6 +349,8 @@ def run_follow(
                 print(f"  第 {rounds} 轮：{problem}")
                 time.sleep(0.2)
                 continue
+            if rounds == 2:
+                print("  高度在跟随期间不会变：之后每一轮都不再重复查安全高度")
             elapsed = time.monotonic() - started
             if result.base_pulses or result.radial_pulses:
                 moved_rounds += 1
@@ -405,6 +456,61 @@ def run_teach(
             move(step, wait=True)
         time.sleep(0.3)  # 让机械臂停稳，读数才是停稳后的
         print(f"  已走 {repeats} 步 x {step} 脉冲")
+
+
+def run_pick_ready(
+    *,
+    arm: RobotArm,
+    source: FrameSource,
+    selector: ObjectSelector,
+    target: ServoTarget,
+    jacobian: ServoJacobian,
+    config: ServoConfig,
+    lift_scale: Optional[LiftScale] = None,
+    z_pulses: Optional[int] = None,
+    retract_pulses: Optional[int] = None,
+) -> int:
+    """**一键就位**：抬到安全高度 → x/y 对准 → z 下降 → 伸缩后缩。
+
+    这是"把 x、y、z 串起来"的那个入口：x/y 走闭环，z 与后缩走配置里的两个脉冲数，
+    每一段的耗时都会打出来——慢在哪一段一眼能看见（定位一次 178 ms、停稳测量一次
+    约 537 ms，所以省"段数"比省"动作时间"更值钱）。
+    """
+    print("一键就位：安全高度 → x/y 对准 → z 下降 → 伸缩后缩")
+    print(f"  {selector.describe()}")
+    print(f"  {target.summary()}；{jacobian.summary()}")
+    print(
+        f"  容差 {config.tolerance_mm:.1f} mm（粗调阶段按 "
+        f"{config.coarse_settle_tolerance_mm:.1f} mm 判停稳）"
+    )
+    print(
+        f"  下降 {config.z_descend_pulses} 脉冲（升降/6 号）、后缩 "
+        f"{config.extension_retract_pulses} 脉冲（伸缩/7 号）"
+        "——两个数在 modules/grasp/eye_in_hand.json，"
+        "--z-pulses / --retract-pulses 只覆盖这一次"
+    )
+    print(f"  下降前要求平面误差 ≤ {config.z_center_tolerance_mm:.1f} mm\n")
+
+    try:
+        result = align_and_descend(
+            arm,
+            source,
+            selector,
+            target,
+            jacobian,
+            config,
+            lift_scale=lift_scale,
+            z_pulses=z_pulses,
+            retract_pulses=retract_pulses,
+            on_message=_say,
+        )
+    except ServoError as problem:
+        print(f"\n就位失败：{problem}")
+        return 1
+    print(f"\n{result.summary()}")
+    print("下一步：合上夹爪完成抓取。")
+    print(f"  要退回上方：--raise {result.descent.pulses}（升降）")
+    return 0
 
 
 def run_descend_z(
@@ -583,6 +689,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--calibrate", action="store_true", help="实测雅可比（两个轴各动两段）")
     mode.add_argument("--follow", action="store_true", help="跟随：物块移动时持续对准")
     mode.add_argument(
+        "--align-and-descend",
+        action="store_true",
+        help="一键就位：安全高度 -> x/y 对准 -> z 下降 -> 伸缩后缩（每一步都报耗时）",
+    )
+    mode.add_argument(
         "--align-z",
         action="store_true",
         help="z 对准（脉冲版）：平面已对准后，升降下降 z_descend_pulses、伸缩后缩 "
@@ -637,6 +748,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         selector = load_object_selector()
         target = load_target()
         jacobian = load_jacobian()
+        # 升降灵敏度只用来"抬到安全高度时一步算到位"和打印预计深度；没标定就是 None。
+        lift_scale = load_lift_scale()
     except ServoError as problem:
         print(f"配置有问题：{problem}")
         return 1
@@ -723,14 +836,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     )
                 if arguments.raise_pulses is not None:
                     return run_raise(arm=arm, pulses=arguments.raise_pulses)
+                if arguments.align_and_descend:
+                    return run_pick_ready(
+                        arm=arm, source=source, selector=selector,
+                        target=target, jacobian=jacobian, config=config,
+                        lift_scale=lift_scale,
+                        z_pulses=arguments.z_pulses,
+                        retract_pulses=arguments.retract_pulses,
+                    )
                 if arguments.follow:
                     return run_follow(
                         arm=arm, source=source, selector=selector,
                         target=target, jacobian=jacobian, config=config,
+                        lift_scale=lift_scale,
                     )
                 return run_align(
                     arm=arm, source=source, selector=selector,
                     target=target, jacobian=jacobian, config=config,
+                    lift_scale=lift_scale,
                 )
             finally:
                 arm.stop_all()

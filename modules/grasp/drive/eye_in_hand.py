@@ -58,6 +58,12 @@ retract_extension  伸缩/7 号后缩  extension_retract_pulses
 两个数都在 ``modules/grasp/eye_in_hand.json`` 里，换物块、换夹爪现场直接改，不用重标。
 下降那一步会先确认平面已经对准（``z_center_tolerance_mm``）——它是这两步唯一的护栏。
 想做"拿物块深度当反馈"的版本才用 :func:`align_z`（视觉伺服，要先标定升降灵敏度）。
+
+## 一次调用
+
+:func:`align_and_descend` 把"抬到安全高度 → x/y 对准 → z 下降 → 后缩"串成一次调用，
+并把每一段的耗时记进 :class:`GraspReadyResult`。现场实测：一次定位 178 ms、一次停稳测量
+约 537 ms，所以"段数"比动作本身更容易吃掉时间——这个结果对象就是用来盯这件事的。
 """
 
 from __future__ import annotations
@@ -365,6 +371,12 @@ class ServoConfig:
     frame_margin_seconds: float = 0.0
     #: 连续两次读数相差不超过这个值（毫米）才算"画面停稳了"。
     settle_tolerance_mm: float = 0.4
+    #: **粗调阶段**接受的读数一致度（毫米）。
+    #:
+    #: 粗调时误差还有十几毫米，没必要为了 0.4 mm 的一致性多等好几帧——而每一帧都要跑
+    #: 一次定位（本机实测 178 ms）。远的时候只求"往哪边走、大概多远"，近了再按
+    #: ``settle_tolerance_mm`` 严格判。
+    coarse_settle_tolerance_mm: float = 3.0
     #: 等画面停稳的最长时间（秒）；超时就拿最后一次读到的值，并让调用方知道。
     settle_timeout_seconds: float = 4.0
     #: **转底盘前要抬到多高**：测到的 ``z``（镜头到物块顶面的距离）至少要有这么多毫米。
@@ -376,8 +388,21 @@ class ServoConfig:
     #:
     #: ``0`` 表示不用这个判据，退回 ``safe_lift_pulses``。
     safe_lift_z_mm: float = 100.0
-    #: 用 z 判据时每次抬升多少脉冲（抬完再测，不依赖任何标定值）。
+    #: 用 z 判据时**每一步最多**抬多少脉冲。
+    #:
+    #: 这是抬升的"步子大小"上限：标过 ``lift_scale`` 时按实测灵敏度算一步（算出来超过
+    #: 它就夹到它），没标过时就直接用它当固定步长。夹一个上限是为了**标定值不准时也不
+    #: 会一口气冲进行程端点**——每一步之后都会重新测一次 z 再决定下一步。
     safe_lift_step_pulses: int = 500
+    #: 标过升降灵敏度时，用它**一步算到位**（而不是固定 500 脉冲一段地试）。
+    #:
+    #: 为什么快这么多：一次"停稳测量"实测约 537 ms（两次定位，每次 178 ms），而按
+    #: 灵敏度算一步通常 1–2 步就到位——省下的是十几段测量，不是动作时间。
+    safe_lift_use_scale: bool = True
+    #: 抬到安全高度时，**按灵敏度算出来的那一步**最多走多少脉冲。
+    #: 与 ``safe_lift_step_pulses`` 的区别：那个是"没标定时的固定步长"，这个是"算出来
+    #: 的一步最多能让它走多远"。标定值偏小时它会兜住，免得一步冲进行程端点。
+    safe_lift_max_pulses_per_step: int = 2000
     #: 用 z 判据时最多抬几次，免得对着一个永远够不到的目标空转。
     safe_lift_max_steps: int = 20
     #: 兜底：**看不到物块时**按这个脉冲数抬升（``0`` 表示不抬，只警告）。
@@ -391,7 +416,11 @@ class ServoConfig:
     #: 表现为闭环怎么走都不动、迭代用尽。
     inter_frame_seconds: float = 0.03
     #: 等停稳时的轮询间隔（秒）。
-    settle_poll_seconds: float = 0.05
+    #:
+    #: 摄像头本身约 32 ms 一帧，所以这个值只该是"补一帧"的零头：50 ms 等于每次轮询
+    #: 白等 50 ms，而一次停稳测量至少要轮询两次。别调成 0——那样会在没新帧时打转空转
+    #: CPU，也失去了"等一帧"的语义。
+    settle_poll_seconds: float = 0.01
     #: 画面里物块的**像素直径**相对第一次测量变化超过这个比例就判为"被遮挡了"。
     #:
     #: 为什么用直径：相机在臂上时，爪瓣扫过物块会把它挡住一部分，可见区域从整圆变成
@@ -417,6 +446,13 @@ class ServoConfig:
             raise ValueError("frame_margin_seconds 不能是负数")
         if self.settle_tolerance_mm < 0:
             raise ValueError("settle_tolerance_mm 不能是负数")
+        if self.coarse_settle_tolerance_mm < 0:
+            raise ValueError("coarse_settle_tolerance_mm 不能是负数")
+        if self.coarse_settle_tolerance_mm < self.settle_tolerance_mm:
+            raise ValueError(
+                "coarse_settle_tolerance_mm 不能小于 settle_tolerance_mm："
+                "粗调档只该更宽松，不该更严"
+            )
         if self.diameter_change_limit_ratio <= 0:
             raise ValueError("diameter_change_limit_ratio 必须是正数")
         if self.inter_frame_seconds < 0:
@@ -438,6 +474,9 @@ class ServoConfig:
             "z_max_total_pulses",
             "z_descend_pulses",
             "extension_retract_pulses",
+            "safe_lift_step_pulses",
+            "safe_lift_max_pulses_per_step",
+            "safe_lift_max_steps",
             "lift_probe_pulses",
             "find_lift_step_pulses",
             "find_max_steps",
@@ -499,6 +538,10 @@ def load_servo_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ServoConfig:
             document.get("settle_tolerance_mm", defaults.settle_tolerance_mm),
             "settle_tolerance_mm",
         ),
+        coarse_settle_tolerance_mm=_non_negative(
+            document.get("coarse_settle_tolerance_mm", defaults.coarse_settle_tolerance_mm),
+            "coarse_settle_tolerance_mm",
+        ),
         settle_timeout_seconds=_positive(
             document.get("settle_timeout_seconds", defaults.settle_timeout_seconds),
             "settle_timeout_seconds",
@@ -521,6 +564,16 @@ def load_servo_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ServoConfig:
         safe_lift_step_pulses=_integer(
             document.get("safe_lift_step_pulses", defaults.safe_lift_step_pulses),
             "safe_lift_step_pulses",
+        ),
+        safe_lift_use_scale=_boolean(
+            document.get("safe_lift_use_scale", defaults.safe_lift_use_scale),
+            "safe_lift_use_scale",
+        ),
+        safe_lift_max_pulses_per_step=_integer(
+            document.get(
+                "safe_lift_max_pulses_per_step", defaults.safe_lift_max_pulses_per_step
+            ),
+            "safe_lift_max_pulses_per_step",
         ),
         safe_lift_max_steps=_integer(
             document.get("safe_lift_max_steps", defaults.safe_lift_max_steps),
@@ -807,14 +860,20 @@ def _settled_sighting(
     config: ServoConfig,
     *,
     after: Optional[float] = None,
+    tolerance: Optional[float] = None,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> MaterialSighting:
     """等到画面不再变，返回那一刻的整条观测（不只是坐标）。
 
     返回观测而不只是 ``(x, y)``，是因为**像素直径**也要用：爪瓣扫过物块会把它挡住一部分，
     那是闭环唯一能自己发现的"机械干涉"信号。
+
+    ``tolerance`` 覆盖一致性判据：粗调阶段（离目标还有十几毫米）用
+    ``coarse_settle_tolerance_mm`` 就够，不必为了 0.4 mm 多等好几帧——每一帧都要跑一次
+    定位，本机实测 178 ms。
     """
     say = on_message if on_message is not None else (lambda _message: None)
+    allowed = config.settle_tolerance_mm if tolerance is None else tolerance
     deadline = time.monotonic() + config.settle_timeout_seconds
     previous: Optional[Tuple[float, float]] = None
     last: Optional[MaterialSighting] = None
@@ -831,7 +890,7 @@ def _settled_sighting(
                 (point[0] - previous[0]) ** 2
                 + (point[1] - previous[1]) ** 2
                 + (point[2] - previous[2]) ** 2
-            ) <= config.settle_tolerance_mm:
+            ) <= allowed:
                 return current
             previous = point
         if time.monotonic() >= deadline:
@@ -945,16 +1004,24 @@ def align_x_y(
     jacobian: ServoJacobian,
     config: ServoConfig,
     *,
+    ensure_safe_height: bool = True,
+    lift_scale: Optional[LiftScale] = None,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> ServoResult:
     """闭环把物块伺服到 ``(tx, ty)``；只动 底座 与 伸缩，不碰高度。
 
+    :param ensure_safe_height: 动手之前要不要先确认"已经抬到安全高度"（默认要）。
+        连续用同一高度调用时（``--follow`` 的每一轮、或一次"对准+下降"里已经抬过）
+        可以关掉：省下的是一次停稳测量（实测约 0.5 s），而高度在这些步骤里不会变。
+        只有调用方**确实知道高度没变**才能关——低位转底盘会撞到物块。
+    :param lift_scale: 已标定的升降灵敏度，交给 :func:`raise_before_rotating` 一步算到位。
     :raises ServoError: 看不到物块、雅可比奇异、脉冲预算用完，或迭代用尽仍未进容差。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     # x/y 的每一步都要转底盘，所以先在**打开动作之前**抬到安全高度。这是机械结构上的
     # 硬约束：低位转底盘会撞到台面上的物块。刻意不自动降回去——降回去正是撞到它的动作。
-    raise_before_rotating(arm, link, selector, config, on_message=say)
+    if ensure_safe_height:
+        raise_before_rotating(arm, link, selector, config, scale=lift_scale, on_message=say)
     readings: List[Tuple[float, float]] = []
     total_base = 0
     total_radial = 0
@@ -964,10 +1031,15 @@ def align_x_y(
     checkpoint: Optional[float] = None
     #: 第一次测到的像素直径，用来发现"物块被挡住了"。
     baseline_diameter: Optional[float] = None
+    #: 这一轮判"停稳"用的一致性门槛。第一次用细档（要判"是不是已经对准了"），
+    #: 之后误差还大就换粗档——粗档少等几帧，而每帧都要跑一次 178 ms 的定位。
+    settle_tolerance = config.settle_tolerance_mm
 
     for attempt in range(1, config.max_iterations + 1):
         started = time.monotonic()
-        sighting = _settled_sighting(link, selector, config, after=checkpoint)
+        sighting = _settled_sighting(
+            link, selector, config, after=checkpoint, tolerance=settle_tolerance
+        )
         measure_seconds = time.monotonic() - started
         offset = (sighting.x_mm, sighting.y_mm)
         readings.append(offset)
@@ -992,6 +1064,12 @@ def align_x_y(
         error_x = offset[0] - target.x_mm
         error_y = offset[1] - target.y_mm
         error = math.hypot(error_x, error_y)
+        # 下一轮判"停稳"用哪一档：还差得远就用粗档（少等几帧），近了回到细档。
+        settle_tolerance = (
+            config.coarse_settle_tolerance_mm
+            if error > config.coarse_error_mm
+            else config.settle_tolerance_mm
+        )
         say(
             f"第 {attempt} 次测量：物块 ({offset[0]:+.2f}, {offset[1]:+.2f}) mm，"
             f"误差 {error:.2f} mm（测量 {measure_seconds * 1000:.0f} ms）"
@@ -1212,6 +1290,7 @@ def raise_before_rotating(
     selector: ObjectSelector,
     config: ServoConfig,
     *,
+    scale: Optional[LiftScale] = None,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> int:
     """**转底盘之前先抬到安全高度**；返回抬升用的脉冲数。
@@ -1221,37 +1300,102 @@ def raise_before_rotating(
 
     判据优先用 **z**（镜头到物块顶面的距离）而不是脉冲数：z 由摄像头直接测出来，
     与传动比无关，所以在 ``mm_per_motor_rev`` 还没标定的时候就能生效。
-    做法是"抬一段、测一次"，直到 ``z >= safe_lift_z_mm``——**不依赖任何标定值**。
+
+    ## 能算就算，算不了才一段段试
+
+    标了 ``lift_scale``（且 ``safe_lift_use_scale`` 为真）时，按"还差多少毫米"**算一步**
+    再走。为什么这条值钱：一次停稳测量实测约 537 ms，而"固定 500 脉冲一段、每段测一次"
+    最坏要 20 段——省下来的是**十几段测量**，不是动作时间。
+
+    算出来的那一步夹在 ``safe_lift_max_pulses_per_step`` 以内，而且每段之后都重新测一次：
+    标定值不准时最多多走一段，不会一口气冲进行程端点。每段实测到的 Δz/脉冲还会**反过来
+    修正下一段的灵敏度**——它比配置里那个数更接近这台机器此刻的状态。
+
+    没标定时保持原样："抬一段、测一次"，直到 ``z >= safe_lift_z_mm``，不依赖任何标定值。
 
     看不到物块时退回 ``safe_lift_pulses``；那个也是 0 就**明确警告**而不是偷偷放过。
 
     刻意**不**在事后自动降回去：降回去正是撞到物块的那个动作。什么时候下降由
-    :func:`align_z`（带下降护栏）决定。
+    :func:`descend_z`（脉冲版）或 :func:`align_z`（视觉版）决定。
     """
     say = on_message if on_message is not None else (lambda _message: None)
 
     if config.safe_lift_z_mm > 0:
+        slope: Optional[float] = None
+        if scale is not None and config.safe_lift_use_scale:
+            slope = abs(scale.dz_per_pulse) if abs(scale.dz_per_pulse) > 1e-9 else None
+        #: 判断"这一段是不是几乎没动"的参照灵敏度：算得出一步时就是那个值，
+        #: 固定步长那条路则用第一段实测出来的值——没有它就没法区分"灵敏度小"和"根本没动"。
+        reference = slope
+        #: 固定步长那条路上"连着几段几乎没动"。没有灵敏度可参照时，靠它收手。
+        dead_segments = 0
         raised = 0
+        #: 上一段：抬起**之前**的 z 与那一段走的脉冲。
+        previous: Optional[Tuple[float, int]] = None
         for step in range(1, config.safe_lift_max_steps + 1):
             try:
                 sighting = _settled_sighting(link, selector, config)
             except ServoError:
                 say("  看不到物块，没法用 z 判安全高度；改用脉冲数抬升")
                 break
-            if sighting.z_mm >= config.safe_lift_z_mm:
+            z_mm = sighting.z_mm
+            if previous is not None:
+                before_z, pulses = previous
+                change_mm = z_mm - before_z
+                # "走了脉冲但 z 几乎没动"只可能是到行程端点或升降轴没接上。
+                # 判据拿**这一段本该动的量**做参照：够长的一段只动了不到一个停稳容差，
+                # 就不是"灵敏度偏小"，而是根本没动——再按 2000 脉冲顶下去会顶坏东西。
+                if (
+                    reference is not None
+                    and reference * pulses > 4 * config.settle_tolerance_mm
+                    and abs(change_mm) < config.settle_tolerance_mm
+                ):
+                    say(
+                        f"  警告：抬了 {pulses} 脉冲，z 只变了 {change_mm:+.2f} mm"
+                        f"（{before_z:.1f} -> {z_mm:.1f} mm）：多半已经到行程端点，"
+                        "或者升降轴没接上。停在这里，请手动确认高度再继续。"
+                    )
+                    return raised
+                if change_mm > 0:
+                    reference = change_mm / pulses
+                    dead_segments = 0
+                    if slope is not None:
+                        slope = reference
+                elif reference is None:
+                    # 固定步长那条路（没有灵敏度可参照）：连着两段"几乎没动"就停。
+                    # 一段不动可能是背隙或噪声，连着两段就不是了。
+                    dead_segments += 1
+                    if dead_segments >= 2:
+                        say(
+                            f"  警告：连着 {dead_segments} 段抬升，z 几乎没变"
+                            f"（现在 {z_mm:.1f} mm）：多半已经到行程端点，或者升降轴没接上。"
+                            "停在这里，请手动确认高度再继续。"
+                        )
+                        return raised
+            if z_mm >= config.safe_lift_z_mm:
                 say(
-                    f"  已在安全高度：z={sighting.z_mm:.1f} mm ≥ "
-                    f"{config.safe_lift_z_mm:.1f} mm"
+                    f"  已在安全高度：z={z_mm:.1f} mm ≥ {config.safe_lift_z_mm:.1f} mm"
                     + (f"（本轮抬了 {raised} 脉冲）" if raised else "")
                 )
                 return raised
+            if slope is not None:
+                need_mm = config.safe_lift_z_mm - z_mm
+                wanted = max(1, int(math.ceil(need_mm / slope * 1.02)))
+                step_pulses = min(wanted, config.safe_lift_max_pulses_per_step)
+                reason = (
+                    f"按 {slope * 1000:+.1f} mm/1000 脉冲算，还差 {need_mm:.1f} mm -> "
+                    f"{step_pulses} 脉冲" + ("（夹到单段上限）" if wanted > step_pulses else "")
+                )
+            else:
+                step_pulses = config.safe_lift_step_pulses
+                reason = f"没标定升降灵敏度，按固定 {step_pulses} 脉冲一段试"
             say(
-                f"  转底盘前抬升：z={sighting.z_mm:.1f} mm < "
-                f"{config.safe_lift_z_mm:.1f} mm，抬 {config.safe_lift_step_pulses} 脉冲"
+                f"  转底盘前抬升：z={z_mm:.1f} mm < {config.safe_lift_z_mm:.1f} mm，{reason}"
                 f"（第 {step}/{config.safe_lift_max_steps} 次）"
             )
-            _move_lift(arm, config.safe_lift_step_pulses)
-            raised += config.safe_lift_step_pulses
+            _move_lift(arm, step_pulses)
+            raised += step_pulses
+            previous = (z_mm, step_pulses)
         else:
             say(
                 f"  警告：抬了 {config.safe_lift_max_steps} 次仍没到 "
@@ -1290,9 +1434,7 @@ def find_object(
     say = on_message if on_message is not None else (lambda _message: None)
     steps = config.find_max_steps if max_steps is None else max_steps
     for step in range(1, steps + 1):
-        try:
-            _settled_sighting(link, selector, config)
-        except ServoError:
+        if not _probe_visible(link, selector, config):
             say(
                 f"  画面里看不到物块：抬升 {config.find_lift_step_pulses} 脉冲再找"
                 f"（第 {step}/{steps} 次）"
@@ -1301,6 +1443,29 @@ def find_object(
             continue
         if step > 1:
             say(f"  抬升 {step - 1} 次后看到了物块")
+        return True
+    return False
+
+
+#: 快速探一次"物块在不在画面里"时最多读几帧。每帧约 221 ms（含 178 ms 定位）。
+VISIBILITY_PROBE_FRAMES = 2
+
+
+def _probe_visible(link: FrameSource, selector: ObjectSelector, config: ServoConfig) -> bool:
+    """快速回答"物块在不在画面里"，**不等停稳**。
+
+    为什么可以不等：这一步只问"在不在"，不问"在哪"——差几毫米无所谓。而等停稳
+    （连续两帧一致）至少要 537 ms；看不到时还要一直等到 ``settle_timeout_seconds``
+    （默认 4 s）才认输，乘上"抬起来找"的步数就是几十秒。
+
+    代价是可能被一帧运动模糊骗到：所以连读 :data:`VISIBILITY_PROBE_FRAMES` 帧，
+    任何一帧认出来就算"在"。
+    """
+    for _ in range(VISIBILITY_PROBE_FRAMES):
+        try:
+            _read_object(link, selector, config)
+        except ServoError:
+            continue
         return True
     return False
 
@@ -1651,6 +1816,129 @@ def retract_extension(
     return count
 
 
+@dataclass(frozen=True)
+class GraspReadyResult:
+    """一次"抬升 + x/y 对准 + z 下降 + 后缩"的结果。"""
+
+    #: 转底盘前抬到安全高度用了多少脉冲（本来就在安全高度就是 0）。
+    raised_pulses: int
+    #: x/y 对准的结果：误差、迭代次数、两个轴各走了多少脉冲。
+    aligned: ServoResult
+    #: z 下降的结果：走了多少脉冲、下降前多深、下降前的平面误差。
+    descent: ZDescentResult
+    #: 伸缩后缩的脉冲数。
+    retracted_pulses: int
+    #: 各段的墙钟耗时（秒）。记下来是为了**一眼看出时间花在哪一段**——
+    #: 定位一次 178 ms、停稳测量一次约 537 ms，段数比动作本身更容易吃掉时间。
+    lift_seconds: float
+    align_seconds: float
+    descend_seconds: float
+    retract_seconds: float
+
+    @property
+    def total_seconds(self) -> float:
+        return (
+            self.lift_seconds
+            + self.align_seconds
+            + self.descend_seconds
+            + self.retract_seconds
+        )
+
+    def summary(self) -> str:
+        return (
+            f"就位完成：抬升 {self.raised_pulses} 脉冲、x/y 误差 {self.aligned.error_mm:.2f} mm"
+            f"（{self.aligned.iterations} 次测量）、下降 {self.descent.pulses} 脉冲、后缩 "
+            f"{self.retracted_pulses} 脉冲；共 {self.total_seconds:.1f} s"
+            f"（抬升 {self.lift_seconds:.1f} + 对准 {self.align_seconds:.1f}"
+            f" + 下降 {self.descend_seconds:.1f} + 后缩 {self.retract_seconds:.1f}）"
+        )
+
+
+def align_and_descend(
+    arm,
+    link: FrameSource,
+    selector: ObjectSelector,
+    target: ServoTarget,
+    jacobian: ServoJacobian,
+    config: ServoConfig,
+    *,
+    lift_scale: Optional[LiftScale] = None,
+    z_pulses: Optional[int] = None,
+    retract_pulses: Optional[int] = None,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> GraspReadyResult:
+    """**一次调用走完抓取前的就位**：抬到安全高度 → x/y 对准 → z 下降 → 伸缩后缩。
+
+    顺序不是随便定的：
+
+    1. **先抬到安全高度**：x/y 的每一步都要转底盘，低位转过去会撞到台面上的物块。
+       整个流程只在这里查一次——后面三步都不改高度。
+    2. **x/y 对准**（闭环，只看画面）：把物块伺服到 ``(tx, ty)``，也就是"爪子抓取点正在
+       物块正上方"。粗调阶段用 ``coarse_settle_tolerance_mm`` 判停稳，少等几帧。
+    3. **z 下降**：平面已对准才允许下降，按 :attr:`ServoConfig.z_descend_pulses` 走固定脉冲。
+    4. **伸缩后缩**：再按 :attr:`ServoConfig.extension_retract_pulses` 后缩到夹持位。
+
+    第 3、4 步是开环的（爪子压下去之后就看不到物块了），**第 2 步的结果就是它们唯一的安全
+    依据**：平面误差超过 ``z_center_tolerance_mm`` 时 :func:`descend_z` 会拒绝下降、一个
+    动作帧都不发。
+
+    比"自己按顺序调四个函数"快在哪：安全高度按灵敏度**一步算到位**（不是 500 脉冲一段地
+    试）；已经抬够时只花一次测量；对准阶段不再重复查安全高度。每一步的耗时都记在
+    :class:`GraspReadyResult` 里，慢在哪一段一眼能看出来。
+
+    :param lift_scale: 已标定的升降灵敏度；``None`` 表示没标定，抬升退回固定步长。
+    :param z_pulses: 覆盖下降脉冲数（只这一次）；``None`` 用配置值。
+    :param retract_pulses: 覆盖后缩脉冲数（只这一次）；``None`` 用配置值。
+    :raises ServoError: 任何一步失败；异常信息里会写清卡在哪一步。
+    """
+    say = on_message if on_message is not None else (lambda _message: None)
+
+    started = time.monotonic()
+    say("① 转底盘前先确认安全高度")
+    raised = raise_before_rotating(
+        arm, link, selector, config, scale=lift_scale, on_message=say
+    )
+    lift_seconds = time.monotonic() - started
+
+    started = time.monotonic()
+    say("② x/y 对准（闭环，只动底座与伸缩）")
+    aligned = align_x_y(
+        arm,
+        link,
+        selector,
+        target,
+        jacobian,
+        config,
+        ensure_safe_height=False,
+        lift_scale=lift_scale,
+        on_message=say,
+    )
+    align_seconds = time.monotonic() - started
+
+    started = time.monotonic()
+    say("③ z 下降（平面已对准，按固定脉冲）")
+    descent = descend_z(
+        arm, link, selector, config, pulses=z_pulses, scale=lift_scale, on_message=say
+    )
+    descend_seconds = time.monotonic() - started
+
+    started = time.monotonic()
+    say("④ 伸缩后缩")
+    retracted = retract_extension(arm, config, pulses=retract_pulses, on_message=say)
+    retract_seconds = time.monotonic() - started
+
+    return GraspReadyResult(
+        raised_pulses=raised,
+        aligned=aligned,
+        descent=descent,
+        retracted_pulses=retracted,
+        lift_seconds=lift_seconds,
+        align_seconds=align_seconds,
+        descend_seconds=descend_seconds,
+        retract_seconds=retract_seconds,
+    )
+
+
 def _clamp_pulses(value: float, limit: int) -> int:
     """把浮点脉冲量取整并夹到 ``±limit``。"""
     rounded = int(round(value))
@@ -1680,6 +1968,17 @@ def _number(value: object, name: str) -> float:
 def _integer(value: object, name: str) -> int:
     if type(value) is not int or value < 1:
         raise ServoError(f"{name} 必须是正整数")
+    return value
+
+
+def _boolean(value: object, name: str) -> bool:
+    """严格取布尔值：``true``/``false`` 才认，``1``/``"true"`` 不认。
+
+    为什么不用 ``bool(value)``：那样任何非空字符串都成了"开"——配置文件里写错成
+    ``"false"`` 会静默变成开，而这几个开关管的正是"要不要走快的那条路"。
+    """
+    if type(value) is not bool:
+        raise ServoError(f"{name} 必须是 true 或 false")
     return value
 
 
