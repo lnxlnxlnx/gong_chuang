@@ -17,6 +17,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import List, Optional, Tuple
+from unittest.mock import patch
 
 from modules.grasp.drive import eye_in_hand as servo
 from modules.grasp.drive.eye_in_hand import (
@@ -33,6 +34,7 @@ from modules.grasp.drive.eye_in_hand import (
     load_servo_config,
     load_target,
     measure_offset,
+    measure_settled,
     probe_jacobian,
     save_calibration,
     select_object,
@@ -294,11 +296,12 @@ class BufferedLink:
     def frame(self, *, timeout=None, max_age_seconds=None, min_received_at=None):
         if min_received_at is None:
             self.unguarded_reads += 1
-            if self._published is None:
-                self._publish(time.monotonic())
         else:
             self.guarded_reads += 1
-            self._publish(max(time.monotonic(), min_received_at))
+        # **每次都发布当前真实位姿**：真摄像头的每次读都是一帧新画面
+        # （新鲜度靠取帧前丢缓冲保证）。"动作之后必须重新取帧"这件事，
+        # 由伺服确实把 min_received_at 传下来这一点来保证——测试用 guarded_reads 断言。
+        self._publish(max(time.monotonic(), min_received_at or 0.0))
         x, y, stamp = self._published
         return (sighting(self.material_id, x, y, self.color, stamp=stamp),)
 
@@ -311,6 +314,97 @@ class EmptyLink:
 
     def frame(self, **_kwargs):
         return None
+
+
+class SettleTests(unittest.TestCase):
+    """``measure_settled``：等到画面连续两次读数一致才算数。
+
+    这是整套东西里最容易被忽略、代价又最大的一处：机械臂动完之后读数还在大幅变化
+    （实测 ``-23.65,+39.77`` → ``-33.38,+23.03``），中间还反复因为运动模糊检不到物块。
+    拿那种数去解算，闭环会振荡、探针会把雅可比算大好几倍。
+    """
+
+    class ScriptedLink:
+        """按脚本给读数；脚本用完后一直返回 ``stable``。"""
+
+        def __init__(self, series, stable) -> None:
+            self._series = list(series)
+            self._stable = stable
+            self.reads = 0
+            self.error = None
+
+        def frame(self, **_kwargs):
+            self.reads += 1
+            x, y = self._series.pop(0) if self._series else self._stable
+            return (sighting(4, x, y, stamp=time.monotonic()),)
+
+    def test_waits_until_two_readings_agree(self) -> None:
+        link = self.ScriptedLink([(0.0, 0.0), (5.0, 0.0), (9.0, 0.0)], (9.0, 0.0))
+        offset = measure_settled(
+            link, ObjectSelector(), ServoConfig(settle_timeout_seconds=2.0)
+        )
+        self.assertEqual(offset, (9.0, 0.0))
+        # 前三次都在变，第四次与第三次一致才返回。
+        self.assertEqual(link.reads, 4)
+
+    def test_returns_the_first_pair_that_agrees(self) -> None:
+        """已经静止时只要两次读数——不该无脑多等。"""
+        link = self.ScriptedLink([], (3.0, -1.0))
+        offset = measure_settled(
+            link, ObjectSelector(), ServoConfig(settle_timeout_seconds=2.0)
+        )
+        self.assertEqual(offset, (3.0, -1.0))
+        self.assertEqual(link.reads, 2)
+
+    def test_timeout_returns_the_last_reading(self) -> None:
+        """一直不停稳时如实收工并报出来，而不是把整条流程卡死。"""
+
+        class AlwaysMoving:
+            error = None
+
+            def __init__(self) -> None:
+                self.value = 0.0
+
+            def frame(self, **_kwargs):
+                self.value += 10.0
+                return (sighting(4, self.value, 0.0, stamp=time.monotonic()),)
+
+        messages = []
+        offset = measure_settled(
+            AlwaysMoving(), ObjectSelector(),
+            ServoConfig(settle_timeout_seconds=0.2, settle_poll_seconds=0.02),
+            on_message=messages.append,
+        )
+        self.assertGreater(offset[0], 0.0)
+        self.assertTrue(any("等停稳超时" in message for message in messages), messages)
+
+    def test_blind_frames_during_motion_do_not_abort_the_wait(self) -> None:
+        """运动模糊时检不到物块是常态；中途看不到不该直接判失败。"""
+
+        class FlakyLink:
+            error = None
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def frame(self, **_kwargs):
+                self.calls += 1
+                if self.calls in (1, 2):  # 前两次糊得检不到
+                    return ()
+                return (sighting(4, 7.0, -2.0, stamp=time.monotonic()),)
+
+        offset = measure_settled(
+            FlakyLink(), ObjectSelector(),
+            ServoConfig(settle_timeout_seconds=2.0, settle_poll_seconds=0.02),
+        )
+        self.assertEqual(offset, (7.0, -2.0))
+
+    def test_never_seeing_anything_is_reported(self) -> None:
+        with self.assertRaisesRegex(ServoError, "稳定看到物块"):
+            measure_settled(
+                EmptyLink(), ObjectSelector(),
+                ServoConfig(settle_timeout_seconds=0.2, settle_poll_seconds=0.02),
+            )
 
 
 class ProbeJacobianTests(unittest.TestCase):
@@ -350,8 +444,12 @@ class ProbeJacobianTests(unittest.TestCase):
 
     def test_no_object_is_refused(self) -> None:
         arm = FakeArm(self.TRUTH)
-        with self.assertRaisesRegex(ServoError, "等不到"):
-            probe_jacobian(arm, EmptyLink(), ObjectSelector(), ServoConfig(probe_pulses=600))
+        with self.assertRaisesRegex(ServoError, "稳定看到物块"):
+            probe_jacobian(
+                arm, EmptyLink(), ObjectSelector(),
+                # 停稳超时调小：这一条测的是"看不到物块要报错"，不该真等 4 秒。
+                ServoConfig(probe_pulses=600, settle_timeout_seconds=0.2),
+            )
         self.assertEqual(arm.calls, [], "看不到物块时一个动作都不该发")
 
 
@@ -373,7 +471,8 @@ class AlignXYTests(unittest.TestCase):
         self.assertAlmostEqual(result.readings[-1][1], self.TARGET.y_mm, places=1)
         # 除了第一次，后面每次读都必须带时间戳过滤。
         self.assertGreaterEqual(link.guarded_reads, result.iterations - 1)
-        self.assertEqual(link.unguarded_reads, 1)
+        # 第一次测量是**不带过滤**的：确认停稳要看两次读数，所以是 2 次。
+        self.assertEqual(link.unguarded_reads, 2, "停稳判据需要连续两次读数")
 
     def test_converges_despite_a_systematic_shortfall(self) -> None:
         """每次只走 60%：闭环靠重新测量补回来，这正是不用绝对标定也能到位的原因。"""
@@ -526,8 +625,11 @@ class AlignXYTests(unittest.TestCase):
 
     def test_missing_object_is_reported(self) -> None:
         arm = FakeArm(self.TRUTH)
-        with self.assertRaisesRegex(ServoError, "等不到"):
-            align_x_y(arm, EmptyLink(), ObjectSelector(), self.TARGET, self.TRUTH, ServoConfig())
+        with self.assertRaisesRegex(ServoError, "稳定看到物块"):
+            align_x_y(
+                arm, EmptyLink(), ObjectSelector(), self.TARGET, self.TRUTH,
+                ServoConfig(settle_timeout_seconds=0.2),
+            )
         self.assertEqual(arm.calls, [])
 
     def test_result_reports_net_pulses(self) -> None:
@@ -550,10 +652,111 @@ class AlignXYTests(unittest.TestCase):
         self.assertIn("完成", text)
         self.assertIn("容差", text)
 
+    def test_occluded_material_is_reported_instead_of_chased(self) -> None:
+        """爪瓣挡住物块时必须**报出来**，而不是照着那个假观测继续解算。
+
+        实测：转 200 脉冲后爪瓣压在物块上，像素直径从 287 px 掉到 195 px。
+        测距公式按直径反推距离，于是把 105 mm 报成 155 mm——看起来完全像
+        "物块突然远了 50 mm"，其实与机械臂位置毫无关系。
+        """
+
+        class OccludingLink:
+            error = None
+
+            def __init__(self, arm) -> None:
+                self.arm = arm
+                self.calls = 0
+
+            def frame(self, **_kwargs):
+                self.calls += 1
+                # 前两次测量正常（287 px），之后被挡住（195 px）。
+                diameter = 287 if self.calls <= 4 else 195
+                x, y = self.arm.offset
+                return (
+                    parse_sighting(
+                        f"物料 4: 绿色物料（green），圆直径 {diameter} px，"
+                        f"xyz=({x:.4f},{y:.4f},105.0) mm",
+                        received_at=time.monotonic(),
+                    ),
+                )
+
+        arm = FakeArm(self.TRUTH, gain=0.6)  # 让它多走几轮，才有机会看到遮挡
+        with self.assertRaisesRegex(ServoError, "挡住"):
+            align_x_y(
+                arm, OccludingLink(arm), ObjectSelector(), self.TARGET, self.TRUTH,
+                ServoConfig(tolerance_mm=0.5, max_pulses_per_step=2000, min_step_mm=0.1),
+            )
+
+    def test_diameter_change_within_the_limit_is_not_treated_as_occlusion(self) -> None:
+        """直径正常的小幅波动（检测噪声）不该误报遮挡。"""
+
+        class WobblyLink(BufferedLink):
+            def __init__(self, arm) -> None:
+                super().__init__(arm)
+                self.calls = 0
+
+            def frame(self, **kwargs):
+                self.calls += 1
+                (item,) = super().frame(**kwargs)
+                diameter = 287 if self.calls % 2 else 281  # ±2%，远小于 25%
+                raw = item.raw.replace("xyz=", f"圆直径 {diameter} px，xyz=")
+                return (parse_sighting(raw, received_at=item.received_at),)
+
+        arm = FakeArm(self.TRUTH, gain=0.7)
+        result = align_x_y(
+            arm, WobblyLink(arm), ObjectSelector(), self.TARGET, self.TRUTH,
+            ServoConfig(tolerance_mm=0.5, max_pulses_per_step=2000, min_step_mm=0.1),
+        )
+        self.assertTrue(result.aligned, result)
+
     def test_measure_offset_reads_the_xy_pair(self) -> None:
         arm = FakeArm(self.TRUTH)
         link = BufferedLink(arm)
         self.assertEqual(measure_offset(link, ObjectSelector(), ServoConfig()), tuple(arm.offset))
+
+
+class MoveAxesTests(unittest.TestCase):
+    """``_move_axes`` 的帧间隔：**这是真机上最容易"看起来对、其实什么都没动"的一处**。
+
+    实测这台机器的 CH340 上，两条 ``FD`` 位置帧背靠背连发（间隔 0 ms）会让**两帧都失效**
+    ——不是丢一帧，是两个轴都不动；而驱动器 ``Response=None``，不会报任何错。
+    曾经因为没有这个间隔，所有"两轴同时要动"的步骤都变成空操作，
+    现象是闭环怎么走都不动、最后报"迭代用尽"。
+    """
+
+    TRUTH = ServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+
+    def _record_sleeps(self, arm, config, base_pulses, radial_pulses):
+        sleeps: List[float] = []
+        with patch.object(servo.time, "sleep", sleeps.append):
+            servo._move_axes(arm, base_pulses, radial_pulses, config)
+        return sleeps
+
+    def test_gap_is_inserted_between_the_two_frames(self) -> None:
+        arm = FakeArm(self.TRUTH)
+        config = ServoConfig(inter_frame_seconds=0.03, parallel_rotation_limit_pulses=4000)
+        sleeps = self._record_sleeps(arm, config, 100, 200)
+        self.assertEqual([kind for kind, _ in arm.calls], ["base:fwd", "radial:fwd"], arm.calls)
+        self.assertIn(0.03, sleeps, f"两条帧之间没有留间隔：{sleeps}")
+
+    def test_no_gap_when_only_one_axis_moves(self) -> None:
+        """只动一个轴时不需要间隔——那种情况本来就不会撞上这个问题。"""
+        arm = FakeArm(self.TRUTH)
+        config = ServoConfig(inter_frame_seconds=0.03)
+        sleeps = self._record_sleeps(arm, config, 100, 0)
+        self.assertNotIn(0.03, sleeps, sleeps)
+
+    def test_large_rotation_still_extends_first(self) -> None:
+        """大角度旋转不并行：先伸缩到位、再转，免得伸出状态下横扫底座。"""
+        arm = FakeArm(self.TRUTH)
+        config = ServoConfig(parallel_rotation_limit_pulses=1, inter_frame_seconds=0.03)
+        self._record_sleeps(arm, config, 500, 200)
+        self.assertEqual([kind for kind, _ in arm.calls], ["radial:fwd", "base:fwd"], arm.calls)
+
+    def test_nothing_happens_when_both_are_zero(self) -> None:
+        arm = FakeArm(self.TRUTH)
+        self.assertEqual(self._record_sleeps(arm, ServoConfig(), 0, 0), [])
+        self.assertEqual(arm.calls, [])
 
 
 if __name__ == "__main__":

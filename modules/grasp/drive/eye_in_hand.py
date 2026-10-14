@@ -296,16 +296,48 @@ class ServoConfig:
     frame_timeout_seconds: float = 2.0
     #: 只接受"接收时刻晚于动作完成时刻"的观测；这里额外留一点余量（秒）。
     frame_margin_seconds: float = 0.0
+    #: 连续两次读数相差不超过这个值（毫米）才算"画面停稳了"。
+    settle_tolerance_mm: float = 0.4
+    #: 等画面停稳的最长时间（秒）；超时就拿最后一次读到的值，并让调用方知道。
+    settle_timeout_seconds: float = 4.0
+    #: 两条位置帧之间的最小间隔（秒）。
+    #:
+    #: **不能省。** 实测这台机器的 CH340 上，两条 ``FD`` 位置帧背靠背连发（间隔 0 ms）
+    #: 会让**两帧都失效**——不是丢一帧，是两个轴都不动，而且驱动器 ``Response=None``
+    #: 不会报任何错。留 20 ms 就正常。省掉它的代价是"所有两轴同时要动的步骤变成空操作"，
+    #: 表现为闭环怎么走都不动、迭代用尽。
+    inter_frame_seconds: float = 0.03
+    #: 等停稳时的轮询间隔（秒）。
+    settle_poll_seconds: float = 0.05
+    #: 画面里物块的**像素直径**相对第一次测量变化超过这个比例就判为"被遮挡了"。
+    #:
+    #: 为什么用直径：相机在臂上时，爪瓣扫过物块会把它挡住一部分，可见区域从整圆变成
+    #: 月牙，等效半径随之变小——而测距公式按直径反推距离，于是会被算成"物块突然远了
+    #: 几十毫米"。那正是"爪子挡住了物块"的签名，而且它看起来完全像一次正常的观测。
+    diameter_change_limit_ratio: float = 0.25
 
     def __post_init__(self) -> None:
         # 与 load_servo_config 的判据保持一致：容差、超时、粗调门槛为 0 都没有意义
         # （容差 0 等于要求"分毫不差"，超时 0 等于"根本不等帧"，
         # 粗调门槛 0 等于"永远走粗调"），而 frame_margin_seconds 取 0 是合法的。
-        for name in ("tolerance_mm", "frame_timeout_seconds", "coarse_error_mm", "min_step_mm"):
+        for name in (
+            "tolerance_mm",
+            "frame_timeout_seconds",
+            "coarse_error_mm",
+            "min_step_mm",
+            "settle_timeout_seconds",
+            "settle_poll_seconds",
+        ):
             if not getattr(self, name) > 0:
                 raise ValueError(f"{name} 必须是正数")
         if self.frame_margin_seconds < 0:
             raise ValueError("frame_margin_seconds 不能是负数")
+        if self.settle_tolerance_mm < 0:
+            raise ValueError("settle_tolerance_mm 不能是负数")
+        if self.diameter_change_limit_ratio <= 0:
+            raise ValueError("diameter_change_limit_ratio 必须是正数")
+        if self.inter_frame_seconds < 0:
+            raise ValueError("inter_frame_seconds 不能是负数")
         for name in (
             "max_iterations",
             "max_pulses_per_step",
@@ -361,6 +393,26 @@ def load_servo_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ServoConfig:
         frame_margin_seconds=_non_negative(
             document.get("frame_margin_seconds", defaults.frame_margin_seconds),
             "frame_margin_seconds",
+        ),
+        settle_tolerance_mm=_non_negative(
+            document.get("settle_tolerance_mm", defaults.settle_tolerance_mm),
+            "settle_tolerance_mm",
+        ),
+        settle_timeout_seconds=_positive(
+            document.get("settle_timeout_seconds", defaults.settle_timeout_seconds),
+            "settle_timeout_seconds",
+        ),
+        settle_poll_seconds=_positive(
+            document.get("settle_poll_seconds", defaults.settle_poll_seconds),
+            "settle_poll_seconds",
+        ),
+        diameter_change_limit_ratio=_positive(
+            document.get("diameter_change_limit_ratio", defaults.diameter_change_limit_ratio),
+            "diameter_change_limit_ratio",
+        ),
+        inter_frame_seconds=_non_negative(
+            document.get("inter_frame_seconds", defaults.inter_frame_seconds),
+            "inter_frame_seconds",
         ),
     )
 
@@ -521,10 +573,12 @@ def _move_axes(arm, base_pulses: int, radial_pulses: int, config: "ServoConfig")
         time.sleep(seconds)
         seconds += _send_axis(arm, BASE_AXIS, base_pulses)
     else:
-        seconds = max(
-            _send_axis(arm, BASE_AXIS, base_pulses),
-            _send_axis(arm, RADIAL_AXIS, radial_pulses),
-        )
+        first = _send_axis(arm, BASE_AXIS, base_pulses)
+        if both:
+            # 两帧之间必须留间隔，否则 CH340 上两帧都失效（见 inter_frame_seconds）。
+            time.sleep(config.inter_frame_seconds)
+        second = _send_axis(arm, RADIAL_AXIS, radial_pulses)
+        seconds = max(first, second)
     time.sleep(seconds)
     return seconds
 
@@ -572,6 +626,72 @@ def measure_offset(
     return (sighting.x_mm, sighting.y_mm)
 
 
+def _settled_sighting(
+    link: FrameSource,
+    selector: ObjectSelector,
+    config: ServoConfig,
+    *,
+    after: Optional[float] = None,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> MaterialSighting:
+    """等到画面不再变，返回那一刻的整条观测（不只是坐标）。
+
+    返回观测而不只是 ``(x, y)``，是因为**像素直径**也要用：爪瓣扫过物块会把它挡住一部分，
+    那是闭环唯一能自己发现的"机械干涉"信号。
+    """
+    say = on_message if on_message is not None else (lambda _message: None)
+    deadline = time.monotonic() + config.settle_timeout_seconds
+    previous: Optional[Tuple[float, float]] = None
+    last: Optional[MaterialSighting] = None
+    while True:
+        try:
+            current = _read_object(link, selector, config, after=after)
+        except ServoError:
+            # 运动模糊时检不到物块是常态，不该当失败——接着等。
+            previous = None
+        else:
+            last = current
+            point = (current.x_mm, current.y_mm)
+            if previous is not None and math.hypot(
+                point[0] - previous[0], point[1] - previous[1]
+            ) <= config.settle_tolerance_mm:
+                return current
+            previous = point
+        if time.monotonic() >= deadline:
+            if last is None:
+                raise ServoError(
+                    f"等了 {config.settle_timeout_seconds:.1f} s 也没能稳定看到物块；"
+                    "确认物块在画面里、没有被人或线材挡住"
+                )
+            say(
+                f"  等停稳超时（{config.settle_timeout_seconds:.1f} s）："
+                f"画面仍在变，先按最后读数 ({last.x_mm:+.2f}, {last.y_mm:+.2f}) mm 继续"
+            )
+            return last
+        time.sleep(config.settle_poll_seconds)
+
+
+def measure_settled(
+    link: FrameSource,
+    selector: ObjectSelector,
+    config: ServoConfig,
+    *,
+    after: Optional[float] = None,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> Tuple[float, float]:
+    """测到画面**不再变**为止，返回那个读数。
+
+    为什么不能"按估算耗时等一等就读"：实测 ``wait=True`` 在 0.652 s 就返回了，
+    可读数在那之后还在大幅变化（``-23.65,+39.77`` → ``-33.38,+23.03``），
+    中间还反复因为运动模糊整个检不到物块。拿那种数去解算，等于用噪声当观测——
+    闭环会振荡，探针会把雅可比算大好几倍。
+
+    判据是**连续两次读数足够接近**：把"等多久"交给观测本身，而不是交给一个估算公式。
+    """
+    sighting = _settled_sighting(link, selector, config, after=after, on_message=on_message)
+    return (sighting.x_mm, sighting.y_mm)
+
+
 def probe_jacobian(
     arm,
     link: FrameSource,
@@ -593,20 +713,24 @@ def probe_jacobian(
     pulses = config.probe_pulses
 
     def one_axis(axis: str, label: str) -> Tuple[float, float]:
-        before = measure_offset(link, selector, config)
+        before = measure_settled(link, selector, config)
         checkpoint = time.monotonic()
         _move_axis(arm, axis, pulses)
-        mid = measure_offset(link, selector, config, after=checkpoint)
+        # 必须**等画面停稳**再读：按估算耗时读到的中点会混进第一段的残余位移，
+        # 于是第二段的斜率被算大——实测这一处能把雅可比放大到 2.5 倍。
+        mid = measure_settled(link, selector, config, after=checkpoint)
         checkpoint = time.monotonic()
         _move_axis(arm, axis, pulses)
-        after = measure_offset(link, selector, config, after=checkpoint)
+        after = measure_settled(link, selector, config, after=checkpoint)
         # 退回原位：两段各退一次。
         _move_axis(arm, axis, -pulses)
         _move_axis(arm, axis, -pulses)
         # 斜率只用**第二段**：同向连续两段里，只有第二段没有背隙损失。
         # （用 "after − before" 除以 2·pulses 会把第一段的背隙摊进来，斜率偏小。）
-        slope = ((after[0] - mid[0]) / pulses, (after[1] - mid[1]) / pulses)
-        backlash = (mid[0] - before[0], mid[1] - before[1])
+        first_leg = (mid[0] - before[0], mid[1] - before[1])
+        second_leg = (after[0] - mid[0], after[1] - mid[1])
+        _require_consistent_legs(first_leg, second_leg, label=label, axis=axis, pulses=pulses)
+        slope = (second_leg[0] / pulses, second_leg[1] / pulses)
         say(
             f"  探针 {label}：走 {2 * pulses} 脉冲，画面 "
             f"({before[0]:+.2f},{before[1]:+.2f}) -> ({mid[0]:+.2f},{mid[1]:+.2f}) "
@@ -615,7 +739,7 @@ def probe_jacobian(
         say(
             f"    第二段（无背隙）每 1000 脉冲 -> "
             f"({slope[0] * 1000:+.2f},{slope[1] * 1000:+.2f}) mm；"
-            f"第一段位移 ({backlash[0]:+.2f},{backlash[1]:+.2f}) mm"
+            f"第一段位移 ({first_leg[0]:+.2f},{first_leg[1]:+.2f}) mm"
         )
         return slope
 
@@ -658,12 +782,33 @@ def align_x_y(
     #: **这是闭环正确性的关键**：动作很快时，队列里可能还压着动作**之前**的帧，
     #: 读到它就会以为"没动过"，于是再发一次同样的指令——表现为来回振荡。
     checkpoint: Optional[float] = None
+    #: 第一次测到的像素直径，用来发现"物块被挡住了"。
+    baseline_diameter: Optional[float] = None
 
     for attempt in range(1, config.max_iterations + 1):
         started = time.monotonic()
-        offset = measure_offset(link, selector, config, after=checkpoint)
+        sighting = _settled_sighting(link, selector, config, after=checkpoint)
         measure_seconds = time.monotonic() - started
+        offset = (sighting.x_mm, sighting.y_mm)
         readings.append(offset)
+
+        # 物块被挡住时，可见区域从整圆变成月牙，等效半径变小——测距公式按直径反推距离，
+        # 于是会报成"物块突然远了几十毫米"。那看起来完全像一次正常观测，其实与机械臂
+        # 位置毫无关系；照着它解算只会让闭环空转。这里把它变成一句说人话的报错。
+        if sighting.diameter_px:
+            if baseline_diameter is None:
+                baseline_diameter = sighting.diameter_px
+            else:
+                ratio = sighting.diameter_px / baseline_diameter
+                if abs(ratio - 1.0) > config.diameter_change_limit_ratio:
+                    raise ServoError(
+                        f"画面里物块的像素直径从 {baseline_diameter:.0f} px 变成 "
+                        f"{sighting.diameter_px:.0f} px（{ratio:.2f} 倍），"
+                        f"距镜头 {sighting.z_mm:.0f} mm。多半是**爪子或别的结构挡住了物块**"
+                        "（被遮住一部分时可见区域变小，测距就会把它算成变远）。\n"
+                        "  x/y 对准必须让爪子**高于**物块，否则转动底座时爪瓣会从物块上扫过去。"
+                        "先把升降抬起来（或用菜单 2 的「机械臂向上」点动几下）再试。"
+                    )
         error_x = offset[0] - target.x_mm
         error_y = offset[1] - target.y_mm
         error = math.hypot(error_x, error_y)
@@ -750,6 +895,49 @@ def align_x_y(
         f"{math.hypot(last[0] - target.x_mm, last[1] - target.y_mm):.2f} mm。"
         "先跑 --calibrate 重标雅可比；若每次都在同一处停住，看是不是有线材或结构挡住了"
     )
+
+
+def _require_consistent_legs(
+    first_leg: Tuple[float, float],
+    second_leg: Tuple[float, float],
+    *,
+    label: str,
+    axis: str,
+    pulses: int,
+) -> None:
+    """两段同向位移必须自洽；不自洽就报错，而不是默默采信第二段。
+
+    同向连走两段时，物理上只有一种可能：**两段朝向相同，而且第一段不比第二段大**
+    （第一段要吃掉背隙，只会更小）。不满足就说明测的不是机械臂的运动：
+
+    - 物块被爪子推走了；
+    - 物块移出画面、检测跳到了别的圆上；
+    - 画面还没停稳就开始读了。
+
+    这三种情况下算出来的"斜率"毫无意义，而它又会被当成雅可比去驱动机械臂——
+    实测这一处曾把底座那一列算大 2.5 倍，表现就是闭环每步过冲、来回振荡永不收敛。
+    """
+    first_len = math.hypot(*first_leg)
+    second_len = math.hypot(*second_leg)
+    if second_len <= 1e-9 and first_len <= 1e-9:
+        raise ServoError(
+            f"探针 {label} 走了 {2 * pulses} 脉冲，画面却一点没动。"
+            "这个轴没有驱动到画面（确认它真的接了、且方向没接反），或者物块没在视野里"
+        )
+    dot = first_leg[0] * second_leg[0] + first_leg[1] * second_leg[1]
+    if second_len > 1e-9 and dot < 0:
+        raise ServoError(
+            f"探针 {label} 两段同向位移却朝相反方向（第一段 {first_leg}、第二段 {second_leg}）："
+            "说明测到的不是这个轴的运动。常见原因：物块被爪子推走了、物块移出画面后"
+            "检测跳到了别的圆上。请把物块挪到画面中央再重试"
+        )
+    if first_len > second_len * 1.3 + 0.5:
+        raise ServoError(
+            f"探针 {label} 第一段位移 ({first_leg}) 比第二段 ({second_leg}) 还大："
+            "同向连走两段时第一段要吃掉背隙，只会更小。多半是画面还没停稳就开始读了，"
+            "或者物块被推动了。"
+            f"可以把 settle_timeout_seconds（现在决定等多久）调大，或把 probe_pulses 调小"
+        )
 
 
 def _clamp_pulses(value: float, limit: int) -> int:
@@ -855,12 +1043,10 @@ def _self_test() -> int:
 
             if min_received_at is None:
                 self.unguarded_reads += 1
-                if self._published is None:
-                    self._publish(time.monotonic())
             else:
-                # 明确要求新帧：现在才把当前真实位置发布出去。
                 self.guarded_reads += 1
-                self._publish(max(time.monotonic(), min_received_at))
+            # 每次都发布当前真实位姿（真摄像头每次读都是一帧新画面）。
+            self._publish(max(time.monotonic(), min_received_at or 0.0))
             x, y, stamp = self._published
             item = parse_sighting(
                 f"物料 4: @(566,376) 绿色物料（green），xyz=({x:.4f},{y:.4f},113.2) mm",
@@ -951,11 +1137,45 @@ def _self_test() -> int:
             return None
 
     try:
-        align_x_y(FakeArm(truth), EmptyLink(), ObjectSelector(material_id=4), target, truth, config)
+        align_x_y(
+            FakeArm(truth), EmptyLink(), ObjectSelector(material_id=4), target, truth,
+            # 停稳超时调小：这里测的是"看不到物块要报错"，不该真等 4 秒。
+            ServoConfig(tolerance_mm=0.5, settle_timeout_seconds=0.2, settle_poll_seconds=0.02),
+        )
     except ServoError as error:
-        assert "等不到" in str(error), error
+        assert "稳定看到物块" in str(error), error
     else:
         raise AssertionError("看不到物块必须报 ServoError")
+
+    # --- 等停稳：读数还在变的时候不能拿它当观测 ---
+    class DriftingLink:
+        """前几次读数在变，之后稳定——机械臂还没停稳就是这个样子。"""
+
+        error = None
+
+        def __init__(self) -> None:
+            self._series = [(0.0, 0.0), (30.0, 5.0), (42.0, 8.0)]
+            self.reads = 0
+
+        def frame(self, **_kwargs):
+            from modules.vision.drive.sighting import parse_sighting
+
+            self.reads += 1
+            x, y = self._series.pop(0) if self._series else (42.0, 8.0)
+            return (
+                parse_sighting(
+                    f"物料 4: 绿色物料（green），xyz=({x:.4f},{y:.4f},113.2) mm",
+                    received_at=time.monotonic(),
+                ),
+            )
+
+    drifting = DriftingLink()
+    settled = measure_settled(
+        drifting, ObjectSelector(material_id=4),
+        ServoConfig(settle_timeout_seconds=2.0, settle_poll_seconds=0.01),
+    )
+    assert settled == (42.0, 8.0), settled
+    assert drifting.reads == 4, drifting.reads
 
     # --- 目标判别 ---
     from modules.vision.drive.sighting import parse_sighting
@@ -995,10 +1215,13 @@ def _self_test() -> int:
     assert abs(probe_arm.offset[1] - start[1]) < 1e-9, (probe_arm.offset, start)
 
     # 探出来奇异的机器要报错（两个轴在画面里同向）。
+    # 注意**必须**用同一个假臂喂给探针和链路：之前这里写成了两个不同的 FakeArm，
+    # 链路读的是一个永远不动的假臂，于是"画面没动"——被上面那条零位移检查抓了出来。
     flat_truth = ServoJacobian(base_dx=0.01, base_dy=0.01, radial_dx=0.02, radial_dy=0.02)
+    flat_arm = FakeArm(flat_truth)
     try:
         probe_jacobian(
-            FakeArm(flat_truth), FakeLink(FakeArm(flat_truth)),
+            flat_arm, FakeLink(flat_arm),
             ObjectSelector(material_id=4), ServoConfig(probe_pulses=800),
         )
     except ServoError as error:
