@@ -332,42 +332,38 @@ def _run_camera(locator: HoughRingLocator, camera_id: int) -> int:
         close_previews,
         looks_blank,
         open_preview,
+        run_preview,
         warn_blank_preview,
     )
 
     window = open_preview()
     blank_frames = 0
     warned = False
+    state = {"debug": False}
     try:
         with USBCamera(camera_id, width=1280, height=720).initialize() as camera:
             print(f"摄像头 {camera_id}；窗口 {window!r}，按 q 退出（按 d 切换灰度图）")
-            show_debug = False
-            while True:
-                frame = camera.read()
-                if frame is None:
-                    raise RuntimeError("摄像头未返回图像")
+
+            def watch(frame, _lock, _stats) -> None:
+                nonlocal blank_frames, warned
                 blank_frames = blank_frames + 1 if looks_blank(frame) else 0
                 if blank_frames >= BLANK_FRAME_WARNING and not warned:
                     warned = True
                     warn_blank_preview(camera_id)
 
-                lock = locator.locate(frame)
-                shown = locator.debug_image(frame) if show_debug else locator.draw(frame, lock)
-                cv2.putText(
-                    shown,
-                    f"materials={len(lock)}",
-                    (10, 24),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 0),
-                    2,
-                )
-                cv2.imshow(window, shown)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
-                    break
+            def draw(frame, lock):
+                return locator.debug_image(frame) if state["debug"] else locator.draw(frame, lock)
+
+            def overlay(annotated, lock, _stats) -> None:
+                cv2.putText(annotated, f"materials={len(lock)}", (10, 24),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            def on_key(key: int, _lock, _stats) -> None:
                 if key == ord("d"):
-                    show_debug = not show_debug
+                    state["debug"] = not state["debug"]
+
+            run_preview(camera, locator.locate, draw, window=window,
+                        on_frame=watch, overlay=overlay, on_key=on_key)
     finally:
         close_previews()
     return 0

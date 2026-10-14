@@ -47,43 +47,44 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+#: 一个十进制数：允许显式 ``+`` 号（浮点格式化很容易带出来，如 ``+7.5``）。
+#: 刻意不支持科学计数法：``3e2`` 出现在这一行里多半是别的东西被误吞了。
+_NUMBER = r"[+-]?\d+(?:\.\d+)?"
+
 #: 「物料 N:」——编号是物料的稳定标识，用来判断"还是不是同一个物料"。
 #: 冒号可以省略，但**后面必须有空白**：`.` 不能匹配任意字符，否则 "物料4xyz=(...)"
 #: 这种没有分隔的写法会把编号吃掉一半。
 _MATERIAL_ID = re.compile(r"物料\s*(\d+)\s*(?:[:：]|\s)")
 
 #: 「@(566,376)」——像素圆心；半角/全角括号与空格都容忍。
-_PIXEL_CENTER = re.compile(r"@\s*[（(]\s*(-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d+(?:\.\d+)?)\s*[)）]")
+_PIXEL_CENTER = re.compile(
+    rf"@\s*[（(]\s*({_NUMBER})\s*[,，]\s*({_NUMBER})\s*[)）]"
+)
 
 #: 「xyz=(-8.3,1.8,113.2) mm」——镜头系毫米坐标。**唯一的必填几何量。**
 _XYZ = re.compile(
-    r"xyz\s*[=＝]\s*[（(]\s*"
-    r"(-?\d+(?:\.\d+)?)\s*[,，]\s*"
-    r"(-?\d+(?:\.\d+)?)\s*[,，]\s*"
-    r"(-?\d+(?:\.\d+)?)\s*[)）]",
+    rf"xyz\s*[=＝]\s*[（(]\s*"
+    rf"({_NUMBER})\s*[,，]\s*"
+    rf"({_NUMBER})\s*[,，]\s*"
+    rf"({_NUMBER})\s*[)）]",
     re.IGNORECASE,
 )
 
 #: 「confidence=0.88」——检测置信度。
-_CONFIDENCE = re.compile(r"confidence\s*[=＝]\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
+_CONFIDENCE = re.compile(rf"confidence\s*[=＝]\s*({_NUMBER})", re.IGNORECASE)
 
 #: 「圆直径 268 px」——像素直径，用来和 xyz 互相印证比例尺。
-_DIAMETER_PX = re.compile(r"圆直径\s*(\d+(?:\.\d+)?)\s*px")
+_DIAMETER_PX = re.compile(rf"圆直径\s*({_NUMBER})\s*px")
 
 #: 「内部σ=20.2」——颜色一致性指标，越小越像纯色圆面。
-_INNER_SIGMA = re.compile(r"内部\s*σ\s*[=＝]\s*(\d+(?:\.\d+)?)")
+_INNER_SIGMA = re.compile(rf"内部\s*σ\s*[=＝]\s*({_NUMBER})")
 
 #: 「边界支撑=83%（36 个方向）」——圆边界被支持的比例。
-_EDGE_SUPPORT = re.compile(r"边界支撑\s*[=＝]\s*(\d+(?:\.\d+)?)\s*%")
+_EDGE_SUPPORT = re.compile(rf"边界支撑\s*[=＝]\s*({_NUMBER})\s*%")
 _EDGE_DIRECTIONS = re.compile(r"(\d+)\s*个方向")
 
 #: 「直线距离约 113.5 mm」——镜头到物料的斜距，等于 ``hypot(x, y, z)``，是自洽性检查。
-_STRAIGHT_DISTANCE = re.compile(r"直线距离(?:约)?\s*(\d+(?:\.\d+)?)\s*mm")
-
-#: 「绿色物料（green）」——中文色名 + 括号里的英文色名。
-_COLOR = re.compile(r"([\u4e00-\u9fff]+)\s*物料\s*[（(]\s*([A-Za-z_]+)\s*[)）]")
-#: 兜底：只给英文色名的写法，如「green 物料」。
-_COLOR_EN = re.compile(r"\b(red|green|blue|yellow|black|white|orange|purple)\b", re.IGNORECASE)
+_STRAIGHT_DISTANCE = re.compile(rf"直线距离(?:约)?\s*({_NUMBER})\s*mm")
 
 #: 颜色名 -> 本仓库统一的英文键（与 ``modules/vision/config.json`` 的
 #: ``targets.material_palette`` 同域）。
@@ -101,6 +102,14 @@ _COLOR_NAMES = {
     "白": "white",
     "白色": "white",
 }
+
+#: 「绿色物料（green）」——中文色名 + 括号里的英文色名。
+_COLOR = re.compile(r"([\u4e00-\u9fff]+)\s*物料\s*[（(]\s*([A-Za-z_]+)\s*[)）]")
+#: 只给中文色名、没有括号的写法，如「绿色物料」。按长度降序排列，
+#: 好让「绿色」优先于「绿」被匹配到。
+_COLOR_CN = re.compile("|".join(sorted(_COLOR_NAMES, key=len, reverse=True)))
+#: 兜底：只给英文色名的写法，如「green 物料」或「green」。
+_COLOR_EN = re.compile(r"\b(red|green|blue|yellow|black|white|orange|purple)\b", re.IGNORECASE)
 
 
 class SightingParseError(ValueError):
@@ -213,14 +222,16 @@ def parse_sighting(line: str, *, received_at: Optional[float] = None) -> Materia
     )
 
 
-def try_parse_sighting(line: str) -> Optional[MaterialSighting]:
+def try_parse_sighting(
+    line: str, *, received_at: Optional[float] = None
+) -> Optional[MaterialSighting]:
     """解析成功返回观测，失败返回 ``None``。
 
     接收线程用它：串口 / socket 上混着日志行是常态，**不该让一行无关输出把整条链路打断**。
     需要知道"为什么没解析出来"的地方（标定时、调试时）请直接用 :func:`parse_sighting`。
     """
     try:
-        return parse_sighting(line)
+        return parse_sighting(line, received_at=received_at)
     except SightingParseError:
         return None
 
@@ -235,11 +246,14 @@ def _number(pattern: re.Pattern, text: str) -> Optional[float]:
 
 
 def _color(text: str) -> Optional[str]:
-    """取颜色键：先认中文色名，再退回英文色名。"""
+    """取颜色键：先认"中文名（英文名）"，再认裸中文名，最后认裸英文名。"""
     match = _COLOR.search(text)
     if match is not None:
         chinese, english = match.group(1), match.group(2)
         return _COLOR_NAMES.get(chinese, english.lower())
+    chinese_only = _COLOR_CN.search(text)
+    if chinese_only is not None:
+        return _COLOR_NAMES[chinese_only.group(0)]
     fallback = _COLOR_EN.search(text)
     return None if fallback is None else fallback.group(1).lower()
 

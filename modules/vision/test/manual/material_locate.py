@@ -27,6 +27,7 @@ from modules.vision import (
     load_camera_id,
     looks_blank,
     open_preview,
+    run_preview,
     warn_blank_preview,
 )
 from modules.vision.config import TargetSettings, load_vision_config
@@ -112,7 +113,6 @@ def run(
     window = open_preview()
     blank_frames = 0
     warned_blank = False
-    misses = 0
     frames = 0
     try:
         with MaterialLocator(
@@ -141,40 +141,50 @@ def run(
                 print(f"物料颜色 BGR={material_bgr}，容差 {colour_tolerance:.0f}："
                       "走颜色块定位，夹爪与背景不进掩膜")
             print(f"顶面真实直径按 {top_diameter_mm:.1f} mm 折算距离")
-            while True:
-                frame = camera.read()
-                if frame is None:
-                    misses += 1
-                    if misses >= MAX_MISSES:
-                        print(f"连续 {misses} 次取不到画面，退出")
-                        return 1
-                    continue
-                misses = 0
-                frames += 1
 
+            def watch(frame, _report, _stats) -> None:
+                nonlocal blank_frames, warned_blank
                 blank_frames = blank_frames + 1 if looks_blank(frame) else 0
                 if blank_frames >= BLANK_FRAME_WARNING and not warned_blank:
                     warned_blank = True
                     warn_blank_preview(camera_id)
 
-                report = locator.locate(frame)
-                annotated = locator.draw(frame, report)
-                best = report.best
-                # 画面上只写 ASCII（cv2.putText 画不出中文）
-                headline = "no material" if best is None else f"{best.name or 'material'} {best.distance_mm:.0f}mm"
-                cv2.putText(annotated, headline, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(annotated, f"materials={len(report.lock)}", (10, 52),
+            def overlay(annotated, report, _stats) -> None:
+                """画面上只写 ASCII（cv2.putText 画不出中文）。"""
+                nonlocal frames
+                frames += 1
+                best = None if report is None else report.best
+                headline = (
+                    "no material" if best is None
+                    else f"{best.name or 'material'} {best.distance_mm:.0f}mm"
+                )
+                count = 0 if report is None else len(report.lock)
+                cv2.putText(annotated, headline, (10, 24),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(annotated, f"materials={count}", (10, 52),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                cv2.imshow(window, annotated)
-
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
-                    return 0
-                if key == ord("p") or frames % PRINT_EVERY == 0:
+                if report is not None and frames % PRINT_EVERY == 0:
                     print(report.summary())
+
+            def on_key(key: int, report, _stats) -> None:
+                if report is not None and key == ord("p"):
+                    print(report.summary())
+
+            stats = run_preview(
+                camera,
+                locator.locate,
+                locator.draw,
+                window=window,
+                print_every=PRINT_EVERY,
+                max_misses=MAX_MISSES,
+                on_frame=watch,
+                overlay=overlay,
+                on_key=on_key,
+            )
     finally:
         close_previews()
-    return 0
+    # 摄像头掉线/一直没画面时仍然报错退出（原来按 MAX_MISSES 退出也是返回 1）。
+    return 0 if stats.reason in ("quit", "") else 1
 
 
 def main() -> None:

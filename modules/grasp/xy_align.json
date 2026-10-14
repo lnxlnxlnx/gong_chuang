@@ -1,6 +1,9 @@
 {
+  "tolerance_mm": 3.0,
+  "iterations": 4,
+  "max_frame_age_ms": 500.0,
   "gripper_marker": {
     "material_id": null,
-    "color": null
+    "color": "red"
   }
 }

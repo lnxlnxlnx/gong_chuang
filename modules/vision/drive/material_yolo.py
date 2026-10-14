@@ -340,37 +340,38 @@ def _run_camera(model_path, camera_id: int, conf: float | None) -> int:
         close_previews,
         looks_blank,
         open_preview,
+        run_preview,
         warn_blank_preview,
     )
 
     window = open_preview()
     blank_frames = 0
     warned = False
-    resolution_reported = False
+    reported = False
     try:
         with MaterialYOLO(model_path, conf_thresh=conf) as yolo, USBCamera(camera_id, width=1280, height=720).initialize() as camera:
             print(f"摄像头 {camera_id}，窗口 {window!r}，按 q 退出")
-            while True:
-                frame = camera.read()
-                if frame is None:
-                    raise RuntimeError("摄像头未返回图像")
-                if not resolution_reported:
+
+            def watch(frame, _hits, _stats) -> None:
+                nonlocal blank_frames, warned, reported
+                if not reported:
                     height, width = frame.shape[:2]
                     print(f"实际画面尺寸：{width}x{height}")
-                    resolution_reported = True
+                    reported = True
                 blank_frames = blank_frames + 1 if looks_blank(frame) else 0
                 if blank_frames >= BLANK_FRAME_WARNING and not warned:
                     warned = True
                     warn_blank_preview(camera_id)
-                hits = yolo.detect(frame)
-                annotated = yolo.detector.draw(frame, hits)
-                for hit in hits:
+
+            def overlay(annotated, hits, _stats) -> None:
+                for hit in hits or ():
                     if is_material(hit.name, yolo.materials):
                         x1, y1 = int(hit.x1), max(int(hit.y1) - 20, 12)
-                        cv2.putText(annotated, "MAT", (x1, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                cv2.imshow(window, annotated)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
+                        cv2.putText(annotated, "MAT", (x1, y1),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+            run_preview(camera, yolo.detect, yolo.detector.draw, window=window,
+                        on_frame=watch, overlay=overlay)
     finally:
         close_previews()
     return 0

@@ -43,7 +43,9 @@ from typing import List, Mapping, Optional, Tuple
 
 from modules.vision.drive.sighting import MaterialSighting, try_parse_sighting
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
+#: 配置文件在模块根目录（``modules/camera_link/config.json``），
+#: 而本文件在 ``drive/`` 下，所以要从 ``drive`` 再往上走一层。
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 
 #: 单行长度上限。超过它说明对面没在发"每行一条观测"——宁可断开也不要让内存无限涨。
 MAX_LINE_BYTES = 64 * 1024
@@ -284,11 +286,13 @@ class CameraLink:
             collected.append(item)
 
         if max_age_seconds is not None:
+            # 严格小于：``max_age_seconds=0`` 的意思是"一点都不许旧"，
+            # 用它做"必须丢掉"的判据时不能因为浮点上的 0.0000001 而通过。
             now = time.monotonic()
             collected = [
                 item
                 for item in collected
-                if item.received_at is None or now - item.received_at <= max_age_seconds
+                if item.received_at is None or now - item.received_at < max_age_seconds
             ]
         if not collected:
             return None
@@ -402,7 +406,9 @@ class CameraLink:
         text = raw.decode(self.config.encoding, "replace").strip()
         if not text:
             return
-        sighting = try_parse_sighting(text)
+        # 时间戳必须在这里打：下游（闭环对准）靠它判断"手上这帧是不是过期了"，
+        # 少了它那条保护会静默失效——看起来在工作，其实一直在用旧坐标。
+        sighting = try_parse_sighting(text, received_at=time.monotonic())
         if sighting is None:
             self._record_rejected(text)
             return

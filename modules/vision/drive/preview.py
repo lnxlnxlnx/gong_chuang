@@ -13,16 +13,21 @@
 
 用法::
 
-    from modules.vision import close_previews, open_preview
+    from modules.vision import close_previews, open_preview, run_preview
 
     window = open_preview()
     try:
-        while True:
-            cv2.imshow(window, frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+        # 预览循环在 modules/vision/drive/stream.py：取帧与推理各一条线程，
+        # 窗口跑在摄像头帧率上，左下角画出 cap/det/age。
+        run_preview(camera, locator.locate, locator.draw, window=window)
     finally:
         close_previews()
+
+    # 需要自己控制循环时才手写 imshow/waitKey：
+    while True:
+        cv2.imshow(window, frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
 """
 
 from __future__ import annotations

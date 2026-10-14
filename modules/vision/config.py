@@ -124,6 +124,26 @@ def load_model_settings(config_path: Path = DEFAULT_CONFIG_PATH) -> ModelSetting
     return _model_settings(_mapping(value, "model"), config_path)
 
 
+def resolve_target_settings(
+    config_path: Path = DEFAULT_CONFIG_PATH,
+) -> Tuple[TargetSettings, Optional[str]]:
+    """读 ``config.json`` 的 ``targets`` 块，**读不出来也不抛异常**。
+
+    返回 ``(参数, 原因)``：成功时原因是 ``None``；文件坏了、字段写错时返回内置
+    默认值 + 一句中文原因，由调用方决定怎么提示。
+
+    为什么不做成"读失败就报错退出"：``targets`` 是**把识别调得更准**的那部分
+    （物料颜色、工作距离先验），不是"没有就跑不动"的那部分。预览入口在用户面前
+    开着，为了一个写错的字段直接退出，比按默认值跑一遍、把原因打在终端上更糟。
+    真正需要这些参数的抓取流程会在自己的入口显式要求它们（``VisionConfig``
+    的 ``require_*``）。
+    """
+    try:
+        return load_vision_config(Path(config_path)).targets, None
+    except ValueError as error:
+        return TargetSettings(), str(error)
+
+
 def _model_settings(document: Mapping[str, object], source: Path) -> ModelSettings:
     backend = document.get("backend", BACKEND_AUTO)
     if backend not in BACKENDS:

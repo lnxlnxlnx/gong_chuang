@@ -3,6 +3,12 @@
 Wraps :class:`cv2.VideoCapture` behind a small ``initialize()`` / ``read()`` /
 ``release()`` interface consistent with the other gong_chuang peripherals.
 OpenCV is imported lazily so this module can be loaded on machines without it.
+
+预览入口不要把 ``read()`` 直接放进显示循环：它会在驱动里阻塞等到下一帧，
+再加上推理的时间，显示帧率就被最慢的那一段拖住了（见
+``modules/vision/drive/stream.py`` 顶部说明）。交给
+:class:`modules.vision.drive.stream.FrameGrabber` 去后台取帧，
+显示循环只拿"最新的一帧"。
 """
 
 from __future__ import annotations

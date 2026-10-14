@@ -322,6 +322,7 @@ USB 摄像头 + YOLOv8 检测，封装为 `modules.vision` 包，供主程序和
 
 - `modules.vision.create_detector(modules.vision.default_model_path())`：Windows 用 ONNX，Jetson 用 TensorRT；都返回 `list[modules.vision.Detection]`。
 - `modules.vision.USBCamera`：USB 摄像头封装（`initialize()/read()/release()`，支持 `with`）。
+- `modules.vision.run_preview(camera, 推理函数, 画图函数, window=...)`：**预览循环**。取帧一条线程、推理一条线程，窗口跑在摄像头帧率上；推理跟不上的帧被跳过而不是拖慢显示。窗口左下角写着 `cap / det / ms / age`（摄像头帧率 / 识别帧率 / 最近一次推理耗时 / 框比画面旧多少毫秒）——"画面卡"和"识别慢"从此是两个可分辨的数。需要"结果与画面严格同帧"的抓取链路请**不要**用它，直接同步调 `locate()` / `detect()`。
 - `modules.vision.open_preview()` / `modules.vision.close_previews()`：HighGUI 预览窗口。**窗口名必须是 ASCII，并且要先显式 `namedWindow` 再 `imshow`**：本机实测中文窗口名会显示成 `??????`（Qt 后端里是 `椤圭洰瑙嗚…` 这样的乱码），不同发行版的 OpenCV 窗口后端（pip 的 Win32UI / conda-forge 的 Qt6）隐式建窗行为也不一样。所以预览入口统一用 `vision-preview` 这个名字。
 - `modules.vision.looks_blank(frame)` / `modules.vision.warn_blank_preview(camera_id)`：`read()` 成功但画面是纯黑/纯白时（被别的程序占用、序号指向没有画面的设备、镜头盖关着）打印排查清单，而不是让用户对着一个纯色窗口猜。
 - `modules.vision.DistanceEstimator`：单目测距（针孔模型，需要已知类别真实宽度）。
@@ -356,7 +357,23 @@ with locator, USBCamera(1, width=1280, height=720).initialize() as camera:
 取距离请用 `report.best`（没有通过校验的顶面时是 `None`），不要取 `report.regions[0]`。
 详见 [modules/vision/docs/视觉物料定位.md](modules/vision/docs/视觉物料定位.md)。
 
-菜单 9 和 `main.py` 的视觉演示从 `modules/vision/config.json` 读取摄像头编号。Windows 当前设为 `1`（外接 USB 摄像头），Jetson 设为 `0`；如果设备枚举顺序不同，修改对应平台的 `camera_id`。指定编号无法打开时会报错，不会自动切换到前置摄像头。
+### 预览帧率：慢的是经典 CV，不是 YOLO 也不是摄像头
+
+本机实测（1280×720）：摄像头 27–30 fps、YOLO 推理 17–20 ms、`imshow` 3.5–7 ms，
+而 `MaterialLocator.locate()` 在真实台面图上是 **0.5–3.3 s**——原来那条串行循环
+（取帧→推理→显示）于是被最慢的一段拖到 0.3–2 fps，还因为取帧不停而越积越延迟。
+现在取帧与推理各跑一条线程，窗口跑在摄像头帧率上；同时去掉了每帧的重复计算
+（每帧转一次灰度图而不是每个候选转一次、模型一帧只问一次、轮廓抽样后再算外接圆），
+`locate()` 本身快了 **2.9–7.9 倍**（例如 `top_pic.png` 954 ms → 131 ms）。
+完整数据、还嫌慢时的四个调节开关、以及**刻意没动**的判据都在
+[modules/vision/docs/预览帧率.md](modules/vision/docs/预览帧率.md)。
+
+菜单 9、菜单 15、菜单 18 和 `main.py` 的物料预览都走同一个 `run_preview`：
+窗口左下角那行 `cap / det / ms / age` 是取帧帧率、识别帧率、最近一次推理耗时、
+以及画面上的框比当前画面旧了多少毫秒。**`det` 只有几 fps 而 `cap` 是 30 fps 时，
+画面仍然是流畅的**——慢的是识别，不是显示；真要看识别够不够快，看 `det`。
+
+菜单 9 和 `main.py` 的视觉演示从 `modules/vision/config.json` 读取摄像头编号，物料预览还会读上面那三个 `targets` 参数（与菜单 18 一致）。Windows 当前设为 `1`（外接 USB 摄像头），Jetson 设为 `0`；如果设备枚举顺序不同，修改对应平台的 `camera_id`。指定编号无法打开时会报错，不会自动切换到前置摄像头。
 
 ### 依赖
 

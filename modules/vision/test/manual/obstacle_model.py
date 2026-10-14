@@ -16,11 +16,17 @@ from __future__ import annotations
 MENU_ENTRY = (15, "障碍物模型测试")
 
 import os
-import time
 from collections.abc import Callable
 from pathlib import Path
 
-from modules.vision import DEFAULT_CLASS_NAMES, USBCamera, create_detector, default_model_path, load_camera_id
+from modules.vision import (
+    DEFAULT_CLASS_NAMES,
+    USBCamera,
+    create_detector,
+    default_model_path,
+    load_camera_id,
+    run_preview,
+)
 
 from project_paths import PROJECT_ROOT, models_path, output_path
 
@@ -270,32 +276,18 @@ def preview_camera(detector, cv2, prompt: Callable[[str], str]) -> None:
 
         print(f"画面 {frame.shape[1]}x{frame.shape[0]}，开始预览；按 q 退出")
         print(f"（窗口标题是英文 \"{WINDOW_TITLE}\"：OpenCV 在 Windows 下画不出中文标题）")
-        fps = 0.0
-        previous = time.time()
-        shown = 0
-        misses = 0
-        while True:
-            detections = detector.detect(frame)
-            now = time.time()
-            fps = fps * 0.9 + (1.0 / (now - previous + 1e-6)) * 0.1 if previous else 0.0
-            previous = now
-
-            cv2.imshow(WINDOW_TITLE, detector.draw(frame, detections, fps=fps))
-            shown += 1
-            if shown % 30 == 0:
-                print(f"  已显示 {shown} 帧，约 {fps:.1f} FPS，当前 {len(detections)} 个目标")
-
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-
-            frame = camera.read()
-            if frame is None:
-                misses += 1
-                if misses >= READ_ATTEMPTS:
-                    print("连续取不到画面，退出预览")
-                    break
-                continue
-            misses = 0
+        print("（窗口左下角 cap/det/age：取帧与推理各跑一条线程，"
+              "cap 是摄像头实际帧率，det 是识别实际帧率）")
+        # 第一帧已经用 READ_ATTEMPTS 次重试拿到手了（摄像头每次打开都先丢几帧），
+        # 交给 run_preview 当起点，免得两处各写一套等待逻辑。
+        run_preview(
+            camera,
+            detector.detect,
+            detector.draw,
+            window=WINDOW_TITLE,
+            first=frame,
+            print_every=30,
+        )
 
     cv2.destroyAllWindows()
     print("预览已关闭")

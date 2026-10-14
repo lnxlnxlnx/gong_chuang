@@ -526,36 +526,20 @@ class YOLOv8ONNXDetector(YOLOv8Detector):
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised manually on the board
-    import time
-
     import cv2
 
-    from modules.vision.drive.preview import close_previews, open_preview
+    from modules.vision import USBCamera, close_previews, open_preview, run_preview
 
     detector = YOLOv8Detector("models/best.engine")
-    camera = cv2.VideoCapture(0)
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    if not camera.isOpened():
+    camera = USBCamera(0, width=640, height=480).initialize()
+    if not camera.capture.isOpened():
         raise SystemExit("camera failed to open: check ls /dev/video*")
 
-    fps = 0.0
-    previous = time.time()
     print("preview running; press q to quit")
     window = open_preview()
     try:
-        while True:
-            ok, frame = camera.read()
-            if not ok:
-                break
-            detections = detector.detect(frame)
-            now = time.time()
-            fps = fps * 0.9 + (1.0 / (now - previous + 1e-6)) * 0.1
-            previous = now
-            annotated = detector.draw(frame, detections, fps=fps)
-            cv2.imshow(window, annotated)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+        # 取帧与推理各跑一条线程：TensorRT 推理跟不上的帧被跳过，窗口不掉帧。
+        run_preview(camera, detector.detect, detector.draw, window=window)
     finally:
         camera.release()
         close_previews()

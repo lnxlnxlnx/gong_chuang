@@ -79,6 +79,17 @@ def normalize_references(value) -> tuple[tuple[float, float, float], ...]:
 DEFAULT_OPEN_PX = 15
 DEFAULT_CLOSE_PX = 9
 
+#: 送进 ``cv2.minEnclosingCircle`` 的轮廓点上限（超出就等间隔抽样）。
+#:
+#: OpenCV 的 ``minEnclosingCircle`` 点数一多就急剧变慢（本机实测，同一条轮廓：
+#: 3862 点 826 ms、1931 点 110 ms、966 点 14.5 ms、483 点 2.1 ms，大致是三次方），
+#: 而它在这里只用来算"等效半径 / 外接圆半径"这一个比值。抽到几百个点以后，
+#: 外接圆半径与全量结果的差只有 0.15%（实测 431.61 对 432.27 px），而填充率判据
+#: 两边留的余量是**阈值 0.65 对实测的 0.74–0.96（物料）/ 0.36–0.53（同色结构件）**：
+#: 0.15% 挪不动任何一次判定。这一步是颜色块路径上最贵的一处（实测一帧 826 ms
+#: 全花在它上面），所以必须治。
+ENCLOSING_MAX_POINTS = 256
+
 #: 小于这么多像素的色块不当物料（噪点、反光、背景上一小块同色）。
 DEFAULT_MIN_AREA_PX = 500
 
@@ -108,6 +119,19 @@ DEFAULT_HUE_TOLERANCE = 10.0
 #: 亮度下限：候选像素的 V 至少是参考色 V 的这个倍数。
 #: 台面与物料色相接近，差的就是明暗（实测 V 85 对 204–252），取 0.65 分开两边。
 DEFAULT_VALUE_RATIO = 0.65
+
+
+def _decimate_contour(contour, limit: int = ENCLOSING_MAX_POINTS):
+    """等间隔抽样轮廓点，专供 ``cv2.minEnclosingCircle`` 用。
+
+    见 :data:`ENCLOSING_MAX_POINTS`：那一步的耗时随点数急剧增长（三次方量级），
+    而外接圆半径只用来算填充率，抽样几百个点已经足够。
+    """
+    count = len(contour)
+    if count <= limit:
+        return contour
+    stride = count // limit + 1
+    return np.ascontiguousarray(contour[::stride])
 
 
 class ColourBlobLocator:
@@ -291,7 +315,7 @@ class ColourBlobLocator:
         if not contours:
             return 0.0, None
         contour = max(contours, key=cv2.contourArea)
-        _centre, enclosing = cv2.minEnclosingCircle(contour)
+        _centre, enclosing = cv2.minEnclosingCircle(_decimate_contour(contour))
         fill = float(np.sqrt(area / np.pi) / enclosing) if enclosing > 0 else 0.0
         if clipped:
             return fill, None

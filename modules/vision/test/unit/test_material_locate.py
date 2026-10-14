@@ -136,9 +136,95 @@ class MaterialLocatorTests(unittest.TestCase):
         self.assertEqual((item.x_mm, item.y_mm, item.z_mm), (20.0, -10.0, 75.0))
 
 
+class PerFrameRedundancyTests(unittest.TestCase):
+    """一帧里的重复计算：它们曾经是这条流水线上最贵的一笔，不能再长回来。
+
+    实测（1280×720 真实台面图）：``to_grayscale`` 转一次 12.0 ms，而霍夫会给
+    24–87 个候选圆，逐个候选重转一次就是 0.3–1.0 s；模型那一侧则是同一个 frame、
+    同样的参数被问了两遍，白花约 20 ms。
+    """
+
+    class CountingYOLO:
+        def __init__(self, hits=()):
+            self.hits = tuple(hits)
+            self.calls = 0
+
+        def detect(self, _frame, *, materials_only=False):
+            self.calls += 1
+            return list(self.hits)
+
+        def close(self):
+            pass
+
+    def test_the_model_is_asked_once_per_frame(self) -> None:
+        for label, kwargs in (
+            # 品红在这个合成画面里根本不存在 → 调色板一个都不命中 → 问模型 →
+            # 模型也没认出 → 退回霍夫。**重复调用的 bug 只在这条分支上。**
+            ("colour path (palette misses, hough finds)",
+             {"material_palette": {"magenta": (255.0, 0.0, 255.0)}}),
+            ("hough path", {}),
+        ):
+            with self.subTest(path=label):
+                yolo = self.CountingYOLO()
+                locator = MaterialLocator(
+                    yolo=yolo, focal_px=300, colour_tolerance=1.0, **kwargs
+                )
+                report = locator.locate(synthetic_rings())
+                self.assertEqual(yolo.calls, 1,
+                                 f"{label}：一帧只该问模型一次")
+                if label.startswith("colour"):
+                    # 必须先确认真的走过了"调色板没找到 → 问模型 → 退回霍夫"这条
+                    # 分支（重复调用的 bug 只在这条分支上），否则这个用例是空转的。
+                    self.assertEqual(report.colour_source, "hough")
+                    self.assertTrue(report.regions)
+
+    def test_the_grayscale_is_built_once_per_frame(self) -> None:
+        from modules.vision.drive import material_locate as module
+
+        calls = {"count": 0}
+        original = module.to_grayscale
+
+        def counting(frame):
+            calls["count"] += 1
+            return original(frame)
+
+        locator = MaterialLocator(yolo=self.CountingYOLO(), focal_px=300,
+                                  locator=RecordingLocator(
+                                      regions=tuple(LockedRegion(160.0 + 160.0 * index, 240.0, 40.0)
+                                                    for index in range(6))))
+        module.to_grayscale = counting
+        try:
+            report = locator.locate(synthetic_rings())
+        finally:
+            module.to_grayscale = original
+
+        self.assertEqual(len(report.regions), 6)
+        self.assertEqual(calls["count"], 1,
+                         "6 个候选圆也只该转一次灰度图（每转一次 12 ms）")
+
+    def test_the_grayscale_is_not_built_when_there_is_nothing_to_measure(self) -> None:
+        from modules.vision.drive import material_locate as module
+
+        calls = {"count": 0}
+        original = module.to_grayscale
+
+        def counting(frame):
+            calls["count"] += 1
+            return original(frame)
+
+        locator = MaterialLocator(yolo=self.CountingYOLO(), focal_px=300,
+                                  locator=RecordingLocator(regions=()))
+        module.to_grayscale = counting
+        try:
+            locator.locate(synthetic_rings())
+        finally:
+            module.to_grayscale = original
+        self.assertEqual(calls["count"], 0,
+                         "一个候选都没有时不该白转一张 1280×720 的灰度图")
+
+
 class WorkingDistanceWindowTests(unittest.TestCase):
     """工作距离先验 → 霍夫半径窗口；没配就先验为空，行为与以前一致。"""
-
     def test_working_distance_is_turned_into_a_radius_window(self) -> None:
         locator = RecordingLocator()
         report = MaterialLocator(

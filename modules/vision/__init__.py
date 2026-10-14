@@ -22,21 +22,20 @@ detection stack meant to be reused by robot applications:
 Example::
 
     import cv2
-    from modules.vision import USBCamera, close_previews, create_detector, default_model_path, open_preview
+    from modules.vision import USBCamera, close_previews, default_model_path, open_preview, run_preview
 
     window = open_preview()
     try:
         with USBCamera(0).initialize() as cam, \
                 create_detector(default_model_path()) as detector:
-            while True:
-                frame = cam.read()
-                if frame is None:
-                    break
-                cv2.imshow(window, detector.draw(frame, detector.detect(frame)))
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
+            # 取帧与推理各跑一条线程：窗口跑在摄像头帧率上，
+            # 推理跟不上的帧被跳过而不是拖慢显示（见 drive/stream.py）。
+            run_preview(cam, detector.detect, detector.draw, window=window)
     finally:
         close_previews()
+
+需要"结果与画面严格同帧"的场合（抓取控制）不要用 :func:`run_preview`，
+直接同步调 ``detector.detect(frame)`` / ``locator.locate(frame)``。
 """
 
 from __future__ import annotations
@@ -61,6 +60,15 @@ from .drive.yolov8 import DEFAULT_CLASS_NAMES, Detection, Detector, YOLOv8Detect
 #: 而触发 runpy 的 "found in sys.modules" 警告，二是 ``import vision`` 不必为
 #: 用不到的功能买单。
 _LAZY_ATTRIBUTES: dict[str, str] = {
+    # stream（预览的两条线程；自己没有 __main__ 自测入口的话也可以直接导入，
+    # 但 python -m modules.vision.drive.stream 需要它别在包初始化时就被导入）
+    "DetectionResult": "drive.stream",
+    "DetectionWorker": "drive.stream",
+    "FrameGrabber": "drive.stream",
+    "GrabbedFrame": "drive.stream",
+    "PreviewStats": "drive.stream",
+    "RateMeter": "drive.stream",
+    "run_preview": "drive.stream",
     # pinhole
     "CameraFix": "drive.pinhole",
     "DEFAULT_FOCAL_PX_AT_1280": "drive.pinhole",
@@ -148,6 +156,15 @@ if TYPE_CHECKING:
         focal_px_from_known_target as focal_px_from_known_target,
         resolve_focal_px as resolve_focal_px,
     )
+    from .drive.stream import (
+        DetectionResult as DetectionResult,
+        DetectionWorker as DetectionWorker,
+        FrameGrabber as FrameGrabber,
+        GrabbedFrame as GrabbedFrame,
+        PreviewStats as PreviewStats,
+        RateMeter as RateMeter,
+        run_preview as run_preview,
+    )
     from .drive.material_class import (
         DEFAULT_MATERIAL_LABELS as DEFAULT_MATERIAL_LABELS,
         ClassResult as ClassResult,
@@ -184,8 +201,15 @@ __all__ = [
     "DEFAULT_FOCAL_PX_AT_1280",
     "DEFAULT_MATERIAL_LABELS",
     "Detection",
+    "DetectionResult",
+    "DetectionWorker",
     "Detector",
     "DistanceEstimator",
+    "FrameGrabber",
+    "GrabbedFrame",
+    "PreviewStats",
+    "RateMeter",
+    "run_preview",
     "ClassResult",
     "HoughRingLocator",
     "LockedRegion",

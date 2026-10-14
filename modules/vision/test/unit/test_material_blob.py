@@ -8,7 +8,9 @@ import numpy as np
 
 from modules.vision.drive.hough_lock import synthetic_rings
 from modules.vision.drive.material_blob import (
+    ENCLOSING_MAX_POINTS,
     ColourBlobLocator,
+    _decimate_contour,
     normalize_references,
     sample_reference,
     synthetic_scene,
@@ -19,6 +21,51 @@ from modules.vision.test.unit.test_material_locate import FakeYOLO
 
 
 MATERIAL_BGR = (114.0, 252.0, 165.0)
+
+
+class ContourDecimationTests(unittest.TestCase):
+    """``minEnclosingCircle`` 的点数上限：它决定颜色块路径会不会卡住。
+
+    实测（本机）：同一条轮廓送 3862 点的 ``minEnclosingCircle`` 要 826 ms，
+    483 点只要 2.1 ms——所以轮廓必须先抽样再送进去。这里守住两件事：
+    点数确实被压到上限以内，且外接圆半径（也就是填充率）几乎不变。
+    """
+
+    def test_short_contours_are_passed_through_unchanged(self) -> None:
+        import cv2
+
+        frame = np.zeros((40, 40), dtype=np.uint8)
+        cv2.circle(frame, (20, 20), 15, 255, -1)
+        contours, _ = cv2.findContours(frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        contour = max(contours, key=cv2.contourArea)
+        self.assertLess(len(contour), ENCLOSING_MAX_POINTS)
+        self.assertIs(_decimate_contour(contour), contour)
+
+    def test_long_contours_are_capped_and_keep_the_enclosing_radius(self) -> None:
+        import cv2
+
+        # 大而毛糙的边界：半径 260 px 的锯齿圆，点数远超上限
+        frame = np.zeros((620, 620), dtype=np.uint8)
+        cv2.circle(frame, (310, 310), 260, 255, -1)
+        angles = np.linspace(0.0, 2.0 * np.pi, 720, endpoint=False)
+        for angle in angles:
+            x = int(round(310 + 262 * np.cos(angle) * (1.0 + 0.01 * ((int(angle * 100) % 2)))))
+            y = int(round(310 + 262 * np.sin(angle)))
+            if 0 <= x < 620 and 0 <= y < 620:
+                frame[y, x] = 255
+        contours, _ = cv2.findContours(frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        contour = max(contours, key=cv2.contourArea)
+        self.assertGreater(len(contour), ENCLOSING_MAX_POINTS)
+
+        decimated = _decimate_contour(contour)
+        self.assertLessEqual(len(decimated), ENCLOSING_MAX_POINTS + 1)
+
+        _full_centre, full_radius = cv2.minEnclosingCircle(contour)
+        _thin_centre, thin_radius = cv2.minEnclosingCircle(decimated)
+        # 抽样只让半径缩掉不到 1%：填充率判据两边留的余量远大于这个数
+        # （阈值 0.65，实测物料 0.74–0.96、同色结构件 0.36–0.53）。
+        self.assertLess(abs(thin_radius - full_radius) / full_radius, 0.01,
+                        f"抽样后外接圆半径变化过大：{thin_radius} 对 {full_radius}")
 
 
 class ColourBlobLocatorTests(unittest.TestCase):

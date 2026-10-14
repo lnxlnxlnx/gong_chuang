@@ -193,7 +193,10 @@ class MaterialLocateCameraTests(unittest.TestCase):
         self.assertEqual(self.run_camera(self.FakeReport(best=None)), 0)
 
     def test_camera_branch_with_a_material(self) -> None:
-        best = SimpleNamespace(name="red", classification=SimpleNamespace(score=0.91))
+        # 预览会把"最好的那个物料"的距离写在画面上，所以假报告要带上真实
+        # RegionReport 的字段（name / distance_mm），不能只给个空壳。
+        best = SimpleNamespace(name="red", distance_mm=75.0,
+                               classification=SimpleNamespace(score=0.91))
         self.assertEqual(self.run_camera(self.FakeReport(best=best)), 0)
 
     def test_camera_requests_720p(self) -> None:

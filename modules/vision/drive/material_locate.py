@@ -22,7 +22,7 @@ import numpy as np
 from modules.vision.drive.hough_lock import HoughRingLocator, LockedRegion, RingLock
 from modules.vision.drive.material_blob import ColourBlobLocator, sample_reference
 from modules.vision.drive.material_class import ClassResult, MaterialClassifier
-from modules.vision.drive.material_face import FaceQuality, measure_face
+from modules.vision.drive.material_face import FaceQuality, measure_face, to_grayscale
 from modules.vision.drive.material_yolo import MaterialYOLO
 from modules.vision.drive.pinhole import (
     DEFAULT_FOCAL_PX_AT_1280 as DEFAULT_FOCAL_PX_AT_1280,
@@ -283,37 +283,57 @@ class MaterialLocator:
         """从一帧 BGR 图像返回圆面、类别和近似相机坐标。"""
         height, width = frame.shape[:2]
         window = self.radius_window(width, height)
+        # 灰度图**一帧只转一次**，而且要"用到才转"：measure_face 每量一个候选圆
+        # 都要用同一张灰度图，而 1280×720 转一次是 12.0 ms（实测）。霍夫在真实
+        # 台面图上会给 24–87 个候选，逐候选重转就是 0.3–1.0 s 白花的时间；
+        # 一个候选都没有时（常见：这一帧台面上没料）则一次都不用转。
+        # 两遍（严格参数 + 放松参数）共用同一张，见 _retry_relaxed。
+        gray_frame = None
+
+        def grayscale():
+            """本帧的 float64 灰度图（首次调用时转换，之后共用）。"""
+            nonlocal gray_frame
+            if gray_frame is None:
+                gray_frame = to_grayscale(frame)
+            return gray_frame
+
         lock = self._locate_circles(frame, window, self.locator)
-        qualities = self._face_qualities(frame, lock)
+        qualities = self._face_qualities(grayscale, lock)
         source = "palette" if lock.regions else None
         hits: tuple[Detection, ...] = ()
+        asked_yolo = False
         if not lock.regions and self.colour_first:
             # 调色板里没有这块料。先问模型：它认出来了，就从它框的中心取一次参考色，
             # 拿这个参考色再分割一遍——换一块料（红、黄……）就不必先量颜色。
             hits = tuple(self.yolo.detect(frame, materials_only=True))
+            asked_yolo = True
             sampled = self._sampled_palette(frame, hits)
             if sampled:
                 trial = ColourBlobLocator(sampled, tolerance=self.colour_tolerance)
                 candidate = self._locate_circles(frame, window, trial)
                 if candidate.regions:
                     lock = candidate
-                    qualities = self._face_qualities(frame, candidate)
+                    qualities = self._face_qualities(grayscale, candidate)
                     source = "model"
             if not lock.regions:
                 # 模型也没认出来：退回霍夫的形状判据，并在报告里说清是退回来的结果。
-                lock, qualities = self._locate_hough(frame, window)
+                lock, qualities = self._locate_hough(frame, grayscale, window)
                 source = "hough" if lock.regions else None
         elif not any(quality.looks_like_face for quality in qualities.values()):
             # 主定位器支持放松时有第二遍：近距离焦画面里真实圆边的梯度被摊平，
             # 严格 Canny 阈值只剩夹爪弧线。锐利画面第一遍就找到顶面，不会跑第二遍。
-            lock, qualities = self._retry_relaxed(frame, window, self.locator, lock, qualities)
+            lock, qualities = self._retry_relaxed(
+                frame, grayscale, window, self.locator, lock, qualities
+            )
         focal_px = self.resolved_focal_px(width, height, required=bool(lock.regions))
         if not lock.regions:
             return MaterialReport(
                 lock=lock, hits=hits, regions=(), focal_px=focal_px,
                 radius_window_px=window, colour_source=source,
             )
-        if not hits:
+        if not hits and not asked_yolo:
+            # 上面已经问过模型的话，这一帧就不再问第二遍：同一个 frame、同样的参数，
+            # 结果必然一样，重跑一次只是白花 20 ms（ONNX 通道实测）。
             hits = tuple(self.yolo.detect(frame, materials_only=True))
         # 画幅规则与像素焦距只有一个定义，在 modules.vision.drive.pinhole 里。
         focal_px = resolve_focal_px(width, height, self.focal_px)
@@ -339,14 +359,14 @@ class MaterialLocator:
                 sampled[hit.name] = colour
         return sampled
 
-    def _locate_hough(self, frame: np.ndarray, window):
+    def _locate_hough(self, frame: np.ndarray, grayscale, window):
         """退回霍夫那一路，含"严格参数没找到顶面就放松 Canny 阈值再试一次"。"""
         locator = self._hough_fallback()
         lock = self._locate_circles(frame, window, locator)
-        qualities = self._face_qualities(frame, lock)
-        return self._retry_relaxed(frame, window, locator, lock, qualities)
+        qualities = self._face_qualities(grayscale, lock)
+        return self._retry_relaxed(frame, grayscale, window, locator, lock, qualities)
 
-    def _retry_relaxed(self, frame: np.ndarray, window, locator, lock, qualities):
+    def _retry_relaxed(self, frame: np.ndarray, grayscale, window, locator, lock, qualities):
         """严格参数没找到像顶面的圆时，用放松版定位器再跑一遍。
 
         放松只在这里发生（而且只在第一遍一无所获时），所以锐利画面、以及没有近距
@@ -358,7 +378,7 @@ class MaterialLocator:
         if factory is None:
             return lock, qualities
         candidate = self._locate_circles(frame, window, factory())
-        candidate_qualities = self._face_qualities(frame, candidate)
+        candidate_qualities = self._face_qualities(grayscale, candidate)
         if any(quality.looks_like_face for quality in candidate_qualities.values()):
             return candidate, candidate_qualities
         return lock, qualities
@@ -385,9 +405,13 @@ class MaterialLocator:
         return tuple(names) if names else tuple(self.classifier.materials)
 
     @staticmethod
-    def _face_qualities(frame: np.ndarray, lock: RingLock) -> dict:
-        """这一批锁定圆面各自的顶面质量。"""
-        return {region: measure_face(frame, region) for region in lock.regions}
+    def _face_qualities(grayscale, lock: RingLock) -> dict:
+        """这一批锁定圆面各自的顶面质量。
+
+        ``grayscale`` 是**取灰度图的可调用对象**（一帧只转一次，用到才转）：
+        候选一个都没有时它一次都不会被调用，有几十个候选时也只转一次。
+        """
+        return {region: measure_face(grayscale(), region) for region in lock.regions}
 
     @staticmethod
     def _accepted(region: LockedRegion, face: FaceQuality, hits, *, colour_path: bool) -> bool:
@@ -631,7 +655,7 @@ def _run_image(args) -> int:
 def _run_camera(args) -> int:
     import cv2
 
-    from modules.vision import USBCamera, close_previews, open_preview
+    from modules.vision import USBCamera, close_previews, open_preview, run_preview
 
     window = open_preview()
     try:
@@ -641,14 +665,14 @@ def _run_camera(args) -> int:
             colour_tolerance=args.tolerance,
         ) as locator, USBCamera(args.camera, width=1280, height=720).initialize() as camera:
             print(f"摄像头 {args.camera}；窗口 {window!r}，按 q 退出")
-            while True:
-                frame = camera.read()
-                if frame is None:
-                    raise RuntimeError("摄像头未返回图像")
-                report = locator.locate(frame)
-                cv2.imshow(window, locator.draw(frame, report))
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
+
+            def overlay(annotated, report, _stats) -> None:
+                best = None if report is None else report.best
+                text = "no material" if best is None else f"{best.name or 'material'} {best.distance_mm:.0f}mm"
+                cv2.putText(annotated, text, (10, 24),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            run_preview(camera, locator.locate, locator.draw, window=window, overlay=overlay)
     finally:
         close_previews()
     return 0

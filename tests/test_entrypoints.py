@@ -102,6 +102,11 @@ class EntryPointTests(unittest.TestCase):
             input="0\n",
             capture_output=True,
             text=True,
+            # 子进程用 UTF-8 写菜单（代码里有中文），而 text=True 默认按
+            # Windows 本地编码（GBK）解码，会抛 UnicodeDecodeError 并让
+            # stdout 变成 None。这里把两端的编码都钉死。
+            encoding="utf-8",
+            errors="replace",
             cwd=ROOT,
             timeout=10,
         )
@@ -114,6 +119,8 @@ class EntryPointTests(unittest.TestCase):
             [sys.executable, "-c", "import main"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=ROOT,
             timeout=10,
         )

@@ -14,7 +14,6 @@ MENU_ENTRY = (9, "视觉演示")
 
 import argparse
 import os
-import time
 from pathlib import Path
 
 from modules.vision import (
@@ -27,6 +26,7 @@ from modules.vision import (
     load_camera_id,
     looks_blank,
     open_preview,
+    run_preview,
     warn_blank_preview,
 )
 
@@ -81,37 +81,37 @@ def main() -> None:
                 USBCamera(camera_id, width=args.width, height=args.height,
                           fps=args.fps).initialize() as camera:
             print(f"preview running in window {window!r}; press q to quit")
-            fps = 0.0
-            previous = time.time()
-            while True:
-                frame = camera.read()
-                if frame is None:
-                    print("no frame from camera; exiting")
-                    break
 
+            def watch(frame, _hits, _stats) -> None:
+                nonlocal blank_frames, warned_blank
                 blank_frames = blank_frames + 1 if looks_blank(frame) else 0
                 if blank_frames >= BLANK_FRAME_WARNING and not warned_blank:
                     warned_blank = True
                     warn_blank_preview(camera_id)
 
-                detections = detector.detect(frame)
-                now = time.time()
-                fps = fps * 0.9 + (1.0 / (now - previous + 1e-6)) * 0.1 if previous else 0.0
-                previous = now
+            def overlay(annotated, hits, _stats) -> None:
+                """距离读数（``--real-widths`` 给了才算）。"""
+                if estimator is None or not hits:
+                    return
+                for det in hits:
+                    distance = estimator.estimate(det)
+                    if distance is None:
+                        continue
+                    text = f"{det.name}: {distance / 1000.0:.2f} m"
+                    x, y = int(det.x1), max(int(det.y1) - 24, 15)
+                    cv2.putText(annotated, text, (x, y),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-                annotated = detector.draw(frame, detections, fps=fps)
-                if estimator is not None:
-                    for det in detections:
-                        distance = estimator.estimate(det)
-                        if distance is not None:
-                            text = f"{det.name}: {distance / 1000.0:.2f} m"
-                            x, y = int(det.x1), max(int(det.y1) - 24, 15)
-                            cv2.putText(annotated, text, (x, y),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                                        (0, 255, 255), 1)
-                cv2.imshow(window, annotated)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
+            # 窗口左下角那行 cap/det/age 由 run_preview 负责画：取帧与推理各跑一条
+            # 线程，两者速率分开显示，才看得出"画面卡"到底是取帧慢还是识别慢。
+            run_preview(
+                camera,
+                detector.detect,
+                detector.draw,
+                window=window,
+                on_frame=watch,
+                overlay=overlay,
+            )
     finally:
         close_previews()
 

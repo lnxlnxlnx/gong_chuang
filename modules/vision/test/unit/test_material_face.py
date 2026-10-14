@@ -45,6 +45,24 @@ class GrayscaleTests(unittest.TestCase):
             to_grayscale(np.zeros((0, 0), dtype=np.uint8))
         with self.assertRaises(ValueError):
             to_grayscale(np.zeros((2, 2, 2, 2), dtype=np.uint8))
+        # 空的 float64 灰度图也要照样拒绝，别被"原样返回"那条捷径漏过去
+        with self.assertRaises(ValueError):
+            to_grayscale(np.zeros((0, 0), dtype=np.float64))
+
+    def test_an_already_float_gray_frame_is_returned_without_copying(self) -> None:
+        """一帧 1280×720 的 astype(float64) 要 1.0–1.2 ms，而每个候选圆都要用同一张。"""
+        gray = np.full((4, 4), 7.0)
+        self.assertIs(to_grayscale(gray), gray)
+
+    def test_other_dtypes_are_still_converted_to_float64(self) -> None:
+        # float32 与 float64 的累加末位可能不同，下游要拿这些数比阈值，不能悄悄换精度。
+        for array in (np.full((4, 4), 7, dtype=np.uint8),
+                      np.full((4, 4), 7.0, dtype=np.float32)):
+            with self.subTest(dtype=array.dtype):
+                converted = to_grayscale(array)
+                self.assertEqual(converted.dtype, np.float64)
+                self.assertIsNot(converted, array)
+                np.testing.assert_array_equal(converted, np.full((4, 4), 7.0))
 
 
 class FaceQualityTests(unittest.TestCase):

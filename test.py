@@ -117,5 +117,8 @@ def main() -> None:
             importlib.import_module(module_name).main()
 
 
+#: 没有这一句时 ``import test`` 会直接进菜单并阻塞在 ``input()`` 上——
+#: 而 ``tests/test_entrypoints.py`` 正是靠 import 它来调 ``discover_manual_tests``
+#: 和 ``main`` 的。``main.py`` 一直是这么写的，这里是同一个约定。
 if __name__ == "__main__":
     main()

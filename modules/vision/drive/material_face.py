@@ -77,14 +77,28 @@ class FaceQuality:
 
 
 def to_grayscale(frame: np.ndarray) -> np.ndarray:
-    """把一帧 BGR/BGRA/灰度图变成 float 灰度图（纯 NumPy，不依赖 cv2）。"""
+    """把一帧 BGR/BGRA/灰度图变成 float64 灰度图（纯 NumPy，不依赖 cv2）。
+
+    **已经是 float64 的二维灰度图原样返回，不再复制。** 这一条是为
+    ``MaterialLocator`` 准备的：它一帧要对每个候选圆各量一次 face，而每量一次
+    都重转整帧的话，1280×720 上转一次 12.0 ms、复制一次 1.0 ms——霍夫在真实
+    台面图上会给 24–87 个候选，"87 × 12 ms ≈ 1.0 s"就是这么来的（实测）。
+    调用方自己转一次、把这张图传进来，**数值完全不变**：还是同一条
+    ``mean(axis=2, dtype=np.float64)`` 算出来的，只是不再重复算。
+
+    非 float64 的输入（float32 也算）仍然复制并转成 float64：float32 与 float64
+    的累加结果在末位可能不同，而下游是拿这些数跟阈值比的，不能悄悄换精度。
+    """
     array = np.asarray(frame)
     if array.ndim == 2:
-        gray = array.astype(np.float64)
-    elif array.ndim == 3:
-        gray = array[:, :, :3].mean(axis=2, dtype=np.float64)
-    else:
+        if array.size == 0:
+            raise ValueError("frame is empty")
+        if array.dtype == np.float64:
+            return array
+        return array.astype(np.float64)
+    if array.ndim != 3:
         raise ValueError(f"unsupported frame shape: {array.shape}")
+    gray = array[:, :, :3].mean(axis=2, dtype=np.float64)
     if gray.size == 0:
         raise ValueError("frame is empty")
     return gray
@@ -101,7 +115,10 @@ def measure_face(
 ) -> FaceQuality:
     """量一个锁定圆面的内部均匀度与边界支撑度。
 
-    ``frame`` 可以是 BGR 也可以是灰度图；``region`` 是 :class:`LockedRegion`。
+    ``frame`` 可以是 BGR 也可以是灰度图；**同一帧要量多个圆时请自己先转一次**
+    :func:`to_grayscale`，再把这个灰度图传给本函数（见 ``to_grayscale`` 说明：
+    每个候选都重转一遍整帧，是 ``MaterialLocator`` 里最容易被忽略的一笔开销）。
+    ``region`` 是 :class:`LockedRegion`。
     """
     if rays < 8:
         raise ValueError("rays must be at least 8")
