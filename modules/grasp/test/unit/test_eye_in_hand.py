@@ -23,12 +23,14 @@ from modules.grasp.drive import eye_in_hand as servo
 from modules.grasp.drive.eye_in_hand import (
     BASE_AXIS,
     RADIAL_AXIS,
+    LiftScale,
     ObjectSelector,
     ServoConfig,
     ServoError,
     ServoJacobian,
     ServoTarget,
     align_x_y,
+    descend_z,
     load_jacobian,
     load_object_selector,
     load_servo_config,
@@ -36,6 +38,7 @@ from modules.grasp.drive.eye_in_hand import (
     measure_offset,
     measure_settled,
     probe_jacobian,
+    retract_extension,
     save_calibration,
     select_object,
 )
@@ -156,6 +159,8 @@ class ServoConfigTests(unittest.TestCase):
             {"max_pulses_per_step": 0},
             {"max_total_pulses": 0},
             {"probe_pulses": 0},
+            {"z_descend_pulses": 0},
+            {"extension_retract_pulses": -150},
             {"frame_timeout_seconds": 0.0},
             {"frame_margin_seconds": -1.0},
         ):
@@ -178,6 +183,15 @@ class ConfigFileTests(unittest.TestCase):
     def test_project_config_loads(self) -> None:
         config = load_servo_config()
         self.assertGreater(config.tolerance_mm, 0)
+
+    def test_the_pulse_steps_are_written_in_the_project_config(self) -> None:
+        """两个脉冲数必须真的落在配置文件里：现场要能手改，不能只靠代码里的默认值。"""
+        document = json.loads(servo.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        self.assertIn("z_descend_pulses", document)
+        self.assertIn("extension_retract_pulses", document)
+        config = load_servo_config()
+        self.assertGreater(config.z_descend_pulses, 0)
+        self.assertGreater(config.extension_retract_pulses, 0)
 
     def test_project_config_starts_uncalibrated(self) -> None:
         """出厂状态必须是"没标定"，而不是某个编出来的默认值。"""
@@ -210,6 +224,8 @@ class ConfigFileTests(unittest.TestCase):
             {"tolerance_mm": 0},
             {"max_iterations": 0},
             {"probe_pulses": 1.5},
+            {"z_descend_pulses": 0},
+            {"extension_retract_pulses": 1.5},
         ):
             with self.subTest(document=document):
                 self.write(document)
@@ -469,10 +485,11 @@ class AlignXYTests(unittest.TestCase):
         self.assertLessEqual(result.error_mm, 0.5)
         self.assertAlmostEqual(result.readings[-1][0], self.TARGET.x_mm, places=1)
         self.assertAlmostEqual(result.readings[-1][1], self.TARGET.y_mm, places=1)
-        # 除了第一次，后面每次读都必须带时间戳过滤。
+        # 除了最初那几次，后面每次读都必须带时间戳过滤。
         self.assertGreaterEqual(link.guarded_reads, result.iterations - 1)
-        # 第一次测量是**不带过滤**的：确认停稳要看两次读数，所以是 2 次。
-        self.assertEqual(link.unguarded_reads, 2, "停稳判据需要连续两次读数")
+        # 不带过滤的读只有开头：安全抬升判据要两次读数确认停稳，正式测量再两次。
+        self.assertGreaterEqual(link.unguarded_reads, 2, "停稳判据需要连续两次读数")
+        self.assertLessEqual(link.unguarded_reads, 6, "只有开头允许不带过滤")
 
     def test_converges_despite_a_systematic_shortfall(self) -> None:
         """每次只走 60%：闭环靠重新测量补回来，这正是不用绝对标定也能到位的原因。"""
@@ -757,6 +774,134 @@ class MoveAxesTests(unittest.TestCase):
         arm = FakeArm(self.TRUTH)
         self.assertEqual(self._record_sleeps(arm, ServoConfig(), 0, 0), [])
         self.assertEqual(arm.calls, [])
+
+
+class LiftScaleTests(unittest.TestCase):
+    """升降灵敏度的符号：**这是"z 高于目标却去抬升"那个 bug 的守卫**。"""
+
+    def test_pulses_cancel_the_error(self) -> None:
+        # 抬升让 z 变大（dz_per_pulse > 0）：z 高于目标时要**下降**（负脉冲）。
+        scale = LiftScale(dz_per_pulse=0.0121)
+        self.assertLess(scale.pulses_for(+50.0), 0.0, "z 高于目标必须往下走")
+        self.assertGreater(scale.pulses_for(-50.0), 0.0, "z 低于目标必须往上走")
+        # 走完这些脉冲，误差正好归零。
+        for error in (50.0, -30.0, 7.5):
+            with self.subTest(error=error):
+                moved = scale.pulses_for(error) * scale.dz_per_pulse
+                self.assertAlmostEqual(moved + error, 0.0, places=9)
+
+    def test_zero_sensitivity_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ServoError, "灵敏度是 0"):
+            LiftScale(dz_per_pulse=0.0).pulses_for(1.0)
+
+
+class ZGuardTests(unittest.TestCase):
+    """z 伺服的下降护栏：宁可不走，也不许再往下。"""
+
+    def test_guard_clamps_a_descent_that_would_go_too_low(self) -> None:
+        scale = LiftScale(dz_per_pulse=0.0121)
+        config = ServoConfig(z_min_mm=30.0)
+        # 现在 z=40、想下降 2000 脉冲（按 0.0121 会降到 15.8 mm，低于护栏）。
+        step, clamped = servo._lift_step_within_guard(
+            z_mm=40.0, step=-2000, scale=scale, config=config
+        )
+        self.assertTrue(clamped)
+        self.assertGreater(step, -2000)
+        # 夹完之后预测的 z 不低于护栏。
+        self.assertGreaterEqual(40.0 + step * scale.dz_per_pulse, config.z_min_mm - 1e-9)
+
+    def test_guard_leaves_a_safe_move_alone(self) -> None:
+        scale = LiftScale(dz_per_pulse=0.0121)
+        config = ServoConfig(z_min_mm=30.0)
+        step, clamped = servo._lift_step_within_guard(
+            z_mm=120.0, step=-600, scale=scale, config=config
+        )
+        self.assertFalse(clamped)
+        self.assertEqual(step, -600)
+
+
+class PulseStepTests(unittest.TestCase):
+    """脉冲版抓取前两步：升降下降 + 伸缩后缩。
+
+    这两步是**开环**的（爪子压下去之后画面里就没有物块了），所以能测的只有两件事：
+    发出的脉冲数与配置一致，以及"平面没对准"必须真的拦住——一个动作帧都不发。
+    """
+
+    class Arm:
+        """只记动作的假臂：升降与伸缩各记一条。"""
+
+        def __init__(self) -> None:
+            self.calls: List[Tuple[str, int]] = []
+
+        def move_down(self, pulses, **_kwargs):
+            self.calls.append(("down", pulses))
+
+        def move_up(self, pulses, **_kwargs):
+            self.calls.append(("up", pulses))
+
+        def move_backward(self, pulses, **_kwargs):
+            self.calls.append(("back", pulses))
+
+        def move_forward(self, pulses, **_kwargs):
+            self.calls.append(("forward", pulses))
+
+    class StillLink:
+        """画面静止的假镜头：连续两次读数一致，``_settled_sighting`` 立刻返回。"""
+
+        def __init__(self, x: float, y: float) -> None:
+            self.x, self.y = x, y
+            self.error = None
+
+        def frame(self, **_kwargs):
+            return (sighting(4, self.x, self.y),)
+
+    def test_the_descent_uses_the_configured_pulse_count(self) -> None:
+        arm = self.Arm()
+        result = descend_z(arm, self.StillLink(1.0, -1.0), ObjectSelector(), ServoConfig())
+        self.assertEqual(arm.calls, [("down", 1700)])
+        self.assertEqual(result.pulses, 1700)
+        self.assertAlmostEqual(result.planar_mm, math.hypot(1.0, -1.0), places=9)
+        self.assertGreater(result.start_z_mm, 0.0)
+
+    def test_a_plane_that_is_not_aligned_is_refused_before_any_motion(self) -> None:
+        arm = self.Arm()
+        with self.assertRaisesRegex(ServoError, "还没对准"):
+            descend_z(arm, self.StillLink(20.0, 0.0), ObjectSelector(), ServoConfig())
+        self.assertEqual(arm.calls, [])
+
+    def test_the_override_only_changes_this_run(self) -> None:
+        arm = self.Arm()
+        config = ServoConfig()
+        result = descend_z(arm, self.StillLink(0.0, 0.0), ObjectSelector(), config, pulses=250)
+        self.assertEqual(arm.calls, [("down", 250)])
+        self.assertEqual(result.pulses, 250)
+        # 覆盖不写回配置：下一次还是配置里的值。
+        self.assertEqual(config.z_descend_pulses, 1700)
+
+    def test_a_nonsense_override_is_refused_without_moving(self) -> None:
+        for pulses in (0, -150, 12.5, True):
+            with self.subTest(pulses=pulses):
+                arm = self.Arm()
+                with self.assertRaises(ServoError):
+                    descend_z(
+                        arm,
+                        self.StillLink(0.0, 0.0),
+                        ObjectSelector(),
+                        ServoConfig(),
+                        pulses=pulses,
+                    )
+                self.assertEqual(arm.calls, [])
+
+    def test_the_retract_pulls_the_extension_back_by_the_configured_count(self) -> None:
+        arm = self.Arm()
+        moved = retract_extension(arm, ServoConfig())
+        self.assertEqual(arm.calls, [("back", 150)])
+        self.assertEqual(moved, 150)
+
+    def test_the_retract_override_is_honoured(self) -> None:
+        arm = self.Arm()
+        self.assertEqual(retract_extension(arm, ServoConfig(), pulses=40), 40)
+        self.assertEqual(arm.calls, [("back", 40)])
 
 
 if __name__ == "__main__":

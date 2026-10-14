@@ -23,7 +23,26 @@ python -m modules.grasp.test.manual.align_xy
 
 # **跟随**：物块被移动时持续跟着对准，Ctrl+C 退出
 python -m modules.grasp.test.manual.align_xy --follow
+
+# 平面稳定之后往下走：升降下降 + 伸缩后缩（两个固定脉冲数）
+python -m modules.grasp.test.manual.align_xy --align-z
 ```
+
+## z 这一步是开环的：两个可改的脉冲数
+
+x/y 是闭环（只在平面里动）；**平面一旦对准**，剩下的两步就是两个固定脉冲数，
+都在 ``modules/grasp/eye_in_hand.json`` 里，现场直接改：
+
+| 配置键 | 轴 | 动作 |
+|---|---|---|
+| ``z_descend_pulses`` | 升降（6 号） | 下降这么多脉冲到夹持高度 |
+| ``extension_retract_pulses`` | 伸缩（7 号） | 再后缩这么多脉冲 |
+
+``--align-z`` 会**先确认平面已经对准**（物块离光轴 ≤ ``z_center_tolerance_mm``）再走；
+没对准就拒绝下降——脉冲数只保证往下走了那么多，不保证下面正好是物块。
+
+试新数不用改文件：``--z-pulses`` / ``--retract-pulses`` 只覆盖这一次。
+只有想"拿物块深度当反馈"时才用视觉伺服版 ``--align-z-visual``（要先标定升降灵敏度）。
 
 ## 这套机器上相机装在臂上
 
@@ -39,7 +58,7 @@ python -m modules.grasp.test.manual.align_xy --follow
 
 from __future__ import annotations
 
-MENU_ENTRY = (21, "x/y 对准物块")
+MENU_ENTRY = (21, "x/y 对准物块（对准后可 z 下降）")
 
 import argparse
 import math
@@ -56,13 +75,21 @@ from modules.grasp.drive.eye_in_hand import (
     ServoError,
     ServoJacobian,
     ServoTarget,
+    _move_lift,
     align_x_y,
+    align_z,
+    descend_z,
+    find_object,
     load_jacobian,
+    load_lift_scale,
     load_object_selector,
     load_servo_config,
     load_target,
+    load_z_target,
     measure_offset,
     probe_jacobian,
+    probe_lift_scale,
+    retract_extension,
     save_calibration,
 )
 from modules.motor.config import load_bus_config as load_motor_bus_config
@@ -237,7 +264,10 @@ def run_align(
 
     result = align_x_y(arm, source, selector, target, jacobian, config, on_message=_say)
     print(f"\n{result.summary()}")
-    print("下一步：z 对准（下降到物块距镜头约 70 mm）与夹爪闭合。")
+    print(
+        f"下一步：--align-z（升降下降 {config.z_descend_pulses} 脉冲 + 伸缩后缩 "
+        f"{config.extension_retract_pulses} 脉冲），然后合上夹爪。"
+    )
     return 0
 
 
@@ -288,6 +318,10 @@ def run_follow(
             time.sleep(0.02)
     except KeyboardInterrupt:
         print(f"\n跟随结束：共 {rounds} 轮，其中 {moved_rounds} 轮发了动作。")
+        print(
+            f"要对准之后往下走：--align-z（升降下降 {config.z_descend_pulses} 脉冲 + "
+            f"伸缩后缩 {config.extension_retract_pulses} 脉冲）"
+        )
         return 0
 
 
@@ -373,6 +407,163 @@ def run_teach(
         print(f"  已走 {repeats} 步 x {step} 脉冲")
 
 
+def run_descend_z(
+    *,
+    arm: RobotArm,
+    source: FrameSource,
+    selector: ObjectSelector,
+    config: ServoConfig,
+    z_pulses: Optional[int] = None,
+    retract_pulses: Optional[int] = None,
+) -> int:
+    """z 对准（脉冲版）：**确认平面已对准 → 升降下降 → 伸缩后缩**。
+
+    两步都是开环的固定脉冲数，来自 ``modules/grasp/eye_in_hand.json``：
+
+    - ``z_descend_pulses``：升降（6 号电机）下降多少脉冲到夹持高度；
+    - ``extension_retract_pulses``：伸缩（7 号电机）再后缩多少脉冲。
+
+    换物块高度、换夹爪就改这两个数，不用重标任何东西。``--z-pulses`` /
+    ``--retract-pulses`` 只覆盖**这一次**，用来试数；试好了写回配置文件。
+    """
+    down = config.z_descend_pulses if z_pulses is None else z_pulses
+    back = config.extension_retract_pulses if retract_pulses is None else retract_pulses
+    print(f"z 对准（脉冲）：升降/6 号下降 {down} 脉冲，然后伸缩/7 号后缩 {back} 脉冲")
+    print(
+        "  两个数在 modules/grasp/eye_in_hand.json："
+        "z_descend_pulses / extension_retract_pulses"
+        "（--z-pulses / --retract-pulses 只覆盖这一次）"
+    )
+    print(
+        f"  下降前要求平面误差 ≤ {config.z_center_tolerance_mm:.1f} mm"
+        "——脉冲数只保证往下走了这么多，不保证下面正好是物块"
+    )
+    print(
+        "  这是**相对**动作：跑过一次之后先用 --raise 抬回上方再跑第二次，"
+        "否则会在原处再降这么多\n"
+    )
+
+    try:
+        descent = descend_z(
+            arm,
+            source,
+            selector,
+            config,
+            pulses=z_pulses,
+            scale=load_lift_scale(),
+            on_message=_say,
+        )
+    except ServoError as problem:
+        # 三种失败（看不到物块、平面没对准、脉冲数不合法）都发生在发动作之前。
+        print(f"\n下降失败（没有发出动作）：{problem}")
+        return 1
+    print(f"\n{descent.summary()}")
+
+    try:
+        moved = retract_extension(arm, config, pulses=retract_pulses, on_message=_say)
+    except ServoError as problem:
+        print(f"\n后缩失败：{problem}")
+        return 1
+    print(f"后缩 {moved} 脉冲完成。")
+
+    print("下一步：合上夹爪完成抓取。")
+    print(f"  要退回上方：--raise {down}（升降）；要伸回去：--teach 里按 c（伸缩）。")
+    return 0
+
+
+def run_align_z_visual(
+    *,
+    arm: RobotArm,
+    source: FrameSource,
+    selector: ObjectSelector,
+    config: ServoConfig,
+    recalibrate: bool = False,
+) -> int:
+    """z 对准（视觉伺服版）：驱动升降，让物块深度落到 ``z_target_mm``。
+
+    现场用的是脉冲版 :func:`run_descend_z`；这一版留给"固定脉冲数不合适"的场合——
+    它拿物块深度当反馈，代价是要先标定升降灵敏度，而且下降途中检测容易丢目标。
+
+    起手式是**先找、找不到就抬起来**：物块太近时既模糊又掉出工作距离窗口，
+    检测会直接失效；抬起来往往就看见了。
+    """
+    target = load_z_target()
+    if target is None:
+        print("还没设 z 目标；在 modules/grasp/eye_in_hand.json 里填 z_target_mm")
+        return 1
+
+    print(f"z 目标 {target:.1f} mm；下降护栏 z_min_mm={config.z_min_mm:.1f} mm")
+    print(f"工作距离窗口 {config.z_min_mm:.0f}–{config.z_max_mm:.0f} mm")
+    print(
+        f"下降前要求平面误差 ≤ {config.z_center_tolerance_mm:.1f} mm"
+        "（z 看不见爪子有没有对准，所以这一步先自己查一遍）\n"
+    )
+
+    # **先确认平面已经对准。** 顺序反了就是让爪子斜着压下去——现场因此差点压坏爪子。
+    try:
+        offset = measure_offset(source, selector, config)
+    except ServoError as problem:
+        print(f"看不到物块：{problem}")
+        return 1
+    planar = math.hypot(offset[0], offset[1])
+    if planar > config.z_center_tolerance_mm:
+        print(
+            f"物块离光轴 {planar:.1f} mm，还没对准（要求 ≤ "
+            f"{config.z_center_tolerance_mm:.1f} mm）。\n"
+            "先做 x/y 对准，再回来做 z：\n"
+            "  python -m modules.grasp.test.manual.align_xy            # 对准一次\n"
+            "然后重跑 --align-z。"
+        )
+        return 1
+
+    if not find_object(arm, source, selector, config, on_message=_say):
+        print(
+            f"抬升 {config.find_max_steps} 次仍然看不到物块；"
+            "把物块往镜头下放一点、或确认它在画面里"
+        )
+        return 1
+    print()
+
+    scale = None if recalibrate else load_lift_scale()
+    if scale is None:
+        print("标定升降灵敏度（走两段同向抬升，然后退回原位）")
+        try:
+            scale = probe_lift_scale(arm, source, selector, config, on_message=_say)
+        except ServoError as problem:
+            print(f"标定失败：{problem}")
+            return 1
+        path = save_calibration(lift_scale=scale)
+        print(f"已写入 {path}\n")
+
+    try:
+        result = align_z(
+            arm, source, selector, target, scale, config, on_message=_say
+        )
+    except ServoError as problem:
+        print(f"\nz 对准失败：{problem}")
+        return 1
+    print(f"\n{result.summary()}")
+    print("下一步：合上夹爪完成抓取。")
+    return 0
+
+
+def run_raise(*, arm: RobotArm, pulses: int) -> int:
+    """只驱动升降：正数抬升、负数下降。
+
+    转底盘之前先用它把爪子抬到物块上方——**低位转底盘会撞到物块**。
+    它不读摄像头、不转底盘，所以是这个阶段最安全的动作。
+    """
+    if pulses == 0:
+        print("--raise 需要非零脉冲数（正=抬升，负=下降）")
+        return 1
+    direction = "抬升" if pulses > 0 else "下降"
+    print(f"{direction} {abs(pulses)} 脉冲（不转底盘、不读摄像头）")
+    seconds = _move_lift(arm, pulses)
+    print(f"完成，估算耗时 {seconds:.2f} s")
+    print("（升降的绝对高度没有标定，所以这里只报脉冲数）")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="让爪子正下方对准物块（只动平面）")
     mode = parser.add_mutually_exclusive_group()
@@ -391,6 +582,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mode.add_argument("--calibrate", action="store_true", help="实测雅可比（两个轴各动两段）")
     mode.add_argument("--follow", action="store_true", help="跟随：物块移动时持续对准")
+    mode.add_argument(
+        "--align-z",
+        action="store_true",
+        help="z 对准（脉冲版）：平面已对准后，升降下降 z_descend_pulses、伸缩后缩 "
+        "extension_retract_pulses（都在 eye_in_hand.json 里）",
+    )
+    mode.add_argument(
+        "--align-z-visual",
+        action="store_true",
+        help="z 对准（视觉伺服版）：驱动升降让物块深度到 z_target_mm；要先标定升降灵敏度",
+    )
+    parser.add_argument(
+        "--z-pulses",
+        type=int,
+        default=None,
+        metavar="PULSES",
+        help="只覆盖 --align-z 这次的下降脉冲数（不改配置文件）",
+    )
+    parser.add_argument(
+        "--retract-pulses",
+        type=int,
+        default=None,
+        metavar="PULSES",
+        help="只覆盖 --align-z 这次的后缩脉冲数（不改配置文件）",
+    )
+    parser.add_argument(
+        "--recalibrate-lift",
+        action="store_true",
+        help="--align-z-visual 时强制重标升降灵敏度（默认只在没标过时标）",
+    )
+    parser.add_argument(
+        "--raise",
+        dest="raise_pulses",
+        type=int,
+        default=None,
+        metavar="PULSES",
+        help="只驱动升降：正数抬升、负数下降。转底盘前先用它抬起来（低位转会撞到物块）",
+    )
     parser.add_argument("--step", type=int, default=100, help="--teach 的默认步进脉冲数（默认 100）")
     parser.add_argument("--tcp", action="store_true", help="观测改从 TCP 远端镜头来（默认用本机摄像头）")
     parser.add_argument("--camera", type=int, default=None, help="摄像头序号；省略则读 modules/vision/config.json")
@@ -443,10 +672,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         # 标定没做完就在**打开串口之前**说清楚：菜单里直接按 21 的人多半还没标定，
         # 这时候去开硬件毫无意义，还会让人以为程序坏了。
-        # ``--calibrate`` 与 ``--teach`` 本身就是标定手段，不受这个闸限制。
-        if not (arguments.calibrate or arguments.teach) and (
-            target is None or jacobian is None
-        ):
+        # 本身就是标定/对准手段的那几个模式不受这个闸限制。
+        if not (
+            arguments.calibrate
+            or arguments.teach
+            or arguments.align_z
+            or arguments.align_z_visual
+            or arguments.raise_pulses is not None
+        ) and (target is None or jacobian is None):
             print("还不能真动，先做两步标定（都很快）：\n")
             if target is None:
                 print("  1) **手动示教**（推荐）：小步挪动机械臂，把爪子挪到物块正上方，")
@@ -477,6 +710,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         arm=arm, source=source, selector=selector,
                         config=config, step_pulses=arguments.step,
                     )
+                if arguments.align_z:
+                    return run_descend_z(
+                        arm=arm, source=source, selector=selector, config=config,
+                        z_pulses=arguments.z_pulses,
+                        retract_pulses=arguments.retract_pulses,
+                    )
+                if arguments.align_z_visual:
+                    return run_align_z_visual(
+                        arm=arm, source=source, selector=selector, config=config,
+                        recalibrate=arguments.recalibrate_lift,
+                    )
+                if arguments.raise_pulses is not None:
+                    return run_raise(arm=arm, pulses=arguments.raise_pulses)
                 if arguments.follow:
                     return run_follow(
                         arm=arm, source=source, selector=selector,

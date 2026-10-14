@@ -28,5 +28,25 @@
   "settle_timeout_seconds": 4.0,
   "settle_poll_seconds": 0.05,
   "diameter_change_limit_ratio": 0.25,
-  "inter_frame_seconds": 0.03
+  "inter_frame_seconds": 0.03,
+  "safe_lift_z_mm": 100.0,
+  "safe_lift_step_pulses": 500,
+  "safe_lift_max_steps": 20,
+  "safe_lift_pulses": 0,
+  "safe_lift_angle_degrees": 1.0,
+  "z_descend_pulses": 2200,
+  "extension_retract_pulses": 150,
+  "z_target_mm": 90.0,
+  "lift_scale": {
+    "dz_per_pulse": 0.01209273118599441
+  },
+  "z_tolerance_mm": 3.0,
+  "z_center_tolerance_mm": 6.0,
+  "z_min_mm": 85.0,
+  "z_max_mm": 160.0,
+  "z_max_pulses_per_step": 600,
+  "z_max_total_pulses": 8000,
+  "lift_probe_pulses": 150,
+  "find_lift_step_pulses": 500,
+  "find_max_steps": 10
 }

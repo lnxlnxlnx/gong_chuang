@@ -45,6 +45,19 @@
 2. **雅可比奇异**——两个关节在画面里产生的位移方向几乎重合，2×2 反不过来。
    物理含义是"这两个轴动起来，物块在画面里往同一个方向跑"，靠它们凑不出任意方向；
 3. **迭代用尽**——报出最后误差与总脉冲，让你去看是标定不准还是被挡住了。
+
+## 平面之外的两步是开环的
+
+x/y 靠闭环（就是上面这一套）；**平面一旦对准**，抓取前剩下的两步都是固定脉冲数：
+
+```
+descend_z          升降/6 号下降  z_descend_pulses
+retract_extension  伸缩/7 号后缩  extension_retract_pulses
+```
+
+两个数都在 ``modules/grasp/eye_in_hand.json`` 里，换物块、换夹爪现场直接改，不用重标。
+下降那一步会先确认平面已经对准（``z_center_tolerance_mm``）——它是这两步唯一的护栏。
+想做"拿物块深度当反馈"的版本才用 :func:`align_z`（视觉伺服，要先标定升降灵敏度）。
 """
 
 from __future__ import annotations
@@ -292,6 +305,60 @@ class ServoConfig:
     max_total_pulses: int = 10000
     #: 标定雅可比时，每个轴探两段同向位移；这是每段的脉冲数。
     probe_pulses: int = 200
+
+    # ---------------------------------------------------------------- z 轴
+    #
+    # z 是"物块离镜头多远"，伺服目标就是"让它在 70 mm 左右"。
+    # 它和 x/y 是同一套机制，但多一条**下降护栏**：没有 mm_per_motor_rev 就不知道
+    # 升降的绝对高度，唯一能兜底的就是"测到的 z 不许低于 z_min_mm"。
+
+    #: **下降前要求平面已对准**：物块的 ``hypot(x, y)`` 必须小于这个值（毫米）。
+    #:
+    #: 为什么必须有：``z`` 是按**直径**反推的，而直径与"物块在画面哪个位置"无关。
+    #: 也就是说 z 伺服**看不见爪子有没有对准**——它只知道自己离物块多远。
+    #: 不先对准就下降，等于让爪子斜着压下去。现场因此差点压坏爪子。
+    z_center_tolerance_mm: float = 6.0
+    #: z 误差小于这个值就算到位（毫米）。
+    z_tolerance_mm: float = 3.0
+    #: **下降护栏**：测到的 z 低于它就拒绝再往下走（毫米）。
+    #:
+    #: 这个值必须按**爪子相对镜头的下探量**来定：z 是"镜头到物块顶面"的距离，
+    #: 而抓取点比镜头低，所以"爪子碰到物块"发生在 z 远大于 0 的地方。
+    #: 定得太小等于没有护栏——现场就是这样差点压坏爪子的。
+    #: 经验做法：先量出"爪尖刚好碰到物块顶面"时的 z，再把护栏设得比它大 5–10 mm。
+    z_min_mm: float = 25.0
+    #: z 的上限（毫米）。默认取视觉模块工作距离窗口的上端：出了窗口测距本身就不可信。
+    z_max_mm: float = 160.0
+    #: 升降单步脉冲上限与总预算。
+    z_max_pulses_per_step: int = 600
+    z_max_total_pulses: int = 8000
+
+    # ---------------------------------------------- 脉冲版 z（开环，抓取前两步）
+    #
+    # 上面那几条是**视觉伺服**版 z（:func:`align_z`）用的：先标定升降灵敏度，再拿
+    # "物块离镜头多远"做反馈。下面两条是它的**开环替代**：平面一旦对准，就按固定
+    # 脉冲数把该做的两步走完。现场用的是这一套——数小、改起来快、不用标定任何东西。
+
+    #: 平面对准之后，升降（6 号电机）**直接下降**多少脉冲到夹持高度。
+    #:
+    #: 为什么可以是固定脉冲数：爪子压下去之后画面里就没有物块了（爪瓣挡住、也掉出
+    #: 工作距离窗口），z 这一段**本来就拿不到反馈**；而"从平面对准的高度到夹持高度"
+    #: 是一段机械安装常数，实测一次就固定下来。换物块、换夹爪改这个数就行。
+    #:
+    #: 执行它的是 :func:`descend_z`——那一步会先确认平面已经对准，再走这么多脉冲。
+    z_descend_pulses: int = 1700
+    #: 下降之后，伸缩（7 号电机）**后缩**多少脉冲。
+    #:
+    #: 和 :attr:`z_descend_pulses` 一样是开环的固定值（现场定出来的那个数）。
+    #: 正数 = 后缩（``RobotArm.move_backward``），执行它的是 :func:`retract_extension`。
+    extension_retract_pulses: int = 150
+
+    #: 标定升降灵敏度时，每段走多少脉冲。
+    lift_probe_pulses: int = 120
+    #: **找不到物块时**每次抬升多少脉冲、最多抬几次（"先抬起来再找"）。
+    #: 物块太近时既模糊又出工作距离窗口，检测会直接失效；抬起来往往就看见了。
+    find_lift_step_pulses: int = 500
+    find_max_steps: int = 10
     #: 等新观测的超时（秒）。
     frame_timeout_seconds: float = 2.0
     #: 只接受"接收时刻晚于动作完成时刻"的观测；这里额外留一点余量（秒）。
@@ -300,8 +367,24 @@ class ServoConfig:
     settle_tolerance_mm: float = 0.4
     #: 等画面停稳的最长时间（秒）；超时就拿最后一次读到的值，并让调用方知道。
     settle_timeout_seconds: float = 4.0
-    #: 两条位置帧之间的最小间隔（秒）。
+    #: **转底盘前要抬到多高**：测到的 ``z``（镜头到物块顶面的距离）至少要有这么多毫米。
     #:
+    #: 为什么用 z 而不是脉冲数：这台机器上**移动 x/y 就是旋转底盘**，而低位转过去会撞到
+    #: 物块（现场撞倒过）。"抬够高度"的物理本质就是"镜头/爪子离物块顶面足够远"，
+    #: 而 ``z`` 正是那个距离——它由摄像头直接测出来，**与传动比无关**，
+    #: 所以不需要先标定 ``mm_per_motor_rev`` 或 ``dz_per_pulse`` 就能生效。
+    #:
+    #: ``0`` 表示不用这个判据，退回 ``safe_lift_pulses``。
+    safe_lift_z_mm: float = 100.0
+    #: 用 z 判据时每次抬升多少脉冲（抬完再测，不依赖任何标定值）。
+    safe_lift_step_pulses: int = 500
+    #: 用 z 判据时最多抬几次，免得对着一个永远够不到的目标空转。
+    safe_lift_max_steps: int = 20
+    #: 兜底：**看不到物块时**按这个脉冲数抬升（``0`` 表示不抬，只警告）。
+    safe_lift_pulses: int = 0
+    #: 转底盘的角度超过这么多度时，就必须先抬升。
+    safe_lift_angle_degrees: float = 1.0
+    #: 两条位置帧之间的最小间隔（秒）。
     #: **不能省。** 实测这台机器的 CH340 上，两条 ``FD`` 位置帧背靠背连发（间隔 0 ms）
     #: 会让**两帧都失效**——不是丢一帧，是两个轴都不动，而且驱动器 ``Response=None``
     #: 不会报任何错。留 20 ms 就正常。省掉它的代价是"所有两轴同时要动的步骤变成空操作"，
@@ -338,6 +421,12 @@ class ServoConfig:
             raise ValueError("diameter_change_limit_ratio 必须是正数")
         if self.inter_frame_seconds < 0:
             raise ValueError("inter_frame_seconds 不能是负数")
+        if self.safe_lift_pulses < 0:
+            raise ValueError("safe_lift_pulses 不能是负数")
+        if self.safe_lift_z_mm < 0:
+            raise ValueError("safe_lift_z_mm 不能是负数")
+        if not self.safe_lift_angle_degrees > 0:
+            raise ValueError("safe_lift_angle_degrees 必须是正数")
         for name in (
             "max_iterations",
             "max_pulses_per_step",
@@ -345,9 +434,21 @@ class ServoConfig:
             "parallel_rotation_limit_pulses",
             "max_total_pulses",
             "probe_pulses",
+            "z_max_pulses_per_step",
+            "z_max_total_pulses",
+            "z_descend_pulses",
+            "extension_retract_pulses",
+            "lift_probe_pulses",
+            "find_lift_step_pulses",
+            "find_max_steps",
         ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} 必须是正整数")
+        for name in ("z_tolerance_mm", "z_min_mm", "z_max_mm"):
+            if not getattr(self, name) > 0:
+                raise ValueError(f"{name} 必须是正数")
+        if self.z_min_mm >= self.z_max_mm:
+            raise ValueError("z_min_mm 必须小于 z_max_mm")
 
     def step_limit_for(self, error_mm: float) -> int:
         """当前误差该用哪一档的单步上限。"""
@@ -414,6 +515,58 @@ def load_servo_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ServoConfig:
             document.get("inter_frame_seconds", defaults.inter_frame_seconds),
             "inter_frame_seconds",
         ),
+        safe_lift_z_mm=_non_negative(
+            document.get("safe_lift_z_mm", defaults.safe_lift_z_mm), "safe_lift_z_mm"
+        ),
+        safe_lift_step_pulses=_integer(
+            document.get("safe_lift_step_pulses", defaults.safe_lift_step_pulses),
+            "safe_lift_step_pulses",
+        ),
+        safe_lift_max_steps=_integer(
+            document.get("safe_lift_max_steps", defaults.safe_lift_max_steps),
+            "safe_lift_max_steps",
+        ),
+        safe_lift_pulses=_non_negative_integer(
+            document.get("safe_lift_pulses", defaults.safe_lift_pulses), "safe_lift_pulses"
+        ),
+        safe_lift_angle_degrees=_positive(
+            document.get("safe_lift_angle_degrees", defaults.safe_lift_angle_degrees),
+            "safe_lift_angle_degrees",
+        ),
+        z_tolerance_mm=_positive(
+            document.get("z_tolerance_mm", defaults.z_tolerance_mm), "z_tolerance_mm"
+        ),
+        z_center_tolerance_mm=_positive(
+            document.get("z_center_tolerance_mm", defaults.z_center_tolerance_mm),
+            "z_center_tolerance_mm",
+        ),
+        z_min_mm=_positive(document.get("z_min_mm", defaults.z_min_mm), "z_min_mm"),
+        z_max_mm=_positive(document.get("z_max_mm", defaults.z_max_mm), "z_max_mm"),
+        z_max_pulses_per_step=_integer(
+            document.get("z_max_pulses_per_step", defaults.z_max_pulses_per_step),
+            "z_max_pulses_per_step",
+        ),
+        z_max_total_pulses=_integer(
+            document.get("z_max_total_pulses", defaults.z_max_total_pulses),
+            "z_max_total_pulses",
+        ),
+        z_descend_pulses=_integer(
+            document.get("z_descend_pulses", defaults.z_descend_pulses), "z_descend_pulses"
+        ),
+        extension_retract_pulses=_integer(
+            document.get("extension_retract_pulses", defaults.extension_retract_pulses),
+            "extension_retract_pulses",
+        ),
+        lift_probe_pulses=_integer(
+            document.get("lift_probe_pulses", defaults.lift_probe_pulses), "lift_probe_pulses"
+        ),
+        find_lift_step_pulses=_integer(
+            document.get("find_lift_step_pulses", defaults.find_lift_step_pulses),
+            "find_lift_step_pulses",
+        ),
+        find_max_steps=_integer(
+            document.get("find_max_steps", defaults.find_max_steps), "find_max_steps"
+        ),
     )
 
 
@@ -465,13 +618,31 @@ def load_jacobian(config_path: Path = DEFAULT_CONFIG_PATH) -> Optional[ServoJaco
     return ServoJacobian(**{field: _number(block[field], f"jacobian.{field}") for field in fields})
 
 
+def load_z_target(config_path: Path = DEFAULT_CONFIG_PATH) -> Optional[float]:
+    """读取已标定的 z 目标（毫米）；没标定过返回 ``None``。"""
+    document = _load_document(config_path)
+    value = document.get("z_target_mm")
+    return None if value is None else _number(value, "z_target_mm")
+
+
+def load_lift_scale(config_path: Path = DEFAULT_CONFIG_PATH) -> Optional[LiftScale]:
+    """读取已标定的升降灵敏度；没标定过返回 ``None``。"""
+    document = _load_document(config_path)
+    block = document.get("lift_scale")
+    if not isinstance(block, dict) or block.get("dz_per_pulse") is None:
+        return None
+    return LiftScale(dz_per_pulse=_number(block["dz_per_pulse"], "lift_scale.dz_per_pulse"))
+
+
 def save_calibration(
     *,
     target: Optional[ServoTarget] = None,
     jacobian: Optional[ServoJacobian] = None,
+    z_target_mm: Optional[float] = None,
+    lift_scale: Optional[LiftScale] = None,
     config_path: Path = DEFAULT_CONFIG_PATH,
 ) -> Path:
-    """把标定结果写回配置文件（只改这两个块，别的键原样保留）。"""
+    """把标定结果写回配置文件（只改这几个块，别的键原样保留）。"""
     document = _load_document(config_path)
     if target is not None:
         document["target"] = {"x_mm": target.x_mm, "y_mm": target.y_mm}
@@ -482,6 +653,10 @@ def save_calibration(
             "radial_dx": jacobian.radial_dx,
             "radial_dy": jacobian.radial_dy,
         }
+    if z_target_mm is not None:
+        document["z_target_mm"] = z_target_mm
+    if lift_scale is not None:
+        document["lift_scale"] = {"dz_per_pulse": lift_scale.dz_per_pulse}
     config_path.write_text(
         json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -651,9 +826,11 @@ def _settled_sighting(
             previous = None
         else:
             last = current
-            point = (current.x_mm, current.y_mm)
-            if previous is not None and math.hypot(
-                point[0] - previous[0], point[1] - previous[1]
+            point = (current.x_mm, current.y_mm, current.z_mm)
+            if previous is not None and math.sqrt(
+                (point[0] - previous[0]) ** 2
+                + (point[1] - previous[1]) ** 2
+                + (point[2] - previous[2]) ** 2
             ) <= config.settle_tolerance_mm:
                 return current
             previous = point
@@ -775,6 +952,9 @@ def align_x_y(
     :raises ServoError: 看不到物块、雅可比奇异、脉冲预算用完，或迭代用尽仍未进容差。
     """
     say = on_message if on_message is not None else (lambda _message: None)
+    # x/y 的每一步都要转底盘，所以先在**打开动作之前**抬到安全高度。这是机械结构上的
+    # 硬约束：低位转底盘会撞到台面上的物块。刻意不自动降回去——降回去正是撞到它的动作。
+    raise_before_rotating(arm, link, selector, config, on_message=say)
     readings: List[Tuple[float, float]] = []
     total_base = 0
     total_radial = 0
@@ -940,6 +1120,537 @@ def _require_consistent_legs(
         )
 
 
+# ------------------------------------------------------------------ z 轴伺服
+#
+# z 就是 :attr:`MaterialSighting.z_mm`——**物块沿光轴离镜头多远**。抓取时希望它落在
+# 7 cm 左右，所以这一步的活是"驱动升降，让测到的 z 等于目标"。
+#
+# 和 x/y 同一套机制（测 → 算 → 走 → 再测），但多两件事：
+#
+# 1. **下降护栏**：``mm_per_motor_rev`` 没标定时不知道升降的绝对高度，唯一能兜底的
+#    就是"测到的 z 不许低于 z_min_mm"。相机撞到物块之前，z 一定先变小。
+# 2. **找不到就先抬起来**：物块太近时既模糊又掉出工作距离窗口，检测会直接失效。
+#    抬起来往往就看见了，所以 :func:`find_object` 是这一步的标准起手式。
+
+LIFT_AXIS = "lift"
+
+
+@dataclass(frozen=True)
+class LiftScale:
+    """升降的 z 灵敏度：每脉冲让物块深度变化多少毫米（**抬升为正**）。"""
+
+    dz_per_pulse: float
+
+    def pulses_for(self, error_mm: float) -> float:
+        """把误差 ``error_mm`` **消掉**所需的升降脉冲（带符号）。
+
+        ``error_mm`` 是"当前 z − 目标 z"。要让 z 变化 ``−error_mm``，所以这里取负——
+        和 :meth:`ServoJacobian.pulses_for` 同一个约定（那条内部也带负号）。
+        **漏掉这个负号会让升降朝反方向走**：z 高于目标时它去抬升，越走越远。
+        """
+        if abs(self.dz_per_pulse) < 1e-9:
+            raise ServoError(
+                "升降灵敏度是 0：这个轴没有改变物块深度。确认升降真的接上了、"
+                "且探针时画面里有完整的物块"
+            )
+        return -error_mm / self.dz_per_pulse
+
+    def summary(self) -> str:
+        return f"升降每 1000 脉冲 -> z {self.dz_per_pulse * 1000:+.1f} mm"
+
+
+@dataclass(frozen=True)
+class ZResult:
+    """一次 z 对准的结果。"""
+
+    target_mm: float
+    #: 每次测到的 z，按顺序；最后一个是最终值。
+    readings: Tuple[float, ...]
+    error_mm: float
+    pulses: int
+    iterations: int
+    tolerance_mm: float
+    #: 因为下降护栏拦住而停在半路（不是失败，是"再往下会撞"）。
+    stopped_by_guard: bool = False
+
+    @property
+    def aligned(self) -> bool:
+        return abs(self.error_mm) <= self.tolerance_mm
+
+    def summary(self) -> str:
+        if self.aligned:
+            verdict = "完成"
+        elif self.stopped_by_guard:
+            verdict = "被下降护栏拦住（再往下会撞上物块）"
+        else:
+            verdict = "未达标"
+        return (
+            f"z 对准{verdict}：最终 z={self.readings[-1]:.1f} mm，"
+            f"误差 {self.error_mm:+.2f} mm（容差 {self.tolerance_mm:.1f} mm）；"
+            f"升降 {self.pulses:+d} 脉冲；测量 {self.iterations} 次"
+        )
+
+
+def _send_lift(arm, signed_pulses: int) -> float:
+    """只**发出**升降动作、不等；返回估算耗时（秒）。正数 = 抬升。"""
+    if signed_pulses == 0:
+        return 0.0
+    action = arm.move_up if signed_pulses > 0 else arm.move_down
+    report = action(abs(signed_pulses), wait=False)
+    return float(getattr(report, "estimated_seconds", 0.0) or 0.0)
+
+
+def _move_lift(arm, signed_pulses: int) -> float:
+    seconds = _send_lift(arm, signed_pulses)
+    time.sleep(seconds)
+    return seconds
+
+
+def raise_before_rotating(
+    arm,
+    link: FrameSource,
+    selector: ObjectSelector,
+    config: ServoConfig,
+    *,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> int:
+    """**转底盘之前先抬到安全高度**；返回抬升用的脉冲数。
+
+    这一条是机械结构决定的硬约束，不是保守起见：这台机器上**移动 x/y 就是旋转底盘**，
+    而爪子和相机在低位时转过去会直接撞到台面上的物块——现场撞倒过一次。
+
+    判据优先用 **z**（镜头到物块顶面的距离）而不是脉冲数：z 由摄像头直接测出来，
+    与传动比无关，所以在 ``mm_per_motor_rev`` 还没标定的时候就能生效。
+    做法是"抬一段、测一次"，直到 ``z >= safe_lift_z_mm``——**不依赖任何标定值**。
+
+    看不到物块时退回 ``safe_lift_pulses``；那个也是 0 就**明确警告**而不是偷偷放过。
+
+    刻意**不**在事后自动降回去：降回去正是撞到物块的那个动作。什么时候下降由
+    :func:`align_z`（带下降护栏）决定。
+    """
+    say = on_message if on_message is not None else (lambda _message: None)
+
+    if config.safe_lift_z_mm > 0:
+        raised = 0
+        for step in range(1, config.safe_lift_max_steps + 1):
+            try:
+                sighting = _settled_sighting(link, selector, config)
+            except ServoError:
+                say("  看不到物块，没法用 z 判安全高度；改用脉冲数抬升")
+                break
+            if sighting.z_mm >= config.safe_lift_z_mm:
+                say(
+                    f"  已在安全高度：z={sighting.z_mm:.1f} mm ≥ "
+                    f"{config.safe_lift_z_mm:.1f} mm"
+                    + (f"（本轮抬了 {raised} 脉冲）" if raised else "")
+                )
+                return raised
+            say(
+                f"  转底盘前抬升：z={sighting.z_mm:.1f} mm < "
+                f"{config.safe_lift_z_mm:.1f} mm，抬 {config.safe_lift_step_pulses} 脉冲"
+                f"（第 {step}/{config.safe_lift_max_steps} 次）"
+            )
+            _move_lift(arm, config.safe_lift_step_pulses)
+            raised += config.safe_lift_step_pulses
+        else:
+            say(
+                f"  警告：抬了 {config.safe_lift_max_steps} 次仍没到 "
+                f"{config.safe_lift_z_mm:.1f} mm；可能是物块已经不在画面里、"
+                "或者升降到了行程端点。请手动确认高度再继续。"
+            )
+            return raised
+
+    if config.safe_lift_pulses > 0:
+        say(f"  先抬升 {config.safe_lift_pulses} 脉冲（转底盘前必须先抬起来）")
+        seconds = _move_lift(arm, config.safe_lift_pulses)
+        say(f"  抬升动作耗时 {seconds:.2f} s")
+        return config.safe_lift_pulses
+
+    say(
+        "  警告：safe_lift_z_mm 和 safe_lift_pulses 都是 0，转底盘前不会抬升；"
+        "低位转动会撞到台面上的物块。确认已经手动抬起来再继续。"
+    )
+    return 0
+
+
+def find_object(
+    arm,
+    link: FrameSource,
+    selector: ObjectSelector,
+    config: ServoConfig,
+    *,
+    max_steps: Optional[int] = None,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """逐步**抬升**直到画面里看得见物块；找到返回 ``True``。
+
+    为什么这是标准起手式：物块太近时既模糊、又掉出单目的工作距离窗口，
+    检测会直接失效——看起来像"什么都没有"，其实只是贴太近了。
+    """
+    say = on_message if on_message is not None else (lambda _message: None)
+    steps = config.find_max_steps if max_steps is None else max_steps
+    for step in range(1, steps + 1):
+        try:
+            _settled_sighting(link, selector, config)
+        except ServoError:
+            say(
+                f"  画面里看不到物块：抬升 {config.find_lift_step_pulses} 脉冲再找"
+                f"（第 {step}/{steps} 次）"
+            )
+            _move_lift(arm, config.find_lift_step_pulses)
+            continue
+        if step > 1:
+            say(f"  抬升 {step - 1} 次后看到了物块")
+        return True
+    return False
+
+
+def _try_lift_direction(
+    arm,
+    link: FrameSource,
+    selector: ObjectSelector,
+    config: ServoConfig,
+    direction: int,
+    say: Callable[[str], None],
+) -> Optional[LiftScale]:
+    """朝一个方向走两段同向位移，量出 z 灵敏度；测不出来返回 ``None``。
+
+    ``direction`` 取 ``+1``（抬升）或 ``-1``（下降）。测出什么就照实返回，
+    连同符号：``dz_per_pulse`` 始终以"抬升为正"表达。
+    """
+    pulses = config.lift_probe_pulses
+    before = _settled_sighting(link, selector, config)
+    checkpoint = time.monotonic()
+    _move_lift(arm, direction * pulses)
+    mid = _settled_sighting(link, selector, config, after=checkpoint)
+    checkpoint = time.monotonic()
+    _move_lift(arm, direction * pulses)
+    after = _settled_sighting(link, selector, config, after=checkpoint)
+    _move_lift(arm, -direction * pulses)
+    _move_lift(arm, -direction * pulses)
+
+    first_leg = mid.z_mm - before.z_mm
+    second_leg = after.z_mm - mid.z_mm
+    say(
+        f"  升降探针（{'抬升' if direction > 0 else '下降'}）："
+        f"z {before.z_mm:.1f} -> {mid.z_mm:.1f} -> {after.z_mm:.1f} mm"
+    )
+    # 自洽性：z 是按直径反推的（z ∝ 1/直径），所以直径必须跟着一起变。
+    # 对不上就说明检测换了目标——升降把真物块推出半径窗口之后，
+    # 检测会锁到画面里别的东西上，报出一个看起来很正常、其实毫无关系的 z。
+    for tag, first, second in (("第一段", before, mid), ("第二段", mid, after)):
+        if not (first.diameter_px and second.diameter_px) or second.z_mm <= 0:
+            continue
+        expected = first.diameter_px * first.z_mm / second.z_mm
+        ratio = second.diameter_px / expected
+        if ratio > 1.25 or ratio < 0.8:
+            say(
+                f"    {tag}的直径与 z 对不上（直径 {first.diameter_px:.0f}->"
+                f"{second.diameter_px:.0f} px，按 z 应该到 {expected:.0f} px）："
+                "检测换了目标，这一趟不算"
+            )
+            return None
+    # 第二段必须给出足够大的、方向正确的变化才算数。
+    # 太小说明这一趟根本没动（撞到行程端点、脉冲被背隙吃掉、或者轴没接上）。
+    if direction * second_leg < config.settle_tolerance_mm:
+        say(f"    第二段只变了 {second_leg:+.2f} mm，测不出来")
+        return None
+    scale = LiftScale(dz_per_pulse=direction * second_leg / pulses)
+    say(f"    {scale.summary()}")
+    return scale
+
+
+def probe_lift_scale(
+    arm,
+    link: FrameSource,
+    selector: ObjectSelector,
+    config: ServoConfig,
+    *,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> LiftScale:
+    """实测升降的 z 灵敏度：走两段**同向**位移，用第二段算斜率。
+
+    和 x/y 的探针同一条道理：第二段没有背隙损失。测完退回原位。
+
+    **两个方向都试**：只朝一个方向探的话，如果那个方向已经到行程端点（例如刚用
+    "抬起来找物块"把升降抬到了顶），量到的变化是零，看起来像"这个轴坏了"。
+    先试抬升、不成再试下降，两边都测不出来才报错。
+    """
+    say = on_message if on_message is not None else (lambda _message: None)
+    # 探针要转底盘（底座那一列），所以先抬到安全高度。
+    raise_before_rotating(arm, link, selector, config, on_message=say)
+    upward = _try_lift_direction(arm, link, selector, config, +1, say)
+    if upward is not None:
+        return upward
+    say("  抬升方向测不出来（多半已经到顶），改测下降方向")
+    downward = _try_lift_direction(arm, link, selector, config, -1, say)
+    if downward is not None:
+        return downward
+    raise ServoError(
+        f"抬升和下降两个方向都测不出 z 的变化（每段 {config.lift_probe_pulses} 脉冲）。"
+        "常见原因：升降已经贴在行程端点上、脉冲被背隙吃掉（把 lift_probe_pulses 调大）、"
+        "或者这个轴没接上。"
+    )
+
+
+def _lift_step_within_guard(
+    *, z_mm: float, step: int, scale: LiftScale, config: ServoConfig
+) -> Tuple[int, bool]:
+    """把这一步夹到"预测 z 不低于 ``z_min_mm``"；返回 ``(步长, 是否被夹)``。
+
+    下降护栏用的是**测到的 z**，不是脉冲数——因为没标定 ``mm_per_motor_rev`` 时，
+    脉冲数换算不出绝对高度，而 z 本身就是"离镜头多远"，正是撞上去之前会先变小的量。
+    """
+    predicted = z_mm + step * scale.dz_per_pulse
+    if predicted >= config.z_min_mm:
+        return step, False
+    allowed = (config.z_min_mm - z_mm) / scale.dz_per_pulse
+    clamped = int(math.copysign(min(abs(step), abs(allowed)), step))
+    return clamped, True
+
+
+def align_z(
+    arm,
+    link: FrameSource,
+    selector: ObjectSelector,
+    target_mm: float,
+    scale: LiftScale,
+    config: ServoConfig,
+    *,
+    search: bool = True,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> ZResult:
+    """驱动升降，让物块深度伺服到 ``target_mm``（毫米）。
+
+    :raises ServoError: 看不到物块（且抬升也没找到）、撞上下降护栏、预算用完、迭代用尽。
+    """
+    say = on_message if on_message is not None else (lambda _message: None)
+    if target_mm < config.z_min_mm:
+        raise ServoError(
+            f"目标 z={target_mm:.1f} mm 低于下降护栏 z_min_mm={config.z_min_mm:.1f} mm；"
+            "那样永远到不了。要么放宽 z_min_mm，要么把目标改大"
+        )
+    readings: List[float] = []
+    total_pulses = 0
+    checkpoint: Optional[float] = None
+    #: 第一次测到的像素直径。升降改变的是距离，所以直径**本来就该**随之变化——
+    #: 但变化必须是**连续、单调**的；一步之内翻倍或减半只可能是换了目标。
+    baseline_diameter: Optional[float] = None
+
+    for attempt in range(1, config.max_iterations + 1):
+        try:
+            sighting = _settled_sighting(link, selector, config, after=checkpoint)
+        except ServoError:
+            if not search or not find_object(arm, link, selector, config, on_message=say):
+                raise
+            checkpoint = time.monotonic()
+            continue
+
+        # 检测换目标时必须停下来：升降把真物块推出**半径窗口**（窗口按工作距离算）之后，
+        # 检测会转而锁到画面里别的东西上，报出一个看起来很正常、其实毫无关系的读数。
+        # z 是按直径反推的，所以"直径一步之内翻倍/减半"就是这个事故的签名。
+        if sighting.diameter_px:
+            if baseline_diameter is None:
+                baseline_diameter = sighting.diameter_px
+            else:
+                ratio = sighting.diameter_px / baseline_diameter
+                if ratio > 1.6 or ratio < 0.625:
+                    raise ServoError(
+                        f"画面里物块的像素直径从 {baseline_diameter:.0f} px 变成 "
+                        f"{sighting.diameter_px:.0f} px（{ratio:.2f} 倍），一步之内变了这么多"
+                        "只可能是**检测换了目标**——多半是真物块被推出了半径窗口"
+                        "（窗口按工作距离 z_max_mm 算：镜头抬得太高时物块变小、\n"
+                        "  半径掉到窗口下限以下就被丢弃），检测于是锁到画面里别的东西上。\n"
+                        "  对策：别把它抬那么高（把 z_max_mm 调大或把目标 z 设小一点），"
+                        "或者把视野里其余的东西挪开。"
+                    )
+
+        # **下降之前必须确认平面已经对准。** z 是按直径反推的，而直径与物块在画面
+        # 哪个位置无关——z 伺服看不见爪子有没有对准，不检查就会让爪子斜着压下去。
+        planar = math.hypot(sighting.x_mm, sighting.y_mm)
+        if planar > config.z_center_tolerance_mm:
+            raise ServoError(
+                f"物块离光轴 {planar:.1f} mm，超过下降前允许的 "
+                f"{config.z_center_tolerance_mm:.1f} mm。平面还没对准就下降会让爪子斜着"
+                "压到物块上。先做 x/y 对准（`--follow`，或直接跑一次无参数的菜单 21），"
+                "再回来做 z。"
+            )
+
+        z_mm = sighting.z_mm
+        readings.append(z_mm)
+        error = z_mm - target_mm
+        say(
+            f"第 {attempt} 次测量：z={z_mm:.1f} mm（直径 {sighting.diameter_px or 0:.0f} px），"
+            f"误差 {error:+.2f} mm"
+        )
+        if abs(error) <= config.z_tolerance_mm:
+            return ZResult(
+                target_mm=target_mm, readings=tuple(readings), error_mm=error,
+                pulses=total_pulses, iterations=attempt, tolerance_mm=config.z_tolerance_mm,
+            )
+
+        wanted = scale.pulses_for(error)
+        step = _clamp_pulses(wanted, config.z_max_pulses_per_step)
+        if step == 0:
+            return ZResult(
+                target_mm=target_mm, readings=tuple(readings), error_mm=error,
+                pulses=total_pulses, iterations=attempt, tolerance_mm=config.z_tolerance_mm,
+                stopped_by_guard=True,
+            )
+        step, clamped = _lift_step_within_guard(
+            z_mm=z_mm, step=step, scale=scale, config=config
+        )
+        if step == 0:
+            say(f"  下降护栏：z 已经到 {z_mm:.1f} mm（下限 {config.z_min_mm:.1f} mm），不再往下")
+            return ZResult(
+                target_mm=target_mm, readings=tuple(readings), error_mm=error,
+                pulses=total_pulses, iterations=attempt, tolerance_mm=config.z_tolerance_mm,
+                stopped_by_guard=True,
+            )
+        if abs(total_pulses + step) > config.z_max_total_pulses:
+            raise ServoError(
+                f"升降脉冲预算用完了（已走 {total_pulses}，上限 {config.z_max_total_pulses}），"
+                f"z 还有 {error:+.2f} mm。多半是灵敏度标反了，重跑 z 标定"
+            )
+
+        say(
+            f"  {'抬升' if step > 0 else '下降'} {abs(step)} 脉冲"
+            + ("（已按下降护栏夹小）" if clamped else "")
+        )
+        seconds = _move_lift(arm, step)
+        say(f"  动作耗时 {seconds:.2f} s")
+        total_pulses += step
+        checkpoint = time.monotonic() + config.frame_margin_seconds
+
+    last = readings[-1]
+    raise ServoError(
+        f"z 伺服 {config.max_iterations} 次仍未进入容差 {config.z_tolerance_mm:.1f} mm；"
+        f"最后 z={last:.1f} mm、误差 {last - target_mm:+.2f} mm。"
+        "如果每次都在同一处停住，先看是不是已经贴到物块了（护栏会拦住）"
+    )
+
+
+# ------------------------------------------- 脉冲版 z：下降与后缩（开环，现场在用）
+#
+# 平面一旦对准，剩下的抓取前两步就是两个固定脉冲数：升降下降 ``z_descend_pulses``、
+# 伸缩后缩 ``extension_retract_pulses``。
+#
+# 为什么这里可以开环：爪子压下去之后画面里就没有物块了（爪瓣挡住、也掉出工作距离
+# 窗口），**这一段本来就拿不到反馈**；而"从平面对准的高度到夹持高度"是机械安装常数，
+# 量一次就固定。真正要保证的不是"下降了多少"，而是**下降之前平面已经对准**——脉冲数
+# 只保证往下走了那么多，不保证下面正好是物块。
+
+
+@dataclass(frozen=True)
+class ZDescentResult:
+    """一次"按脉冲下降"的结果。"""
+
+    #: 实际发出的下降脉冲数（正数）。
+    pulses: int
+    #: 下降前测到的平面误差（毫米）——这一步的前置条件。
+    planar_mm: float
+    #: 下降前测到的物块深度（毫米），事后用来核对"当时停在哪一层"。
+    start_z_mm: float
+    #: 下降动作的估算耗时（秒）。
+    seconds: float
+
+    def summary(self) -> str:
+        return (
+            f"下降 {self.pulses} 脉冲完成（下降前 z={self.start_z_mm:.1f} mm、"
+            f"平面误差 {self.planar_mm:.2f} mm）；耗时约 {self.seconds:.2f} s"
+        )
+
+
+def descend_z(
+    arm,
+    link: FrameSource,
+    selector: ObjectSelector,
+    config: ServoConfig,
+    *,
+    pulses: Optional[int] = None,
+    scale: Optional[LiftScale] = None,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> ZDescentResult:
+    """z 对准（脉冲版）：**确认平面已对准之后，按固定脉冲数直接下降**。
+
+    和 :func:`align_z` 的区别只有一句：这里不闭环。爪子压下去之后画面里就没有物块了
+    （爪瓣挡住、也掉出工作距离窗口），z 这一段本来就拿不到反馈；现场真正好用的量是
+    "从平面对准的高度到夹持高度走了多少脉冲"——那是机械安装常数，量一次就固定下来，
+    放在 :attr:`ServoConfig.z_descend_pulses` 里随时能改。换物块高度、换夹爪都只改这个数，
+    不用重标任何东西。
+
+    ## 唯一的护栏：平面已经对准
+
+    脉冲数只保证"往下走了这么多"，**不保证下面正好是物块**。所以走之前先测一次**停稳**
+    的读数：物块离光轴超过 ``z_center_tolerance_mm`` 就拒绝下降（一个动作帧都不发），
+    并让你先去做 x/y 对准。顺序反了就是让爪子斜着压下去——现场因此差点压坏爪子。
+
+    :param pulses: 覆盖配置里的脉冲数（现场试数用）；``None`` 表示用配置值。
+    :param scale: 已标定的升降灵敏度，只用来说一句"预计降到多深"，**不参与决策**。
+    :raises ServoError: 看不到物块、平面还没对准、或覆盖的脉冲数不是正整数。
+    """
+    say = on_message if on_message is not None else (lambda _message: None)
+    count = config.z_descend_pulses if pulses is None else pulses
+    if type(count) is not int or count < 1:
+        raise ServoError(f"下降脉冲数必须是正整数，拿到 {count!r}")
+
+    sighting = _settled_sighting(link, selector, config)
+    planar = math.hypot(sighting.x_mm, sighting.y_mm)
+    if planar > config.z_center_tolerance_mm:
+        raise ServoError(
+            f"物块离光轴 {planar:.1f} mm，超过下降前允许的 "
+            f"{config.z_center_tolerance_mm:.1f} mm。平面还没对准就下降会让爪子斜着压到"
+            "物块上。先做 x/y 对准（`--follow`，或直接跑一次无参数的菜单 21），再回来下降。"
+        )
+    say(
+        f"  下降前：z={sighting.z_mm:.1f} mm，物块离光轴 {planar:.2f} mm"
+        f"（要求 ≤ {config.z_center_tolerance_mm:.1f} mm）"
+    )
+    if scale is not None:
+        # 估算一下"这一步大概会降到多深"。只是给人核对的：真正决定走多少的是脉冲数，
+        # 不是这个估算——所以它不参与任何判断（灵敏度没标定时整段也不出现）。
+        predicted = sighting.z_mm - count * scale.dz_per_pulse
+        say(
+            f"  按已标定的 {scale.summary()}，这 {count} 脉冲预计把 z 从 "
+            f"{sighting.z_mm:.1f} mm 带到约 {predicted:.1f} mm"
+            "（只是估算，用来核对脉冲数改对没有）"
+        )
+    say(f"  下降 {count} 脉冲（升降/6 号；盲降，走完之前画面里就没有物块了）")
+    seconds = _move_lift(arm, -count)
+    say(f"  下降完成，耗时约 {seconds:.2f} s")
+    return ZDescentResult(
+        pulses=count, planar_mm=planar, start_z_mm=sighting.z_mm, seconds=seconds
+    )
+
+
+def retract_extension(
+    arm,
+    config: ServoConfig,
+    *,
+    pulses: Optional[int] = None,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> int:
+    """伸缩轴（7 号电机）**后缩**固定脉冲数；返回实际走的脉冲数。
+
+    它是 :func:`descend_z` 之后的第二步（顺序就是"先下降、再后缩"）。单独调它之前先想清楚
+    爪子下面是什么：它**不检查**平面有没有对准（那是 :func:`descend_z` 的闸），发出去的就是
+    一次水平位移。
+
+    这个数同样来自 :attr:`ServoConfig.extension_retract_pulses`：开环、可改、不用标定。
+
+    :param pulses: 覆盖配置里的脉冲数（现场试数用）；``None`` 表示用配置值。
+    :raises ServoError: 覆盖的脉冲数不是正整数。
+    """
+    say = on_message if on_message is not None else (lambda _message: None)
+    count = config.extension_retract_pulses if pulses is None else pulses
+    if type(count) is not int or count < 1:
+        raise ServoError(f"后缩脉冲数必须是正整数，拿到 {count!r}")
+    say(f"  伸缩/7 号后缩 {count} 脉冲")
+    seconds = _move_axis(arm, RADIAL_AXIS, -count)
+    say(f"  后缩完成，耗时约 {seconds:.2f} s")
+    return count
+
+
 def _clamp_pulses(value: float, limit: int) -> int:
     """把浮点脉冲量取整并夹到 ``±limit``。"""
     rounded = int(round(value))
@@ -984,6 +1695,13 @@ def _non_negative(value: object, name: str) -> float:
     if number < 0:
         raise ServoError(f"{name} 不能是负数")
     return number
+
+
+def _non_negative_integer(value: object, name: str) -> int:
+    """非负整数；``0`` 常用来表示"这个保护没开"。"""
+    if type(value) is not int or value < 0:
+        raise ServoError(f"{name} 必须是非负整数")
+    return value
 
 
 # ---------------------------------------------------------------------- 自测
