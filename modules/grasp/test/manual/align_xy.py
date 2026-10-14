@@ -1,37 +1,40 @@
-"""真机入口：让爪子正下方对准物块（抓取流程第一步，只动平面）。
+"""真机入口：让爪子正下方对准物块（抓取第一步，只动平面）。
 
     python test.py            # 菜单选 21
+
+## 观测从哪来
+
+默认走**本机 USB 摄像头**：``modules/vision`` 的 ``MaterialLocator`` 直接读画面，
+就是菜单 18 那条通路（你终端里看到的 `物料 1: @(543,382) …` 就是它打的）。
+远端镜头（TCP 那种）用 ``--tcp``，两者对上层完全同形。
 
 ## 用法
 
 ```powershell
-# 只看不动：打印每一帧收到的观测、算出的目标位姿、以及"要动多少"，不发任何动作帧
-python -m modules.grasp.test.manual.align_xy --dry-run
+# 只看不动：实时打印物块读数、目标读数、误差，以及打算走多少脉冲
+python -m modules.grasp.test.manual.align_xy --status
 
-# 真动：闭环对准，直到平面误差进容差
+# 第一次用：两步标定
+python -m modules.grasp.test.manual.align_xy --set-target   # 用手把爪子挪到正好套住物块，回车记录
+python -m modules.grasp.test.manual.align_xy --calibrate    # 程序自己动两下，实测雅可比
+
+# 对准一次（对准就停）
 python -m modules.grasp.test.manual.align_xy
 
-# 只验证链路：起监听、把收到的每一行原样打出来，不碰机械臂
-python -m modules.grasp.test.manual.align_xy --listen-only
-
-# 还没有平面标定时：转底座采几个点，拟合基座轴心与 θ 零点
-python -m modules.grasp.test.manual.align_xy --calibrate-plane
+# **跟随**：物块被移动时持续跟着对准，Ctrl+C 退出
+python -m modules.grasp.test.manual.align_xy --follow
 ```
 
-## 跑之前必须准备好的三件事
+## 这套机器上相机装在臂上
 
-1. **机械臂已经回过零**（或用别的方式拿到了绝对参考）。本臂只有相对位置模式，
-   程序发的是"从当前位置转多少度、伸多少毫米"，它自己不知道绝对位置。
-2. **``modules/arm/config.json`` 的 ``limits.radial_mm`` 已按实验 F 标定。**
-   没有它这一维就没有任何软件保护——程序会在**打开串口之前**拒绝往下走。
-3. **``modules/vision/sighting_plane.json`` 的 ``plane`` 三项已填**
-   （``--calibrate-plane`` 就是干这个的）。
+相机随爪子一起动，所以「物块在相机系的坐标」里混着机械臂自己的运动，
+不能用世界坐标换算。这里走的是**视觉伺服**：把画面里的物块调到那个固定的目标读数
+``(tx, ty)``——它就是爪子抓取点在相机坐标系里的位置。细节见
+``modules/grasp/drive/eye_in_hand.py``。
 
-## 为什么不做回零
-
-回零牵涉"零点设在哪、单圈会不会落到错误的圈"（见 ``modules/grasp/docs/抓取坐标链路.md``
-第 4 节），那是操作纪律，不该由这个脚本替你做决定。它只提供 ``--park`` 之外的
-一件事：把平面这一件事做对。
+**不需要** ``mm_per_motor_rev``、``limits``、平面标定，也不需要给爪子贴靶标：
+每一步都用脉冲驱动、拿画面当反馈。代价是精度受"一帧能分辨多少毫米"限制，
+而且没标定行程时只能靠脉冲预算兜底。
 """
 
 from __future__ import annotations
@@ -39,423 +42,459 @@ from __future__ import annotations
 MENU_ENTRY = (21, "x/y 对准物块")
 
 import argparse
-import json
-import sys
-from typing import List, Optional, Sequence, Tuple
+import math
+import time
+from typing import Optional, Sequence
 
-from modules.arm.config import ArmConfig, load_arm_config
+from modules.arm.config import load_arm_config
 from modules.arm.drive.robot_arm import RobotArm
-from modules.camera_link.drive.link import CameraLink, CameraLinkError, load_camera_link_config
-from modules.grasp.config import GraspConfig, load_grasp_config
-from modules.grasp.drive.run_xy import (
-    GripperMarker,
-    XYAligner,
-    XYAlignConfig,
-    XYAlignError,
-    load_gripper_marker,
-    load_xy_align_config,
+from modules.grasp.drive.camera_source import CameraFrameSource
+from modules.grasp.drive.eye_in_hand import (
+    FrameSource,
+    ObjectSelector,
+    ServoConfig,
+    ServoError,
+    ServoJacobian,
+    ServoTarget,
+    align_x_y,
+    load_jacobian,
+    load_object_selector,
+    load_servo_config,
+    load_target,
+    measure_offset,
+    probe_jacobian,
+    save_calibration,
 )
 from modules.motor.config import load_bus_config as load_motor_bus_config
-from modules.vision.drive.calibration import PlaneCalibration, fit_plane_calibration, CalibrationSample
-from modules.vision.drive.sighting import MaterialSighting, SightingParseError, parse_sighting
-from modules.vision.drive.sighting_plane import SightingPlane, load_sighting_plane
-
-#: 平面标定时底座每一步转多少度。取 30° 是因为转太小拟合出的圆心会很飘。
-CALIBRATION_STEP_DEGREES = 30.0
-
-#: 平面标定至少走这么多步（含起点）。三个点定一个圆，再留一个做交叉验证。
-CALIBRATION_STEPS = 5
 
 
-def missing_setup(
-    *,
-    arm: ArmConfig,
-    plane: Optional[SightingPlane],
-) -> List[str]:
-    """列出还不能真动的原因；空列表表示可以开跑。
+def _say(message: str) -> None:
+    print(f"  {message}")
 
-    扫描的顺序就是现场该做的顺序，而且**全部在打开串口之前**给出——
-    缺一项都会变成一句难懂的运行时报错，不如一次说清。
-    """
-    problems: List[str] = []
-    if arm.radial_limit is None:
-        problems.append(
-            "机械臂：limits.radial_mm 没填（实验 F）——伸缩轴没有任何软件保护，"
-            "本脚本拒绝动它"
+
+def _open_source(arguments) -> FrameSource:
+    """按参数开一个观测源；调用方负责 ``close()``。"""
+    if arguments.tcp:
+        from modules.camera_link.drive.link import (
+            CameraLink,
+            CameraLinkError,
+            load_camera_link_config,
         )
-    if plane is None:
-        problems.append(
-            "视觉：modules/vision/sighting_plane.json 的 plane 三项还没填；"
-            "先跑 --calibrate-plane"
-        )
-    elif plane.plane.rms_mm > 5.0:
-        problems.append(
-            f"视觉：平面标定残差 RMS={plane.plane.rms_mm:.1f} mm 偏大（>5 mm），"
-            "抓取精度会被它直接拖住；先重做 --calibrate-plane"
-        )
-    return problems
+
+        config = load_camera_link_config()
+        port = config.port if arguments.listen_port is None else arguments.listen_port
+        try:
+            link = CameraLink(config=config, port=port).start()
+        except CameraLinkError as error:
+            raise SystemExit(f"起不了接收链路：{error}") from error
+        print(f"接收链路已监听 {link.host}:{link.port}（等远端镜头连上来）")
+        return link
+
+    source = CameraFrameSource.from_vision_config(
+        camera_id=arguments.camera, on_message=_say
+    )
+    print(f"已打开摄像头 {arguments.camera if arguments.camera is not None else '（配置里的）'}"
+          f"，观测来自本机 MaterialLocator")
+    return source
 
 
-def _load_marker() -> GripperMarker:
-    try:
-        return load_gripper_marker()
-    except XYAlignError as error:
-        raise SystemExit(f"配置不完整：{error}") from error
-
-
-def _load_plane_or_none() -> Optional[SightingPlane]:
-    try:
-        return load_sighting_plane()
-    except ValueError:
-        return None
-
-
-def run_listen_only(*, link: CameraLink) -> int:
-    """只验证链路：把收到的每一行原样打出来，并给出解析结果。"""
-    print(f"正在监听 {link.host}:{link.port}（Ctrl+C 退出）")
-    print("请让镜头端连上来并开始发观测。收到的原始行会原样打印。\n")
+def run_watch(*, source: FrameSource, selector: ObjectSelector, config: ServoConfig) -> int:
+    """只看不动：把每一帧的读数实时打出来。"""
+    print("watch：只读不发帧。Ctrl+C 退出。\n")
     try:
         while True:
-            sighting = link.latest(timeout=5.0)
-            if sighting is None:
-                if link.error:
-                    print(f"链路错误：{link.error}")
-                    return 1
-                print(
-                    f"  … 5 秒内没有新观测（已收 {link.received} 条、"
-                    f"拒绝 {link.rejected_count} 条、连接 {link.connections} 次）"
-                )
-                continue
-            print(f"  收到：{sighting.summary()}")
-            print(f"        原始：{sighting.raw}")
-            for rejected in link.rejected[-3:]:
-                print(f"  （解析不了的行）{rejected}")
-    except KeyboardInterrupt:
-        print(f"\n结束：共收到 {link.received} 条，拒绝 {link.rejected_count} 条。")
-    return 0
-
-
-def run_dry_run(
-    *,
-    link: CameraLink,
-    plane: SightingPlane,
-    marker: GripperMarker,
-    align_config: XYAlignConfig,
-    grasp_config: GraspConfig,
-    arm_config: ArmConfig,
-) -> int:
-    """只算不动：打印"如果现在动，会怎么动"。
-
-    这一档的价值在于**第一次上真机时先看数**：目标位姿对不对、要转的角度合不合理、
-    有没有越过行程。看对了再去掉 ``--dry-run``。
-    """
-    from modules.grasp.drive.align import AlignmentError, solve_planar_alignment
-    from modules.arm.drive.kinematics import CylindricalPose, check_reachable
-
-    print("dry-run：只解算不发帧。Ctrl+C 退出。\n")
-    try:
-        while True:
-            frame = link.frame(timeout=10.0, max_age_seconds=2.0)
-            if frame is None:
-                if link.error:
-                    print(f"链路错误：{link.error}")
-                    return 1
-                print("  … 没有新观测")
-                continue
-            try:
-                marker_sighting, material = _pick_marker_and_material(frame, marker)
-            except XYAlignError as error:
-                print(f"  {error}")
-                continue
-
-            problem = plane.depth_problem(material)
-            if problem is not None:
-                print(f"  警告：{problem}")
-
-            base_now, radial_now = plane.polar(marker_sighting)
-            base_want, radial_want = plane.polar(material)
-            current = CylindricalPose(base_now, radial_now, 0.0)
-            target = CylindricalPose(base_want, radial_want, 0.0)
-            problems = check_reachable(
-                target, base_limit=arm_config.base_limit, radial_limit=arm_config.radial_limit
-            )
-            print(f"\n物料 {material.material_id}（{material.color}）：{material.summary()}")
-            print(f"  爪子现在：θ={base_now:+.2f}°，r={radial_now:.2f} mm")
-            print(f"  物料要求：θ={base_want:+.2f}°，r={radial_want:.2f} mm")
-            if problems:
-                print(f"  越界：{'；'.join(problems)}")
-                continue
-            try:
-                solution = solve_planar_alignment(current, target)
-            except AlignmentError as error:
-                print(f"  解不出来：{error}")
-                continue
-            print(f"  应当执行：{solution.summary()}")
+            sighting = _read_one(source, selector, config)
+            extra = ""
+            if sighting.color is not None:
+                extra += f" {sighting.color}"
+            if sighting.confidence is not None:
+                extra += f" conf={sighting.confidence:.2f}"
             print(
-                f"  （容差 {align_config.tolerance_mm:.1f} mm；"
-                f"缩回半径 {grasp_config.retract_radius_mm}）"
+                f"物块 {sighting.material_id}{extra}："
+                f"xyz=({sighting.x_mm:+.2f}, {sighting.y_mm:+.2f}, {sighting.z_mm:.2f}) mm；"
+                f"水平偏离镜头轴 {sighting.planar_distance_mm:.2f} mm"
             )
     except KeyboardInterrupt:
-        print("\ndry-run 结束。")
+        print("\nwatch 结束。")
+        return 0
+    except ServoError as problem:
+        print(f"读取失败：{problem}")
+        return 1
+
+
+def _read_one(source: FrameSource, selector: ObjectSelector, config: ServoConfig):
+    from modules.grasp.drive.eye_in_hand import select_object
+
+    frame = source.frame(timeout=config.frame_timeout_seconds)
+    if frame is None:
+        raise ServoError("等不到新的观测；确认摄像头有画面、且物块在视野里")
+    return select_object(frame, selector)
+
+
+def run_status(
+    *,
+    source: FrameSource,
+    selector: ObjectSelector,
+    target: Optional[ServoTarget],
+    jacobian: Optional[ServoJacobian],
+    config: ServoConfig,
+) -> int:
+    """只算不动：打印当前读数、目标读数、误差，以及打算怎么走。"""
+    print("status：只读不发帧。Ctrl+C 退出。\n")
+    if target is None:
+        print("还没标定目标读数（tx, ty）；先跑 --set-target。")
+    if jacobian is None:
+        print("还没标定雅可比；先跑 --calibrate。（没有它算不出要走的脉冲）")
+    try:
+        while True:
+            offset = measure_offset(source, selector, config)
+            line = f"物块读数 ({offset[0]:+.2f}, {offset[1]:+.2f}) mm"
+            if target is not None:
+                error_x = offset[0] - target.x_mm
+                error_y = offset[1] - target.y_mm
+                line += (
+                    f"｜目标 ({target.x_mm:+.2f}, {target.y_mm:+.2f})"
+                    f"｜误差 {math.hypot(error_x, error_y):.2f} mm"
+                )
+                if jacobian is not None:
+                    try:
+                        base_pulses, radial_pulses = jacobian.pulses_for(error_x, error_y)
+                    except ServoError as problem:
+                        line += f"｜算不出脉冲：{problem}"
+                    else:
+                        line += f"｜应走 底座 {base_pulses:+.0f}、伸缩 {radial_pulses:+.0f} 脉冲"
+            print(line)
+    except KeyboardInterrupt:
+        print("\nstatus 结束。")
+        return 0
+    except ServoError as problem:
+        print(f"读取失败：{problem}")
+        return 1
+
+
+def run_set_target(
+    *, source: FrameSource, selector: ObjectSelector, config: ServoConfig, centred: bool = False
+) -> int:
+    """把**当前**画面读数记成目标 ``(tx, ty)``。
+
+    ``centred=True`` 时不读画面，直接把目标设成 ``(0, 0)``——那是"相机光轴正好穿过
+    抓取点"这个假设。相机正装在爪子上方时它就是对的，而且**不用手工摆位**：
+    先按这个假设跑，如果对准之后爪子明显偏了，再改用下面那种手工记录法。
+
+    手工记录法：把物块放到爪子附近，用手把爪子挪到"正好套住物块"的位置，
+    然后记录此刻的画面读数——那个读数**就是**抓取点在相机系里的位置。
+    """
+    if centred:
+        target = ServoTarget(x_mm=0.0, y_mm=0.0)
+        path = save_calibration(target=target)
+        print(f"已按「相机光轴穿过抓取点」记下 {target.summary()}，写入 {path}")
+        print("如果之后对准了但爪子明显偏，说明相机是偏装的：")
+        print("  用手把爪子挪到正好套住物块的位置，再跑 --set-target 重新记录。")
+        return 0
+
+    print("把物块放到爪子附近，然后用手把爪子挪到「正好套住物块」的位置。")
+    print("挪好之后按回车记录当前读数。")
+    input("准备好了按回车：")
+    try:
+        offset = measure_offset(source, selector, config)
+    except ServoError as problem:
+        print(f"读取失败：{problem}")
+        return 1
+    target = ServoTarget(x_mm=offset[0], y_mm=offset[1])
+    path = save_calibration(target=target)
+    print(f"已记录 {target.summary()}，写入 {path}")
+    print("接着跑 --calibrate 实测雅可比。")
     return 0
 
 
-def _pick_marker_and_material(
-    frame: Sequence[MaterialSighting], marker: GripperMarker
-) -> Tuple[MaterialSighting, MaterialSighting]:
-    """从一帧里挑出靶标与物料；复用 ``XYAligner`` 的判别规则。"""
-    markers = [item for item in frame if marker.matches(item)]
-    materials = [item for item in frame if not marker.matches(item)]
-    if not markers:
-        raise XYAlignError(
-            f"这一帧里没有爪上靶标（{marker.describe()}）；"
-            f"收到 {len(frame)} 条：{'、'.join(f'物料 {i.material_id}({i.color})' for i in frame) or '空'}"
-        )
-    if not materials:
-        raise XYAlignError("这一帧里只有爪上靶标，没有物料")
-    if len(materials) > 1:
-        raise XYAlignError(
-            "这一帧里有多个物料："
-            + "、".join(f"物料 {i.material_id}({i.color})" for i in materials)
-            + "；一次只对准一个"
-        )
-    return markers[-1], materials[0]
+def run_calibrate(
+    *, arm: RobotArm, source: FrameSource, selector: ObjectSelector, config: ServoConfig
+) -> int:
+    """实测雅可比：让程序自己动两下，看画面挪了多少。"""
+    print(f"将用 {config.probe_pulses} 脉冲一段、每轴走两段同向位移，然后退回原位。")
+    print("请确认机械臂四周没有障碍物。\n")
+    try:
+        jacobian = probe_jacobian(arm, source, selector, config, on_message=_say)
+    except ServoError as problem:
+        print(f"标定失败：{problem}")
+        return 1
+    path = save_calibration(jacobian=jacobian)
+    print(f"\n{jacobian.summary()}")
+    print(f"已写入 {path}")
+    print("接着跑 --status 看数字对不对，再跑真动。")
+    return 0
 
 
 def run_align(
+    *, arm: RobotArm, source: FrameSource, selector, target, jacobian, config
+) -> int:
+    """真动：闭环把物块伺服到目标读数（对准就停）。"""
+    print("开始 x/y 对准（只动 底座旋转 与 伸缩，高度不动）")
+    print(f"  {selector.describe()}")
+    print(f"  {target.summary()}；{jacobian.summary()}")
+    print(f"  容差 {config.tolerance_mm:.1f} mm，最多测量 {config.max_iterations} 次")
+    print(f"  每轴脉冲预算 {config.max_total_pulses}（没有标定行程，这是唯一的兜底）\n")
+
+    result = align_x_y(arm, source, selector, target, jacobian, config, on_message=_say)
+    print(f"\n{result.summary()}")
+    print("下一步：z 对准（下降到物块距镜头约 70 mm）与夹爪闭合。")
+    return 0
+
+
+def run_follow(
+    *, arm: RobotArm, source: FrameSource, selector, target, jacobian, config
+) -> int:
+    """跟随：物块被移动时持续把它伺服回目标读数。
+
+    每一轮都会重新测量并按当前误差算脉冲；物块不动时误差本来就在容差内，
+    于是那一轮只花一次测量、不发任何动作帧。所以"静止"和"被推动"是同一段代码。
+    """
+    print("开始跟随（只动 底座旋转 与 伸缩，高度不动）")
+    print(f"  {target.summary()}；{jacobian.summary()}")
+    print(f"  容差 {config.tolerance_mm:.1f} mm；物块移动就会跟着动，Ctrl+C 退出\n")
+
+    rounds = 0
+    moved_rounds = 0
+    limited_notice = False
+    try:
+        while True:
+            rounds += 1
+            started = time.monotonic()
+            try:
+                result = align_x_y(
+                    arm, source, selector, target, jacobian, config
+                )
+            except ServoError as problem:
+                # 跟随过程中"这一帧没看到物块"是常见的（手挡住、移出视野），
+                # 不该让整条循环退出——报一句继续。
+                print(f"  第 {rounds} 轮：{problem}")
+                time.sleep(0.2)
+                continue
+            elapsed = time.monotonic() - started
+            if result.base_pulses or result.radial_pulses:
+                moved_rounds += 1
+                print(
+                    f"  第 {rounds} 轮：误差 {result.error_mm:.2f} mm -> "
+                    f"底座 {result.base_pulses:+d}、伸缩 {result.radial_pulses:+d} 脉冲"
+                    f"（{elapsed * 1000:.0f} ms，{result.iterations} 次测量）"
+                )
+            elif result.resolution_limited and not limited_notice:
+                limited_notice = True
+                print(
+                    f"  误差 {result.error_mm:.2f} mm 已小于背隙地板"
+                    f"（{config.min_step_mm:.2f} mm）：这是这台机器能做到的极限，不再微调。"
+                    "想更准就得先把背隙调小（或把 min_step_mm 调小试试）。"
+                )
+            time.sleep(0.02)
+    except KeyboardInterrupt:
+        print(f"\n跟随结束：共 {rounds} 轮，其中 {moved_rounds} 轮发了动作。")
+        return 0
+
+
+def run_teach(
     *,
     arm: RobotArm,
-    link: CameraLink,
-    plane: SightingPlane,
-    marker: GripperMarker,
-    align_config: XYAlignConfig,
-    grasp_config: GraspConfig,
-    arm_config: ArmConfig,
+    source: FrameSource,
+    selector: ObjectSelector,
+    config: ServoConfig,
+    step_pulses: int,
 ) -> int:
-    """真动：闭环对准一次。"""
-    print("开始 x/y 对准（只动 底座旋转 与 伸缩，高度不动）")
-    print(f"  {marker.describe()}")
-    print(f"  缩回半径：{grasp_config.retract_radius_mm}")
-    print(f"  容差：{align_config.tolerance_mm:.1f} mm，最多重新测量 {align_config.iterations} 次\n")
+    """手动示教：小步挪动机械臂，读数实时显示，按 ``t`` 把当前读数记成目标。
 
-    arm.enable_all()
-    aligner = XYAligner(
-        arm=arm,
-        link=link,
-        plane=plane,
-        marker=marker,
-        config=align_config,
-        grasp_config=grasp_config,
-        arm_config=arm_config,
-        on_message=lambda message: print(f"  {message}"),
-    )
-    try:
-        result = aligner.align()
-    except XYAlignError as error:
-        print(f"\n对准失败：{error}")
-        return 1
-    finally:
-        # 无论成败都松力矩：这一步之后机械臂不该保持通电堵着。
-        arm.disable_all()
+    为什么需要它：目标读数 ``(tx, ty)`` 是"爪子抓取点在相机坐标系里的位置"，
+    它是一个**物理安装常数**——只有把爪子真的挪到物块正上方，才知道那个读数是多少。
+    程序推不出来，也不该猜：猜错的话，"对准"之后爪子会稳定地停在物块旁边。
 
-    print(f"\n{result.summary()}")
-    print("下一步：z 对准（把爪子降到镜头正下方约 7 cm 处）与夹爪闭合。")
-    return 0
+    命令：
 
-
-def run_calibrate_plane(*, arm: RobotArm, link: CameraLink, marker: GripperMarker) -> int:
-    """转底座采点，拟合基座轴心与 θ 零点，并把结果写回配置文件。
-
-    原理：底座**纯旋转**时爪上靶标画出一个以基座轴心为圆心的圆，所以
-    "从相机坐标里拟合圆心"就等于"找到基座旋转轴在镜头水平面上的位置"。
-    θ 零点再用"命令的角度 − 测到的角度"的圆均值定出来。
+    - ``a`` / ``b``：底座逆时针 / 顺时针走一步；
+    - ``c`` / ``d``：伸缩前伸 / 后缩走一步；
+    - 纯数字：改每步的脉冲数；
+    - 字母后跟数字（如 ``b5``）：连续走 5 步；
+    - ``t``：把**当前读数**记成目标 ``(tx, ty)``；
+    - ``q``：退出。
     """
-    from project_paths import project_path
+    step = max(1, step_pulses)
+    print("手动示教：把爪子挪到物块正上方，然后按 t 记录目标读数。")
+    print("  a/b = 底座逆时针/顺时针    c/d = 伸缩前伸/后缩")
+    print(f"  数字 = 改每步脉冲数（当前 {step}）；字母后跟数字 = 连走多步（如 b5）")
+    print("  t = 记录当前读数为目标     q = 退出\n")
 
-    samples: List[CalibrationSample] = []
-    radial_command = 0.0
-    print(f"将转 {CALIBRATION_STEPS - 1} 步，每步 {CALIBRATION_STEP_DEGREES:.0f}°。")
-    print("请确认机械臂前方没有障碍物，且爪子悬空不碰台面。\n")
+    while True:
+        try:
+            offset = measure_offset(source, selector, config)
+            reading = f"({offset[0]:+7.2f}, {offset[1]:+6.2f}) mm"
+        except ServoError as problem:
+            reading = f"看不到物块（{problem}）"
+        print(f"当前读数 {reading}   每步 {step} 脉冲")
+        try:
+            raw = input("命令：").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not raw:
+            continue
+        if raw == "q":
+            return 0
+        if raw == "t":
+            try:
+                offset = measure_offset(source, selector, config)
+            except ServoError as problem:
+                print(f"  记不了：{problem}")
+                continue
+            target = ServoTarget(x_mm=offset[0], y_mm=offset[1])
+            path = save_calibration(target=target)
+            print(f"  已记录 {target.summary()}，写入 {path}")
+            print("  接着跑 --calibrate 实测雅可比，再跑 --follow 跟随。")
+            continue
+        if raw.isdigit():
+            step = max(1, int(raw))
+            continue
 
-    for step in range(CALIBRATION_STEPS):
-        frame = link.frame(timeout=15.0, max_age_seconds=2.0)
-        if frame is None:
-            print("采点失败：等不到观测。请确认镜头端在发数据、且爪上靶标在画面里。")
-            return 1
-        sightings = [item for item in frame if marker.matches(item)]
-        if not sightings:
-            print(
-                f"采点失败：第 {step + 1} 步的画面里没有爪上靶标。"
-                f"收到的观测：{'、'.join(f'物料 {i.material_id}({i.color})' for i in frame)}"
-            )
-            return 1
-        target = sightings[-1]
-        samples.append(
-            CalibrationSample(
-                x_mm=target.x_mm,
-                y_mm=target.y_mm,
-                base_degrees=step * CALIBRATION_STEP_DEGREES,
-                radial_mm=radial_command,
-            )
-        )
-        print(
-            f"  第 {step + 1} 步：命令 θ={step * CALIBRATION_STEP_DEGREES:+.0f}°，"
-            f"靶标在镜头系 ({target.x_mm:+.2f}, {target.y_mm:+.2f}) mm"
-        )
-        if step == CALIBRATION_STEPS - 1:
-            break
-        arm.move_base_degrees(CALIBRATION_STEP_DEGREES, wait=True)
-        radial_command = 0.0
-
-    try:
-        fitted = fit_plane_calibration(samples)
-    except ValueError as error:
-        print(f"拟合失败：{error}")
-        return 1
-
-    print(f"\n拟合结果：{fitted.summary()}")
-    if fitted.rms_mm > 5.0:
-        print(
-            f"残差 RMS={fitted.rms_mm:.1f} mm 偏大；"
-            "常见原因是靶标没装稳、画面抖动、或者转的角度太小。建议重做。"
-        )
-
-    path = project_path("modules", "vision", "sighting_plane.json")
-    document = json.loads(path.read_text(encoding="utf-8"))
-    document["plane"] = {
-        "center_x_mm": fitted.center_x_mm,
-        "center_y_mm": fitted.center_y_mm,
-        "rotation_degrees": fitted.rotation_degrees,
-        "rms_mm": fitted.rms_mm,
-        "samples": fitted.samples,
-    }
-    path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"已写入 {path}")
-    print("接着填 modules/vision/sighting_plane.json 的 table_depth_mm（实验 D），再跑 --dry-run。")
-    return 0
+        action = raw[0]
+        if action not in "abcd":
+            print("  不认识的命令；可用 a/b/c/d、数字、t、q")
+            continue
+        repeats = 1
+        if len(raw) > 1:
+            if not raw[1:].isdigit():
+                print("  连走次数要是数字，例如 b5")
+                continue
+            repeats = max(1, int(raw[1:]))
+        move = {
+            "a": arm.rotate_ccw,
+            "b": arm.rotate_cw,
+            "c": arm.move_forward,
+            "d": arm.move_backward,
+        }[action]
+        for _ in range(repeats):
+            move(step, wait=True)
+        time.sleep(0.3)  # 让机械臂停稳，读数才是停稳后的
+        print(f"  已走 {repeats} 步 x {step} 脉冲")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="让爪子正下方对准物块（只动平面）")
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--watch", action="store_true", help="只读：实时打印物块读数，不开机械臂串口")
+    mode.add_argument("--status", action="store_true", help="只读：打印读数、误差与打算走的脉冲")
+    mode.add_argument("--set-target", action="store_true", help="把当前画面读数记成目标 (tx, ty)")
     mode.add_argument(
-        "--listen-only",
+        "--target-centred",
         action="store_true",
-        help="只起监听并打印收到的行，不打开机械臂串口",
-    )
-    mode.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="解算并打印要动多少，但不发任何动作帧（也不打开机械臂串口）",
+        help="直接把目标设成 (0,0)：假设相机光轴正好穿过抓取点",
     )
     mode.add_argument(
-        "--calibrate-plane",
+        "--teach",
         action="store_true",
-        help="转底座采点，拟合基座轴心与 θ 零点，写入 sighting_plane.json",
+        help="手动示教：小步挪动机械臂，按 t 记录当前读数为目标（推荐）",
     )
-    parser.add_argument(
-        "--port",
-        default=None,
-        help="机械臂步进总线串口；省略则用 modules/motor/config.json 的平台配置",
-    )
-    parser.add_argument(
-        "--listen-port",
-        type=int,
-        default=None,
-        help="接收镜头端的本地端口；省略则用 modules/camera_link/config.json",
-    )
-    parser.add_argument(
-        "--steps",
-        type=int,
-        default=CALIBRATION_STEPS,
-        help=f"平面标定采点数（默认 {CALIBRATION_STEPS}）",
-    )
-    parser.add_argument(
-        "--step-degrees",
-        type=float,
-        default=CALIBRATION_STEP_DEGREES,
-        help=f"平面标定每步转角（默认 {CALIBRATION_STEP_DEGREES:.0f}°）",
-    )
+    mode.add_argument("--calibrate", action="store_true", help="实测雅可比（两个轴各动两段）")
+    mode.add_argument("--follow", action="store_true", help="跟随：物块移动时持续对准")
+    parser.add_argument("--step", type=int, default=100, help="--teach 的默认步进脉冲数（默认 100）")
+    parser.add_argument("--tcp", action="store_true", help="观测改从 TCP 远端镜头来（默认用本机摄像头）")
+    parser.add_argument("--camera", type=int, default=None, help="摄像头序号；省略则读 modules/vision/config.json")
+    parser.add_argument("--port", default=None, help="机械臂步进总线串口；省略则用 modules/motor/config.json")
+    parser.add_argument("--listen-port", type=int, default=None, help="--tcp 时接收镜头端的本地端口")
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """菜单和命令行共用的入口。"""
-    global CALIBRATION_STEPS, CALIBRATION_STEP_DEGREES
-
     arguments = build_parser().parse_args(argv)
-    CALIBRATION_STEPS = max(3, arguments.steps)
-    CALIBRATION_STEP_DEGREES = arguments.step_degrees
 
-    link_config = load_camera_link_config()
     try:
-        link = CameraLink(
-            config=link_config,
-            port=link_config.port if arguments.listen_port is None else arguments.listen_port,
-        ).start()
-    except CameraLinkError as error:
-        print(f"起不了接收链路：{error}")
+        config = load_servo_config()
+        selector = load_object_selector()
+        target = load_target()
+        jacobian = load_jacobian()
+    except ServoError as problem:
+        print(f"配置有问题：{problem}")
         return 1
-    print(f"接收链路已监听 {link.host}:{link.port}")
+
+    if config.min_step_mm > config.tolerance_mm:
+        print(
+            f"警告：min_step_mm={config.min_step_mm:.2f} 大于 "
+            f"tolerance_mm={config.tolerance_mm:.2f}——背隙地板比容差还大，"
+            "闭环永远报不了「对准」，只会在分辨率极限上收工。"
+            "要么放宽 tolerance_mm，要么把 min_step_mm 调小。\n"
+        )
 
     try:
-        if arguments.listen_only:
-            return run_listen_only(link=link)
+        source = _open_source(arguments)
+    except (SystemExit, FileNotFoundError, RuntimeError, ServoError) as problem:
+        print(f"打不开观测源：{problem}")
+        return 1
 
-        align_config = load_xy_align_config()
-        grasp_config = load_grasp_config()
-        arm_config = load_arm_config()
-        marker = _load_marker()
-
-        if arguments.dry_run:
-            plane = _load_plane_or_none()
-            if plane is None:
-                print(
-                    "dry-run 需要平面标定：modules/vision/sighting_plane.json 的 plane 三项还没填。"
-                    "先跑 --calibrate-plane。"
-                )
-                return 1
-            return run_dry_run(
-                link=link,
-                plane=plane,
-                marker=marker,
-                align_config=align_config,
-                grasp_config=grasp_config,
-                arm_config=arm_config,
+    try:
+        if arguments.watch:
+            return run_watch(source=source, selector=selector, config=config)
+        if arguments.status:
+            return run_status(
+                source=source, selector=selector, target=target, jacobian=jacobian, config=config
+            )
+        if arguments.set_target or arguments.target_centred:
+            return run_set_target(
+                source=source,
+                selector=selector,
+                config=config,
+                centred=arguments.target_centred,
             )
 
-        plane = _load_plane_or_none()
-        if not arguments.calibrate_plane:
-            problems = missing_setup(arm=arm_config, plane=plane)
-            if problems:
-                print("还不能开跑，缺这些：")
-                for problem in problems:
-                    print(f"  - {problem}")
-                return 1
-        if plane is None and not arguments.calibrate_plane:
+        # 标定没做完就在**打开串口之前**说清楚：菜单里直接按 21 的人多半还没标定，
+        # 这时候去开硬件毫无意义，还会让人以为程序坏了。
+        # ``--calibrate`` 与 ``--teach`` 本身就是标定手段，不受这个闸限制。
+        if not (arguments.calibrate or arguments.teach) and (
+            target is None or jacobian is None
+        ):
+            print("还不能真动，先做两步标定（都很快）：\n")
+            if target is None:
+                print("  1) **手动示教**（推荐）：小步挪动机械臂，把爪子挪到物块正上方，")
+                print("     程序实时显示读数，按 t 把当前读数记成目标：")
+                print("     python -m modules.grasp.test.manual.align_xy --teach")
+                print("     （如果相机是正装在抓取点上方的，也可以用 --target-centred 直接设成 (0,0)）")
+            if jacobian is None:
+                step = "  2)" if target is None else "  1)"
+                print(f"{step} 让程序自己动两下，实测「每脉冲让画面挪多少毫米」：")
+                print("     python -m modules.grasp.test.manual.align_xy --calibrate")
+            print("\n标定完先跑 --status 核对数字（只看不动），再跑 --follow 跟随。")
             return 1
 
         # 到这一步才打开机械臂串口。
         port = arguments.port or load_motor_bus_config().port
         print(f"打开机械臂总线 {port}")
-        arm = RobotArm(port, config=arm_config)
+        arm = RobotArm(port, config=load_arm_config())
         try:
             arm.initialize()
-            if arguments.calibrate_plane:
-                return run_calibrate_plane(arm=arm, link=link, marker=marker)
-            return run_align(
-                arm=arm,
-                link=link,
-                plane=plane,
-                marker=marker,
-                align_config=align_config,
-                grasp_config=grasp_config,
-                arm_config=arm_config,
-            )
+            arm.enable_all()
+            try:
+                if arguments.calibrate:
+                    return run_calibrate(
+                        arm=arm, source=source, selector=selector, config=config
+                    )
+                if arguments.teach:
+                    return run_teach(
+                        arm=arm, source=source, selector=selector,
+                        config=config, step_pulses=arguments.step,
+                    )
+                if arguments.follow:
+                    return run_follow(
+                        arm=arm, source=source, selector=selector,
+                        target=target, jacobian=jacobian, config=config,
+                    )
+                return run_align(
+                    arm=arm, source=source, selector=selector,
+                    target=target, jacobian=jacobian, config=config,
+                )
+            finally:
+                arm.stop_all()
+                arm.disable_all()
         finally:
             arm.close()
     finally:
-        link.stop()
+        close = getattr(source, "close", None)
+        if close is not None:
+            close()
 
 
 if __name__ == "__main__":

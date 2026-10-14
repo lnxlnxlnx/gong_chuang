@@ -1,0 +1,27 @@
+{
+  "object": {
+    "material_id": null,
+    "color": null
+  },
+  "target": {
+    "x_mm": -12.367854646537173,
+    "y_mm": 2.7759375440126806
+  },
+  "jacobian": {
+    "base_dx": -0.1798134328429667,
+    "base_dy": -0.025002708994498746,
+    "radial_dx": 0.0017927576653604849,
+    "radial_dy": 0.016403027601228363
+  },
+  "tolerance_mm": 2.0,
+  "max_iterations": 12,
+  "max_pulses_per_step": 1200,
+  "coarse_max_pulses_per_step": 4000,
+  "coarse_error_mm": 10.0,
+  "min_step_mm": 1.0,
+  "parallel_rotation_limit_pulses": 600,
+  "max_total_pulses": 10000,
+  "probe_pulses": 200,
+  "frame_timeout_seconds": 2.0,
+  "frame_margin_seconds": 0.0
+}

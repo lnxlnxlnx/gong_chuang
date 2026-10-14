@@ -258,18 +258,23 @@ class CameraLink:
         self,
         *,
         max_age_seconds: Optional[float] = None,
+        min_received_at: Optional[float] = None,
         timeout: Optional[float] = None,
     ) -> Optional[Tuple[MaterialSighting, ...]]:
         """把队列里当前压着的观测收成**一组**返回（同一批、去重后按物料编号排序）。
 
-        为什么需要它：一帧画面里的爪上靶标和物料是**两条独立的消息**，分两次到达。
-        如果按"最新一条"逐条取，第二次取到的可能又是靶标，永远凑不齐一对。
+        为什么需要它：一帧画面里可能有多个目标（物块、爪子……），它们是**几条独立的消息**，
+        分几次到达。如果按"最新一条"逐条取，第二次取到的可能又是同一个目标，永远凑不齐一组。
 
-        两个参数：
+        三个过滤参数：
 
         - ``timeout``：队列为空时最多等这么久（秒），等到第一条就把它同批的伙伴一起收走；
-        - ``max_age_seconds``：只收"新到这么多秒以内"的观测；更旧的一条都不返回。
-          机械臂动过之后再拿几秒前的坐标，算出来的位置早就不成立了。
+        - ``max_age_seconds``：只收"新到这么多秒以内"的观测；
+        - ``min_received_at``：只收"接收时刻不早于这个 ``time.monotonic()`` 值"的观测。
+
+        ``min_received_at`` 是机械臂动过之后**唯一可靠**的取法：动作开始前记一个时刻，
+        动作结束后要求所有观测都晚于它。用固定的 ``max_age_seconds`` 挡不住"动作很快、
+        旧帧也很新"的情况，而那种情况下读到的是动作**之前**的坐标，闭环会以为没动。
 
         没有可用观测时返回 ``None``（而不是空元组：空元组会让调用方以为"收到了一帧，
         只是里面什么都没"，那是另一回事）。
@@ -285,6 +290,12 @@ class CameraLink:
                 break
             collected.append(item)
 
+        if min_received_at is not None:
+            collected = [
+                item
+                for item in collected
+                if item.received_at is None or item.received_at >= min_received_at
+            ]
         if max_age_seconds is not None:
             # 严格小于：``max_age_seconds=0`` 的意思是"一点都不许旧"，
             # 用它做"必须丢掉"的判据时不能因为浮点上的 0.0000001 而通过。
@@ -297,7 +308,7 @@ class CameraLink:
         if not collected:
             return None
 
-        # 同一个物料可能被连报几条（镜头端每帧都发）：只留最新的一条。
+        # 同一个目标可能被连报几条（镜头端每帧都发）：只留最新的一条。
         freshest: dict = {}
         for item in collected:
             freshest[item.material_id] = item
