@@ -65,6 +65,7 @@ from typing import Callable, List, Optional, Sequence, Tuple
 
 from modules.grasp.drive.servo_motion import (
     _move_axes,
+    _move_axis,
     _move_lift,
     _send_lift,
 )

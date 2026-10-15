@@ -1,10 +1,31 @@
-"""eye-in-hand 视觉伺服的数学与闭环行为。
+"""eye-in-hand 视觉伺服：四个归属地的数学、闭环行为与就位主链。
 
 判据只有一条硬标准：**按 ``pulses_for`` 算出来的脉冲走一遍，画面误差必须归零。**
 这条不变量对 2×2 求逆的符号错误、行列式写反、列顺序调换全都敏感——用一个随机
 雅可比矩阵族来压它，比逐个人工算例更难糊弄过去。
 
 伺服循环那边则是四个失败路径必须响亮：看不到物块、雅可比奇异、预算用完、迭代用尽。
+
+## 名字现在分四个家
+
+原先一个 ``eye_in_hand.py`` 住着四件事，现在按"谁改谁"分开：
+
+- 值对象 / 配置读写 / 结果类型 → :mod:`modules.grasp.drive.servo_model`；
+- 观测判据（选取、停稳、可见性探测） → :mod:`modules.grasp.drive.servo_observation`；
+- 脉冲原语（真的发帧并等） → :mod:`modules.grasp.drive.servo_motion`；
+- 实际控制算法（探针、安全抬升、悬停、x/y 闭环、下降、后缩） →
+  :mod:`modules.grasp.drive.eye_in_hand`。
+
+**主编排不再是自由函数**：``align_and_descend`` 只剩
+:meth:`modules.grasp.runtime.Grasp.align_and_descend` 一个定义（实例方法），
+所以它在这里的测试也变成实例测试。
+
+## patch 要打在"被执行的那个名字"上
+
+``align_x_y`` 等函数在**自己的模块**里查找 ``_move_axes`` / ``measure_offset``，
+所以脉冲与观测断言指着 ``servo_motion`` / ``servo_observation``；而
+``Grasp`` 的方法是在**方法体内**从 ``modules.grasp.drive.eye_in_hand``
+导入算法的，所以算法断言指着那个真实定义处。
 """
 
 from __future__ import annotations
@@ -19,10 +40,22 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from unittest.mock import patch
 
-from modules.grasp.drive import eye_in_hand as servo
+from modules.grasp.drive import eye_in_hand as algorithms
+from modules.grasp.drive import servo_model as model
+from modules.grasp.drive import servo_motion as motion
+from modules.grasp.drive import servo_observation as observation
 from modules.grasp.drive.eye_in_hand import (
+    align_x_y,
+    descend_z,
+    find_object,
+    hover_above_object,
+    probe_jacobian,
+    retract_extension,
+)
+from modules.grasp.drive.servo_model import (
     BASE_AXIS,
     RADIAL_AXIS,
+    GraspReadyResult,
     HoverResult,
     LiftScale,
     ObjectSelector,
@@ -32,22 +65,20 @@ from modules.grasp.drive.eye_in_hand import (
     ServoResult,
     ServoTarget,
     ZDescentResult,
-    align_and_descend,
-    align_x_y,
-    descend_z,
-    find_object,
-    hover_above_object,
     load_jacobian,
     load_object_selector,
     load_servo_config,
     load_target,
+    save_calibration,
+)
+from modules.grasp.drive.servo_observation import (
+    VISIBILITY_PROBE_FRAMES,
     measure_offset,
     measure_settled,
-    probe_jacobian,
-    retract_extension,
-    save_calibration,
     select_object,
 )
+from modules.grasp import runtime as grasp_runtime
+from modules.grasp.runtime import Grasp
 from modules.vision.drive.sighting import parse_sighting
 
 
@@ -197,7 +228,7 @@ class ConfigFileTests(unittest.TestCase):
 
     def test_the_pulse_steps_are_written_in_the_project_config(self) -> None:
         """两个脉冲数必须真的落在配置文件里：现场要能手改，不能只靠代码里的默认值。"""
-        document = json.loads(servo.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        document = json.loads(model.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
         self.assertIn("z_descend_pulses", document)
         self.assertIn("extension_retract_pulses", document)
         config = load_servo_config()
@@ -482,6 +513,140 @@ class ProbeJacobianTests(unittest.TestCase):
         self.assertEqual(arm.calls, [], "看不到物块时一个动作都不该发")
 
 
+def align_result() -> ServoResult:
+    """一份"平面已对准"的假结果（误差落在容差内，``aligned`` 为真）。"""
+    return ServoResult(
+        target=ServoTarget(x_mm=0.0, y_mm=0.0),
+        readings=((0.4, -0.5),),
+        error_x=0.4,
+        error_y=-0.5,
+        base_pulses=10,
+        radial_pulses=-4,
+        iterations=1,
+        tolerance_mm=2.0,
+    )
+
+
+def ready_result() -> GraspReadyResult:
+    """一份"四步都跑完了"的假结果，装配假会话时用它。"""
+    return GraspReadyResult(
+        raised_pulses=250,
+        aligned=align_result(),
+        descent=ZDescentResult(pulses=2200, planar_mm=0.64, start_z_mm=100.0, seconds=1.2),
+        retracted_pulses=150,
+        lift_seconds=1.0,
+        align_seconds=1.1,
+        descend_seconds=1.2,
+        retract_seconds=1.3,
+        hover_pulses=-120,
+    )
+
+
+class GraspSessionRig:
+    """装配一个假会话：假臂 + 假观测源 + 真会话 + 被 patch 的五个算法。
+
+    只替换真实的机械臂构造点 ``modules.grasp.runtime._new_arm``（这里直接塞假臂）与
+    观测源；会话自己的校验、动作编排、耗时记录都跑真代码——这一层才是本文件要测的。
+
+    ``with`` 里挂上的是**真实定义处**（``modules.grasp.drive.eye_in_hand``）的五个名字，
+    因为会话是在动作方法体内从那里导入算法的：patch 别处拦不住。
+    """
+
+    #: 与 :class:`AlignXYTests` 用的是同一个雅可比；刻意再写一遍而不是互相引用，
+    #: 免得两个类的加载顺序变成隐含依赖。
+    TRUTH = ServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    TARGET = ServoTarget(x_mm=0.0, y_mm=0.0)
+    STAGES = ("hover", "raise", "align", "down", "back")
+
+    def __init__(self, *, hover_z_mm: Optional[float] = None, strict_align: bool = True):
+        """``strict_align``：主链必须传 ``ensure_safe_height=False``。
+
+        单独对准（``Grasp.align_xy``）走的是**默认** ``True``，所以那一组用
+        ``strict_align=False``——那正是"安全高度检查没被顺手关掉"的证据。
+        """
+        self.strict_align = strict_align
+        self.arm = FakeArm(self.TRUTH)
+        self.source = BufferedLink(self.arm)
+        self.config = ServoConfig(hover_z_mm=hover_z_mm)
+        self.grasp = Grasp(
+            config=self.config,
+            selector=ObjectSelector(),
+            target=self.TARGET,
+            jacobian=self.TRUTH,
+            lift_scale=LiftScale(dz_per_pulse=0.0121),
+            on_message=lambda _message: None,
+        )
+        self.grasp._arm = self.arm
+        self.grasp._source = self.source
+        self._mocks = []
+        self._patches = []
+
+    # ---------------------------------------------------------------- 装/拆
+    def __enter__(self):
+        self._patches = [
+            patch.object(algorithms, name)
+            for name in ("hover_above_object", "raise_before_rotating", "align_x_y",
+                         "descend_z", "retract_extension")
+        ]
+        hover, lift, align, down, back = (item.start() for item in self._patches)
+        self._mocks = [hover, lift, align, down, back]
+        hover.side_effect = lambda *_a, **_k: HoverResult(
+            configured=True, pulses=-120, start_z_mm=120.0, end_z_mm=100.0
+        )
+        lift.side_effect = lambda *_a, **_k: 250
+        align.side_effect = self._align
+        down.side_effect = lambda *_a, **_k: ZDescentResult(
+            pulses=2200, planar_mm=0.64, start_z_mm=100.0, seconds=1.2
+        )
+        back.side_effect = lambda *_a, **_k: 150
+        return self
+
+    def __exit__(self, *_exc):
+        for item in reversed(self._patches):
+            item.stop()
+        self._mocks = []
+        return False
+
+    # ---------------------------------------------------------------- 假算法
+    def _align(self, *_args, **kwargs):
+        if not self.strict_align:
+            return align_result()
+        if kwargs.get("ensure_safe_height", True) is not False:
+            # 主链必须关掉那次重复的安全高度检查；详情见
+            # ``test_align_is_asked_to_skip_the_duplicate_safe_height_check``。
+            raise AssertionError("主链必须传 ensure_safe_height=False")
+        return align_result()
+
+    # ---------------------------------------------------------------- 观测
+    def stage_clock(self, *, durations=None) -> List[float]:
+        """把会话四段耗时用到的 ``time.monotonic`` 换成一个受控时钟。
+
+        返回四段应有的耗时。会话是在 ``runtime`` 里**按模块名**调
+        ``time.monotonic()`` 的，所以这里必须 patch 那个查找处——
+        给自己挂一个 ``_clock`` 属性是拦不住的（那只是测试自己的想象）。
+        """
+        durations = [1.0, 2.5, 1.25, 2.0] if durations is None else durations
+        ticks: List[float] = []
+        for index, seconds in enumerate(durations):
+            ticks.append(100.0 * (index + 1))
+            ticks.append(100.0 * (index + 1) + seconds)
+        remaining = iter(ticks)
+
+        def clock():
+            return next(remaining)
+
+        self._patches.append(patch.object(grasp_runtime.time, "monotonic", clock))
+        self._patches[-1].start()
+        return list(durations)
+
+    # ---------------------------------------------------------------- 断言助手
+    def called_stages(self) -> List[str]:
+        return [name for name, item in zip(self.STAGES, self._mocks) if item.called]
+
+    def mock(self, stage: str):
+        return self._mocks[self.STAGES.index(stage)]
+
+
 class AlignXYTests(unittest.TestCase):
     TRUTH = ServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
     TARGET = ServoTarget(x_mm=2.0, y_mm=-1.0)
@@ -758,8 +923,10 @@ class MoveAxesTests(unittest.TestCase):
 
     def _record_sleeps(self, arm, config, base_pulses, radial_pulses):
         sleeps: List[float] = []
-        with patch.object(servo.time, "sleep", sleeps.append):
-            servo._move_axes(arm, base_pulses, radial_pulses, config)
+        # ``sleep`` 要在**真正执行它的模块**里换掉：``_move_axes`` 是 servo_motion 的
+        # 函数，它查的是自己模块的名字，不是 eye_in_hand 的。
+        with patch.object(motion.time, "sleep", sleeps.append):
+            motion._move_axes(arm, base_pulses, radial_pulses, config)
         return sleeps
 
     def test_gap_is_inserted_between_the_two_frames(self) -> None:
@@ -815,7 +982,7 @@ class ZGuardTests(unittest.TestCase):
         scale = LiftScale(dz_per_pulse=0.0121)
         config = ServoConfig(z_min_mm=30.0)
         # 现在 z=40、想下降 2000 脉冲（按 0.0121 会降到 15.8 mm，低于护栏）。
-        step, clamped = servo._lift_step_within_guard(
+        step, clamped = algorithms._lift_step_within_guard(
             z_mm=40.0, step=-2000, scale=scale, config=config
         )
         self.assertTrue(clamped)
@@ -826,7 +993,7 @@ class ZGuardTests(unittest.TestCase):
     def test_guard_leaves_a_safe_move_alone(self) -> None:
         scale = LiftScale(dz_per_pulse=0.0121)
         config = ServoConfig(z_min_mm=30.0)
-        step, clamped = servo._lift_step_within_guard(
+        step, clamped = algorithms._lift_step_within_guard(
             z_mm=120.0, step=-600, scale=scale, config=config
         )
         self.assertFalse(clamped)
@@ -992,7 +1159,7 @@ class SafeLiftTests(unittest.TestCase):
 
     def test_the_calibrated_scale_reaches_the_safe_height_in_two_segments(self) -> None:
         rig, link, config = self.make()
-        raised = servo.raise_before_rotating(
+        raised = algorithms.raise_before_rotating(
             rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
 
@@ -1006,7 +1173,7 @@ class SafeLiftTests(unittest.TestCase):
 
     def test_without_the_scale_it_walks_in_fixed_segments(self) -> None:
         rig, link, config = self.make()
-        raised = servo.raise_before_rotating(rig, link, ObjectSelector(), config)
+        raised = algorithms.raise_before_rotating(rig, link, ObjectSelector(), config)
 
         self.assertGreaterEqual(rig.z, config.safe_lift_z_mm)
         self.assertEqual(set(rig.up_pulses), {config.safe_lift_step_pulses})
@@ -1016,21 +1183,21 @@ class SafeLiftTests(unittest.TestCase):
 
     def test_the_scale_path_can_be_switched_off(self) -> None:
         rig, link, config = self.make(safe_lift_use_scale=False)
-        servo.raise_before_rotating(
+        algorithms.raise_before_rotating(
             rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
         self.assertEqual(set(rig.up_pulses), {config.safe_lift_step_pulses})
 
     def test_the_computed_segment_is_capped(self) -> None:
         rig, link, config = self.make(safe_lift_max_pulses_per_step=400)
-        servo.raise_before_rotating(
+        algorithms.raise_before_rotating(
             rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
         self.assertEqual(rig.up_pulses[0], 400)
 
     def test_already_high_enough_costs_one_measurement_and_no_motion(self) -> None:
         rig, link, config = self.make(z_mm=105.0)
-        raised = servo.raise_before_rotating(
+        raised = algorithms.raise_before_rotating(
             rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
 
@@ -1041,7 +1208,7 @@ class SafeLiftTests(unittest.TestCase):
     def test_the_quick_check_passes_on_a_single_frame_when_clearly_safe(self) -> None:
         """每一轮都要查的调用方（--follow）用单帧快判：够高就只花一帧。"""
         rig, link, config = self.make(z_mm=110.0)
-        raised = servo.raise_before_rotating(rig, link, ObjectSelector(), config, quick=True)
+        raised = algorithms.raise_before_rotating(rig, link, ObjectSelector(), config, quick=True)
 
         self.assertEqual(raised, 0)
         self.assertEqual(rig.calls, [])
@@ -1049,7 +1216,7 @@ class SafeLiftTests(unittest.TestCase):
 
     def test_the_quick_check_falls_back_when_the_margin_is_not_met(self) -> None:
         rig, link, config = self.make(z_mm=102.0)  # 过了安全高度，但不够余量
-        raised = servo.raise_before_rotating(rig, link, ObjectSelector(), config, quick=True)
+        raised = algorithms.raise_before_rotating(rig, link, ObjectSelector(), config, quick=True)
 
         self.assertEqual(raised, 0)
         # 一帧快判 + 一次停稳测量（两次定位）
@@ -1059,14 +1226,14 @@ class SafeLiftTests(unittest.TestCase):
         """余量就是为这一条存在的：模糊帧把 z 读大、"以为够高"正是低位转底盘的成因。"""
         rig, _unused, config = self.make(z_mm=99.0)  # 真值低于安全高度
         link = FirstFrameHigh(rig, offset_mm=4.0)  # 第一帧读成 103，仍在余量（5 mm）内
-        raised = servo.raise_before_rotating(rig, link, ObjectSelector(), config, quick=True)
+        raised = algorithms.raise_before_rotating(rig, link, ObjectSelector(), config, quick=True)
 
         self.assertGreater(len(rig.up_pulses), 0)  # 没被那一帧骗过去：该抬还是抬
         self.assertEqual(raised, sum(rig.up_pulses))
 
     def test_a_lift_that_changes_nothing_is_reported_instead_of_pushed(self) -> None:
         rig, link, config = self.make(slope=0.0)  # 已经到行程端点：走多少都不变
-        raised = servo.raise_before_rotating(
+        raised = algorithms.raise_before_rotating(
             rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
 
@@ -1076,7 +1243,7 @@ class SafeLiftTests(unittest.TestCase):
     def test_a_lift_that_barely_moves_is_also_treated_as_an_endstop(self) -> None:
         """到端点时物块几乎不动、只剩画面噪声：判据不能只看"是不是恰好 0"。"""
         rig, link, config = self.make(slope=0.00005)
-        raised = servo.raise_before_rotating(
+        raised = algorithms.raise_before_rotating(
             rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
 
@@ -1085,7 +1252,7 @@ class SafeLiftTests(unittest.TestCase):
 
     def test_without_a_scale_a_dead_lift_stops_after_two_segments(self) -> None:
         rig, link, config = self.make(slope=0.0)
-        raised = servo.raise_before_rotating(rig, link, ObjectSelector(), config)
+        raised = algorithms.raise_before_rotating(rig, link, ObjectSelector(), config)
 
         # 没有灵敏度可参照，所以第一段没法判；两段都不动就收手（而不是顶满 20 段）。
         self.assertEqual(len(rig.up_pulses), 2)
@@ -1177,7 +1344,7 @@ class FindObjectTests(unittest.TestCase):
 
         self.assertFalse(found)
         self.assertLess(elapsed, 1.0)  # 旧写法这里要 3 × 30 s
-        self.assertEqual(link.reads, 3 * servo.VISIBILITY_PROBE_FRAMES)
+        self.assertEqual(link.reads, 3 * VISIBILITY_PROBE_FRAMES)
         self.assertEqual(len(rig.up_pulses), 3)  # 每一步仍然照抬
 
 
@@ -1197,7 +1364,7 @@ class EnsureSafeHeightTests(unittest.TestCase):
         arm, link, target, jacobian = self.rig()
         config = ServoConfig()
 
-        with patch.object(servo, "raise_before_rotating") as check:
+        with patch.object(algorithms, "raise_before_rotating") as check:
             result = align_x_y(
                 arm, link, ObjectSelector(), target, jacobian, config,
                 ensure_safe_height=False,
@@ -1205,7 +1372,7 @@ class EnsureSafeHeightTests(unittest.TestCase):
         check.assert_not_called()
         self.assertTrue(result.aligned)
 
-        with patch.object(servo, "raise_before_rotating") as check:
+        with patch.object(algorithms, "raise_before_rotating") as check:
             align_x_y(arm, link, ObjectSelector(), target, jacobian, config)
         check.assert_called_once()
 
@@ -1213,7 +1380,7 @@ class EnsureSafeHeightTests(unittest.TestCase):
         arm, link, target, jacobian = self.rig()
         scale = LiftScale(dz_per_pulse=0.0121)
 
-        with patch.object(servo, "raise_before_rotating") as check:
+        with patch.object(algorithms, "raise_before_rotating") as check:
             align_x_y(
                 arm, link, ObjectSelector(), target, jacobian, ServoConfig(),
                 lift_scale=scale,
@@ -1222,100 +1389,162 @@ class EnsureSafeHeightTests(unittest.TestCase):
         self.assertEqual(check.call_args.kwargs["scale"], scale)
 
 
-class AlignAndDescendTests(unittest.TestCase):
-    """一键就位：四步的顺序、参数传递、耗时记录。"""
+class GraspAlignXYSessionTests(unittest.TestCase):
+    """``Grasp.align_xy``：配了 ``hover_z_mm`` 才先悬停；安全高度检查不能被顺手关掉。
 
-    def canned(self, order: List[str]):
-        def hover(*_args, **_kwargs):
-            order.append("hover")
-            return HoverResult(
-                configured=True, pulses=-120, start_z_mm=120.0, end_z_mm=100.0
-            )
+    ``ensure_safe_height`` 的默认值是 ``True`` 这件事在这里必须被钉住：主链
+    （:meth:`Grasp.align_and_descend`）才关它，单独对准时**一次都不能省**——
+    低位转底盘会把台面上的物块撞倒。
+    """
 
-        def lift(*_args, **_kwargs):
-            order.append("lift")
-            return 250
+    def build(self, *, hover_z_mm: Optional[float]) -> GraspSessionRig:
+        # ``strict_align=False``：这一组走的是 ``align_x_y`` 的默认参数，
+        # 也就是"底层那次安全高度检查仍然发生"。
+        return GraspSessionRig(hover_z_mm=hover_z_mm, strict_align=False)
 
-        def align(*_args, **kwargs):
-            order.append("align")
-            self.assertFalse(kwargs["ensure_safe_height"])
-            return ServoResult(
-                target=ServoTarget(x_mm=0.0, y_mm=0.0),
-                readings=((0.4, -0.5),),
-                error_x=0.4,
-                error_y=-0.5,
-                base_pulses=10,
-                radial_pulses=-4,
-                iterations=1,
-                tolerance_mm=2.0,
-            )
+    def test_a_configured_hover_runs_first_and_then_aligns(self) -> None:
+        rig = self.build(hover_z_mm=105.0)
+        with rig as session:
+            result = session.grasp.align_xy()
+            hover = session.mock("hover")
+            align = session.mock("align")
 
-        def down(*_args, **_kwargs):
-            order.append("down")
-            return ZDescentResult(
-                pulses=2200, planar_mm=0.64, start_z_mm=100.0, seconds=1.2
-            )
+            hover.assert_called_once()
+            align.assert_called_once()
+            self.assertEqual(align.call_args.args[0:3], (session.arm, session.source, ObjectSelector()))
+            # 单独对准时**不能**关掉任何安全检查：``ensure_safe_height`` 一个都别出现。
+            self.assertNotIn("ensure_safe_height", align.call_args.kwargs)
+            session.mock("raise").assert_not_called()
+            session.mock("down").assert_not_called()
+            session.mock("back").assert_not_called()
 
-        def back(*_args, **_kwargs):
-            order.append("back")
-            return 150
+        self.assertTrue(result.aligned)
 
-        return lift, align, down, back, hover
+    def test_without_the_key_it_skips_hover_but_still_aligns(self) -> None:
+        rig = self.build(hover_z_mm=None)
+        with rig as session:
+            result = session.grasp.align_xy()
+            session.mock("hover").assert_not_called()
+            session.mock("align").assert_called_once()
+            self.assertNotIn("ensure_safe_height", session.mock("align").call_args.kwargs)
 
-    def run_it(self, order: List[str], seen: Optional[dict] = None, **overrides):
-        lift, align, down, back, hover = self.canned(order)
-        if seen is not None:
-            # 想看命令行覆盖有没有传下去，就把两个脉冲步骤包一层记录。
-            # 先存原名再重新绑定，否则闭包里的 down 指的是包好的那个自己。
-            original_down, original_back = down, back
+        self.assertTrue(result.aligned)
 
-            def record_down(*_args, **kwargs):
-                seen["z"] = kwargs.get("pulses")
-                return original_down()
 
-            def record_back(*_args, **kwargs):
-                seen["retract"] = kwargs.get("pulses")
-                return original_back()
+class GraspAlignAndDescendTests(unittest.TestCase):
+    """一键就位现在是 ``Grasp`` 的**实例方法**（原来的自由函数已删除）。
 
-            down, back = record_down, record_back
-        jacobian = ServoJacobian(
-            base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091
-        )
-        with patch.object(servo, "hover_above_object", side_effect=hover), patch.object(
-            servo, "raise_before_rotating", side_effect=lift
-        ), patch.object(servo, "align_x_y", side_effect=align), patch.object(
-            servo, "descend_z", side_effect=down
-        ), patch.object(servo, "retract_extension", side_effect=back):
-            return align_and_descend(
-                arm=None,
-                link=None,
-                selector=ObjectSelector(),
-                target=ServoTarget(x_mm=0.0, y_mm=0.0),
-                jacobian=jacobian,
-                config=ServoConfig(),
-                **overrides,
-            )
+    四步的顺序、``ensure_safe_height=False``、两个脉冲覆盖、以及四段耗时的记录，
+    一条条都要还在：第 3、4 步是开环的（爪子压下去之后画面里就没有物块了），
+    第 2 步的结果是它们**唯一**的安全依据。
+    """
 
     def test_the_steps_run_in_the_documented_order(self) -> None:
-        order: List[str] = []
-        result = self.run_it(order)
+        rig = GraspSessionRig()
+        with rig as session:
+            durations = session.stage_clock()
+            result = session.grasp.align_and_descend()
+            called = session.called_stages()
 
-        self.assertEqual(order, ["hover", "lift", "align", "down", "back"])
+        self.assertEqual(called, ["hover", "raise", "align", "down", "back"])
+        # 完整字段：每一段的结果都要带出来，不能被换成"只报成功"。
         self.assertEqual(result.hover_pulses, -120)
         self.assertEqual(result.raised_pulses, 250)
         self.assertEqual(result.retracted_pulses, 150)
         self.assertEqual(result.descent.pulses, 2200)
         self.assertTrue(result.aligned.aligned)
-        self.assertGreaterEqual(result.total_seconds, 0.0)
-        summary = result.summary()
+        self.assertEqual(
+            (
+                result.lift_seconds,
+                result.align_seconds,
+                result.descend_seconds,
+                result.retract_seconds,
+            ),
+            tuple(durations),
+        )
+        self.assertAlmostEqual(result.total_seconds, sum(durations))
         for keyword in ("就位完成", "悬停 -120", "抬升 250", "下降 2200", "后缩 150"):
-            self.assertIn(keyword, summary)
+            self.assertIn(keyword, result.summary())
+
+    def test_align_is_asked_to_skip_the_duplicate_safe_height_check(self) -> None:
+        """刚刚才查过安全高度（悬停 + 抬升），这几步又不改高度，只跳过那一次重复。"""
+        rig = GraspSessionRig()
+        with rig as session:
+            session.stage_clock()
+            session.grasp.align_and_descend()
+            self.assertIs(
+                session.mock("align").call_args.kwargs["ensure_safe_height"], False
+            )
 
     def test_the_overrides_reach_the_two_pulse_steps(self) -> None:
-        seen: dict = {}
-        self.run_it([], seen=seen, z_pulses=800, retract_pulses=40)
+        rig = GraspSessionRig()
+        with rig as session:
+            session.stage_clock()
+            session.grasp.align_and_descend(z_pulses=800, retract_pulses=40)
+            self.assertEqual(session.mock("down").call_args.kwargs["pulses"], 800)
+            self.assertEqual(session.mock("back").call_args.kwargs["pulses"], 40)
 
-        self.assertEqual(seen, {"z": 800, "retract": 40})
+    def test_without_overrides_the_two_steps_get_none(self) -> None:
+        """``None`` 表示"用配置里的值"：会话不能替调用方填数。"""
+        rig = GraspSessionRig()
+        with rig as session:
+            session.stage_clock()
+            session.grasp.align_and_descend()
+            self.assertIsNone(session.mock("down").call_args.kwargs["pulses"])
+            self.assertIsNone(session.mock("back").call_args.kwargs["pulses"])
+
+    def test_every_stage_gets_the_configured_lift_scale(self) -> None:
+        """没标定升降灵敏度时"往下走"是在朝物块靠近，所以尺度要一路传下去。"""
+        rig = GraspSessionRig()
+        scale = rig.grasp._lift_scale
+        with rig as session:
+            session.stage_clock()
+            session.grasp.align_and_descend()
+            for stage in ("hover", "raise", "down"):
+                with self.subTest(stage=stage):
+                    self.assertIs(session.mock(stage).call_args.kwargs["scale"], scale)
+
+    def test_a_failing_hover_stops_before_anything_else(self) -> None:
+        self._assert_stage_failure("hover")
+
+    def test_a_failing_lift_stops_before_aligning(self) -> None:
+        self._assert_stage_failure("raise")
+
+    def test_a_failing_align_stops_before_descending(self) -> None:
+        self._assert_stage_failure("align")
+
+    def test_a_failing_descent_stops_before_retracting(self) -> None:
+        self._assert_stage_failure("down")
+
+    def test_a_failing_retract_is_reported(self) -> None:
+        self._assert_stage_failure("back")
+
+    def _assert_stage_failure(self, stage: str) -> None:
+        """某一阶段失败时：后面的一步都不许发，错误原样传出去。"""
+        rig = GraspSessionRig()
+        with rig as session:
+            session.stage_clock()
+            session.mock(stage).side_effect = ServoError(f"{stage} 失败")
+            with self.assertRaisesRegex(ServoError, f"{stage} 失败"):
+                session.grasp.align_and_descend()
+            called = session.called_stages()
+
+        index = rig.STAGES.index(stage)
+        self.assertEqual(called, list(rig.STAGES[: index + 1]), called)
+
+    def test_the_algorithms_are_imported_from_the_real_definition_site(self) -> None:
+        """会话在**方法体内**从 eye_in_hand 导入算法；patch 定义处才拦得住。
+
+        这条同时守着一件事：一次就位只对准**一次**。``align_and_descend``
+        不经过 ``self.align_xy()``——那会重复悬停与安全检查，改变原来只查一次的主链。
+        """
+        rig = GraspSessionRig()
+        with rig as session:
+            session.stage_clock()
+            session.grasp.align_and_descend()
+            self.assertTrue(session.mock("align").called)
+            # 多一次就是走了 self.align_xy() 那条重复路。
+            self.assertEqual(session.mock("align").call_count, 1)
 
 
 if __name__ == "__main__":

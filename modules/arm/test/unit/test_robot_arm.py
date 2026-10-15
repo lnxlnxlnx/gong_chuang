@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from modules.motor.drive.motion import estimate_move_seconds
 from modules.motor.drive.emm42 import Direction
@@ -284,6 +285,71 @@ class RobotArmAxisMappingTests(ArmTestCase):
                 torque_frame(motor_id=7, enabled=False),
             ],
         )
+
+
+class RobotArmConstructionTests(unittest.TestCase):
+    """构造中途失败时的资源归属。
+
+    ``RobotArm.__init__`` 会**先打开共享串口、再建三个驱动器**。构造没返回时调用方
+    拿不到对象，所以那个串口只能由构造器自己收尾——不收的话下一次构造会莫名其妙地
+    打不开同一个口，而且现场看不出是谁占着。
+    """
+
+    def test_motor_failure_closes_the_serial_the_constructor_opened(self) -> None:
+        serial = FakeSerial()
+        opened = []
+
+        def fake_open(self):
+            opened.append(self)
+            return serial
+
+        with patch.object(RobotArm, "_open_shared_serial", fake_open):
+            with patch(
+                "modules.arm.drive.robot_arm.Emm42Driver",
+                side_effect=RuntimeError("motor 6 不存在"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "motor 6 不存在"):
+                    RobotArm("/dev/ttyUSB0", config=fixture_config())
+        self.assertEqual(len(opened), 1, "串口确实由本构造器打开")
+        self.assertFalse(serial.is_open, "自己开的串口必须由自己关掉")
+
+    def test_injected_serial_is_never_closed_by_a_failed_constructor(self) -> None:
+        """外部注入的 ``serial_port`` **不归**本构造器管，失败时不许擅自关掉。"""
+        serial = FakeSerial()
+        with patch(
+            "modules.arm.drive.robot_arm.Emm42Driver",
+            side_effect=RuntimeError("motor 6 不存在"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "motor 6 不存在"):
+                RobotArm(
+                    "/dev/ttyUSB0", config=fixture_config(), serial_port=serial
+                )
+        self.assertTrue(serial.is_open, "注入的串口不该被失败的构造器关掉")
+
+    def test_successful_construction_keeps_the_serial_open(self) -> None:
+        """正常路径不能被收尾逻辑误伤：串口要保持打开，三个轴都建好。"""
+        arm = ArmTestCase().make_arm()
+        self.assertTrue(arm._serial.is_open)
+        self.assertEqual(sorted(arm._motors), ["base", "extension", "lift"])
+
+    def test_cleanup_failure_keeps_the_construction_error_as_primary(self) -> None:
+        """关串口也失败时，构造失败仍是主异常，关串口的错误挂在 ``__cause__``。"""
+        serial = FakeSerial()
+
+        def broken_close() -> None:
+            raise RuntimeError("close broke")
+
+        serial.close = broken_close
+        with patch.object(RobotArm, "_open_shared_serial", lambda self: serial):
+            with patch(
+                "modules.arm.drive.robot_arm.Emm42Driver",
+                side_effect=RuntimeError("motor 6 不存在"),
+            ):
+                with self.assertRaises(RuntimeError) as caught:
+                    RobotArm("/dev/ttyUSB0", config=fixture_config())
+        self.assertIn("motor 6 不存在", str(caught.exception))
+        self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+        self.assertIn("close broke", str(caught.exception.__cause__))
 
 
 if __name__ == "__main__":

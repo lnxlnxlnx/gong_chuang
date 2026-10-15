@@ -60,6 +60,7 @@ class ServoError(RuntimeError):
     """伺服无法继续（看不到物块、雅可比奇异、不收敛、超出行程预算）。"""
 
 
+@dataclass(frozen=True)
 class ObjectSelector:
     """怎么从一堆观测里认出"哪条是物块"。
 
@@ -100,6 +101,7 @@ class ObjectSelector:
         return "物块 = " + "、".join(parts)
 
 
+@dataclass(frozen=True)
 class ServoTarget:
     """``(tx, ty)``：爪子抓取点在相机坐标系里的位置（毫米）。"""
 
@@ -110,6 +112,7 @@ class ServoTarget:
         return f"目标读数 ({self.x_mm:+.2f}, {self.y_mm:+.2f}) mm"
 
 
+@dataclass(frozen=True)
 class ServoJacobian:
     """每脉冲引起的画面位移（毫米/脉冲）。
 
@@ -190,6 +193,7 @@ class ServoJacobian:
         )
 
 
+@dataclass(frozen=True)
 class ServoConfig:
     """伺服的步长、预算与容差。
 
@@ -448,6 +452,7 @@ class ServoConfig:
         )
 
 
+@dataclass(frozen=True)
 class LiftScale:
     """升降的 z 灵敏度：每脉冲让物块深度变化多少毫米（**抬升为正**）。"""
 
@@ -471,6 +476,7 @@ class LiftScale:
         return f"升降每 1000 脉冲 -> z {self.dz_per_pulse * 1000:+.1f} mm"
 
 
+@dataclass(frozen=True)
 class ServoResult:
     """一次 x/y 对准的结果。"""
 
@@ -513,6 +519,7 @@ class ServoResult:
         )
 
 
+@dataclass(frozen=True)
 class ZResult:
     """一次 z 对准的结果。"""
 
@@ -544,6 +551,7 @@ class ZResult:
         )
 
 
+@dataclass(frozen=True)
 class HoverResult:
     """一次"悬停到配置高度"（:func:`hover_above_object`）的结果。"""
 
@@ -571,6 +579,7 @@ class HoverResult:
         )
 
 
+@dataclass(frozen=True)
 class ZDescentResult:
     """一次"按脉冲下降"的结果。"""
 
@@ -590,6 +599,7 @@ class ZDescentResult:
         )
 
 
+@dataclass(frozen=True)
 class GraspReadyResult:
     """一次"抬升 + x/y 对准 + z 下降 + 后缩"的结果。"""
 

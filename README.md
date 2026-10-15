@@ -336,14 +336,28 @@ USB 摄像头 + YOLOv8 检测，封装为 `modules.vision` 包，供主程序和
 完整说明见 [modules/vision/docs/视觉物料定位.md](modules/vision/docs/视觉物料定位.md)。
 
 ```python
-from vision import MaterialLocator, USBCamera
+from modules.vision import Vision
 
-# 模型路径/类别表/阈值默认全部来自 modules/vision/config.json；
-# 要临时换一个模型才传 model_path。
+# 配置路径、模型、类别表、阈值、摄像头序号全部来自 modules/vision/config.json；
+# 要临时换一个模型/相机才传对应参数（只作用于这一次，不写回文件）。
+with Vision.open(config_path="modules/vision/config.json") as vision:
+    report = vision.locate()
+    if report.best is not None:
+        print(report.best.x_mm, report.best.y_mm, report.best.z_mm)
+    print(report.summary())  # 圆心、像素直径、约略距离及可选类别
+```
+
+只想在一帧图像上跑（不打开相机）时，用帧级定位器：
+
+```python
+from modules.vision.drive.camera import USBCamera
+from modules.vision.drive.material_locate import MaterialLocator
+
+# 模型路径/类别表/阈值默认全部来自 modules/vision/config.json。
 locator = MaterialLocator(model_path="models/best.onnx")
 with locator, USBCamera(1, width=1280, height=720).initialize() as camera:
     report = locator.locate(camera.read())
-    print(report.summary())  # 圆心、像素直径、约略距离及可选类别
+    print(report.summary())
 ```
 
 菜单 18 是 720p 真机预览入口（`q` 退出，`p` 立刻打印结论）。需提高距离精度时，

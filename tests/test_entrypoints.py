@@ -98,13 +98,14 @@ class EntryPointTests(unittest.TestCase):
 
     def test_test_menu_can_exit_without_opening_hardware(self) -> None:
         result = subprocess.run(
-            [sys.executable, str(ROOT / "test.py")],
+            # ``-X utf8`` 是**必须的**，不是保险：子进程的 stdout 在 Windows 上默认按
+            # 控制台代码页（本机 cp936）编码，而父进程按 UTF-8 解码，
+            # 于是中文菜单变成乱码、下面的断言永远找不到「机械臂」。
+            # 把两端的编码都钉死在 UTF-8，这条测试才测的是"菜单能跑"而不是"本机代码页"。
+            [sys.executable, "-X", "utf8", str(ROOT / "test.py")],
             input="0\n",
             capture_output=True,
             text=True,
-            # 子进程用 UTF-8 写菜单（代码里有中文），而 text=True 默认按
-            # Windows 本地编码（GBK）解码，会抛 UnicodeDecodeError 并让
-            # stdout 变成 None。这里把两端的编码都钉死。
             encoding="utf-8",
             errors="replace",
             cwd=ROOT,

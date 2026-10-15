@@ -142,7 +142,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    from modules.vision import USBCamera, close_previews, open_preview
+    from modules.vision.drive.camera import USBCamera
+    from modules.vision.drive.preview import close_previews, open_preview
 
     args = parse_args()
     platform = "windows" if os.name == "nt" else "jetson"

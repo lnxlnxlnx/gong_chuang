@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import math
+import time
 from typing import TYPE_CHECKING, Callable, Optional, Protocol, Sequence, Tuple
 
 from modules.grasp.drive.servo_model import ObjectSelector, ServoConfig, ServoError
