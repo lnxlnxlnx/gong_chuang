@@ -13,11 +13,11 @@
     },
     "lift": {
       "motor_id": 6,
-      "mm_per_motor_rev": null
+      "mm_per_motor_rev": 60
     },
     "extension": {
       "motor_id": 7,
-      "mm_per_motor_rev": null
+      "mm_per_motor_rev": 60
     }
   },
   "homing": {

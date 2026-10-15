@@ -60,6 +60,17 @@ class ServoError(RuntimeError):
     """伺服无法继续（看不到物块、雅可比奇异、不收敛、超出行程预算）。"""
 
 
+class ObjectMissing(ServoError):
+    """**这一帧里一个物块都没有**——不是"链路坏了"，也不是"有好几个目标"。
+
+    单独一个类型，是因为调用方对它的处理与别的 :class:`ServoError` 不同：x/y 对准在
+    "已经测到过、而且已经进入可下降精度"之后看不见物块，是**爪子自己悬到了物块上方把光
+    挡住**的典型现象，可以按最后一次读数收工（见
+    :func:`modules.grasp.drive.eye_in_hand._result_when_occluded`）；而"多个目标"和
+    "等不到新观测"必须停下来问人。用异常消息的字符串去区分这三件事太脆，所以用类型。
+    """
+
+
 @dataclass(frozen=True)
 class ObjectSelector:
     """怎么从一堆观测里认出"哪条是物块"。
@@ -494,6 +505,10 @@ class ServoResult:
     #: 是不是"卡在分辨率极限上"停下的：误差已经比背隙能分辨的还小，
     #: 再走一步只会跨过目标。这时 :attr:`aligned` 可能是假，但那不是失败。
     resolution_limited: bool = False
+    #: 是不是**因遮挡收工**的：物块被爪子（或别的结构）挡住之后，按已经测到的那次读数
+    #: 收工，而不是继续要新帧。它表示"没有再验证过"，**不是**"已经对准"——调用方要据此
+    #: 决定后面还能不能做开环动作（例如下降）。
+    occluded: bool = False
 
     @property
     def error_mm(self) -> float:
@@ -510,6 +525,8 @@ class ServoResult:
             verdict = "已到分辨率极限（背隙决定，再走只会跨过目标）"
         else:
             verdict = "未达标"
+        if self.occluded:
+            verdict += "（物块被挡住，按最后一次读数收工，未再验证）"
         return (
             f"x/y 对准{verdict}："
             f"最终读数 ({self.readings[-1][0]:+.2f}, {self.readings[-1][1]:+.2f}) mm，"
@@ -555,7 +572,8 @@ class ZResult:
 class HoverResult:
     """一次"悬停到配置高度"（:func:`hover_above_object`）的结果。"""
 
-    #: 配了 ``hover_z_mm`` 吗；没配就是"跳过"，``pulses`` 必为 0。
+    #: 这一步真的跑了吗；没跑（没配 ``hover_z_mm``，或调用方要求不动高度）就是"跳过"，
+    #: ``pulses`` 必为 0。
     configured: bool
     #: 实际走的升降脉冲（正 = 抬升、负 = 下降）。
     pulses: int = 0
@@ -570,7 +588,7 @@ class HoverResult:
 
     def summary(self) -> str:
         if not self.configured:
-            return "悬停高度：没配 hover_z_mm，跳过（起始高度只由安全高度兜下限）"
+            return "悬停高度：跳过（没配 hover_z_mm，或调用方要求不动高度；起始高度只由安全高度兜下限）"
         if not self.pulses:
             return f"悬停高度：本来就在 z={self.start_z_mm:.1f} mm，没动"
         return (

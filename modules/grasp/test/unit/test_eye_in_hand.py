@@ -1390,35 +1390,55 @@ class EnsureSafeHeightTests(unittest.TestCase):
 
 
 class GraspAlignXYSessionTests(unittest.TestCase):
-    """``Grasp.align_xy``：配了 ``hover_z_mm`` 才先悬停；安全高度检查不能被顺手关掉。
+    """``Grasp.align_xy``：**默认只动平面**，高度完全由调用方负责。
 
-    ``ensure_safe_height`` 的默认值是 ``True`` 这件事在这里必须被钉住：主链
-    （:meth:`Grasp.align_and_descend`）才关它，单独对准时**一次都不能省**——
-    低位转底盘会把台面上的物块撞倒。
+    这条默认值是刻意选的：物块放得高时悬停会一路往上抬到行程端点（抬升方向没有上限），
+    所以"单独对准"不再自己升降。代价是**转底盘前的安全高度检查也默认关掉了**——
+    低位转底盘会把台面上的物块撞倒（现场发生过），调用方必须先自己点动到够高，
+    或者显式传 ``ensure_safe_height=True`` 把那次检查要回来。
+    主链 :meth:`Grasp.align_and_descend` 的默认值**没变**（仍然悬停 + 仍然查安全高度）。
     """
 
     def build(self, *, hover_z_mm: Optional[float]) -> GraspSessionRig:
-        # ``strict_align=False``：这一组走的是 ``align_x_y`` 的默认参数，
-        # 也就是"底层那次安全高度检查仍然发生"。
+        # ``strict_align=False``：这一组走的是 ``align_x_y`` 的默认参数那一支。
         return GraspSessionRig(hover_z_mm=hover_z_mm, strict_align=False)
 
-    def test_a_configured_hover_runs_first_and_then_aligns(self) -> None:
+    def test_the_default_does_not_touch_the_height(self) -> None:
+        """默认：既不悬停，也不查安全高度——高度是调用方的事。"""
         rig = self.build(hover_z_mm=105.0)
         with rig as session:
             result = session.grasp.align_xy()
+            session.mock("hover").assert_not_called()
+            self.assertIs(
+                session.mock("align").call_args.kwargs["ensure_safe_height"], False
+            )
+
+        self.assertTrue(result.aligned)
+
+    def test_a_requested_hover_runs_first_and_then_aligns(self) -> None:
+        rig = self.build(hover_z_mm=105.0)
+        with rig as session:
+            result = session.grasp.align_xy(hover=True)
             hover = session.mock("hover")
             align = session.mock("align")
 
             hover.assert_called_once()
             align.assert_called_once()
             self.assertEqual(align.call_args.args[0:3], (session.arm, session.source, ObjectSelector()))
-            # 单独对准时**不能**关掉任何安全检查：``ensure_safe_height`` 一个都别出现。
-            self.assertNotIn("ensure_safe_height", align.call_args.kwargs)
             session.mock("raise").assert_not_called()
             session.mock("down").assert_not_called()
             session.mock("back").assert_not_called()
 
         self.assertTrue(result.aligned)
+
+    def test_the_safe_height_check_can_be_asked_back(self) -> None:
+        """要回那次检查时，底层必须拿到它自己的默认值（关键字一个都不传）。"""
+        rig = self.build(hover_z_mm=105.0)
+        with rig as session:
+            session.grasp.align_xy(ensure_safe_height=True)
+            self.assertNotIn(
+                "ensure_safe_height", session.mock("align").call_args.kwargs
+            )
 
     def test_without_the_key_it_skips_hover_but_still_aligns(self) -> None:
         rig = self.build(hover_z_mm=None)
@@ -1426,7 +1446,6 @@ class GraspAlignXYSessionTests(unittest.TestCase):
             result = session.grasp.align_xy()
             session.mock("hover").assert_not_called()
             session.mock("align").assert_called_once()
-            self.assertNotIn("ensure_safe_height", session.mock("align").call_args.kwargs)
 
         self.assertTrue(result.aligned)
 
@@ -1545,6 +1564,279 @@ class GraspAlignAndDescendTests(unittest.TestCase):
             self.assertTrue(session.mock("align").called)
             # 多一次就是走了 self.align_xy() 那条重复路。
             self.assertEqual(session.mock("align").call_count, 1)
+
+
+class GraspManualHeightTests(unittest.TestCase):
+    """``hover`` / ``ensure_safe_height``：高度可以整段交给调用方。
+
+    为什么要有这两个开关（现场实测）：物块放得高时，悬停伺服要把"镜头到物块"的距离压到
+    ``hover_z_mm``，于是**一路往上抬**——抬升方向没有上限，只有"走了脉冲 z 却没变"的
+    事后判据，所以它会顶在行程端点上，电机堵转。
+
+    两个开关的边界必须清楚：``hover=False`` 只让开"悬停"；``ensure_safe_height=False``
+    才是"转底盘前的高度我自己负责"——低位转底盘会撞到台面上的物块。
+    """
+
+    def test_skipping_both_leaves_the_height_untouched(self) -> None:
+        rig = GraspSessionRig(hover_z_mm=105.0)
+        with rig as session:
+            session.stage_clock()
+            result = session.grasp.align_and_descend(
+                hover=False, ensure_safe_height=False
+            )
+            called = session.called_stages()
+            session.mock("hover").assert_not_called()
+            session.mock("raise").assert_not_called()
+
+        self.assertEqual(called, ["align", "down", "back"])
+        self.assertEqual(result.hover_pulses, 0)
+        self.assertEqual(result.raised_pulses, 0)
+        # 跳过悬停时摘要不能说"悬停 0 脉冲"，也不能假装抬过。
+        self.assertNotIn("悬停", result.summary())
+        self.assertIn("抬升 0 脉冲", result.summary())
+
+    def test_the_default_still_hovers_and_raises(self) -> None:
+        rig = GraspSessionRig(hover_z_mm=105.0)
+        with rig as session:
+            session.stage_clock()
+            session.grasp.align_and_descend()
+            self.assertEqual(
+                session.called_stages(),
+                ["hover", "raise", "align", "down", "back"],
+            )
+
+    def test_skipping_hover_keeps_the_safe_height_check(self) -> None:
+        """``hover=False`` 不是"关掉安全检查"：转底盘前照样要够高。"""
+        rig = GraspSessionRig(hover_z_mm=105.0)
+        with rig as session:
+            session.stage_clock()
+            result = session.grasp.align_and_descend(hover=False)
+
+            session.mock("hover").assert_not_called()
+            session.mock("raise").assert_called_once()
+
+        self.assertEqual(result.raised_pulses, 250)
+        self.assertEqual(result.hover_pulses, 0)
+
+    def test_the_align_step_still_skips_its_duplicate_check(self) -> None:
+        """主链只查一次安全高度这件事与两个开关无关。"""
+        rig = GraspSessionRig(hover_z_mm=105.0)
+        with rig as session:
+            session.stage_clock()
+            session.grasp.align_and_descend(hover=False, ensure_safe_height=False)
+            self.assertIs(
+                session.mock("align").call_args.kwargs["ensure_safe_height"], False
+            )
+
+    def test_align_xy_can_skip_both_height_steps(self) -> None:
+        """单独对准也能不动高度：``align_xy(hover=False, ensure_safe_height=False)``。"""
+        rig = GraspSessionRig(hover_z_mm=105.0, strict_align=False)
+        with rig as session:
+            result = session.grasp.align_xy(hover=False, ensure_safe_height=False)
+
+            session.mock("hover").assert_not_called()
+            self.assertIs(
+                session.mock("align").call_args.kwargs["ensure_safe_height"], False
+            )
+
+        self.assertTrue(result.aligned)
+
+
+class OcclusionTests(unittest.TestCase):
+    """物块中途看不见：**只有"一个目标都没有"才可能是爪子挡光**，别的必须报错。
+
+    现场现象：对准到最后，爪子正好悬在物块上方，自己把光挡住，画面里就没有那块料了。
+    这时如果照旧报错，流程会死在一个已经对准的位置上；但如果一律"看不见就当对准了"，
+    就等于放行一个没量过的落点。所以只开一个窄口子：**已经测到过 + 那一次已经进入
+    "可以下降"的平面精度**，才按最后一次读数收工，并且在结果里写明"未再验证"。
+    """
+
+    TRUTH = ServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    TARGET = ServoTarget(x_mm=2.0, y_mm=-1.0)
+
+    class OccludedLink:
+        """前 ``visible_reads`` 次读得到物块，之后画面里什么都没有（被爪子挡住）。"""
+
+        error = None
+
+        def __init__(self, arm: "FakeArm", *, visible_reads: int) -> None:
+            self.arm = arm
+            self.remaining = visible_reads
+
+        def frame(self, **_kwargs):
+            if self.remaining <= 0:
+                return ()
+            self.remaining -= 1
+            return (
+                sighting(
+                    4, self.arm.offset[0], self.arm.offset[1], stamp=time.monotonic()
+                ),
+            )
+
+    def config(self) -> ServoConfig:
+        # 超时给得很短：这条路径要等满 settle_timeout 才认输，测试不该真的等 4 s。
+        return ServoConfig(
+            tolerance_mm=0.5,
+            max_iterations=12,
+            max_pulses_per_step=2000,
+            min_step_mm=0.1,
+            z_center_tolerance_mm=6.0,
+            settle_timeout_seconds=0.05,
+            settle_poll_seconds=0.01,
+        )
+
+    def test_a_blind_frame_after_a_close_reading_finishes_with_a_flag(self) -> None:
+        """走了两步之后被挡住，而最后一次误差已经在 6 mm 内 → 收工，且写明未再验证。"""
+        arm = FakeArm(self.TRUTH, gain=0.6)
+        link = self.OccludedLink(arm, visible_reads=4)
+        messages: List[str] = []
+
+        result = align_x_y(
+            arm, link, ObjectSelector(), self.TARGET, self.TRUTH, self.config(),
+            ensure_safe_height=False, on_message=messages.append,
+        )
+
+        self.assertTrue(result.occluded)
+        # 用的是第 2 次（也就是最后一次有效）的读数，不是凭空造一个。
+        self.assertEqual(len(result.readings), 2)
+        self.assertAlmostEqual(result.error_x, result.readings[-1][0] - self.TARGET.x_mm, places=9)
+        self.assertAlmostEqual(result.error_mm, 4.66, delta=0.3)
+        self.assertIn("挡住", result.summary())
+        self.assertTrue(any("未再验证" in message for message in messages), messages)
+
+    def test_a_blind_frame_while_still_far_off_still_raises(self) -> None:
+        """一次有效读数之后就被挡住、但误差还有十几毫米 → 必须报错，不能猜。"""
+        arm = FakeArm(self.TRUTH)
+        link = self.OccludedLink(arm, visible_reads=2)
+
+        with self.assertRaisesRegex(ServoError, "没有物块"):
+            align_x_y(
+                arm, link, ObjectSelector(), self.TARGET, self.TRUTH, self.config(),
+                ensure_safe_height=False,
+            )
+
+    def test_a_blind_first_frame_raises_without_any_history(self) -> None:
+        """一帧都没测到过：没有"最后一次读数"可用，只能报错。"""
+        arm = FakeArm(self.TRUTH)
+        link = self.OccludedLink(arm, visible_reads=0)
+
+        with self.assertRaisesRegex(ServoError, "没有物块"):
+            align_x_y(
+                arm, link, ObjectSelector(), self.TARGET, self.TRUTH, self.config(),
+                ensure_safe_height=False,
+            )
+
+    def test_several_targets_are_never_treated_as_occlusion(self) -> None:
+        """画面里有两个目标时**不能**当遮挡收工：那会朝错的目标走，必须问人。"""
+
+        class TwoTargets:
+            error = None
+
+            def frame(self, **_kwargs):
+                stamp = time.monotonic()
+                return (
+                    sighting(1, 30.0, 0.0, stamp=stamp),
+                    sighting(2, -30.0, 0.0, stamp=stamp),
+                )
+
+        arm = FakeArm(self.TRUTH)
+        with self.assertRaisesRegex(ServoError, "多个目标"):
+            align_x_y(
+                arm, TwoTargets(), ObjectSelector(), self.TARGET, self.TRUTH, self.config(),
+                ensure_safe_height=False,
+            )
+
+    def test_the_timeout_message_carries_the_last_inner_reason(self) -> None:
+        """超时那句必须带上最后一次内层原因——否则三种成因长得一模一样。"""
+        arm = FakeArm(self.TRUTH)
+        link = self.OccludedLink(arm, visible_reads=0)
+
+        with self.assertRaises(ServoError) as caught:
+            measure_settled(
+                link,
+                ObjectSelector(),
+                ServoConfig(settle_timeout_seconds=0.05, settle_poll_seconds=0.01),
+            )
+
+        message = str(caught.exception)
+        self.assertIn("也没能稳定看到物块", message)
+        self.assertIn("这一段的最后一次失败是", message)
+        self.assertIn("没有物块", message)
+
+
+class StepDirectionTests(unittest.TestCase):
+    """每一步走完，实测位移与雅可比预测**方向相反**时必须立刻停下。
+
+    这是"雅可比过时 / 装反"的唯一签名。没有这条判据时，闭环只会照着雅可比一直走，
+    直到脉冲预算（``max_total_pulses``）用完——那时报的是"预算用完"，现场看到的是
+    "越走越偏、方向不对"，离真正的原因已经很远。
+
+    判据必须窄：只拦**方向相反**；同向但只走了一部分（背隙、物块被推动、雅可比偏小）
+    不许误伤，否则一个能收敛的闭环会被无谓地打断。
+    """
+
+    TRUTH = ServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    TARGET = ServoTarget(x_mm=0.0, y_mm=0.0)
+
+    def config(self) -> ServoConfig:
+        return ServoConfig(
+            tolerance_mm=0.5, max_iterations=12, max_pulses_per_step=2000, min_step_mm=0.1
+        )
+
+    def inverted(self) -> ServoJacobian:
+        """与机器相反的那份雅可比（相机装反 / 接线改过之后的典型状态）。"""
+        return ServoJacobian(
+            base_dx=-self.TRUTH.base_dx,
+            base_dy=-self.TRUTH.base_dy,
+            radial_dx=-self.TRUTH.radial_dx,
+            radial_dy=-self.TRUTH.radial_dy,
+        )
+
+    def test_an_inverted_jacobian_stops_at_the_first_step(self) -> None:
+        arm = FakeArm(self.TRUTH)
+
+        with self.assertRaises(ServoError) as caught:
+            align_x_y(
+                arm, BufferedLink(arm), ObjectSelector(), self.TARGET, self.inverted(),
+                self.config(), ensure_safe_height=False,
+            )
+
+        message = str(caught.exception)
+        # 报错里要同时给出实测与预测两个数，现场才能核对；并给出重探的命令。
+        self.assertIn("方向相反", message)
+        self.assertIn("实测", message)
+        self.assertIn("预测", message)
+        self.assertIn("--calibrate", message)
+        # 只发了一步的帧（两个轴各一条），没有把预算烧完。
+        self.assertEqual(len(arm.calls), 2, arm.calls)
+
+    def test_a_partial_step_in_the_right_direction_is_not_flagged(self) -> None:
+        """背隙/物块被推动让这一步只走了一部分，方向仍然一致 → 照旧收敛。"""
+        arm = FakeArm(self.TRUTH, gain=0.3)
+
+        result = align_x_y(
+            arm, BufferedLink(arm), ObjectSelector(), self.TARGET, self.TRUTH,
+            self.config(), ensure_safe_height=False,
+        )
+
+        self.assertTrue(result.aligned, result.summary())
+
+    def test_a_consistent_jacobian_reports_measured_against_predicted(self) -> None:
+        """方向一致时也要把"实测 vs 预测"打出来，供现场核对雅可比还准不准。"""
+        # gain=0.5：一步走不完，于是第二、第三轮都会经过核对那一行。
+        arm = FakeArm(self.TRUTH, gain=0.5)
+        messages: List[str] = []
+
+        result = align_x_y(
+            arm, BufferedLink(arm), ObjectSelector(), self.TARGET, self.TRUTH,
+            self.config(), ensure_safe_height=False, on_message=messages.append,
+        )
+
+        self.assertTrue(result.aligned, result.summary())
+        self.assertTrue(
+            any("实测画面位移" in message and "雅可比预测" in message for message in messages),
+            messages,
+        )
 
 
 if __name__ == "__main__":

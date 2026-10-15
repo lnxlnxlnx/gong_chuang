@@ -184,6 +184,14 @@
 | 转动底座 | `move_base_degrees(degrees, ...)` | 需要 `axes.base.reduction_ratio` |
 | 升降 | `move_lift_mm(millimeters, ...)` | 需要 `axes.lift.mm_per_motor_rev` |
 | 伸缩 | `move_radial_mm(millimeters, ...)` | 需要 `axes.extension.mm_per_motor_rev` |
+| 一次走多轴（圆柱） | `move_cylindrical_by(*, base_degrees=0.0, radial_mm=0.0, height_mm=0.0, ...)` | 同上；顺序固定"抬升 → 伸缩 → 底座"，下降排在最后 |
+| 一次走多轴（基座 XYZ） | `move_by(*, x_mm=0.0, y_mm=0.0, z_mm=0.0, ...)` | 同上；x/y **还需要当前位姿**，只走 z 不需要 |
+
+后两个是上面三个的**组合入口**：各走一个增量，同样不需要位姿已知（`move_by` 的 x/y 除外），
+返回值按执行顺序只含真的发了帧的那几段。`move_by` 的 x/y 为什么非要位姿：水平方向只有
+"转底座 + 伸缩"两个自由度，同一对 `(dx, dy)` 在不同方位对应不同的 `(Δ底座角, Δ半径)`，
+切向那部分还要除以当前半径——猜一个方位正是这条路上最危险的事。位姿未知时它**拒绝发帧**
+并说明缺什么，而不是退化成一次猜测。
 
 两组都**不检查绝对行程**：行程是绝对位姿的限制，调用方必须在发出动作前用
 `modules.arm.drive.kinematics.require_reachable` 检查（抓取流程就是这么做的）。

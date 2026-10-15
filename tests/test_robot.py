@@ -265,5 +265,94 @@ class RobotTestCase(unittest.TestCase):
         open_bus.assert_not_called()
 
 
+class SharedBusOpenerTests(unittest.TestCase):
+    """``Robot._open_shared_bus`` 自己必须**真的可调用**。
+
+    这里是曾经的现场故障：给这个方法叠了两个 ``@staticmethod``，于是类属性成了一个
+    ``staticmethod`` 对象而不是函数，``Robot.open(arm=True)`` 直接抛
+    ``TypeError: 'staticmethod' object is not callable``。
+
+    上面那些用例全都 patch 掉了这个工厂，所以**测不到它本身**——必须有一条用例走进去。
+    """
+
+    def test_the_decorated_factory_is_callable(self) -> None:
+        for name in (
+            "_open_shared_bus",
+            "_load_grasp_settings",
+            "_require_distinct_motor_addresses",
+            "_attempt",
+        ):
+            with self.subTest(method=name):
+                self.assertTrue(
+                    callable(getattr(Robot, name)),
+                    f"Robot.{name} 必须是可调用对象（检查装饰器有没有叠错）",
+                )
+
+    def test_it_opens_pyserial_at_the_configured_baud_and_returns_a_serial_port(self) -> None:
+        """真实实现仍是 pyserial 的 ``Serial``；返回类型是窄协议 ``SerialPort``。"""
+        from modules.motor.drive.emm42 import Emm42Driver
+
+        opened = FakeSerialPort()
+        with patch("serial.Serial", return_value=opened) as make:
+            bus = Robot._open_shared_bus("COM_TEST")
+
+        self.assertIs(bus, opened)
+        self.assertEqual(make.call_args.args[0], "COM_TEST")
+        self.assertEqual(make.call_args.kwargs["baudrate"], Emm42Driver.BAUDRATE)
+        # 满足协议形状：位置参数写入，且允许返回 None。
+        self.assertEqual(bus.write(b"abc"), 3)
+
+    def test_missing_pyserial_is_reported_with_the_install_hint(self) -> None:
+        with patch.dict("sys.modules", {"serial": None}):
+            with self.assertRaises(RuntimeError) as caught:
+                Robot._open_shared_bus("COM_TEST")
+        self.assertIn("pyserial", str(caught.exception))
+
+    def test_the_open_path_really_calls_the_factory(self) -> None:
+        """走真实装配，只替换最外层的端口打开：臂/底盘都拿到同一条借用连接。"""
+        opened = FakeSerialPort()
+        arm = FakeModule("arm", [])
+        chassis = FakeModule("chassis", [])
+        with patch.object(Robot, "_open_shared_bus", return_value=opened) as make_bus, patch(
+            "modules.arm.config.load_arm_config", return_value=healthy_arm_config()
+        ), patch(
+            "modules.motor.config.load_bus_config",
+            return_value=SimpleNamespace(port="COM_TEST"),
+        ), patch(
+            "modules.arm.runtime.RobotArm._from_settings", return_value=arm
+        ) as make_arm, patch(
+            "modules.chassis.runtime.MecanumChassis.load_hardware_profile",
+            return_value=healthy_chassis_profile(),
+        ), patch(
+            "modules.chassis.runtime.MecanumChassis._from_settings", return_value=chassis
+        ) as make_chassis:
+            with Robot.open(arm=True, chassis=True):
+                pass
+
+        make_bus.assert_called_once_with("COM_TEST")
+        self.assertIs(make_arm.call_args.kwargs["bus"], opened)
+        self.assertIs(make_chassis.call_args.kwargs["bus"], opened)
+        self.assertFalse(make_arm.call_args.kwargs["owns_bus"])
+
+
+class FakeSerialPort:
+    """满足 ``SerialPort`` 协议的假串口：位置参数写入、返回可空。"""
+
+    def __init__(self) -> None:
+        self.is_open = True
+
+    def write(self, data, /):
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def read(self, size: int) -> bytes:
+        return bytes(size)
+
+    def close(self) -> None:
+        self.is_open = False
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -74,6 +74,7 @@ from modules.grasp.drive.servo_model import (
     DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH,
     LIFT_AXIS,
     MIN_JACOBIAN_DETERMINANT,
+    ObjectMissing,
     RADIAL_AXIS,
     GraspReadyResult,
     HoverResult,
@@ -128,6 +129,91 @@ def _clamp_pulses(value: float, limit: int) -> int:
     """把浮点脉冲量取整并夹到 ``±limit``。"""
     rounded = int(round(value))
     return max(-limit, min(limit, rounded))
+
+
+def _result_when_occluded(
+    readings: List[Tuple[float, float]],
+    target: ServoTarget,
+    config: ServoConfig,
+    *,
+    base_pulses: int,
+    radial_pulses: int,
+    iterations: int,
+) -> Optional[ServoResult]:
+    """物块看不见了，能不能按**已经测到**的那次读数收工；不能就返回 ``None``。
+
+    这是"爪子已经悬到物块上方、自己把光挡住"的收工口。成立要同时满足两条：
+
+    1. 这一次调用里**至少测到过一次**（一次都没有就无从谈起，只能报错问人）；
+    2. 那一次的误差已经进入"可以下降"的平面精度（``z_center_tolerance_mm``，
+       与 :func:`descend_z` 用的是同一个门槛）。
+
+    两条一起的含义是：遮挡发生在"再走也只会过冲"的阶段，按那一次读数收工不会让机械臂落到
+    一个没量过的地方。结果里的 ``occluded`` 明确表示**没有再验证过**——不是"已经对准"，
+    调用方要据此决定后面还能不能做开环动作（例如下降）。
+
+    还差得远就返回 ``None``（物块可能被人挡住、被挪走、或者被爪子推开了）——那种情况必须
+    报错，不能猜。
+    """
+    if not readings:
+        return None
+    error_x = readings[-1][0] - target.x_mm
+    error_y = readings[-1][1] - target.y_mm
+    if math.hypot(error_x, error_y) > config.z_center_tolerance_mm:
+        return None
+    return ServoResult(
+        target=target,
+        readings=tuple(readings),
+        error_x=error_x,
+        error_y=error_y,
+        base_pulses=base_pulses,
+        radial_pulses=radial_pulses,
+        iterations=iterations,
+        tolerance_mm=config.tolerance_mm,
+        occluded=True,
+    )
+
+
+def _require_step_direction(
+    jacobian: ServoJacobian,
+    *,
+    step: Tuple[int, int],
+    measured: Tuple[float, float],
+    config: ServoConfig,
+    say: Callable[[str], None],
+) -> None:
+    """这一步走完，画面**该**往哪动是雅可比说了算的；方向明显相反就必须停下。
+
+    雅可比是"每脉冲让画面挪多少"的**一次性**标定。相机重新装过、皮带或联轴器滑过、轴的
+    接线/方向改过之后，它和机器就可能对不上——而闭环只会照着它一直走，直到脉冲预算用完
+    （那时报的是"预算用完"，离真正的原因已经很远，现场看到的就是"越走越偏/方向不对"）。
+
+    判据刻意做窄：只有**预测位移与实测位移明显相反**（点积为负、两边都远高于停稳噪声）
+    才拦。物块被爪子推动、背隙吃掉一小步、雅可比只是偏小这类情况方向仍然一致，不误伤；
+    方向一致时只把"实测 vs 预测"打出来，供现场核对雅可比还准不准。
+    """
+    predicted = jacobian.displacement_for(step[0], step[1])
+    floor = 4.0 * config.settle_tolerance_mm
+    if math.hypot(predicted[0], predicted[1]) <= floor:
+        return
+    if math.hypot(measured[0], measured[1]) <= floor:
+        return
+    if predicted[0] * measured[0] + predicted[1] * measured[1] >= 0.0:
+        say(
+            f"  这一步实测画面位移 ({measured[0]:+.2f}, {measured[1]:+.2f}) mm，"
+            f"雅可比预测 ({predicted[0]:+.2f}, {predicted[1]:+.2f}) mm"
+        )
+        return
+    raise ServoError(
+        f"这一步的实测画面位移与雅可比预测**方向相反**：实测 "
+        f"({measured[0]:+.2f}, {measured[1]:+.2f}) mm，预测 "
+        f"({predicted[0]:+.2f}, {predicted[1]:+.2f}) mm"
+        f"（底座 {step[0]:+d}、伸缩 {step[1]:+d} 脉冲）。\n"
+        "  雅可比是“每脉冲让画面挪多少”的一次性标定，方向相反说明它和你现在的机器对不上："
+        "相机重新装过、皮带或联轴器滑过、轴的接线或方向改过。\n"
+        "  重探一次（探针自带两段同向位移的一致性判据，符号错了它自己会报）：\n"
+        "    python -m modules.grasp.test.manual.align_xy --calibrate"
+    )
 
 
 def probe_jacobian(
@@ -222,6 +308,16 @@ def align_x_y(
         一帧（约 0.22 s）而不是一次停稳测量（约 0.54 s）。
     :param lift_scale: 已标定的升降灵敏度，交给 :func:`raise_before_rotating` 一步算到位。
     :raises ServoError: 看不到物块、雅可比奇异、脉冲预算用完，或迭代用尽仍未进容差。
+
+    物块**中途看不见**分两种，处理方式不同：
+
+    - 已经测到过、而且那一次已经进入"可以下降"的平面精度（``z_center_tolerance_mm``，
+      与 :func:`descend_z` 同一个门槛）→ 按最后一次读数收工，结果里 ``occluded=True``。
+      爪子悬到物块正上方、自己把光挡住就是这个现象，收工口正是为它留的；
+    - 一次都没测到、或者还差得远 → 原样报错（物块可能被挪走、被手挡住、被爪子推开）。
+
+    "画面里有多个目标"和"等不到新观测"**不属于遮挡**（那是
+    :class:`~modules.grasp.drive.servo_model.ObjectMissing` 之外的类型），永远报错。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     # x/y 的每一步都要转底盘，所以先在**打开动作之前**抬到安全高度。这是机械结构上的
@@ -243,6 +339,10 @@ def align_x_y(
     #: **这是闭环正确性的关键**：动作很快时，队列里可能还压着动作**之前**的帧，
     #: 读到它就会以为"没动过"，于是再发一次同样的指令——表现为来回振荡。
     checkpoint: Optional[float] = None
+    #: 上一次动作**之前**的读数，与那一次下发的脉冲。用来核对"实测位移 vs 雅可比预测"：
+    #: 方向相反就是雅可比过时/装反的签名，必须立刻停下而不是把脉冲预算烧完。
+    previous_offset: Optional[Tuple[float, float]] = None
+    previous_step: Optional[Tuple[int, int]] = None
     #: 第一次测到的像素直径，用来发现"物块被挡住了"。
     baseline_diameter: Optional[float] = None
     #: 这一轮判"停稳"用的一致性门槛。第一次用细档（要判"是不是已经对准了"），
@@ -251,9 +351,30 @@ def align_x_y(
 
     for attempt in range(1, config.max_iterations + 1):
         started = time.monotonic()
-        sighting = _settled_sighting(
-            link, selector, config, after=checkpoint, tolerance=settle_tolerance
-        )
+        try:
+            sighting = _settled_sighting(
+                link, selector, config, after=checkpoint, tolerance=settle_tolerance
+            )
+        except ObjectMissing:
+            # 只有"一个目标都没有"走这条路：可能只是爪子悬到物块上方把光挡住了。
+            # "多个目标"与"等不到新观测"是别的类型，会照旧往上抛——那两种必须问人。
+            fallback = _result_when_occluded(
+                readings,
+                target,
+                config,
+                base_pulses=total_base,
+                radial_pulses=total_radial,
+                iterations=attempt,
+            )
+            if fallback is None:
+                raise
+            say(
+                f"  物块看不见了（第 {attempt} 次测量）：按第 {len(readings)} 次的读数 "
+                f"({readings[-1][0]:+.2f}, {readings[-1][1]:+.2f}) mm 收工，误差 "
+                f"{fallback.error_mm:.2f} mm，**未再验证**；"
+                "多半是爪子已经悬到物块上方、自己把光挡住了"
+            )
+            return fallback
         measure_seconds = time.monotonic() - started
         offset = (sighting.x_mm, sighting.y_mm)
         readings.append(offset)
@@ -298,6 +419,20 @@ def align_x_y(
                 radial_pulses=total_radial,
                 iterations=attempt,
                 tolerance_mm=config.tolerance_mm,
+            )
+
+        # 上一次那一步到底把画面挪到哪了：与雅可比预测**方向相反**就立刻停下
+        # （那是雅可比过时/装反的签名，继续走只会把脉冲预算烧完，现场表现为"越走越偏"）。
+        if previous_step is not None and previous_offset is not None:
+            _require_step_direction(
+                jacobian,
+                step=previous_step,
+                measured=(
+                    offset[0] - previous_offset[0],
+                    offset[1] - previous_offset[1],
+                ),
+                config=config,
+                say=say,
             )
 
         # 粗调 / 细调分档：误差大时放开单步上限，一步把大部分误差消掉，
@@ -357,6 +492,9 @@ def align_x_y(
         say(f"  动作耗时 {move_seconds:.2f} s")
         total_base += base_step
         total_radial += radial_step
+        # 记下"走之前在哪、发了多少脉冲"，下一轮拿实测位移和雅可比预测对一次。
+        previous_offset = offset
+        previous_step = (base_step, radial_step)
         # 两个动作都已等完，从这一刻起才允许读新帧。
         checkpoint = time.monotonic() + config.frame_margin_seconds
 

@@ -397,7 +397,6 @@ class Robot:
             )
 
     @staticmethod
-    @staticmethod
     def _open_shared_bus(port: str) -> "SerialPort":
         """打开那条共享的 Emm42 连接（arm 与 chassis 时序复用同一条）。
 

@@ -20,7 +20,12 @@ import math
 import time
 from typing import TYPE_CHECKING, Callable, Optional, Protocol, Sequence, Tuple
 
-from modules.grasp.drive.servo_model import ObjectSelector, ServoConfig, ServoError
+from modules.grasp.drive.servo_model import (
+    ObjectMissing,
+    ObjectSelector,
+    ServoConfig,
+    ServoError,
+)
 
 if TYPE_CHECKING:
     from modules.vision.drive.sighting import MaterialSighting
@@ -73,7 +78,7 @@ def select_object(
         listing = "、".join(
             f"物料 {item.material_id}({item.color})" for item in sightings
         ) or "（空）"
-        raise ServoError(
+        raise ObjectMissing(
             f"这一帧里没有物块（{selector.describe()}）；收到 {len(sightings)} 条：{listing}"
         )
     if len(matched) > 1 and selector.is_open:
@@ -135,12 +140,17 @@ def _settled_sighting(
     deadline = time.monotonic() + config.settle_timeout_seconds
     previous: Optional[Tuple[float, float]] = None
     last: Optional[MaterialSighting] = None
+    #: 这段时间里**最后一次**"读不到"的原因。必须留着：最终那句"没能稳定看到物块"至少
+    #: 对应三种完全不同的情况（一个目标都没有 / 画面里有多个目标 / 等不到新观测），混成
+    #: 一句话现场只能靠猜；而且"一个目标都没有"还可能只是爪子挡住了光，处理方式完全不同。
+    last_error: Optional[ServoError] = None
     while True:
         try:
             current = _read_object(link, selector, config, after=after)
-        except ServoError:
+        except ServoError as error:
             # 运动模糊时检不到物块是常态，不该当失败——接着等。
             previous = None
+            last_error = error
         else:
             last = current
             point = (current.x_mm, current.y_mm, current.z_mm)
@@ -153,10 +163,18 @@ def _settled_sighting(
             previous = point
         if time.monotonic() >= deadline:
             if last is None:
-                raise ServoError(
+                # 超时的**类型**跟着最后一次失败走：调用方要能区分"一个目标都没有"（可能是
+                # 爪子挡住了光，可以按最后一次读数收工）与"多个目标 / 链路超时"（必须报错）。
+                message = (
                     f"等了 {config.settle_timeout_seconds:.1f} s 也没能稳定看到物块；"
-                    "确认物块在画面里、没有被人或线材挡住"
+                    f"这一段的最后一次失败是：{last_error}\n"
+                    "  一个目标都没有时：确认物块在画面里，没有被人、线材或爪子挡住；"
+                    "提示多个目标时：在 modules/grasp/eye_in_hand.json 的 object 里"
+                    "填 material_id 或 color"
                 )
+                if isinstance(last_error, ObjectMissing):
+                    raise ObjectMissing(message) from last_error
+                raise ServoError(message) from last_error
             say(
                 f"  等停稳超时（{config.settle_timeout_seconds:.1f} s）："
                 f"画面仍在变，先按最后读数 ({last.x_mm:+.2f}, {last.y_mm:+.2f}) mm 继续"

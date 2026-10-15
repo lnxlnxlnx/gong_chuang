@@ -51,11 +51,13 @@ Grasp 实例
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 from modules.grasp.drive.servo_model import (
     GraspReadyResult,
+    HoverResult,
     LiftScale,
     ObjectSelector,
     ServoConfig,
@@ -84,10 +86,10 @@ class GraspSettings(TypedDict):
     selector: ObjectSelector
     target: ServoTarget
     jacobian: ServoJacobian
-    lift_scale: Optional[LiftScale]
+    lift_scale: LiftScale | None
 
 
-def _new_arm(port: str, arm_config) -> "RobotArm":
+def _new_arm(port: str, arm_config) -> RobotArm:
     """真实构造机械臂的唯一位置；测试在这里注入假臂。
 
     ``RobotArm`` 的构造会打开串口，所以调用它之前必须已经做完配置校验
@@ -108,8 +110,8 @@ class Grasp:
         selector: ObjectSelector,
         target: ServoTarget,
         jacobian: ServoJacobian,
-        lift_scale: Optional[LiftScale],
-        on_message: Optional[Callable[[str], None]] = None,
+        lift_scale: LiftScale | None,
+        on_message: Callable[[str], None] | None = None,
     ) -> None:
         """只保存**已经读好的**配置与值对象：不读文件、不碰设备。"""
         self._config = config
@@ -123,8 +125,8 @@ class Grasp:
         )
         #: 设备在 ``open`` / ``_from_modules_settings`` 之前确实还不存在，所以如实可空；
         #: 动作边界用 :meth:`_require_resources` 缩窄。
-        self._arm: Optional[RobotArm] = None
-        self._source: Optional[ClosableFrameSource] = None
+        self._arm: RobotArm | None = None
+        self._source: ClosableFrameSource | None = None
         self._closed = False
         #: 设备是**借来的**吗（``from_modules``）：借来的不收尾，只结束本会话。
         self._borrowed = False
@@ -138,7 +140,7 @@ class Grasp:
         if self._closed:
             raise RuntimeError("Grasp 已关闭")
 
-    def _require_resources(self) -> "tuple[RobotArm, ClosableFrameSource]":
+    def _require_resources(self) -> tuple[RobotArm, ClosableFrameSource]:
         """校验会话开启并返回**确定存在**的机械臂与观测源。"""
         self._require_open()
         arm, source = self._arm, self._source
@@ -153,12 +155,12 @@ class Grasp:
     def open(
         cls,
         *,
-        config_path: Optional[Path] = None,
-        vision_config_path: Optional[Path] = None,
-        vision_calibration_path: Optional[Path] = None,
-        arm_config_path: Optional[Path] = None,
-        motor_config_path: Optional[Path] = None,
-    ) -> "Grasp":
+        config_path: Path | None = None,
+        vision_config_path: Path | None = None,
+        vision_calibration_path: Path | None = None,
+        arm_config_path: Path | None = None,
+        motor_config_path: Path | None = None,
+    ) -> Grasp:
         """从现有配置创建本机视觉、机械臂和普通动作会话。
 
         五个路径**各自**解析默认值，不能混用：抓取参数来自 ``eye_in_hand.json``，
@@ -167,9 +169,6 @@ class Grasp:
         """
         from modules.arm.config import DEFAULT_CONFIG_PATH as arm_default
         from modules.arm.config import load_arm_config
-        from modules.motor.config import DEFAULT_CONFIG_PATH as motor_default
-        from modules.motor.config import load_bus_config
-        from modules.vision.runtime import Vision, _load_settings
         from modules.grasp.drive.servo_model import (
             DEFAULT_CONFIG_PATH,
             load_jacobian,
@@ -178,6 +177,9 @@ class Grasp:
             load_servo_config,
             load_target,
         )
+        from modules.motor.config import DEFAULT_CONFIG_PATH as motor_default
+        from modules.motor.config import load_bus_config
+        from modules.vision.runtime import Vision, _load_settings
 
         grasp_path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
         arm_path = arm_default if arm_config_path is None else Path(arm_config_path)
@@ -186,9 +188,9 @@ class Grasp:
         # 五份配置一次读好，构造后只使用这些值——动作方法里不再读文件。
         config: ServoConfig = load_servo_config(grasp_path)
         selector: ObjectSelector = load_object_selector(grasp_path)
-        target: Optional[ServoTarget] = load_target(grasp_path)
-        jacobian: Optional[ServoJacobian] = load_jacobian(grasp_path)
-        lift_scale: Optional[LiftScale] = load_lift_scale(grasp_path)
+        target: ServoTarget | None = load_target(grasp_path)
+        jacobian: ServoJacobian | None = load_jacobian(grasp_path)
+        lift_scale: LiftScale | None = load_lift_scale(grasp_path)
         # 在**打开任何设备之前**取得非空 target / jacobian（含奇异判据）。
         target, jacobian = cls._require_action_ready(target=target, jacobian=jacobian)
         arm_config = load_arm_config(config_path=arm_path)
@@ -215,12 +217,12 @@ class Grasp:
         selector: ObjectSelector,
         target: ServoTarget,
         jacobian: ServoJacobian,
-        lift_scale: Optional[LiftScale],
-        arm_config: "ArmConfig",
+        lift_scale: LiftScale | None,
+        arm_config: ArmConfig,
         port: str,
         source_factory: Callable[[], ClosableFrameSource],
-        on_message: Optional[Callable[[str], None]] = None,
-    ) -> "Grasp":
+        on_message: Callable[[str], None] | None = None,
+    ) -> Grasp:
         """**普通动作唯一的设备创建路径**（public ``open`` 与菜单 21 都走这里）。
 
         顺序是硬要求：普通动作的配置校验**不能**挪到装配机械臂之后——``_new_arm``
@@ -256,11 +258,11 @@ class Grasp:
     def from_modules(
         cls,
         *,
-        arm: "RobotArm",
-        vision: "Vision",
-        config_path: Optional[Path] = None,
-        on_message: Optional[Callable[[str], None]] = None,
-    ) -> "Grasp":
+        arm: RobotArm,
+        vision: Vision,
+        config_path: Path | None = None,
+        on_message: Callable[[str], None] | None = None,
+    ) -> Grasp:
         """**借用**已经装配好的 arm / vision，读完 eye_in_hand 配置后建立会话。
 
         ``Robot`` 集成路径用这个：同一个会话里 arm 与 vision 只开一份，抓取复用它。
@@ -288,9 +290,9 @@ class Grasp:
         grasp_path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
         config: ServoConfig = load_servo_config(grasp_path)
         selector: ObjectSelector = load_object_selector(grasp_path)
-        target: Optional[ServoTarget] = load_target(grasp_path)
-        jacobian: Optional[ServoJacobian] = load_jacobian(grasp_path)
-        lift_scale: Optional[LiftScale] = load_lift_scale(grasp_path)
+        target: ServoTarget | None = load_target(grasp_path)
+        jacobian: ServoJacobian | None = load_jacobian(grasp_path)
+        lift_scale: LiftScale | None = load_lift_scale(grasp_path)
         target, jacobian = cls._require_action_ready(target=target, jacobian=jacobian)
         return cls._from_modules_settings(
             config=config,
@@ -311,11 +313,11 @@ class Grasp:
         selector: ObjectSelector,
         target: ServoTarget,
         jacobian: ServoJacobian,
-        lift_scale: Optional[LiftScale],
-        arm: "RobotArm",
-        vision: "Vision",
-        on_message: Optional[Callable[[str], None]] = None,
-    ) -> "Grasp":
+        lift_scale: LiftScale | None,
+        arm: RobotArm,
+        vision: Vision,
+        on_message: Callable[[str], None] | None = None,
+    ) -> Grasp:
         """借用装配的**唯一接缝**：``Robot`` 在开设备前预校验配置后也走这里。
 
         与 :meth:`_open_settings` 共用同一份参数校验与同一套动作实现，只是不创建设备。
@@ -340,8 +342,8 @@ class Grasp:
 
     @staticmethod
     def _require_action_ready(
-        *, target: Optional[ServoTarget], jacobian: Optional[ServoJacobian]
-    ) -> "tuple[ServoTarget, ServoJacobian]":
+        *, target: ServoTarget | None, jacobian: ServoJacobian | None
+    ) -> tuple[ServoTarget, ServoJacobian]:
         """普通动作的前置校验：必须在**打开任何设备之前**完成。
 
         返回缩窄后的 ``(target, jacobian)``：调用方拿到的就是非空值，不必在装配完成后
@@ -356,21 +358,43 @@ class Grasp:
         return target, jacobian
 
     # ------------------------------------------------------------- 动作
-    def align_xy(self) -> ServoResult:
-        """包含原 ``run_align`` 的可选悬停，再按原规则检查安全高度并对准。
+    def align_xy(
+        self, *, hover: bool = False, ensure_safe_height: bool = False
+    ) -> ServoResult:
+        """只做 x/y 对准：**默认一步都不动高度**，高度由调用方负责。
 
         只动平面（底座 + 伸缩），**不下降、不后缩**。
+
+        :param hover: 要不要先把高度伺服到 ``hover_z_mm``。那一步会**自己升降**——物块放得
+            高时它会一路往上抬到行程端点（抬升方向没有上限），所以默认不做；要做就传
+            ``hover=True``。配置里没写 ``hover_z_mm`` 时这一步本来就不发生。
+        :param ensure_safe_height: 转底盘之前要不要先确认已经在安全高度。**默认不做**，
+            因为默认值要跟"不动高度"一致。这意味着**低位转底盘会撞到台面上的物块**
+            （现场发生过），所以调用方必须先自己点动到够高，或者显式传 ``True`` 把这次
+            检查要回来。传 ``True`` 时底层拿到的是它自己的默认值（关键字一个都不传）。
         """
         arm, source = self._require_resources()
         from modules.grasp.drive.eye_in_hand import align_x_y, hover_above_object
 
-        if self._config.hover_z_mm is not None:
+        if hover and self._config.hover_z_mm is not None:
             hover_above_object(
                 arm,
                 source,
                 self._selector,
                 self._config,
                 scale=self._lift_scale,
+                on_message=self._say,
+            )
+        if not ensure_safe_height:
+            return align_x_y(
+                arm,
+                source,
+                self._selector,
+                self._target,
+                self._jacobian,
+                self._config,
+                ensure_safe_height=False,
+                lift_scale=self._lift_scale,
                 on_message=self._say,
             )
         return align_x_y(
@@ -384,7 +408,14 @@ class Grasp:
             on_message=self._say,
         )
 
-    def align_and_descend(self, *, z_pulses=None, retract_pulses=None) -> GraspReadyResult:
+    def align_and_descend(
+        self,
+        *,
+        z_pulses=None,
+        retract_pulses=None,
+        hover: bool = True,
+        ensure_safe_height: bool = True,
+    ) -> GraspReadyResult:
         """执行抓取前就位；**不闭合夹爪，也不承诺完成搬运**。
 
         顺序不是随便定的：
@@ -406,7 +437,21 @@ class Grasp:
 
         :param z_pulses: 覆盖下降脉冲数（只这一次）；``None`` 用配置值。
         :param retract_pulses: 覆盖后缩脉冲数（只这一次）；``None`` 用配置值。
+        :param hover: 第 1 步里的悬停要不要做（默认做）。悬停会**自己升降**：它把"镜头到
+            物块"的距离伺服到 ``hover_z_mm``，物块放得高时它会一路往上抬——没有上限，
+            只有"走了脉冲 z 却没变"的事后判据，所以会顶到行程端点。想让高度完全由自己
+            掌握就传 ``hover=False``。
+        :param ensure_safe_height: 要不要在转底盘之前把高度抬到安全高度（默认要）。传
+            ``False`` = 高度由调用方自己负责，本方法一次都不动升降（除了第 3 步那次下降）。
+            **低位转底盘会撞到台面上的物块**，关掉它之前请先自己点动到够高。
         :raises ServoError: 任何一步失败；异常信息里会写清卡在哪一步。
+
+        高度自己管的一条典型用法（第 1 步整体让开，下降脉冲按现场改）::
+
+            robot.arm.move_up(pulses=600)          # 自己点动到够高
+            result = robot.grasp.align_and_descend(
+                hover=False, ensure_safe_height=False, z_pulses=600
+            )
         """
         arm, source = self._require_resources()
         from modules.grasp.drive.eye_in_hand import (
@@ -419,14 +464,25 @@ class Grasp:
 
         say = self._say
         started = time.monotonic()
-        say("① 先到物块上方的悬停高度（配了 hover_z_mm 才动），再确认转底盘前的安全高度")
-        hovered = hover_above_object(
-            arm, source, self._selector, self._config,
-            scale=self._lift_scale, on_message=say,
+        if hover or ensure_safe_height:
+            say("① 先到物块上方的悬停高度（配了 hover_z_mm 才动），再确认转底盘前的安全高度")
+        else:
+            say("① 不动高度：转底盘前的高度由调用方自己保证（低位转动会撞到台面上的物块）")
+        hovered = (
+            hover_above_object(
+                arm, source, self._selector, self._config,
+                scale=self._lift_scale, on_message=say,
+            )
+            if hover
+            else HoverResult(configured=False)
         )
-        raised = raise_before_rotating(
-            arm, source, self._selector, self._config,
-            scale=self._lift_scale, on_message=say,
+        raised = (
+            raise_before_rotating(
+                arm, source, self._selector, self._config,
+                scale=self._lift_scale, on_message=say,
+            )
+            if ensure_safe_height
+            else 0
         )
         lift_seconds = time.monotonic() - started
 
@@ -502,10 +558,10 @@ class Grasp:
             except Exception as error:
                 errors.append((stage, error))
         if errors:
-            details = "; ".join("{}: {}".format(stage, error) for stage, error in errors)
+            details = "; ".join(f"{stage}: {error}" for stage, error in errors)
             raise RuntimeError("Grasp 清理失败：" + details) from errors[0][1]
 
-    def __enter__(self) -> "Grasp":
+    def __enter__(self) -> Grasp:
         self._require_open()
         return self
 

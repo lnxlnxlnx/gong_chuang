@@ -12,6 +12,7 @@ from __future__ import annotations
 import unittest
 
 from modules.arm.config import ArmConfig, AxisConfig
+from modules.arm.drive.kinematics import CylindricalPose
 from modules.arm.runtime import RobotArm
 from modules.motor.drive.emm42 import Direction
 
@@ -226,6 +227,147 @@ class UnitMoveWaitTests(UnitMoveTestCase):
             [relative_position_frame(motor_id=7, direction=Direction.CW, pulses=1600)],
         )
         self.assertEqual(self.sleep_calls, [])
+
+
+class RelativePoseMoveTests(UnitMoveTestCase):
+    """一次多轴的相对入口：``move_cylindrical_by`` / ``move_by``。
+
+    这一组钉住两件事，两件都不是实现细节：
+
+    - **执行顺序**（抬升在前、下降在最后、平面先伸缩再底座）——那是碰撞保护；
+    - **X/Y 分解依赖当前位姿**——那是极坐标的几何事实，不是保守。
+    """
+
+    def record(self, arm, *, base_degrees: float, radial_mm: float, height_mm: float) -> None:
+        arm.record_measurement(
+            CylindricalPose(
+                base_degrees=base_degrees, radial_mm=radial_mm, height_mm=height_mm
+            )
+        )
+
+    def test_the_cylindrical_entry_raises_then_extends_then_turns(self) -> None:
+        arm = self.make_arm()
+
+        reports = arm.move_cylindrical_by(
+            base_degrees=22.5, radial_mm=10.0, height_mm=5.0
+        )
+
+        self.assertEqual(
+            self.serial.writes,
+            [
+                relative_position_frame(motor_id=6, direction=Direction.CW, pulses=400),
+                relative_position_frame(motor_id=7, direction=Direction.CW, pulses=800),
+                relative_position_frame(motor_id=5, direction=Direction.CW, pulses=1000),
+            ],
+        )
+        self.assertEqual([report.motor_id for report in reports], [6, 7, 5])
+
+    def test_a_descent_is_left_for_last(self) -> None:
+        """下降排在转底座之后：低位转底盘才是撞到台面物块的那一步。"""
+        arm = self.make_arm()
+
+        arm.move_cylindrical_by(base_degrees=22.5, height_mm=-20.0)
+
+        self.assertEqual(
+            self.serial.writes,
+            [
+                relative_position_frame(motor_id=5, direction=Direction.CW, pulses=1000),
+                relative_position_frame(motor_id=6, direction=Direction.CCW, pulses=1600),
+            ],
+        )
+
+    def test_zero_increments_send_nothing(self) -> None:
+        arm = self.make_arm()
+
+        reports = arm.move_cylindrical_by()
+
+        self.assertEqual(reports, ())
+        self.assertEqual(self.serial.writes, [])
+        self.assertEqual(self.sleep_calls, [])
+
+    def test_move_by_splits_a_tangential_step_with_the_current_pose(self) -> None:
+        """半径 100 mm、底座角 0° 时 +Y 是纯切向：只转底座，不伸缩。"""
+        arm = self.make_arm()
+        self.record(arm, base_degrees=0.0, radial_mm=100.0, height_mm=50.0)
+
+        arm.move_by(y_mm=10.0)
+
+        # 10 mm / 100 mm = 0.1 rad = 5.7296°；按 16000 脉冲/圈 = 254.6 -> 255
+        self.assertEqual(
+            self.serial.writes,
+            [relative_position_frame(motor_id=5, direction=Direction.CW, pulses=255)],
+        )
+
+    def test_move_by_along_the_current_radius_is_pure_extension(self) -> None:
+        arm = self.make_arm()
+        self.record(arm, base_degrees=0.0, radial_mm=100.0, height_mm=50.0)
+
+        arm.move_by(x_mm=10.0)
+
+        self.assertEqual(
+            self.serial.writes,
+            [relative_position_frame(motor_id=7, direction=Direction.CW, pulses=800)],
+        )
+
+    def test_the_height_component_of_move_by_needs_no_pose(self) -> None:
+        """位姿未知时 z 仍然能相对走：高度与方位无关。"""
+        arm = self.make_arm()
+
+        reports = arm.move_by(z_mm=-2.0)
+
+        self.assertEqual(
+            self.serial.writes,
+            [relative_position_frame(motor_id=6, direction=Direction.CCW, pulses=160)],
+        )
+        self.assertEqual([report.motor_id for report in reports], [6])
+
+    def test_x_and_y_without_a_pose_are_refused_before_writing(self) -> None:
+        arm = self.make_arm()
+
+        with self.assertRaisesRegex(RuntimeError, "位姿"):
+            arm.move_by(x_mm=1.0)
+
+        self.assertEqual(self.serial.writes, [])
+        self.assertEqual(self.sleep_calls, [])
+
+    def test_a_radius_too_small_for_xy_is_refused(self) -> None:
+        """基座轴线附近 1 mm 的切向增量就是几十度：宁可拒绝，不要分解出这种动作。"""
+        arm = self.make_arm()
+        self.record(arm, base_degrees=0.0, radial_mm=0.5, height_mm=50.0)
+
+        with self.assertRaisesRegex(ValueError, "半径"):
+            arm.move_by(y_mm=1.0)
+
+        self.assertEqual(self.serial.writes, [])
+
+    def test_an_uncalibrated_linear_axis_refuses_millimetres(self) -> None:
+        arm = self.make_arm(
+            config=fixture_config(
+                axes={
+                    "base": AxisConfig(motor_id=5, reduction_ratio=BASE_REDUCTION),
+                    "lift": AxisConfig(motor_id=6),
+                    "extension": AxisConfig(motor_id=7),
+                }
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "标定"):
+            arm.move_cylindrical_by(radial_mm=10.0)
+        with self.assertRaisesRegex(ValueError, "标定"):
+            arm.move_by(z_mm=10.0)
+
+        self.assertEqual(self.serial.writes, [])
+        self.assertEqual(self.sleep_calls, [])
+
+    def test_a_boolean_or_non_finite_increment_is_rejected(self) -> None:
+        arm = self.make_arm()
+
+        for bad in (True, float("nan"), float("inf"), "10"):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    arm.move_cylindrical_by(base_degrees=bad)
+
+        self.assertEqual(self.serial.writes, [])
 
 
 if __name__ == "__main__":
