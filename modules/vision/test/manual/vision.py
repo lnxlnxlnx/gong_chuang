@@ -16,19 +16,17 @@ import argparse
 import os
 from pathlib import Path
 
-from modules.vision import (
+from modules.vision.config import default_model_path
+from modules.vision.detector_factory import create_configured_detector
+from modules.vision.drive.camera import USBCamera, load_camera_id, looks_blank
+from modules.vision.drive.distance import DistanceEstimator
+from modules.vision.drive.preview import (
     BLANK_FRAME_WARNING,
-    DistanceEstimator,
-    USBCamera,
     close_previews,
-    create_configured_detector,
-    default_model_path,
-    load_camera_id,
-    looks_blank,
     open_preview,
-    run_preview,
     warn_blank_preview,
 )
+from modules.vision.drive.stream import run_preview
 
 
 def parse_real_widths(text: str | None):

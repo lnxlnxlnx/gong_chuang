@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from modules.vision.config import ModelSettings
 from modules.vision.drive.hough_lock import LockedRegion
 from modules.vision.drive.material_class import (
     DEFAULT_MATERIAL_LABELS,
@@ -82,22 +83,35 @@ class MaterialYOLOTests(unittest.TestCase):
         self.assertEqual([hit.name for hit in yolo.detect(self.frame, materials_only=True)], ["red"])
         self.assertEqual(fake.shapes, [(480, 640, 3), (480, 640, 3)])
 
-    def test_material_set_comes_from_the_model_config(self) -> None:
-        """没显式给 materials 时按 config.json 的 model.materials/m.class_names 来。"""
-        fake = FakeDetector([detection("red"), detection("blue", class_id=2)])
-        with patch("modules.vision.drive.material_yolo._configured_materials",
-                   return_value=("red",)):
-            yolo = MaterialYOLO(detector=fake)
-            self.assertEqual(yolo.effective_materials, ("red",))
-            self.assertEqual(
-                [hit.name for hit in yolo.detect(self.frame, materials_only=True)], ["red"]
-            )
+    def test_material_set_comes_from_the_injected_snapshot(self) -> None:
+        """没显式给 materials 时取构造时那份 ``ModelSettings`` 快照的 materials。
 
-    def test_explicit_materials_win_over_the_config(self) -> None:
+        刻意**不**回读默认配置文件：会话装配时定的类别就是这一会话的类别。
+        """
+        fake = FakeDetector([detection("red"), detection("blue", class_id=2)])
+        snapshot = ModelSettings(class_names=("red", "blue", "green"), materials=("red",))
+        yolo = MaterialYOLO(detector=fake, settings=snapshot)
+        self.assertEqual(yolo.effective_materials, ("red",))
+        self.assertEqual(
+            [hit.name for hit in yolo.detect(self.frame, materials_only=True)], ["red"]
+        )
+
+    def test_snapshot_is_not_reread_after_construction(self) -> None:
+        """实例建好之后改配置文件不影响它——快照在构造时就定死了。"""
         fake = FakeDetector([detection("red")])
-        with patch("modules.vision.drive.material_yolo._configured_materials",
-                   return_value=("blue",)):
-            yolo = MaterialYOLO(detector=fake, materials=("red",))
+        snapshot = ModelSettings(class_names=("red",), materials=("red",))
+        yolo = MaterialYOLO(detector=fake, settings=snapshot)
+        with patch(
+            "modules.vision.config.load_model_settings",
+            side_effect=AssertionError("不该在构造之后回读配置"),
+        ):
+            self.assertEqual(yolo.effective_materials, ("red",))
+            self.assertEqual(len(yolo.detect(self.frame, materials_only=True)), 1)
+
+    def test_explicit_materials_win_over_the_snapshot(self) -> None:
+        fake = FakeDetector([detection("red")])
+        snapshot = ModelSettings(class_names=("red", "blue"), materials=("blue",))
+        yolo = MaterialYOLO(detector=fake, materials=("red",), settings=snapshot)
         self.assertEqual(yolo.effective_materials, ("red",))
 
     def test_detect_in_region_maps_boxes_back_to_the_frame(self) -> None:

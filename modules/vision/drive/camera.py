@@ -79,19 +79,32 @@ class USBCamera:
         self.capture = None
 
     def initialize(self) -> "USBCamera":
-        """Open the camera and apply resolution / frame-rate settings."""
+        """Open the camera and apply resolution / frame-rate settings.
+
+        ``capture`` 在**全部设置都成功之后**才移交给实例：中途任何一步失败，
+        都由本方法释放那个还没交出去的局部 capture。否则一个没被任何人持有的
+        ``VideoCapture`` 会一直占着设备——下一个 ``USBCamera(0)`` 会莫名其妙地打不开。
+        释放本身再失败时，原异常仍是主异常，释放错误挂成它的 ``__cause__``。
+        """
         cv2 = _cv2()
         capture = cv2.VideoCapture(self.device_id)
-        if not capture.isOpened():
-            raise RuntimeError(
-                f"USB camera {self.device_id} failed to open; "
-                "check the configured camera index and connection"
-            )
-        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        capture.set(cv2.CAP_PROP_FPS, self.fps)
-        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        try:
+            if not capture.isOpened():
+                raise RuntimeError(
+                    f"USB camera {self.device_id} failed to open; "
+                    "check the configured camera index and connection"
+                )
+            capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            capture.set(cv2.CAP_PROP_FPS, self.fps)
+            capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        except BaseException as primary:
+            try:
+                capture.release()
+            except Exception as cleanup:
+                raise primary.with_traceback(primary.__traceback__) from cleanup
+            raise
         self.capture = capture
         return self
 

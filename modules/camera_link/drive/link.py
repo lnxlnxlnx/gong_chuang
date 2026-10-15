@@ -162,45 +162,94 @@ class CameraLink:
 
     # ------------------------------------------------------------- 生命周期
     def start(self) -> "CameraLink":
-        """绑定端口并起线程；重复调用是空操作。"""
+        """绑定端口并起线程；重复调用是空操作。
+
+        **listen 到线程启动的全部步骤在同一个 try 里**：``setsockopt``、``listen``、
+        ``getsockname`` 和线程构造/启动都可能失败，而那时 socket 已经建好了。
+        统一由失败收尾去关它——只在 bind 分支里单独 close 会漏掉后面几步，
+        漏掉的 socket 会一直占着端口（下一个 ``start()`` 就报"端口被占用"）。
+
+        bind 失败仍然转换成带原委的 :class:`CameraLinkError`（现场最想看到的就是
+        "被占用还是没权限"）；close 由收尾负责，所以那个分支里不再单独关一次。
+        """
         if self._thread is not None:
             return self
-        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            self._server.bind((self.host, self._requested_port))
-        except OSError as error:
-            self._server.close()
-            self._server = None
-            raise CameraLinkError(
-                f"无法监听 {self.host}:{self._requested_port}：{error}；"
-                "端口被占用或没有权限"
-            ) from error
-        self._server.listen(1)
-        self.port = self._server.getsockname()[1]
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._serve, name="camera-link", daemon=True)
-        self._thread.start()
-        return self
+            self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                self._server.bind((self.host, self._requested_port))
+            except OSError as error:
+                raise CameraLinkError(
+                    f"无法监听 {self.host}:{self._requested_port}：{error}；"
+                    "端口被占用或没有权限"
+                ) from error
+            self._server.listen(1)
+            self.port = self._server.getsockname()[1]
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._serve, name="camera-link", daemon=True
+            )
+            self._thread.start()
+            return self
+        except BaseException as primary:
+            try:
+                self.stop()
+            except Exception as cleanup:
+                raise primary.with_traceback(primary.__traceback__) from cleanup
+            raise
 
     def stop(self) -> None:
-        """停线程、关连接；重复调用是空操作。"""
+        """停线程、关连接；重复调用是空操作。
+
+        顺序：先置停止事件，再把 client / server / thread 三项**取出来并清空实例引用**
+        （这样再调一次 ``stop`` 不会有任何重复动作），然后两个 socket 各自独立尝试
+        ``shutdown`` + ``close``，最后 join 线程。
+
+        ``shutdown`` 对没连上的 socket 抛 ``OSError`` 是**预期**的，可以忽略；
+        ``close`` 的错误**必须收集**——它是真的没把端口还回去，静默吞掉就成了
+        "关过了但还是占着"。
+
+        两个 socket 都 **先 shutdown、再 close，最后才 join**：接收线程可能正阻塞在
+        ``accept()`` 上（它的超时是 ``accept_timeout_seconds``，默认 30 秒），
+        只置 ``_stop`` 并不会唤醒它。先 shutdown 监听 socket 会让那个 accept 立刻抛错
+        退出，join 才能真正很快返回。
+
+        线程还没真正启动（``ident is None``，例如 ``start()`` 里 start 本身失败）时
+        **绝不能 join**：那会抛 ``cannot join thread before it is started``，
+        把真正的启动错误盖掉。
+        """
         self._stop.set()
-        for sock in (self._client, self._server):
-            if sock is not None:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-        thread, self._thread = self._thread, None
-        self._client = None
-        self._server = None
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=5.0)
+        client, server, thread = self._client, self._server, self._thread
+        self._client = self._server = self._thread = None
+
+        errors = []
+        for name, sock in (("client.shutdown", client), ("server.shutdown", server)):
+            if sock is None:
+                continue
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # 没连上 / 已经断了：预期之内，不是清理失败。
+        for name, sock in (("client.close", client), ("server.close", server)):
+            if sock is None:
+                continue
+            try:
+                sock.close()
+            except Exception as error:
+                errors.append((name, error))
+        if (
+            thread is not None
+            and thread.ident is not None
+            and thread is not threading.current_thread()
+        ):
+            try:
+                thread.join(timeout=5.0)
+            except Exception as error:
+                errors.append(("thread.join", error))
+        if errors:
+            details = "; ".join("{}: {}".format(name, error) for name, error in errors)
+            raise CameraLinkError("摄像头链路清理失败：" + details) from errors[0][1]
 
     def close(self) -> None:
         """``stop`` 的别名，让 ``with`` 和别的模块读起来一致。"""

@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import test as test_launcher
 from project_paths import PROJECT_ROOT
-from modules.vision import default_model_path, load_model_settings
+from modules.vision.config import default_model_path, load_model_settings
 
 
 ROOT = PROJECT_ROOT
@@ -129,9 +129,9 @@ class EntryPointTests(unittest.TestCase):
     def test_module_self_test_entries_stay_warning_free(self) -> None:
         """``python -m`` self-tests must not trip runpy's "found in sys.modules".
 
-        ``modules.vision`` resolves the material-locator symbols lazily on
-        purpose; a package ``__init__`` that imported its own submodules eagerly
-        would make these entry points warn (and fail under ``-W error``).
+        包出口只显式导出 ``Vision`` / ``MaterialReport`` / ``RegionReport``，
+        并且不预加载“既能 import、又能 ``python -m``”的流水线模块；一旦有人在
+        ``__init__`` 里急切导入它们，这些入口就会警告（``-W error`` 下直接失败）。
         """
         for module in (
             "modules.vision.drive.hough_lock",

@@ -12,7 +12,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from modules.vision import default_model_path, require_model_path
 from modules.vision.config import (
     BACKEND_AUTO,
     BACKEND_ONNX,
@@ -21,7 +20,9 @@ from modules.vision.config import (
     DEFAULT_ONNX_MODEL,
     ModelSettings,
     current_platform,
+    default_model_path,
     load_model_settings,
+    require_model_path,
 )
 from modules.vision.drive.yolov8 import DEFAULT_CLASS_NAMES
 

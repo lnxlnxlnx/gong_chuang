@@ -1,4 +1,4 @@
-"""eye-in-hand 视觉伺服：让爪子正下方对准物块（**只动平面**）。
+"""eye-in-hand 视觉伺服：让爪子正下方对准物块（**只动平面**），再完成下降与后缩。
 
 ## 这套机器上相机是装在臂上的
 
@@ -18,37 +18,29 @@
 伺服要有"动多少"的量纲。用毫米就得先标定 ``mm_per_motor_rev``；用脉冲则**一个机器常数都不用**：
 只要知道"每脉冲让画面里的物块挪多少毫米"，就能算出让误差归零的脉冲数。
 
-那个量就是 2×2 雅可比 :class:`ServoJacobian`：
-
-| | 底座每脉冲 | 伸缩每脉冲 |
-|---|---|---|
-| 画面 x 位移 | ``base_dx`` | ``radial_dx`` |
-| 画面 y 位移 | ``base_dy`` | ``radial_dy`` |
-
+那个量就是 2×2 雅可比 :class:`~modules.grasp.drive.servo_model.ServoJacobian`：
 它是**实测出来**的（:func:`probe_jacobian`），所以相机怎么装的、歪多少度、朝哪个方向，
 全都不用假设。代价是标定一次。
 
 ## 为什么还要闭环
 
 雅可比是线性的，而真实关系在大位移下会弯；背隙、丢步也会让"发了 800 脉冲"不等于
-"走了 800 脉冲的量"。所以每次都用**新的一帧**重算，而不是相信"发了这么多就应该到了"。
+"走了 800 脉冲的量"。所以每次都用**新的一帧**重算。
 
 **新的一帧**是硬要求：动作前记一个时刻，动作后只要晚于它的观测（``min_received_at``）。
-用"多久算旧"挡不住"动作很快、旧帧也还新"的情况，那时读到的是动作**之前**的坐标，
-闭环会以为没动过、然后再发一次——看起来像在振荡。
+用"多久算旧"挡不住"动作很快、旧帧也还新"的情况，那时读到的是动作**之前**的坐标。
 
-## 失败长什么样
+## 本模块只留实际算法
 
-三种都**响亮地失败**，不猜：
-
-1. **画面里没有物块**（或不止一个而没配判别条件）——不猜哪一个是目标；
-2. **雅可比奇异**——两个关节在画面里产生的位移方向几乎重合，2×2 反不过来。
-   物理含义是"这两个轴动起来，物块在画面里往同一个方向跑"，靠它们凑不出任意方向；
-3. **迭代用尽**——报出最后误差与总脉冲，让你去看是标定不准还是被挡住了。
+配置与数值模型在 :mod:`modules.grasp.drive.servo_model`，观测判据在
+:mod:`modules.grasp.drive.servo_observation`，脉冲原语在
+:mod:`modules.grasp.drive.servo_motion`。**主编排**（悬停 → 安全抬升 → x/y → 下降 →
+后缩）已经移进 :class:`modules.grasp.runtime.Grasp` 的实例方法，这里不再保留同名的
+自由函数转发壳——那种壳会让"到底谁在编排"重新变得说不清。
 
 ## 平面之外的两步是开环的
 
-x/y 靠闭环（就是上面这一套）；**平面一旦对准**，抓取前剩下的两步都是固定脉冲数：
+x/y 靠闭环；**平面一旦对准**，抓取前剩下的两步都是固定脉冲数：
 
 ```
 descend_z          升降/6 号下降  z_descend_pulses
@@ -57,758 +49,62 @@ retract_extension  伸缩/7 号后缩  extension_retract_pulses
 
 两个数都在 ``modules/grasp/eye_in_hand.json`` 里，换物块、换夹爪现场直接改，不用重标。
 下降那一步会先确认平面已经对准（``z_center_tolerance_mm``）——它是这两步唯一的护栏。
-想做"拿物块深度当反馈"的版本才用 :func:`align_z`（视觉伺服，要先标定升降灵敏度）。
 
-## 一次调用
+## 自测
 
-:func:`align_and_descend` 把"抬到安全高度 → x/y 对准 → z 下降 → 后缩"串成一次调用，
-并把每一段的耗时记进 :class:`GraspReadyResult`。现场实测：一次定位 178 ms、一次停稳测量
-约 537 ms，所以"段数"比动作本身更容易吃掉时间——这个结果对象就是用来盯这件事的。
+``python -m modules.grasp.drive.eye_in_hand`` 不需要硬件：验证 2×2 求逆、方向符号、
+闭环收敛与三种失败路径。本模块仍可作为 ``python -m`` 入口，所以它**不能**在包导入时
+被加载（见 ``modules/grasp/__init__.py``）。
 """
 
 from __future__ import annotations
 
-import json
 import math
 import time
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable, List, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
+from modules.grasp.drive.servo_motion import (
+    _move_axes,
+    _move_lift,
+    _send_lift,
+)
+from modules.grasp.drive.servo_model import (
+    BASE_AXIS,
+    DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH,
+    LIFT_AXIS,
+    MIN_JACOBIAN_DETERMINANT,
+    RADIAL_AXIS,
+    GraspReadyResult,
+    HoverResult,
+    LiftScale,
+    ObjectSelector,
+    ServoConfig,
+    ServoError,
+    ServoJacobian,
+    ServoResult,
+    ServoTarget,
+    ZDescentResult,
+    ZResult,
+    load_jacobian,
+    load_lift_scale,
+    load_object_selector,
+    load_servo_config,
+    load_target,
+    load_z_target,
+    save_calibration,
+)
+from modules.grasp.drive.servo_observation import (
+    FrameSource,
+    VISIBILITY_PROBE_FRAMES,
+    _probe_visible,
+    _read_object,
+    _settled_sighting,
+    measure_offset,
+    measure_settled,
+    select_object,
+)
 from modules.vision.drive.sighting import MaterialSighting
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "eye_in_hand.json"
-
-
-class FrameSource(Protocol):
-    """观测源需要提供的那一件事：取一组观测。
-
-    故意只要这一个方法，于是两种来源都能插进来，而这里不需要知道是哪种：
-
-    - :class:`modules.camera_link.drive.link.CameraLink`（远端镜头走 TCP）；
-    - :class:`modules.grasp.drive.camera_source.CameraFrameSource`（本机 USB 摄像头，
-      默认走这条）。
-
-    ``min_received_at`` 是"只要不早于这个时刻的观测"——机械臂动完之后
-    **必须**带上它，否则可能读到动作**之前**的画面（详见模块开头）。
-    """
-
-    def frame(
-        self,
-        *,
-        timeout: Optional[float] = None,
-        max_age_seconds: Optional[float] = None,
-        min_received_at: Optional[float] = None,
-    ) -> Optional[Sequence[MaterialSighting]]: ...
-
-#: 判定雅可比奇异的门槛（行列式绝对值）。行列式是"两个关节在画面里位移方向"张成的
-#: 面积；小到接近零时 2×2 求逆会把噪声放大成巨大的脉冲指令。
-MIN_JACOBIAN_DETERMINANT = 1e-6
-
-BASE_AXIS = "base"
-RADIAL_AXIS = "radial"
-
-
-class ServoError(RuntimeError):
-    """伺服无法继续（看不到物块、雅可比奇异、不收敛、超出行程预算）。"""
-
-
-@dataclass(frozen=True)
-class ObjectSelector:
-    """怎么从一堆观测里认出"哪条是物块"。
-
-    - ``material_id``：按编号认（最稳）；
-    - ``color``：按颜色认。
-
-    两个都不给时要求**画面里只有一个目标**：多于一个就直接报错，
-    因为猜错目标会让机械臂朝错误的方向动，而动作本身看起来完全正常。
-    """
-
-    material_id: Optional[int] = None
-    color: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        if self.color is not None:
-            object.__setattr__(self, "color", self.color.strip().lower())
-
-    def matches(self, sighting: MaterialSighting) -> bool:
-        if self.material_id is not None and sighting.material_id != self.material_id:
-            return False
-        if self.color is not None and sighting.color != self.color:
-            return False
-        return True
-
-    @property
-    def is_open(self) -> bool:
-        """没配判别条件时为真，此时要求画面里只有一个目标。"""
-        return self.material_id is None and self.color is None
-
-    def describe(self) -> str:
-        if self.is_open:
-            return "物块 = 画面里唯一的目标"
-        parts = []
-        if self.material_id is not None:
-            parts.append(f"编号 {self.material_id}")
-        if self.color is not None:
-            parts.append(f"颜色 {self.color}")
-        return "物块 = " + "、".join(parts)
-
-
-def select_object(
-    sightings: Sequence[MaterialSighting], selector: ObjectSelector
-) -> MaterialSighting:
-    """从一帧里挑出物块。
-
-    :raises ServoError: 一个都没有，或者没有一个明确的。
-    """
-    matched = [item for item in sightings if selector.matches(item)]
-    if not matched:
-        listing = "、".join(
-            f"物料 {item.material_id}({item.color})" for item in sightings
-        ) or "（空）"
-        raise ServoError(
-            f"这一帧里没有物块（{selector.describe()}）；收到 {len(sightings)} 条：{listing}"
-        )
-    if len(matched) > 1 and selector.is_open:
-        listing = "、".join(f"物料 {item.material_id}({item.color})" for item in matched)
-        raise ServoError(
-            f"画面里有多个目标（{listing}），不知道该对准哪一个；"
-            "请在 modules/grasp/eye_in_hand.json 的 object 里填 material_id 或 color"
-        )
-    return matched[-1]
-
-
-@dataclass(frozen=True)
-class ServoTarget:
-    """``(tx, ty)``：爪子抓取点在相机坐标系里的位置（毫米）。"""
-
-    x_mm: float
-    y_mm: float
-
-    def summary(self) -> str:
-        return f"目标读数 ({self.x_mm:+.2f}, {self.y_mm:+.2f}) mm"
-
-
-@dataclass(frozen=True)
-class ServoJacobian:
-    """每脉冲引起的画面位移（毫米/脉冲）。
-
-    正方向与 ``RobotArm`` 的动作方法一致：底座正脉冲 = CW，伸缩正脉冲 = 前伸。
-    """
-
-    base_dx: float
-    base_dy: float
-    radial_dx: float
-    radial_dy: float
-
-    @property
-    def determinant(self) -> float:
-        return self.base_dx * self.radial_dy - self.radial_dx * self.base_dy
-
-    @property
-    def is_singular(self) -> bool:
-        return abs(self.determinant) < MIN_JACOBIAN_DETERMINANT
-
-    def pulses_for(self, error_x: float, error_y: float) -> Tuple[float, float]:
-        """要让画面位移改变 ``(−error_x, −error_y)``，两个轴各走多少脉冲。
-
-        推导：线性化下走 ``p`` 脉冲会让观测量变化 ``J·p``；当前误差是 ``e``，
-        要让它归零就是 ``e + J·p = 0``，即 ``p = −J⁻¹·e``。
-
-        :raises ServoError: 雅可比奇异。
-        """
-        if self.is_singular:
-            raise ServoError(
-                f"雅可比奇异（行列式 {self.determinant:.3e}）：底座与伸缩在画面里"
-                "产生的位移方向几乎重合，两个轴凑不出任意方向。"
-                "请检查相机是不是装得让两个轴的运动在画面里同向，或重新标定 --calibrate"
-            )
-        determinant = self.determinant
-        return (
-            (self.radial_dx * error_y - self.radial_dy * error_x) / determinant,
-            (self.base_dy * error_x - self.base_dx * error_y) / determinant,
-        )
-
-    def displacement_for(self, base_pulses: float, radial_pulses: float) -> Tuple[float, float]:
-        """走这两个脉冲量会让画面里的物块挪多少（线性化预测）。"""
-        return (
-            self.base_dx * base_pulses + self.radial_dx * radial_pulses,
-            self.base_dy * base_pulses + self.radial_dy * radial_pulses,
-        )
-
-    @property
-    def base_norm(self) -> float:
-        """底座轴的灵敏度（毫米/脉冲，不分方向）。"""
-        return math.hypot(self.base_dx, self.base_dy)
-
-    @property
-    def radial_norm(self) -> float:
-        """伸缩轴的灵敏度（毫米/脉冲，不分方向）。"""
-        return math.hypot(self.radial_dx, self.radial_dy)
-
-    def minimum_pulses(self, min_step_mm: float) -> Tuple[float, float]:
-        """让每个轴至少推动画面 ``min_step_mm`` 毫米所需的脉冲数。
-
-        用毫米表达门槛、再按**各自的灵敏度**换算成脉冲，是因为两个轴的灵敏度可以差
-        十几倍（实测这台机器底座 0.164 mm/脉冲、伸缩 0.0139 mm/脉冲）。同一个"最小脉冲数"
-        落在底座上等于二十多毫米的走动，会直接把闭环推到振荡。
-
-        某一列几乎为零（那个轴动不了画面）时返回 0——那种情况本来就该由奇异判据拦下，
-        不该在这里编一个巨大的脉冲数出来。
-        """
-        if min_step_mm <= 0:
-            return (0.0, 0.0)
-        base = min_step_mm / self.base_norm if self.base_norm > 1e-12 else 0.0
-        radial = min_step_mm / self.radial_norm if self.radial_norm > 1e-12 else 0.0
-        return (base, radial)
-
-    def summary(self) -> str:
-        return (
-            f"雅可比：底座每 1000 脉冲 -> ({self.base_dx * 1000:+.2f}, {self.base_dy * 1000:+.2f}) mm；"
-            f"伸缩每 1000 脉冲 -> ({self.radial_dx * 1000:+.2f}, {self.radial_dy * 1000:+.2f}) mm；"
-            f"行列式 {self.determinant:.3e}"
-        )
-
-
-@dataclass(frozen=True)
-class ServoConfig:
-    """伺服的步长、预算与容差。
-
-    ## 粗调 / 细调两档
-
-    误差大于 ``coarse_error_mm`` 时按**粗调**走：单步上限放到
-    ``coarse_max_pulses_per_step``，一步把大部分误差消掉。误差小了再按**细调**走，
-    单步上限收紧到 ``max_pulses_per_step``。
-
-    为什么要分档：单步上限卡得太死时，大误差要拆成好几轮，**每一轮都要重新取帧+定位**
-    （定位是整个循环里最慢的一段之一），于是"能一步到位"变成"走三步"。
-    分档之后大误差一轮收敛、小误差不会因为步子太大而反复过冲。
-    """
-
-    #: 平面误差小于这个值就认为对准了（毫米）。
-    tolerance_mm: float = 2.0
-    #: 最多重新测量几次。
-    max_iterations: int = 12
-    #: **细调**档的单轴脉冲上限。
-    max_pulses_per_step: int = 1200
-    #: **粗调**档的单轴脉冲上限；误差大于 ``coarse_error_mm`` 时用它。
-    coarse_max_pulses_per_step: int = 4000
-    #: 误差大于这个值就进粗调档（毫米）。
-    coarse_error_mm: float = 10.0
-    #: 单轴指令要让画面至少挪这么多毫米，否则按原方向抬到这么多。
-    #: 抬的原因是**背隙**：指令太小时会被背隙整段吃掉，画面一动不动，
-    #: 闭环于是以为"没动过"、再发一次同样的指令——看起来就是原地打转。
-    #:
-    #: **刻意用毫米而不是脉冲**：两个轴的灵敏度可以差十几倍（实测这台机器底座
-    #: 0.164 mm/脉冲、伸缩 0.0139 mm/脉冲），同一个"最小脉冲数"落在底座上等于
-    #: 二十多毫米的走动，会直接把闭环推到振荡。
-    min_step_mm: float = 1.0
-    #: 转角不超过这个脉冲数时，两个轴**同时**发；超过就改成"先伸缩、再旋转"。
-    #: 伸出状态下横扫底座会把整条臂扫过工作区，大角度旋转不能和伸缩并行。
-    parallel_rotation_limit_pulses: int = 600
-    #: 每个轴在一次对准里允许走的总脉冲；用完了就报错。
-    #: 这是**没有标定行程时唯一的兜底**，别设得太大。
-    max_total_pulses: int = 10000
-    #: 标定雅可比时，每个轴探两段同向位移；这是每段的脉冲数。
-    probe_pulses: int = 200
-
-    # ---------------------------------------------------------------- z 轴
-    #
-    # z 是"物块离镜头多远"，伺服目标就是"让它在 70 mm 左右"。
-    # 它和 x/y 是同一套机制，但多一条**下降护栏**：没有 mm_per_motor_rev 就不知道
-    # 升降的绝对高度，唯一能兜底的就是"测到的 z 不许低于 z_min_mm"。
-
-    #: **下降前要求平面已对准**：物块的 ``hypot(x, y)`` 必须小于这个值（毫米）。
-    #:
-    #: 为什么必须有：``z`` 是按**直径**反推的，而直径与"物块在画面哪个位置"无关。
-    #: 也就是说 z 伺服**看不见爪子有没有对准**——它只知道自己离物块多远。
-    #: 不先对准就下降，等于让爪子斜着压下去。现场因此差点压坏爪子。
-    z_center_tolerance_mm: float = 6.0
-    #: z 误差小于这个值就算到位（毫米）。
-    z_tolerance_mm: float = 3.0
-    #: **下降护栏**：测到的 z 低于它就拒绝再往下走（毫米）。
-    #:
-    #: 这个值必须按**爪子相对镜头的下探量**来定：z 是"镜头到物块顶面"的距离，
-    #: 而抓取点比镜头低，所以"爪子碰到物块"发生在 z 远大于 0 的地方。
-    #: 定得太小等于没有护栏——现场就是这样差点压坏爪子的。
-    #: 经验做法：先量出"爪尖刚好碰到物块顶面"时的 z，再把护栏设得比它大 5–10 mm。
-    z_min_mm: float = 25.0
-    #: z 的上限（毫米）。默认取视觉模块工作距离窗口的上端：出了窗口测距本身就不可信。
-    z_max_mm: float = 160.0
-    #: 升降单步脉冲上限与总预算。
-    z_max_pulses_per_step: int = 600
-    z_max_total_pulses: int = 8000
-
-    # ---------------------------------------------- 脉冲版 z（开环，抓取前两步）
-    #
-    # 上面那几条是**视觉伺服**版 z（:func:`align_z`）用的：先标定升降灵敏度，再拿
-    # "物块离镜头多远"做反馈。下面两条是它的**开环替代**：平面一旦对准，就按固定
-    # 脉冲数把该做的两步走完。现场用的是这一套——数小、改起来快、不用标定任何东西。
-
-    #: 平面对准之后，升降（6 号电机）**直接下降**多少脉冲到夹持高度。
-    #:
-    #: 为什么可以是固定脉冲数：爪子压下去之后画面里就没有物块了（爪瓣挡住、也掉出
-    #: 工作距离窗口），z 这一段**本来就拿不到反馈**；而"从平面对准的高度到夹持高度"
-    #: 是一段机械安装常数，实测一次就固定下来。换物块、换夹爪改这个数就行。
-    #:
-    #: 执行它的是 :func:`descend_z`——那一步会先确认平面已经对准，再走这么多脉冲。
-    z_descend_pulses: int = 1700
-    #: 下降之后，伸缩（7 号电机）**后缩**多少脉冲。
-    #:
-    #: 和 :attr:`z_descend_pulses` 一样是开环的固定值（现场定出来的那个数）。
-    #: 正数 = 后缩（``RobotArm.move_backward``），执行它的是 :func:`retract_extension`。
-    extension_retract_pulses: int = 150
-
-    #: 标定升降灵敏度时，每段走多少脉冲。
-    lift_probe_pulses: int = 120
-    #: **找不到物块时**每次抬升多少脉冲、最多抬几次（"先抬起来再找"）。
-    #: 物块太近时既模糊又出工作距离窗口，检测会直接失效；抬起来往往就看见了。
-    find_lift_step_pulses: int = 500
-    find_max_steps: int = 10
-    #: 等新观测的超时（秒）。
-    frame_timeout_seconds: float = 2.0
-    #: 只接受"接收时刻晚于动作完成时刻"的观测；这里额外留一点余量（秒）。
-    frame_margin_seconds: float = 0.0
-    #: 连续两次读数相差不超过这个值（毫米）才算"画面停稳了"。
-    settle_tolerance_mm: float = 0.4
-    #: **粗调阶段**接受的读数一致度（毫米）。
-    #:
-    #: 粗调时误差还有十几毫米，没必要为了 0.4 mm 的一致性多等好几帧——而每一帧都要跑
-    #: 一次定位（本机实测 178 ms）。远的时候只求"往哪边走、大概多远"，近了再按
-    #: ``settle_tolerance_mm`` 严格判。
-    coarse_settle_tolerance_mm: float = 3.0
-    #: 等画面停稳的最长时间（秒）；超时就拿最后一次读到的值，并让调用方知道。
-    settle_timeout_seconds: float = 4.0
-    #: **转底盘前要抬到多高**：测到的 ``z``（镜头到物块顶面的距离）至少要有这么多毫米。
-    #:
-    #: 为什么用 z 而不是脉冲数：这台机器上**移动 x/y 就是旋转底盘**，而低位转过去会撞到
-    #: 物块（现场撞倒过）。"抬够高度"的物理本质就是"镜头/爪子离物块顶面足够远"，
-    #: 而 ``z`` 正是那个距离——它由摄像头直接测出来，**与传动比无关**，
-    #: 所以不需要先标定 ``mm_per_motor_rev`` 或 ``dz_per_pulse`` 就能生效。
-    #:
-    #: ``0`` 表示不用这个判据，退回 ``safe_lift_pulses``。
-    safe_lift_z_mm: float = 100.0
-    #: 用 z 判据时**每一步最多**抬多少脉冲。
-    #:
-    #: 这是抬升的"步子大小"上限：标过 ``lift_scale`` 时按实测灵敏度算一步（算出来超过
-    #: 它就夹到它），没标过时就直接用它当固定步长。夹一个上限是为了**标定值不准时也不
-    #: 会一口气冲进行程端点**——每一步之后都会重新测一次 z 再决定下一步。
-    safe_lift_step_pulses: int = 500
-    #: 标过升降灵敏度时，用它**一步算到位**（而不是固定 500 脉冲一段地试）。
-    #:
-    #: 为什么快这么多：一次"停稳测量"实测约 537 ms（两次定位，每次 178 ms），而按
-    #: 灵敏度算一步通常 1–2 步就到位——省下的是十几段测量，不是动作时间。
-    safe_lift_use_scale: bool = True
-    #: 抬到安全高度时，**按灵敏度算出来的那一步**最多走多少脉冲。
-    #: 与 ``safe_lift_step_pulses`` 的区别：那个是"没标定时的固定步长"，这个是"算出来
-    #: 的一步最多能让它走多远"。标定值偏小时它会兜住，免得一步冲进行程端点。
-    safe_lift_max_pulses_per_step: int = 2000
-    #: 用 z 判据时最多抬几次，免得对着一个永远够不到的目标空转。
-    safe_lift_max_steps: int = 20
-    #: 兜底：**看不到物块时**按这个脉冲数抬升（``0`` 表示不抬，只警告）。
-    safe_lift_pulses: int = 0
-    #: 转底盘的角度超过这么多度时，就必须先抬升。
-    safe_lift_angle_degrees: float = 1.0
-    #: 两条位置帧之间的最小间隔（秒）。
-    #: **不能省。** 实测这台机器的 CH340 上，两条 ``FD`` 位置帧背靠背连发（间隔 0 ms）
-    #: 会让**两帧都失效**——不是丢一帧，是两个轴都不动，而且驱动器 ``Response=None``
-    #: 不会报任何错。留 20 ms 就正常。省掉它的代价是"所有两轴同时要动的步骤变成空操作"，
-    #: 表现为闭环怎么走都不动、迭代用尽。
-    inter_frame_seconds: float = 0.03
-    #: 等停稳时的轮询间隔（秒）。
-    #:
-    #: 摄像头本身约 32 ms 一帧，所以这个值只该是"补一帧"的零头：50 ms 等于每次轮询
-    #: 白等 50 ms，而一次停稳测量至少要轮询两次。别调成 0——那样会在没新帧时打转空转
-    #: CPU，也失去了"等一帧"的语义。
-    settle_poll_seconds: float = 0.01
-    #: 画面里物块的**像素直径**相对第一次测量变化超过这个比例就判为"被遮挡了"。
-    #:
-    #: 为什么用直径：相机在臂上时，爪瓣扫过物块会把它挡住一部分，可见区域从整圆变成
-    #: 月牙，等效半径随之变小——而测距公式按直径反推距离，于是会被算成"物块突然远了
-    #: 几十毫米"。那正是"爪子挡住了物块"的签名，而且它看起来完全像一次正常的观测。
-    diameter_change_limit_ratio: float = 0.25
-
-    def __post_init__(self) -> None:
-        # 与 load_servo_config 的判据保持一致：容差、超时、粗调门槛为 0 都没有意义
-        # （容差 0 等于要求"分毫不差"，超时 0 等于"根本不等帧"，
-        # 粗调门槛 0 等于"永远走粗调"），而 frame_margin_seconds 取 0 是合法的。
-        for name in (
-            "tolerance_mm",
-            "frame_timeout_seconds",
-            "coarse_error_mm",
-            "min_step_mm",
-            "settle_timeout_seconds",
-            "settle_poll_seconds",
-        ):
-            if not getattr(self, name) > 0:
-                raise ValueError(f"{name} 必须是正数")
-        if self.frame_margin_seconds < 0:
-            raise ValueError("frame_margin_seconds 不能是负数")
-        if self.settle_tolerance_mm < 0:
-            raise ValueError("settle_tolerance_mm 不能是负数")
-        if self.coarse_settle_tolerance_mm < 0:
-            raise ValueError("coarse_settle_tolerance_mm 不能是负数")
-        if self.coarse_settle_tolerance_mm < self.settle_tolerance_mm:
-            raise ValueError(
-                "coarse_settle_tolerance_mm 不能小于 settle_tolerance_mm："
-                "粗调档只该更宽松，不该更严"
-            )
-        if self.diameter_change_limit_ratio <= 0:
-            raise ValueError("diameter_change_limit_ratio 必须是正数")
-        if self.inter_frame_seconds < 0:
-            raise ValueError("inter_frame_seconds 不能是负数")
-        if self.safe_lift_pulses < 0:
-            raise ValueError("safe_lift_pulses 不能是负数")
-        if self.safe_lift_z_mm < 0:
-            raise ValueError("safe_lift_z_mm 不能是负数")
-        if not self.safe_lift_angle_degrees > 0:
-            raise ValueError("safe_lift_angle_degrees 必须是正数")
-        for name in (
-            "max_iterations",
-            "max_pulses_per_step",
-            "coarse_max_pulses_per_step",
-            "parallel_rotation_limit_pulses",
-            "max_total_pulses",
-            "probe_pulses",
-            "z_max_pulses_per_step",
-            "z_max_total_pulses",
-            "z_descend_pulses",
-            "extension_retract_pulses",
-            "safe_lift_step_pulses",
-            "safe_lift_max_pulses_per_step",
-            "safe_lift_max_steps",
-            "lift_probe_pulses",
-            "find_lift_step_pulses",
-            "find_max_steps",
-        ):
-            if getattr(self, name) < 1:
-                raise ValueError(f"{name} 必须是正整数")
-        for name in ("z_tolerance_mm", "z_min_mm", "z_max_mm"):
-            if not getattr(self, name) > 0:
-                raise ValueError(f"{name} 必须是正数")
-        if self.z_min_mm >= self.z_max_mm:
-            raise ValueError("z_min_mm 必须小于 z_max_mm")
-
-    def step_limit_for(self, error_mm: float) -> int:
-        """当前误差该用哪一档的单步上限。"""
-        return (
-            self.coarse_max_pulses_per_step
-            if error_mm > self.coarse_error_mm
-            else self.max_pulses_per_step
-        )
-
-
-def load_servo_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ServoConfig:
-    """读取 ``modules/grasp/eye_in_hand.json`` 的伺服参数部分。"""
-    document = _load_document(config_path)
-    defaults = ServoConfig()
-    return ServoConfig(
-        tolerance_mm=_positive(document.get("tolerance_mm", defaults.tolerance_mm), "tolerance_mm"),
-        max_iterations=_integer(document.get("max_iterations", defaults.max_iterations), "max_iterations"),
-        max_pulses_per_step=_integer(
-            document.get("max_pulses_per_step", defaults.max_pulses_per_step), "max_pulses_per_step"
-        ),
-        coarse_max_pulses_per_step=_integer(
-            document.get("coarse_max_pulses_per_step", defaults.coarse_max_pulses_per_step),
-            "coarse_max_pulses_per_step",
-        ),
-        coarse_error_mm=_positive(
-            document.get("coarse_error_mm", defaults.coarse_error_mm), "coarse_error_mm"
-        ),
-        min_step_mm=_positive(
-            document.get("min_step_mm", defaults.min_step_mm), "min_step_mm"
-        ),
-        parallel_rotation_limit_pulses=_integer(
-            document.get("parallel_rotation_limit_pulses", defaults.parallel_rotation_limit_pulses),
-            "parallel_rotation_limit_pulses",
-        ),
-        max_total_pulses=_integer(
-            document.get("max_total_pulses", defaults.max_total_pulses), "max_total_pulses"
-        ),
-        probe_pulses=_integer(document.get("probe_pulses", defaults.probe_pulses), "probe_pulses"),
-        frame_timeout_seconds=_positive(
-            document.get("frame_timeout_seconds", defaults.frame_timeout_seconds),
-            "frame_timeout_seconds",
-        ),
-        frame_margin_seconds=_non_negative(
-            document.get("frame_margin_seconds", defaults.frame_margin_seconds),
-            "frame_margin_seconds",
-        ),
-        settle_tolerance_mm=_non_negative(
-            document.get("settle_tolerance_mm", defaults.settle_tolerance_mm),
-            "settle_tolerance_mm",
-        ),
-        coarse_settle_tolerance_mm=_non_negative(
-            document.get("coarse_settle_tolerance_mm", defaults.coarse_settle_tolerance_mm),
-            "coarse_settle_tolerance_mm",
-        ),
-        settle_timeout_seconds=_positive(
-            document.get("settle_timeout_seconds", defaults.settle_timeout_seconds),
-            "settle_timeout_seconds",
-        ),
-        settle_poll_seconds=_positive(
-            document.get("settle_poll_seconds", defaults.settle_poll_seconds),
-            "settle_poll_seconds",
-        ),
-        diameter_change_limit_ratio=_positive(
-            document.get("diameter_change_limit_ratio", defaults.diameter_change_limit_ratio),
-            "diameter_change_limit_ratio",
-        ),
-        inter_frame_seconds=_non_negative(
-            document.get("inter_frame_seconds", defaults.inter_frame_seconds),
-            "inter_frame_seconds",
-        ),
-        safe_lift_z_mm=_non_negative(
-            document.get("safe_lift_z_mm", defaults.safe_lift_z_mm), "safe_lift_z_mm"
-        ),
-        safe_lift_step_pulses=_integer(
-            document.get("safe_lift_step_pulses", defaults.safe_lift_step_pulses),
-            "safe_lift_step_pulses",
-        ),
-        safe_lift_use_scale=_boolean(
-            document.get("safe_lift_use_scale", defaults.safe_lift_use_scale),
-            "safe_lift_use_scale",
-        ),
-        safe_lift_max_pulses_per_step=_integer(
-            document.get(
-                "safe_lift_max_pulses_per_step", defaults.safe_lift_max_pulses_per_step
-            ),
-            "safe_lift_max_pulses_per_step",
-        ),
-        safe_lift_max_steps=_integer(
-            document.get("safe_lift_max_steps", defaults.safe_lift_max_steps),
-            "safe_lift_max_steps",
-        ),
-        safe_lift_pulses=_non_negative_integer(
-            document.get("safe_lift_pulses", defaults.safe_lift_pulses), "safe_lift_pulses"
-        ),
-        safe_lift_angle_degrees=_positive(
-            document.get("safe_lift_angle_degrees", defaults.safe_lift_angle_degrees),
-            "safe_lift_angle_degrees",
-        ),
-        z_tolerance_mm=_positive(
-            document.get("z_tolerance_mm", defaults.z_tolerance_mm), "z_tolerance_mm"
-        ),
-        z_center_tolerance_mm=_positive(
-            document.get("z_center_tolerance_mm", defaults.z_center_tolerance_mm),
-            "z_center_tolerance_mm",
-        ),
-        z_min_mm=_positive(document.get("z_min_mm", defaults.z_min_mm), "z_min_mm"),
-        z_max_mm=_positive(document.get("z_max_mm", defaults.z_max_mm), "z_max_mm"),
-        z_max_pulses_per_step=_integer(
-            document.get("z_max_pulses_per_step", defaults.z_max_pulses_per_step),
-            "z_max_pulses_per_step",
-        ),
-        z_max_total_pulses=_integer(
-            document.get("z_max_total_pulses", defaults.z_max_total_pulses),
-            "z_max_total_pulses",
-        ),
-        z_descend_pulses=_integer(
-            document.get("z_descend_pulses", defaults.z_descend_pulses), "z_descend_pulses"
-        ),
-        extension_retract_pulses=_integer(
-            document.get("extension_retract_pulses", defaults.extension_retract_pulses),
-            "extension_retract_pulses",
-        ),
-        lift_probe_pulses=_integer(
-            document.get("lift_probe_pulses", defaults.lift_probe_pulses), "lift_probe_pulses"
-        ),
-        find_lift_step_pulses=_integer(
-            document.get("find_lift_step_pulses", defaults.find_lift_step_pulses),
-            "find_lift_step_pulses",
-        ),
-        find_max_steps=_integer(
-            document.get("find_max_steps", defaults.find_max_steps), "find_max_steps"
-        ),
-    )
-
-
-def load_object_selector(config_path: Path = DEFAULT_CONFIG_PATH) -> ObjectSelector:
-    """读取 ``modules/grasp/eye_in_hand.json`` 的 ``object`` 段。"""
-    document = _load_document(config_path)
-    block = document.get("object")
-    if block is None:
-        block = {}
-    if not isinstance(block, dict):
-        raise ServoError("object 必须是 JSON 对象")
-
-    material_id = block.get("material_id")
-    if material_id is not None and (type(material_id) is not int or material_id < 0):
-        raise ServoError("object.material_id 必须是非负整数或 null")
-    color = block.get("color")
-    if color is not None and (not isinstance(color, str) or not color.strip()):
-        raise ServoError("object.color 必须是非空字符串或 null")
-    return ObjectSelector(material_id=material_id, color=color)
-
-
-def load_target(config_path: Path = DEFAULT_CONFIG_PATH) -> Optional[ServoTarget]:
-    """读取已标定的 ``(tx, ty)``；没标定过返回 ``None``。"""
-    document = _load_document(config_path)
-    block = document.get("target")
-    if block is None:
-        return None
-    if not isinstance(block, dict):
-        raise ServoError("target 必须是 JSON 对象")
-    if block.get("x_mm") is None or block.get("y_mm") is None:
-        return None
-    return ServoTarget(
-        x_mm=_number(block["x_mm"], "target.x_mm"),
-        y_mm=_number(block["y_mm"], "target.y_mm"),
-    )
-
-
-def load_jacobian(config_path: Path = DEFAULT_CONFIG_PATH) -> Optional[ServoJacobian]:
-    """读取已标定的雅可比；没标定过返回 ``None``。"""
-    document = _load_document(config_path)
-    block = document.get("jacobian")
-    if block is None:
-        return None
-    if not isinstance(block, dict):
-        raise ServoError("jacobian 必须是 JSON 对象")
-    fields = ("base_dx", "base_dy", "radial_dx", "radial_dy")
-    if any(block.get(field) is None for field in fields):
-        return None
-    return ServoJacobian(**{field: _number(block[field], f"jacobian.{field}") for field in fields})
-
-
-def load_z_target(config_path: Path = DEFAULT_CONFIG_PATH) -> Optional[float]:
-    """读取已标定的 z 目标（毫米）；没标定过返回 ``None``。"""
-    document = _load_document(config_path)
-    value = document.get("z_target_mm")
-    return None if value is None else _number(value, "z_target_mm")
-
-
-def load_lift_scale(config_path: Path = DEFAULT_CONFIG_PATH) -> Optional[LiftScale]:
-    """读取已标定的升降灵敏度；没标定过返回 ``None``。"""
-    document = _load_document(config_path)
-    block = document.get("lift_scale")
-    if not isinstance(block, dict) or block.get("dz_per_pulse") is None:
-        return None
-    return LiftScale(dz_per_pulse=_number(block["dz_per_pulse"], "lift_scale.dz_per_pulse"))
-
-
-def save_calibration(
-    *,
-    target: Optional[ServoTarget] = None,
-    jacobian: Optional[ServoJacobian] = None,
-    z_target_mm: Optional[float] = None,
-    lift_scale: Optional[LiftScale] = None,
-    config_path: Path = DEFAULT_CONFIG_PATH,
-) -> Path:
-    """把标定结果写回配置文件（只改这几个块，别的键原样保留）。"""
-    document = _load_document(config_path)
-    if target is not None:
-        document["target"] = {"x_mm": target.x_mm, "y_mm": target.y_mm}
-    if jacobian is not None:
-        document["jacobian"] = {
-            "base_dx": jacobian.base_dx,
-            "base_dy": jacobian.base_dy,
-            "radial_dx": jacobian.radial_dx,
-            "radial_dy": jacobian.radial_dy,
-        }
-    if z_target_mm is not None:
-        document["z_target_mm"] = z_target_mm
-    if lift_scale is not None:
-        document["lift_scale"] = {"dz_per_pulse": lift_scale.dz_per_pulse}
-    config_path.write_text(
-        json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    return config_path
-
-
-@dataclass(frozen=True)
-class ServoResult:
-    """一次 x/y 对准的结果。"""
-
-    target: ServoTarget
-    #: 每次测量到的画面偏移，按顺序；最后一个是最终位置。
-    readings: Tuple[Tuple[float, float], ...]
-    #: 最终误差分量与模长（毫米）。
-    error_x: float
-    error_y: float
-    #: 用掉的底座 / 伸缩脉冲（带符号累计）。
-    base_pulses: int
-    radial_pulses: int
-    iterations: int
-    tolerance_mm: float
-    #: 是不是"卡在分辨率极限上"停下的：误差已经比背隙能分辨的还小，
-    #: 再走一步只会跨过目标。这时 :attr:`aligned` 可能是假，但那不是失败。
-    resolution_limited: bool = False
-
-    @property
-    def error_mm(self) -> float:
-        return math.hypot(self.error_x, self.error_y)
-
-    @property
-    def aligned(self) -> bool:
-        return self.error_mm <= self.tolerance_mm
-
-    def summary(self) -> str:
-        if self.aligned:
-            verdict = "完成"
-        elif self.resolution_limited:
-            verdict = "已到分辨率极限（背隙决定，再走只会跨过目标）"
-        else:
-            verdict = "未达标"
-        return (
-            f"x/y 对准{verdict}："
-            f"最终读数 ({self.readings[-1][0]:+.2f}, {self.readings[-1][1]:+.2f}) mm，"
-            f"误差 {self.error_mm:.2f} mm（容差 {self.tolerance_mm:.1f} mm）；"
-            f"底座 {self.base_pulses:+d} 脉冲、伸缩 {self.radial_pulses:+d} 脉冲；"
-            f"测量 {self.iterations} 次"
-        )
-
-
-def _move_axis(arm, axis: str, signed_pulses: int) -> float:
-    """驱动一个轴并等它走完（按估算耗时）；返回等了多久。"""
-    seconds = _send_axis(arm, axis, signed_pulses)
-    time.sleep(seconds)
-    return seconds
-
-
-def _send_axis(arm, axis: str, signed_pulses: int) -> float:
-    """只**发出**一个轴的动作、不等；返回估算耗时（秒）。
-
-    Emm42 是"发完就返回、不回 ACK"的，所以 ``wait=False`` 立刻返回，
-    耗时靠 :func:`estimate_move_seconds` 估算——这正是能并行两个轴的前提。
-    """
-    if signed_pulses == 0:
-        return 0.0
-    if axis == BASE_AXIS:
-        action = arm.rotate_cw if signed_pulses > 0 else arm.rotate_ccw
-    else:
-        action = arm.move_forward if signed_pulses > 0 else arm.move_backward
-    report = action(abs(signed_pulses), wait=False)
-    return float(getattr(report, "estimated_seconds", 0.0) or 0.0)
-
-
-def _move_axes(arm, base_pulses: int, radial_pulses: int, config: "ServoConfig") -> float:
-    """走一步平面修正，返回估算耗时（秒）。
-
-    **两个轴同时发**：驱动器不回 ACK，串行 ``wait`` 等于把两段时间**相加**，
-    而实际可以并行、只等较长的那个。跟踪速度有一半就丢在这里。
-
-    大角度旋转时**不**并行：伸出状态下横扫底座会把整条臂扫过工作区，
-    所以改成"先伸缩、再旋转"，和 ``pipeline`` 是同一条规矩。
-    """
-    if base_pulses == 0 and radial_pulses == 0:
-        return 0.0
-
-    both = base_pulses != 0 and radial_pulses != 0
-    if both and abs(base_pulses) > config.parallel_rotation_limit_pulses:
-        # 大角度：先缩回/伸出到位，再转。
-        seconds = _send_axis(arm, RADIAL_AXIS, radial_pulses)
-        time.sleep(seconds)
-        seconds += _send_axis(arm, BASE_AXIS, base_pulses)
-    else:
-        first = _send_axis(arm, BASE_AXIS, base_pulses)
-        if both:
-            # 两帧之间必须留间隔，否则 CH340 上两帧都失效（见 inter_frame_seconds）。
-            time.sleep(config.inter_frame_seconds)
-        second = _send_axis(arm, RADIAL_AXIS, radial_pulses)
-        seconds = max(first, second)
-    time.sleep(seconds)
-    return seconds
 
 
 def _apply_minimum(step: int, wanted: float, minimum: float) -> int:
@@ -827,105 +123,10 @@ def _apply_minimum(step: int, wanted: float, minimum: float) -> int:
     return int(math.copysign(max(1.0, minimum), wanted))
 
 
-def _read_object(link: FrameSource, selector: ObjectSelector, config: ServoConfig, *, after: Optional[float] = None) -> MaterialSighting:
-    """等一帧，并返回物块那一观测。``after`` 给出"只要不早于这个时刻"的过滤。"""
-    frame = link.frame(
-        timeout=config.frame_timeout_seconds,
-        min_received_at=after,
-    )
-    if frame is None:
-        error = getattr(link, "error", None)
-        raise ServoError(
-            "等不到新的观测"
-            + (f"；接收链路报错：{error}" if error else "；确认镜头端已连上并正在发数据")
-        )
-    return select_object(frame, selector)
-
-
-def measure_offset(
-    link: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
-    *,
-    after: Optional[float] = None,
-) -> Tuple[float, float]:
-    """读一帧，返回物块在相机系的水平偏移 ``(x, y)``（毫米）。"""
-    sighting = _read_object(link, selector, config, after=after)
-    return (sighting.x_mm, sighting.y_mm)
-
-
-def _settled_sighting(
-    link: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
-    *,
-    after: Optional[float] = None,
-    tolerance: Optional[float] = None,
-    on_message: Optional[Callable[[str], None]] = None,
-) -> MaterialSighting:
-    """等到画面不再变，返回那一刻的整条观测（不只是坐标）。
-
-    返回观测而不只是 ``(x, y)``，是因为**像素直径**也要用：爪瓣扫过物块会把它挡住一部分，
-    那是闭环唯一能自己发现的"机械干涉"信号。
-
-    ``tolerance`` 覆盖一致性判据：粗调阶段（离目标还有十几毫米）用
-    ``coarse_settle_tolerance_mm`` 就够，不必为了 0.4 mm 多等好几帧——每一帧都要跑一次
-    定位，本机实测 178 ms。
-    """
-    say = on_message if on_message is not None else (lambda _message: None)
-    allowed = config.settle_tolerance_mm if tolerance is None else tolerance
-    deadline = time.monotonic() + config.settle_timeout_seconds
-    previous: Optional[Tuple[float, float]] = None
-    last: Optional[MaterialSighting] = None
-    while True:
-        try:
-            current = _read_object(link, selector, config, after=after)
-        except ServoError:
-            # 运动模糊时检不到物块是常态，不该当失败——接着等。
-            previous = None
-        else:
-            last = current
-            point = (current.x_mm, current.y_mm, current.z_mm)
-            if previous is not None and math.sqrt(
-                (point[0] - previous[0]) ** 2
-                + (point[1] - previous[1]) ** 2
-                + (point[2] - previous[2]) ** 2
-            ) <= allowed:
-                return current
-            previous = point
-        if time.monotonic() >= deadline:
-            if last is None:
-                raise ServoError(
-                    f"等了 {config.settle_timeout_seconds:.1f} s 也没能稳定看到物块；"
-                    "确认物块在画面里、没有被人或线材挡住"
-                )
-            say(
-                f"  等停稳超时（{config.settle_timeout_seconds:.1f} s）："
-                f"画面仍在变，先按最后读数 ({last.x_mm:+.2f}, {last.y_mm:+.2f}) mm 继续"
-            )
-            return last
-        time.sleep(config.settle_poll_seconds)
-
-
-def measure_settled(
-    link: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
-    *,
-    after: Optional[float] = None,
-    on_message: Optional[Callable[[str], None]] = None,
-) -> Tuple[float, float]:
-    """测到画面**不再变**为止，返回那个读数。
-
-    为什么不能"按估算耗时等一等就读"：实测 ``wait=True`` 在 0.652 s 就返回了，
-    可读数在那之后还在大幅变化（``-23.65,+39.77`` → ``-33.38,+23.03``），
-    中间还反复因为运动模糊整个检不到物块。拿那种数去解算，等于用噪声当观测——
-    闭环会振荡，探针会把雅可比算大好几倍。
-
-    判据是**连续两次读数足够接近**：把"等多久"交给观测本身，而不是交给一个估算公式。
-    """
-    sighting = _settled_sighting(link, selector, config, after=after, on_message=on_message)
-    return (sighting.x_mm, sighting.y_mm)
+def _clamp_pulses(value: float, limit: int) -> int:
+    """把浮点脉冲量取整并夹到 ``±limit``。"""
+    rounded = int(round(value))
+    return max(-limit, min(limit, rounded))
 
 
 def probe_jacobian(
@@ -1005,6 +206,7 @@ def align_x_y(
     config: ServoConfig,
     *,
     ensure_safe_height: bool = True,
+    quick_safe_lift: bool = False,
     lift_scale: Optional[LiftScale] = None,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> ServoResult:
@@ -1014,6 +216,9 @@ def align_x_y(
         连续用同一高度调用时（``--follow`` 的每一轮、或一次"对准+下降"里已经抬过）
         可以关掉：省下的是一次停稳测量（实测约 0.5 s），而高度在这些步骤里不会变。
         只有调用方**确实知道高度没变**才能关——低位转底盘会撞到物块。
+    :param quick_safe_lift: 那次检查允许先用**单帧**快判（够高就放行，不确定退回停稳
+        测量）。给"每一轮都要查"的 ``--follow`` 用：判据不放宽，但绝大多数轮次只花
+        一帧（约 0.22 s）而不是一次停稳测量（约 0.54 s）。
     :param lift_scale: 已标定的升降灵敏度，交给 :func:`raise_before_rotating` 一步算到位。
     :raises ServoError: 看不到物块、雅可比奇异、脉冲预算用完，或迭代用尽仍未进容差。
     """
@@ -1021,7 +226,15 @@ def align_x_y(
     # x/y 的每一步都要转底盘，所以先在**打开动作之前**抬到安全高度。这是机械结构上的
     # 硬约束：低位转底盘会撞到台面上的物块。刻意不自动降回去——降回去正是撞到它的动作。
     if ensure_safe_height:
-        raise_before_rotating(arm, link, selector, config, scale=lift_scale, on_message=say)
+        raise_before_rotating(
+            arm,
+            link,
+            selector,
+            config,
+            scale=lift_scale,
+            quick=quick_safe_lift,
+            on_message=say,
+        )
     readings: List[Tuple[float, float]] = []
     total_base = 0
     total_radial = 0
@@ -1198,90 +411,161 @@ def _require_consistent_legs(
         )
 
 
-# ------------------------------------------------------------------ z 轴伺服
-#
-# z 就是 :attr:`MaterialSighting.z_mm`——**物块沿光轴离镜头多远**。抓取时希望它落在
-# 7 cm 左右，所以这一步的活是"驱动升降，让测到的 z 等于目标"。
-#
-# 和 x/y 同一套机制（测 → 算 → 走 → 再测），但多两件事：
-#
-# 1. **下降护栏**：``mm_per_motor_rev`` 没标定时不知道升降的绝对高度，唯一能兜底的
-#    就是"测到的 z 不许低于 z_min_mm"。相机撞到物块之前，z 一定先变小。
-# 2. **找不到就先抬起来**：物块太近时既模糊又掉出工作距离窗口，检测会直接失效。
-#    抬起来往往就看见了，所以 :func:`find_object` 是这一步的标准起手式。
+def hover_above_object(
+    arm,
+    link: FrameSource,
+    selector: ObjectSelector,
+    config: ServoConfig,
+    *,
+    scale: Optional[LiftScale] = None,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> HoverResult:
+    """**就位的第一步**：把镜头到物块的距离伺服到 ``hover_z_mm``（高了降、低了抬）。
 
-LIFT_AXIS = "lift"
+    ## 为什么需要它
 
+    x/y 对准**不动高度**，所以"对准时爪子停在哪一层"原本完全取决于机械臂当时在哪——
+    只由 ``safe_lift_z_mm`` 兜一个下限（低了才抬，高了不管）。而 :func:`descend_z` 的下降
+    是**开环的固定脉冲数**：起点高度不固定，落点就不固定，抓取高度就会一轮一个样。
 
-@dataclass(frozen=True)
-class LiftScale:
-    """升降的 z 灵敏度：每脉冲让物块深度变化多少毫米（**抬升为正**）。"""
+    配上 ``hover_z_mm`` 之后，每轮开始都先回到同一层，下降的落点才有重复性。
+    ``null``（默认）= 不主动调整，行为与以前完全一致。
 
-    dz_per_pulse: float
+    ## 两条硬约束
 
-    def pulses_for(self, error_mm: float) -> float:
-        """把误差 ``error_mm`` **消掉**所需的升降脉冲（带符号）。
+    1. **往下降只降到 ``safe_lift_z_mm`` 为止**。悬停再低也不能低过"转底盘前的安全高度"——
+       那正是低位转底盘的成因（配置层面也拦：``hover_z_mm < safe_lift_z_mm`` 直接拒绝加载）。
+    2. **往下走之前必须先知道"一步走多远"**。有标定的 ``lift_scale`` 就直接用；没有就先抬
+       一段**量出真实灵敏度**（升和降共用同一个 |Δz/脉冲|），量出来之前绝不往下走——
+       往下是在朝物块靠近，盲走没有第二次机会。
 
-        ``error_mm`` 是"当前 z − 目标 z"。要让 z 变化 ``−error_mm``，所以这里取负——
-        和 :meth:`ServoJacobian.pulses_for` 同一个约定（那条内部也带负号）。
-        **漏掉这个负号会让升降朝反方向走**：z 高于目标时它去抬升，越走越远。
-        """
-        if abs(self.dz_per_pulse) < 1e-9:
-            raise ServoError(
-                "升降灵敏度是 0：这个轴没有改变物块深度。确认升降真的接上了、"
-                "且探针时画面里有完整的物块"
+    到位判据用 ``z_tolerance_mm``（和视觉版 z 同一个"到位"容差）。每段之后都重新测，
+    并用这一段实测的 Δz/脉冲修正下一段——和 :func:`raise_before_rotating` 同一套做法。
+
+    :param scale: 已标定的升降灵敏度；``None`` 表示没标定（那就只抬不降）。
+    :raises ServoError: 看不到物块（起手就要能看见它，否则悬停无从谈起）。
+    """
+    say = on_message if on_message is not None else (lambda _message: None)
+    target = config.hover_z_mm
+    if target is None:
+        say("  没配 hover_z_mm：不主动调整起始高度（只由 safe_lift_z_mm 兜下限）")
+        return HoverResult(configured=False)
+
+    slope: Optional[float] = None
+    if scale is not None and abs(scale.dz_per_pulse) > 1e-9:
+        slope = abs(scale.dz_per_pulse)
+    moved = 0
+    start_z: Optional[float] = None
+    previous: Optional[Tuple[float, int]] = None
+    dead_segments = 0
+    for attempt in range(1, config.safe_lift_max_steps + 1):
+        # 起手这一测要等停稳：它同时决定"要不要动"和"下一步走多远"。
+        sighting = _settled_sighting(link, selector, config)
+        z_mm = sighting.z_mm
+        if start_z is None:
+            start_z = z_mm
+        if previous is not None:
+            before_z, pulses = previous
+            change_mm = z_mm - before_z
+            if slope is not None and abs(slope * pulses) > 4 * config.settle_tolerance_mm:
+                if abs(change_mm) < config.settle_tolerance_mm:
+                    say(
+                        f"  警告：走了 {pulses:+d} 脉冲，z 只变了 {change_mm:+.2f} mm"
+                        f"（{before_z:.1f} -> {z_mm:.1f} mm）：多半已经到行程端点。"
+                        "停在这里，请手动确认高度再继续。"
+                    )
+                    return HoverResult(
+                        configured=True, pulses=moved, start_z_mm=start_z, end_z_mm=z_mm
+                    )
+            if change_mm != 0 and pulses != 0:
+                measured = abs(change_mm / pulses)
+                if measured > 0:
+                    dead_segments = 0
+                    slope = measured
+            else:
+                dead_segments += 1
+                if dead_segments >= 2:
+                    say("  警告：连着两段 z 都没变，停在这里；请手动确认高度")
+                    return HoverResult(
+                        configured=True, pulses=moved, start_z_mm=start_z, end_z_mm=z_mm
+                    )
+
+        error = z_mm - target
+        if abs(error) <= config.z_tolerance_mm:
+            say(
+                f"  已在悬停高度：z={z_mm:.1f} mm（目标 {target:.1f} ± "
+                f"{config.z_tolerance_mm:.1f}）"
+                + (f"，本轮走了 {moved:+d} 脉冲" if moved else "")
             )
-        return -error_mm / self.dz_per_pulse
+            return HoverResult(
+                configured=True, pulses=moved, start_z_mm=start_z, end_z_mm=z_mm
+            )
 
-    def summary(self) -> str:
-        return f"升降每 1000 脉冲 -> z {self.dz_per_pulse * 1000:+.1f} mm"
-
-
-@dataclass(frozen=True)
-class ZResult:
-    """一次 z 对准的结果。"""
-
-    target_mm: float
-    #: 每次测到的 z，按顺序；最后一个是最终值。
-    readings: Tuple[float, ...]
-    error_mm: float
-    pulses: int
-    iterations: int
-    tolerance_mm: float
-    #: 因为下降护栏拦住而停在半路（不是失败，是"再往下会撞"）。
-    stopped_by_guard: bool = False
-
-    @property
-    def aligned(self) -> bool:
-        return abs(self.error_mm) <= self.tolerance_mm
-
-    def summary(self) -> str:
-        if self.aligned:
-            verdict = "完成"
-        elif self.stopped_by_guard:
-            verdict = "被下降护栏拦住（再往下会撞上物块）"
+        if slope is None:
+            if error < 0:
+                step_pulses = config.safe_lift_step_pulses
+                reason = f"没标定升降灵敏度：只抬不降，按固定 {step_pulses} 脉冲一段抬"
+            else:
+                say(
+                    f"  现在 z={z_mm:.1f} mm 比悬停高度 {target:.1f} mm 远，需要下降，"
+                    "但没标定升降灵敏度（lift_scale），不敢盲降。维持现状——"
+                    "要不先把升降灵敏度标出来（--align-z-visual 会顺手标）"
+                )
+                return HoverResult(
+                    configured=True,
+                    pulses=moved,
+                    start_z_mm=start_z,
+                    end_z_mm=z_mm,
+                    stopped_without_scale=True,
+                )
         else:
-            verdict = "未达标"
-        return (
-            f"z 对准{verdict}：最终 z={self.readings[-1]:.1f} mm，"
-            f"误差 {self.error_mm:+.2f} mm（容差 {self.tolerance_mm:.1f} mm）；"
-            f"升降 {self.pulses:+d} 脉冲；测量 {self.iterations} 次"
+            # 这里用**当前的** slope：可能是标定值，也可能是上一段实测出来的。
+            # 一条约定与 LiftScale.pulses_for 相同：误差为正（z 偏大）就要往下走。
+            wanted = int(round(-error / slope))
+            step_pulses = max(
+                -config.safe_lift_max_pulses_per_step,
+                min(config.safe_lift_max_pulses_per_step, wanted),
+            )
+            if step_pulses < 0:
+                # 下降方向的护栏：最多降到 safe_lift_z_mm 那一层。
+                allowed = int((z_mm - config.safe_lift_z_mm) / slope)
+                if allowed <= 0:
+                    say(
+                        f"  已经到安全高度 {config.safe_lift_z_mm:.1f} mm，不能再往下悬停；"
+                        "要么把 hover_z_mm 调高，要么把 safe_lift_z_mm 调低（后者要谨慎）"
+                    )
+                    return HoverResult(
+                        configured=True,
+                        pulses=moved,
+                        start_z_mm=start_z,
+                        end_z_mm=z_mm,
+                        stopped_at_safe_floor=True,
+                    )
+                step_pulses = -min(abs(step_pulses), allowed)
+            reason = (
+                f"按 {slope * 1000:+.1f} mm/1000 脉冲算，误差 {error:+.1f} mm -> "
+                f"{step_pulses:+d} 脉冲"
+            )
+        if step_pulses == 0:
+            return HoverResult(
+                configured=True, pulses=moved, start_z_mm=start_z, end_z_mm=z_mm
+            )
+        say(
+            f"  悬停调整：z={z_mm:.1f} mm（目标 {target:.1f}），{reason}"
+            f"（第 {attempt}/{config.safe_lift_max_steps} 次）"
         )
+        _move_lift(arm, step_pulses)
+        moved += step_pulses
+        previous = (z_mm, step_pulses)
 
-
-def _send_lift(arm, signed_pulses: int) -> float:
-    """只**发出**升降动作、不等；返回估算耗时（秒）。正数 = 抬升。"""
-    if signed_pulses == 0:
-        return 0.0
-    action = arm.move_up if signed_pulses > 0 else arm.move_down
-    report = action(abs(signed_pulses), wait=False)
-    return float(getattr(report, "estimated_seconds", 0.0) or 0.0)
-
-
-def _move_lift(arm, signed_pulses: int) -> float:
-    seconds = _send_lift(arm, signed_pulses)
-    time.sleep(seconds)
-    return seconds
+    say(
+        f"  警告：调了 {config.safe_lift_max_steps} 次仍没到悬停高度 "
+        f"{target:.1f} mm（现在 {previous[0] if previous else 0:.1f} mm）。"
+        "请手动确认高度再继续。"
+    )
+    return HoverResult(
+        configured=True, pulses=moved, start_z_mm=start_z, end_z_mm=None
+    )
 
 
 def raise_before_rotating(
@@ -1291,6 +575,7 @@ def raise_before_rotating(
     config: ServoConfig,
     *,
     scale: Optional[LiftScale] = None,
+    quick: bool = False,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> int:
     """**转底盘之前先抬到安全高度**；返回抬升用的脉冲数。
@@ -1321,6 +606,26 @@ def raise_before_rotating(
     say = on_message if on_message is not None else (lambda _message: None)
 
     if config.safe_lift_z_mm > 0:
+        if quick:
+            # 单帧快判：**只有"比安全高度还高出一截"才直接放行**，其余一律退回停稳测量。
+            # 为什么要它：每一轮都要查一次的调用方（--follow）原本每轮付一次停稳测量
+            # （实测约 0.54 s），而"还在不在安全高度"这件事用一帧就够——前提是留余量：
+            # 运动模糊的一帧可能把 z **读大**，而"以为够高"正是低位转底盘的成因。
+            try:
+                probe = _read_object(link, selector, config)
+            except ServoError:
+                probe = None
+            if (
+                probe is not None
+                and probe.z_mm
+                >= config.safe_lift_z_mm + config.safe_lift_quick_margin_mm
+            ):
+                say(
+                    f"  已在安全高度：z={probe.z_mm:.1f} mm ≥ {config.safe_lift_z_mm:.1f} mm"
+                    f"（单帧快判，余量 {config.safe_lift_quick_margin_mm:.1f} mm）"
+                )
+                return 0
+            say("  单帧快判不足以放行（读数偏低或余量不够），退回停稳测量")
         slope: Optional[float] = None
         if scale is not None and config.safe_lift_use_scale:
             slope = abs(scale.dz_per_pulse) if abs(scale.dz_per_pulse) > 1e-9 else None
@@ -1443,29 +748,6 @@ def find_object(
             continue
         if step > 1:
             say(f"  抬升 {step - 1} 次后看到了物块")
-        return True
-    return False
-
-
-#: 快速探一次"物块在不在画面里"时最多读几帧。每帧约 221 ms（含 178 ms 定位）。
-VISIBILITY_PROBE_FRAMES = 2
-
-
-def _probe_visible(link: FrameSource, selector: ObjectSelector, config: ServoConfig) -> bool:
-    """快速回答"物块在不在画面里"，**不等停稳**。
-
-    为什么可以不等：这一步只问"在不在"，不问"在哪"——差几毫米无所谓。而等停稳
-    （连续两帧一致）至少要 537 ms；看不到时还要一直等到 ``settle_timeout_seconds``
-    （默认 4 s）才认输，乘上"抬起来找"的步数就是几十秒。
-
-    代价是可能被一帧运动模糊骗到：所以连读 :data:`VISIBILITY_PROBE_FRAMES` 帧，
-    任何一帧认出来就算"在"。
-    """
-    for _ in range(VISIBILITY_PROBE_FRAMES):
-        try:
-            _read_object(link, selector, config)
-        except ServoError:
-            continue
         return True
     return False
 
@@ -1695,37 +977,6 @@ def align_z(
     )
 
 
-# ------------------------------------------- 脉冲版 z：下降与后缩（开环，现场在用）
-#
-# 平面一旦对准，剩下的抓取前两步就是两个固定脉冲数：升降下降 ``z_descend_pulses``、
-# 伸缩后缩 ``extension_retract_pulses``。
-#
-# 为什么这里可以开环：爪子压下去之后画面里就没有物块了（爪瓣挡住、也掉出工作距离
-# 窗口），**这一段本来就拿不到反馈**；而"从平面对准的高度到夹持高度"是机械安装常数，
-# 量一次就固定。真正要保证的不是"下降了多少"，而是**下降之前平面已经对准**——脉冲数
-# 只保证往下走了那么多，不保证下面正好是物块。
-
-
-@dataclass(frozen=True)
-class ZDescentResult:
-    """一次"按脉冲下降"的结果。"""
-
-    #: 实际发出的下降脉冲数（正数）。
-    pulses: int
-    #: 下降前测到的平面误差（毫米）——这一步的前置条件。
-    planar_mm: float
-    #: 下降前测到的物块深度（毫米），事后用来核对"当时停在哪一层"。
-    start_z_mm: float
-    #: 下降动作的估算耗时（秒）。
-    seconds: float
-
-    def summary(self) -> str:
-        return (
-            f"下降 {self.pulses} 脉冲完成（下降前 z={self.start_z_mm:.1f} mm、"
-            f"平面误差 {self.planar_mm:.2f} mm）；耗时约 {self.seconds:.2f} s"
-        )
-
-
 def descend_z(
     arm,
     link: FrameSource,
@@ -1816,194 +1067,6 @@ def retract_extension(
     return count
 
 
-@dataclass(frozen=True)
-class GraspReadyResult:
-    """一次"抬升 + x/y 对准 + z 下降 + 后缩"的结果。"""
-
-    #: 转底盘前抬到安全高度用了多少脉冲（本来就在安全高度就是 0）。
-    raised_pulses: int
-    #: x/y 对准的结果：误差、迭代次数、两个轴各走了多少脉冲。
-    aligned: ServoResult
-    #: z 下降的结果：走了多少脉冲、下降前多深、下降前的平面误差。
-    descent: ZDescentResult
-    #: 伸缩后缩的脉冲数。
-    retracted_pulses: int
-    #: 各段的墙钟耗时（秒）。记下来是为了**一眼看出时间花在哪一段**——
-    #: 定位一次 178 ms、停稳测量一次约 537 ms，段数比动作本身更容易吃掉时间。
-    lift_seconds: float
-    align_seconds: float
-    descend_seconds: float
-    retract_seconds: float
-
-    @property
-    def total_seconds(self) -> float:
-        return (
-            self.lift_seconds
-            + self.align_seconds
-            + self.descend_seconds
-            + self.retract_seconds
-        )
-
-    def summary(self) -> str:
-        return (
-            f"就位完成：抬升 {self.raised_pulses} 脉冲、x/y 误差 {self.aligned.error_mm:.2f} mm"
-            f"（{self.aligned.iterations} 次测量）、下降 {self.descent.pulses} 脉冲、后缩 "
-            f"{self.retracted_pulses} 脉冲；共 {self.total_seconds:.1f} s"
-            f"（抬升 {self.lift_seconds:.1f} + 对准 {self.align_seconds:.1f}"
-            f" + 下降 {self.descend_seconds:.1f} + 后缩 {self.retract_seconds:.1f}）"
-        )
-
-
-def align_and_descend(
-    arm,
-    link: FrameSource,
-    selector: ObjectSelector,
-    target: ServoTarget,
-    jacobian: ServoJacobian,
-    config: ServoConfig,
-    *,
-    lift_scale: Optional[LiftScale] = None,
-    z_pulses: Optional[int] = None,
-    retract_pulses: Optional[int] = None,
-    on_message: Optional[Callable[[str], None]] = None,
-) -> GraspReadyResult:
-    """**一次调用走完抓取前的就位**：抬到安全高度 → x/y 对准 → z 下降 → 伸缩后缩。
-
-    顺序不是随便定的：
-
-    1. **先抬到安全高度**：x/y 的每一步都要转底盘，低位转过去会撞到台面上的物块。
-       整个流程只在这里查一次——后面三步都不改高度。
-    2. **x/y 对准**（闭环，只看画面）：把物块伺服到 ``(tx, ty)``，也就是"爪子抓取点正在
-       物块正上方"。粗调阶段用 ``coarse_settle_tolerance_mm`` 判停稳，少等几帧。
-    3. **z 下降**：平面已对准才允许下降，按 :attr:`ServoConfig.z_descend_pulses` 走固定脉冲。
-    4. **伸缩后缩**：再按 :attr:`ServoConfig.extension_retract_pulses` 后缩到夹持位。
-
-    第 3、4 步是开环的（爪子压下去之后就看不到物块了），**第 2 步的结果就是它们唯一的安全
-    依据**：平面误差超过 ``z_center_tolerance_mm`` 时 :func:`descend_z` 会拒绝下降、一个
-    动作帧都不发。
-
-    比"自己按顺序调四个函数"快在哪：安全高度按灵敏度**一步算到位**（不是 500 脉冲一段地
-    试）；已经抬够时只花一次测量；对准阶段不再重复查安全高度。每一步的耗时都记在
-    :class:`GraspReadyResult` 里，慢在哪一段一眼能看出来。
-
-    :param lift_scale: 已标定的升降灵敏度；``None`` 表示没标定，抬升退回固定步长。
-    :param z_pulses: 覆盖下降脉冲数（只这一次）；``None`` 用配置值。
-    :param retract_pulses: 覆盖后缩脉冲数（只这一次）；``None`` 用配置值。
-    :raises ServoError: 任何一步失败；异常信息里会写清卡在哪一步。
-    """
-    say = on_message if on_message is not None else (lambda _message: None)
-
-    started = time.monotonic()
-    say("① 转底盘前先确认安全高度")
-    raised = raise_before_rotating(
-        arm, link, selector, config, scale=lift_scale, on_message=say
-    )
-    lift_seconds = time.monotonic() - started
-
-    started = time.monotonic()
-    say("② x/y 对准（闭环，只动底座与伸缩）")
-    aligned = align_x_y(
-        arm,
-        link,
-        selector,
-        target,
-        jacobian,
-        config,
-        ensure_safe_height=False,
-        lift_scale=lift_scale,
-        on_message=say,
-    )
-    align_seconds = time.monotonic() - started
-
-    started = time.monotonic()
-    say("③ z 下降（平面已对准，按固定脉冲）")
-    descent = descend_z(
-        arm, link, selector, config, pulses=z_pulses, scale=lift_scale, on_message=say
-    )
-    descend_seconds = time.monotonic() - started
-
-    started = time.monotonic()
-    say("④ 伸缩后缩")
-    retracted = retract_extension(arm, config, pulses=retract_pulses, on_message=say)
-    retract_seconds = time.monotonic() - started
-
-    return GraspReadyResult(
-        raised_pulses=raised,
-        aligned=aligned,
-        descent=descent,
-        retracted_pulses=retracted,
-        lift_seconds=lift_seconds,
-        align_seconds=align_seconds,
-        descend_seconds=descend_seconds,
-        retract_seconds=retract_seconds,
-    )
-
-
-def _clamp_pulses(value: float, limit: int) -> int:
-    """把浮点脉冲量取整并夹到 ``±limit``。"""
-    rounded = int(round(value))
-    return max(-limit, min(limit, rounded))
-
-
-def _load_document(config_path: Path) -> Mapping[str, object]:
-    try:
-        document = json.loads(config_path.read_text(encoding="utf-8"))
-    except OSError as error:
-        raise ServoError(f"无法读取 eye-in-hand 配置：{config_path}") from error
-    except json.JSONDecodeError as error:
-        raise ServoError(f"eye-in-hand 配置不是合法 JSON：{config_path}") from error
-    if not isinstance(document, dict):
-        raise ServoError("eye-in-hand 配置必须是 JSON 对象")
-    return document
-
-
-def _number(value: object, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ServoError(f"{name} 必须是数字")
-    if not math.isfinite(float(value)):
-        raise ServoError(f"{name} 必须是有限数")
-    return float(value)
-
-
-def _integer(value: object, name: str) -> int:
-    if type(value) is not int or value < 1:
-        raise ServoError(f"{name} 必须是正整数")
-    return value
-
-
-def _boolean(value: object, name: str) -> bool:
-    """严格取布尔值：``true``/``false`` 才认，``1``/``"true"`` 不认。
-
-    为什么不用 ``bool(value)``：那样任何非空字符串都成了"开"——配置文件里写错成
-    ``"false"`` 会静默变成开，而这几个开关管的正是"要不要走快的那条路"。
-    """
-    if type(value) is not bool:
-        raise ServoError(f"{name} 必须是 true 或 false")
-    return value
-
-
-def _positive(value: object, name: str) -> float:
-    number = _number(value, name)
-    if not number > 0:
-        raise ServoError(f"{name} 必须是正数")
-    return number
-
-
-def _non_negative(value: object, name: str) -> float:
-    number = _number(value, name)
-    if number < 0:
-        raise ServoError(f"{name} 不能是负数")
-    return number
-
-
-def _non_negative_integer(value: object, name: str) -> int:
-    """非负整数；``0`` 常用来表示"这个保护没开"。"""
-    if type(value) is not int or value < 0:
-        raise ServoError(f"{name} 必须是非负整数")
-    return value
-
-
-# ---------------------------------------------------------------------- 自测
 def _self_test() -> int:
     """不需要硬件：验证 2×2 求逆、方向符号、闭环收敛与三种失败路径。"""
     class FakeArm:
@@ -2249,7 +1312,3 @@ def _self_test() -> int:
     print(f"eye-in-hand 伺服自测通过：{result.summary()}")
     print(f"  {truth.summary()}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(_self_test())

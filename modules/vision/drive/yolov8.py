@@ -310,15 +310,25 @@ class YOLOv8Detector:
         self.d_output = None
         self.stream = None
 
-        self._load_engine(engine_path)
-        if input_size is not None and int(input_size) != self.input_size:
-            # 引擎的输入尺寸写在引擎里；配置里写的不一致就直接说清楚，
-            # 别等到第一帧推理时才崩在 reshape 上。
-            raise ValueError(
-                f"配置的模型输入边长 {int(input_size)} 与引擎的 {self.input_size} 不一致：{engine_path}"
-            )
-        self._alloc_buffers()
-        self._warmup()
+        # 构造未返回的对象只能由构造器自己收尾：`_load_engine` / `_alloc_buffers` 都可能
+        # 在中途失败（引擎版本不对、显存不够），那时 engine / context / 已分配的 host
+        # 缓冲全都已经取得，必须在这里释放掉，否则每次重试都泄漏一份。
+        try:
+            self._load_engine(engine_path)
+            if input_size is not None and int(input_size) != self.input_size:
+                # 引擎的输入尺寸写在引擎里；配置里写的不一致就直接说清楚，
+                # 别等到第一帧推理时才崩在 reshape 上。
+                raise ValueError(
+                    f"配置的模型输入边长 {int(input_size)} 与引擎的 {self.input_size} 不一致：{engine_path}"
+                )
+            self._alloc_buffers()
+            self._warmup()
+        except BaseException as primary:
+            try:
+                self.close()
+            except Exception as cleanup:
+                raise primary.with_traceback(primary.__traceback__) from cleanup
+            raise
 
     # ------------------------------------------------------------------ setup
 
@@ -463,18 +473,44 @@ class YOLOv8Detector:
     # ------------------------------------------------------------- lifecycle
 
     def close(self) -> None:
-        """Release GPU buffers, context and engine (call once when done)."""
-        if self.stream is not None:
-            self.stream.synchronize()
-        for attr in ("d_input", "d_output", "h_input", "h_output",
-                     "context", "engine", "stream"):
-            obj = getattr(self, attr, None)
-            if obj is not None:
-                try:
-                    del obj
-                except (TypeError, AttributeError):
-                    pass
-            setattr(self, attr, None)
+        """Release GPU buffers, context and engine; one failure must not skip the rest.
+
+        每项资源**先取出、再清引用**，然后独立尝试释放。stream 同步失败不该让
+        device allocation / host buffer / context / engine 一个都不放——那正是"跑了几轮
+        之后显存不够"的成因；所以同步单独一步，失败只记进清单，不阻断后面的释放。
+        没取得的对象直接跳过，取过的只释放一次。全部尝试之后才报告，错误清单含每个
+        失败项，以第一项为 ``__cause__``。
+        """
+        stream = getattr(self, "stream", None)
+        resources = [
+            ("d_input", getattr(self, "d_input", None)),
+            ("d_output", getattr(self, "d_output", None)),
+            ("h_input", getattr(self, "h_input", None)),
+            ("h_output", getattr(self, "h_output", None)),
+            ("context", getattr(self, "context", None)),
+            ("engine", getattr(self, "engine", None)),
+        ]
+        # 先清空引用：即便下面某一项报错，对象也不会再被本实例二次释放。
+        self.stream = None
+        for name, _ in resources:
+            setattr(self, name, None)
+
+        errors = []
+        if stream is not None:
+            try:
+                stream.synchronize()
+            except Exception as error:
+                errors.append(("stream.synchronize", error))
+        for name, resource in resources:
+            if resource is None:
+                continue
+            try:
+                _release_cuda_resource(resource)
+            except Exception as error:
+                errors.append((name, error))
+        if errors:
+            details = "; ".join("{}: {}".format(name, error) for name, error in errors)
+            raise RuntimeError("TensorRT 资源释放失败：" + details) from errors[0][1]
 
     def __enter__(self) -> "YOLOv8Detector":
         return self
@@ -525,10 +561,36 @@ class YOLOv8ONNXDetector(YOLOv8Detector):
         self.net = None
 
 
+def _release_cuda_resource(resource) -> None:
+    """释放一个已经取得的 CUDA / TensorRT 对象。
+
+    - ``pycuda.driver.DeviceAllocation``：``free()`` 把显存还回去。
+    - page-locked host 数组（``cuda.pagelocked_empty`` 的结果）：真正的释放动作挂在
+      ``base.free()`` 上，调用它；失败时原异常继续上抛（调用方记进清单）。
+    - TensorRT execution context / engine：没有显式 ``free``，不做动作——调用方已经
+      清掉了实例引用，引用计数会在本函数返回后收尾。
+
+    参数是**已经被调用方清空引用**的对象；假对象（测试注入的）走同一套分支，
+    有 ``free`` 就调，没有就什么也不做。stream 的同步由调用方单独负责，
+    因为"同步失败"不该阻断其余资源的释放。
+    """
+    free = getattr(resource, "free", None)
+    if callable(free):
+        free()
+        return
+    # page-locked 数组：free() 挂在它的 .base 上。
+    base = getattr(resource, "base", None)
+    base_free = getattr(base, "free", None)
+    if callable(base_free):
+        base_free()
+
+
 if __name__ == "__main__":  # pragma: no cover - exercised manually on the board
     import cv2
 
-    from modules.vision import USBCamera, close_previews, open_preview, run_preview
+    from modules.vision.drive.camera import USBCamera
+    from modules.vision.drive.preview import close_previews, open_preview
+    from modules.vision.drive.stream import run_preview
 
     detector = YOLOv8Detector("models/best.engine")
     camera = USBCamera(0, width=640, height=480).initialize()

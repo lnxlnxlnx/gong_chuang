@@ -11,8 +11,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from modules.vision import default_model_path, load_camera_id
-from modules.vision.config import resolve_target_settings
+from modules.vision.config import default_model_path
+from modules.vision.drive.camera import load_camera_id
 
 #: 预览里每显示这么多帧往终端打一行统计（0 表示不打）。
 PRINT_EVERY = 60
@@ -43,16 +43,15 @@ def demo_vision(
     camera_id = _camera_id(camera_id)
     import cv2
 
-    from modules.vision import (
+    from modules.vision.detector_factory import create_configured_detector
+    from modules.vision.drive.camera import USBCamera, looks_blank
+    from modules.vision.drive.preview import (
         BLANK_FRAME_WARNING,
-        USBCamera,
         close_previews,
-        create_configured_detector,
-        looks_blank,
         open_preview,
-        run_preview,
         warn_blank_preview,
     )
+    from modules.vision.drive.stream import run_preview
 
     # 窗口名必须是 ASCII，且要先显式建窗，见 preview.py 顶部说明。
     window = open_preview()
@@ -94,66 +93,58 @@ def demo_material(
     """预览物料的像素位置和相机坐标；按 p 打印，按 q 退出。
 
     可用 ``python -m modules.vision.drive.hough_lock`` 单独检查圆面定位；这里
-    使用 :class:`modules.vision.MaterialLocator` 跑完整流程。
+    使用 :class:`modules.vision.drive.material_locate.MaterialLocator` 跑完整流程。
 
     **物料颜色与工作距离先验来自 ``modules/vision/config.json``**（``targets`` 块：
     ``material_palette`` / ``material_bgr`` / ``working_distance_mm`` /
-    ``material_diameter_mm`` / ``color_tolerance``）。这三个参数决定"用颜色块还是
+    ``material_diameter_mm`` / ``color_tolerance``）。这几个参数决定"用颜色块还是
     霍夫找圆"以及"半径窗口按物理先验算还是按画幅猜"——恰恰是识别速度与稳不稳的
     分水岭：真实台面图上不配它们时，霍夫会在整幅 1280×720 上凑出几十个候选圆，
     每帧要 0.8–3.3 s。菜单 18（``modules/vision/test/manual/material_locate.py``）
     一直读的就是这些值，这里与它保持一致。
+
+    本次的 ``model_path`` / ``camera_id`` / ``focal_px`` 只作用**这一轮**：先后落到
+    配置快照上，再进入 :meth:`modules.vision.runtime.Vision._open_config`
+    这条唯一的真实会话创建路径——不写回文件、不再开一套相机或模型。
+    配置读不出来就**直接失败**：预览里按默认值继续跑会让人以为"配置生效了"。
     """
-    model_path = _require_model(model_path)
-    camera_id = _camera_id(camera_id)
+    from modules.vision.runtime import Vision, _load_settings, _override_settings
+
+    settings = _override_settings(
+        _load_settings(), model_path=model_path, camera_id=camera_id
+    )
+    camera_id = settings.camera_id("windows" if os.name == "nt" else "jetson")
     import cv2
 
-    from modules.vision import (
+    from modules.vision.drive.camera import looks_blank
+    from modules.vision.drive.preview import (
         BLANK_FRAME_WARNING,
-        MaterialLocator,
-        USBCamera,
         close_previews,
-        looks_blank,
         open_preview,
-        run_preview,
         warn_blank_preview,
     )
+    from modules.vision.drive.stream import run_preview
 
-    targets, problem = resolve_target_settings()
-    if problem is not None:
-        print(f"config.json 的 targets 块读不出来（{problem}），这一轮按默认值跑")
-    # 配置里的值直接透传给 MaterialLocator：它自己会做类型归一与校验
-    # （调色板取色、深度范围排序），这里再解析一遍只会多一处能写错的地方。
-    depth_range = targets.working_distance_mm
-    palette = targets.material_palette or None
-
+    targets = settings.targets
     window = open_preview()
     blank_frames = 0
     warned_blank = False
     try:
-        with MaterialLocator(
-            model_path=model_path,
-            focal_px=focal_px,
-            depth_range_mm=depth_range,
-            material_bgr=None if palette else targets.material_bgr,
-            material_palette=palette,
-            colour_tolerance=targets.color_tolerance,
-            top_diameter_mm=targets.material_diameter_mm,
-        ) as locator, USBCamera(camera_id, width=1280, height=720).initialize() as camera:
-            print(f"摄像头编号 {camera_id}，模型 {model_path.name}；预览窗口 {window!r}，按 q 退出")
+        with Vision._open_config(settings, focal_px=focal_px) as vision:
+            print(f"摄像头编号 {camera_id}；预览窗口 {window!r}，按 q 退出")
             print("画面里只画 ASCII；按 p 打印所有物料的完整结果，按 q 退出。")
-            if palette or targets.material_bgr is not None:
+            if targets.material_palette or targets.material_bgr is not None:
                 print(f"物料颜色取自 config.json（容差 {targets.color_tolerance:.0f}）："
                       "走颜色块定位，夹爪与背景不进掩膜")
             else:
                 print("config.json 里没有物料颜色：走霍夫圆 + 形状判据"
                       "（速度与稳定性都差一截，建议配 targets.material_palette）")
-            if depth_range is None:
+            if targets.working_distance_mm is None:
                 print("没有工作距离先验：半径窗口按画幅猜；"
                       "config.json 的 targets.working_distance_mm 可以按物理尺寸算出窗口")
             else:
-                print(f"工作距离先验 {depth_range[0]:.0f}–{depth_range[1]:.0f} mm，"
-                      "半径窗口按针孔模型算")
+                low, high = targets.working_distance_mm
+                print(f"工作距离先验 {low:.0f}–{high:.0f} mm，半径窗口按针孔模型算")
 
             def watch(frame, _result, _stats) -> None:
                 nonlocal blank_frames, warned_blank
@@ -190,10 +181,12 @@ def demo_material(
                 if key == ord("p") and report is not None:
                     print(report.summary())
 
+            # 复用**本会话自己的**相机与定位器：预览不额外开设备，也不把同步
+            # vision.locate() 塞进显示循环（那会把显示帧率拖到推理速度）。
             run_preview(
-                camera,
-                locator.locate,
-                locator.draw,
+                vision._camera,
+                vision._locator.locate,
+                vision._locator.draw,
                 window=window,
                 print_every=PRINT_EVERY,
                 on_frame=watch,

@@ -29,6 +29,7 @@ import numpy as np
 from modules.vision.drive.yolov8 import DEFAULT_CLASS_NAMES, Detection, Detector
 
 if TYPE_CHECKING:
+    from modules.vision.config import ModelSettings
     from modules.vision.drive.hough_lock import LockedRegion
 
 #: 算作物料的类别名。当前物料模型是专用的四分类（``red`` / ``yellow`` / ``blue`` /
@@ -43,22 +44,6 @@ def is_material(name: str, materials: Iterable[str] = MATERIAL_CLASS_NAMES) -> b
     return name in set(materials)
 
 
-def _configured_materials() -> tuple[str, ...]:
-    """``config.json`` 的 ``model.materials``；没配或读不出来时返回空元组。
-
-    读配置失败（文件坏了、字段写错）不该把整条流水线拖死：这里是"想更精确一点"的
-    增强，失败就退回内置表，让上游按老行为跑。
-    """
-    try:
-        from modules.vision.config import load_model_settings
-    except ImportError:  # 单独跑本模块的自测时也可能走到这里
-        return ()
-    try:
-        return tuple(load_model_settings().materials)
-    except (OSError, ValueError):
-        return ()
-
-
 def is_inside_region(
     detection: Detection, region: LockedRegion, *, margin: float = 0.0
 ) -> bool:
@@ -71,17 +56,21 @@ class MaterialYOLO:
     """Wrap one YOLO detector behind a "frame -> detections" interface.
 
     Parameters:
-        model_path: ONNX (Windows) or TensorRT engine (Jetson) path; defaults
-            to :func:`modules.vision.default_model_path`, which reads
-            ``modules/vision/config.json``.
-        conf_thresh / iou_thresh / class_names: ``None`` 表示"按 ``config.json`` 的
+        model_path: ONNX (Windows) or TensorRT engine (Jetson) path; ``None``
+            means "按 ``settings``（或默认配置）的 ``model`` 块来"，见
+            :func:`modules.vision.config.default_model_path`。
+        conf_thresh / iou_thresh / class_names: ``None`` 表示"按 ``settings`` 的
             ``model`` 块来"。显式传值只用于临时试验，正常部署不要在代码里写死。
         materials: class names treated as materials, used by ``materials_only``;
-            ``None`` 表示按配置（见 :attr:`effective_materials`）。
+            ``None`` 表示按 ``settings``（见 :attr:`effective_materials`）。
         detector: an already-built detector (same ``detect()`` / ``draw()`` /
-            ``close()`` interface, see :class:`modules.vision.Detector`); injected by
-            tests or when sharing one model between modules. When given,
-            ``model_path`` is ignored.
+            ``close()`` interface, see :class:`modules.vision.drive.yolov8.Detector`);
+            injected by tests or when sharing one model between modules. When given,
+            ``model_path`` is ignored and **不会再建第二个检测器**。
+        settings: 本会话已经读好的 :class:`~modules.vision.config.ModelSettings`
+            快照；``None`` 时才在**构造时**读一次默认配置。会话路线始终传快照，
+            于是"构造之后改配置文件"不影响这个实例。
+        input_size: 显式输入边长；``None`` 表示用 ``settings`` 里的值。
     """
 
     def __init__(
@@ -93,13 +82,28 @@ class MaterialYOLO:
         class_names: Sequence[str] | None = None,
         materials: Sequence[str] | None = None,
         detector: Detector | None = None,
+        settings: "ModelSettings | None" = None,
+        input_size: int | None = None,
     ) -> None:
+        if settings is None and detector is None:
+            # 只在"没人给快照"时读一次默认配置；读完就定死，不逐帧回读文件。
+            from modules.vision.config import load_model_settings
+
+            settings = load_model_settings()
+        self.settings = settings
         self.model_path = Path(model_path) if model_path is not None else None
-        # None = "还没定，等建检测器时问配置"；显式给了就一直是它。
+        # None = "还没定，等建检测器时问 settings"；显式给了就一直是它。
         self.conf_thresh = None if conf_thresh is None else float(conf_thresh)
         self.iou_thresh = None if iou_thresh is None else float(iou_thresh)
         self.class_names = list(class_names) if class_names is not None else None
-        self._materials = tuple(materials) if materials is not None else None
+        self.input_size = None if input_size is None else int(input_size)
+        #: 本实例按哪些类别算物料。构造时就定死：不再逐帧回读默认配置文件，
+        #: 也不因为"类别名对不上内置表"而临时换一套表。
+        self._materials = (
+            tuple(materials) if materials is not None
+            else tuple(settings.materials) if settings is not None
+            else tuple(MATERIAL_CLASS_NAMES)
+        )
         self._detector = detector
 
     # ------------------------------------------------------------- 生命周期
@@ -107,15 +111,17 @@ class MaterialYOLO:
     def detector(self) -> Detector:
         """Lazily build the real detector the first time it is needed."""
         if self._detector is None:
-            from modules.vision import create_configured_detector
+            from modules.vision.detector_factory import create_configured_detector
 
-            # 路径、类别表、输入边长、阈值全部可以来自 config.json；
-            # 这里显式传进去的才是覆盖值（None 表示不覆盖）。
+            # 路径、类别表、输入边长、阈值全部来自本会话的 settings 快照；
+            # 显式传进去的才是覆盖值（None 表示不覆盖，由工厂按 settings 定）。
             self._detector = create_configured_detector(
                 model_path=self.model_path,
                 class_names=self.class_names,
                 conf_thresh=self.conf_thresh,
                 iou_thresh=self.iou_thresh,
+                input_size=self.input_size,
+                settings=self.settings,
             )
         return self._detector
 
@@ -140,24 +146,16 @@ class MaterialYOLO:
 
     @property
     def effective_materials(self) -> tuple[str, ...]:
-        """这一帧按哪些类别名算物料。
+        """本实例按哪些类别名算物料——**构造时定死的那一份**。
 
-        优先级：构造时显式传的 ``materials`` → ``config.json`` 的 ``model.materials``
-        （留空表示 ``model.class_names`` 全部算物料）→ 内置表。
+        优先级：构造时显式传的 ``materials`` → 构造时读到的
+        ``settings.materials``（``config.json`` 的 ``model.materials``，留空表示
+        ``model.class_names`` 全部算物料）→ 内置表。
 
-        最后一档是给"没配置、也读不出模型类别表"的旧场景兜底：模型的类别名跟内置表
-        完全对不上时，说明它换了一套命名（例如老比赛的 ``obj-*`` 十类表），
-        那就按它自己声明的全部类别算——一个专用模型不该因为改了命名就把所有框过滤掉。
+        刻意**不逐帧读文件、不做异常兜底换表**：会话装配时确定的类别就是这一会话的
+        类别，实例建好之后再改配置文件不影响它。需要别的类别就建一个新实例。
         """
-        if self._materials is not None:
-            return self._materials
-        configured = _configured_materials()
-        if configured:
-            return configured
-        names = tuple(getattr(self.detector, "class_names", ()) or ())
-        if names and not (set(names) & set(MATERIAL_CLASS_NAMES)):
-            return names
-        return tuple(MATERIAL_CLASS_NAMES)
+        return self._materials
 
     def detect(self, frame: np.ndarray, *, materials_only: bool = False) -> list[Detection]:
         """Run one inference on the whole frame."""
@@ -334,15 +332,14 @@ def _run_image(model_path, image_path: Path, conf: float | None) -> int:
 def _run_camera(model_path, camera_id: int, conf: float | None) -> int:
     import cv2
 
-    from modules.vision import (
+    from modules.vision.drive.camera import USBCamera, looks_blank
+    from modules.vision.drive.preview import (
         BLANK_FRAME_WARNING,
-        USBCamera,
         close_previews,
-        looks_blank,
         open_preview,
-        run_preview,
         warn_blank_preview,
     )
+    from modules.vision.drive.stream import run_preview
 
     window = open_preview()
     blank_frames = 0

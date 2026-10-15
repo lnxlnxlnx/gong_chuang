@@ -18,20 +18,17 @@ import argparse
 import os
 from pathlib import Path
 
-from modules.vision import (
+from modules.vision.config import DEFAULT_CONFIG_PATH
+from modules.vision.drive.camera import USBCamera, looks_blank
+from modules.vision.drive.material_locate import parse_bgr, parse_depth_range, parse_palette
+from modules.vision.drive.preview import (
     BLANK_FRAME_WARNING,
-    MaterialLocator,
-    USBCamera,
     close_previews,
-    default_model_path,
-    load_camera_id,
-    looks_blank,
     open_preview,
-    run_preview,
     warn_blank_preview,
 )
-from modules.vision.config import TargetSettings, load_vision_config
-from modules.vision.drive.material_locate import parse_bgr, parse_depth_range, parse_palette
+from modules.vision.drive.stream import run_preview
+from modules.vision.runtime import Vision, _load_settings, _override_settings
 
 #: 每这么多帧打印一次中文结论。
 PRINT_EVERY = 30
@@ -40,107 +37,75 @@ PRINT_EVERY = 30
 MAX_MISSES = 30
 
 
-def configured_targets():
-    """读 ``config.json`` 的 ``targets`` 块；读不出来就当没配。"""
-    try:
-        return load_vision_config().targets
-    except ValueError as error:
-        print(f"config.json 读不出物料参数（{error}），这一轮按默认值跑")
-        return TargetSettings()
-
-
 def parse_args() -> argparse.Namespace:
+    """只解析命令行：**不读配置、不打开设备**。
+
+    所有"本次覆盖"的默认值都是 ``None``，意思是"没给，按配置来"。想看到配置里的
+    当前值，由 :func:`main` 加载快照之后打印，而不是在这里读一遍配置文件——
+    读两次会给"改完 config.json 行为没变"这类问题留后门。
+    """
     parser = argparse.ArgumentParser(description="物料圆面定位 + 30 mm 测距 + YOLO 分类")
-    platform = "windows" if os.name == "nt" else "jetson"
-    try:
-        default_camera = load_camera_id(platform)
-    except ValueError:
-        default_camera = 0
-    targets = configured_targets()
-    default_depth = targets.working_distance_mm
-    parser.add_argument("--model", type=Path, default=default_model_path(),
+    parser.add_argument("--model", type=Path, default=None,
                         help="模型路径（默认读 config.json 的 model 块："
                              "Windows 是 best.onnx，Jetson 是 best.engine）")
-    parser.add_argument("--camera", type=int, default=default_camera,
-                        help=f"摄像头序号（默认读 config/vision.json：{default_camera}）")
+    parser.add_argument("--camera", type=int, default=None,
+                        help="摄像头序号（默认读 config.json 对应平台的 camera_id）")
     parser.add_argument("--conf", type=float, default=None,
                         help="置信度阈值；默认读 config.json 的 model.conf_thresh")
     parser.add_argument("--focal", type=float, default=None,
                         help="标定后的当前画幅水平像素焦距；不传则用实拍样本粗标定")
-    parser.add_argument("--depth", dest="depth_range", type=parse_depth_range,
-                        default=default_depth,
+    parser.add_argument("--depth", dest="depth_range", type=parse_depth_range, default=None,
                         help='相机到物料顶面的深度范围（毫米），例如 "60,80"；'
-                             "默认读 config.json 的 targets.working_distance_mm"
-                             f"（当前 {default_depth}）")
-    parser.add_argument("--bgr", dest="material_bgr", type=parse_bgr,
-                        default=targets.material_bgr,
+                             "默认读 config.json 的 targets.working_distance_mm")
+    parser.add_argument("--bgr", dest="material_bgr", type=parse_bgr, default=None,
                         help="物料顶面参考颜色 B,G,R（例如 165,252,114）；"
                              "默认读 config.json 的 targets.material_bgr，给了它就走颜色块定位")
-    parser.add_argument("--palette", dest="material_palette", type=parse_palette,
-                        default=targets.material_palette or None,
+    parser.add_argument("--palette", dest="material_palette", type=parse_palette, default=None,
                         help='物料调色板 "green:165,252,114;blue:248,122,41"；'
                              "默认读 config.json 的 targets.material_palette，"
                              "换物料颜色只改这里就行")
-    parser.add_argument("--tolerance", type=float, default=targets.color_tolerance,
-                        help=f"颜色容差（默认 {targets.color_tolerance}）")
-    parser.add_argument("--diameter", type=float, default=targets.material_diameter_mm,
+    parser.add_argument("--tolerance", type=float, default=None,
+                        help="颜色容差；默认读 config.json 的 targets.color_tolerance")
+    parser.add_argument("--diameter", type=float, default=None,
                         help="物料顶面真实直径（毫米），默认读 config.json 的 "
-                             f"targets.material_diameter_mm（当前 {targets.material_diameter_mm}）")
+                             "targets.material_diameter_mm")
     return parser.parse_args()
 
 
-def run(
-    camera_id: int,
-    model_path: Path,
-    *,
-    focal_px: float | None = None,
-    conf: float | None = None,
-    depth_range: tuple[float, float] | None = None,
-    material_bgr: tuple[float, float, float] | None = None,
-    material_palette: dict[str, tuple[float, float, float]] | None = None,
-    colour_tolerance: float = 60.0,
-    top_diameter_mm: float = 30.0,
-) -> int:
-    """Open the camera and print the material verdict until q is pressed."""
-    import cv2
+def run(settings, *, focal_px: float | None = None) -> int:
+    """用**已经读好的配置快照**打开摄像头并打印物料结论，直到按 q 退出。
 
-    if not Path(model_path).is_file():
-        print(f"找不到模型文件：{model_path}")
-        print("默认路径写在 modules/vision/config.json 的 model 块；"
-              "Jetson 上 engine 要用 build_engine 在板上生成")
-        return 1
+    快照由 :func:`main` 读取命令行之后覆盖好再传进来；这里不读文件、不再开第二台相机。
+    预览沿用 :func:`run_preview` 原来的两条线程，并且**复用本会话的相机和定位器**。
+    """
+    import cv2
 
     window = open_preview()
     blank_frames = 0
     warned_blank = False
     frames = 0
     try:
-        with MaterialLocator(
-            model_path=model_path,
-            conf_thresh=conf,
-            focal_px=focal_px,
-            depth_range_mm=depth_range,
-            material_bgr=material_bgr,
-            material_palette=material_palette,
-            colour_tolerance=colour_tolerance,
-            top_diameter_mm=top_diameter_mm,
-        ) as locator, USBCamera(camera_id, width=1280, height=720).initialize() as camera:
+        with Vision._open_config(settings, focal_px=focal_px) as vision:
+            camera_id = settings.camera_id(
+                "windows" if os.name == "nt" else "jetson"
+            )
             print(f"摄像头 {camera_id}，窗口 {window!r}；按 q 退出，按 p 立刻打印结论")
-            if depth_range is None:
+            targets = vision._settings.targets
+            if targets.working_distance_mm is None:
                 print("没有工作距离先验：半径窗口按画幅猜，远处的同色物体可能被当成物料")
             else:
-                print(f"工作距离先验 {depth_range[0]:.0f}–{depth_range[1]:.0f} mm，"
-                      "半径窗口按针孔模型算")
-            if material_palette:
-                names = "、".join(material_palette)
-                print(f"物料调色板 {names}，容差 {colour_tolerance:.0f}："
+                low, high = targets.working_distance_mm
+                print(f"工作距离先验 {low:.0f}–{high:.0f} mm，半径窗口按针孔模型算")
+            if targets.material_palette:
+                names = "、".join(targets.material_palette)
+                print(f"物料调色板 {names}，容差 {targets.color_tolerance:.0f}："
                       "走颜色块定位，夹爪与背景不进掩膜")
-            elif material_bgr is None:
+            elif targets.material_bgr is None:
                 print("没有物料颜色：走霍夫圆 + 形状判据（夹爪圆弧可能被当成候选）")
             else:
-                print(f"物料颜色 BGR={material_bgr}，容差 {colour_tolerance:.0f}："
+                print(f"物料颜色 BGR={targets.material_bgr}，容差 {targets.color_tolerance:.0f}："
                       "走颜色块定位，夹爪与背景不进掩膜")
-            print(f"顶面真实直径按 {top_diameter_mm:.1f} mm 折算距离")
+            print(f"顶面真实直径按 {targets.material_diameter_mm:.1f} mm 折算距离")
 
             def watch(frame, _report, _stats) -> None:
                 nonlocal blank_frames, warned_blank
@@ -171,9 +136,9 @@ def run(
                     print(report.summary())
 
             stats = run_preview(
-                camera,
-                locator.locate,
-                locator.draw,
+                vision._camera,
+                vision._locator.locate,
+                vision._locator.draw,
                 window=window,
                 print_every=PRINT_EVERY,
                 max_misses=MAX_MISSES,
@@ -189,19 +154,21 @@ def run(
 
 def main() -> None:
     args = parse_args()
-    raise SystemExit(
-        run(
-            args.camera,
-            args.model,
-            focal_px=args.focal,
-            conf=args.conf,
-            depth_range=args.depth_range,
-            material_bgr=args.material_bgr,
-            material_palette=args.material_palette,
-            colour_tolerance=args.tolerance,
-            top_diameter_mm=args.diameter,
-        )
+    # 覆盖先落到**配置快照**上，再进入唯一的真实会话创建路径：
+    # 不写回文件、不在 public open 之后再关掉重开带覆盖的设备。
+    settings = _override_settings(
+        _load_settings(),
+        model_path=args.model,
+        camera_id=args.camera,
+        conf_thresh=args.conf,
+        depth_range_mm=args.depth_range,
+        material_bgr=args.material_bgr,
+        material_palette=args.material_palette,
+        colour_tolerance=args.tolerance,
+        top_diameter_mm=args.diameter,
     )
+    print(f"配置来自 {DEFAULT_CONFIG_PATH}")
+    raise SystemExit(run(settings, focal_px=args.focal))
 
 
 if __name__ == "__main__":

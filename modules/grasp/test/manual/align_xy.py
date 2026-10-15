@@ -11,7 +11,7 @@
 ## 用法
 
 ```powershell
-# **一键就位**：抬到安全高度 -> x/y 对准 -> z 下降 -> 伸缩后缩，每段都报耗时
+# **一键就位**：悬停高度 -> 安全高度 -> x/y 对准 -> z 下降 -> 伸缩后缩，每段都报耗时
 python -m modules.grasp.test.manual.align_xy --align-and-descend
 
 # 只看不动：实时打印物块读数、目标读数、误差，以及打算走多少脉冲
@@ -31,6 +31,21 @@ python -m modules.grasp.test.manual.align_xy --follow
 python -m modules.grasp.test.manual.align_xy --align-z
 ```
 
+## 起始高度也在配置里：`hover_z_mm`
+
+x/y 对准**不动高度**，所以"对准时爪子停在哪一层"原本只由 `safe_lift_z_mm` 兜下限
+（低了才抬，高了不管）。而下降是**开环的固定脉冲数**，起点不固定、落点就不固定。
+
+`eye_in_hand.json` 的 `hover_z_mm`（默认 100.0，和 `safe_lift_z_mm` 同值）让就位第一步
+先把"镜头到物块的距离"伺服到这一层（高了降、低了抬，判据 `z_tolerance_mm`），
+于是每次下降都从同一层开始：
+
+- 必须 `>= safe_lift_z_mm`，否则直接拒绝加载（悬停得比安全高度还低 = 低位转底盘）；
+- 往下降只降到 `safe_lift_z_mm` 为止；而且要**先知道一步走多远**（标定的 `lift_scale`，
+  或先抬一段实测出灵敏度），在量出来之前绝不往下走；
+- **改了它就要重测 `z_descend_pulses`**：起点换多少毫米，落点就换多少毫米；
+- 临时试：`--hover-z 105`（只覆盖这一次）。设成 `null` = 完全不主动调整。
+
 ## 时间花在哪（本机实测）
 
 | 环节 | 实测 | 说明 |
@@ -45,7 +60,9 @@ python -m modules.grasp.test.manual.align_xy --align-z
 - 抬到安全高度：标过 ``lift_scale`` 就按"还差多少毫米"**一步算到位**（夹在
   ``safe_lift_max_pulses_per_step`` 内），而不是 500 脉冲一段地试——最多省十几段测量；
 - 粗调阶段用 ``coarse_settle_tolerance_mm`` 判停稳（远的时候不必为了 0.4 mm 多等帧）；
-- ``--follow`` 只在第一轮查安全高度（高度在跟随期间不会变）；
+- ``--follow`` **每一轮仍然查安全高度**，但用"单帧快判 + 余量（``safe_lift_quick_margin_mm``）"：
+  够高就直接放行（一帧，约 0.22 s），读数偏低或落在余量内就退回完整的停稳测量（约 0.54 s）。
+  判据一点没放宽，省的是"绝大多数轮次都够高"这件事上的重复测量；
 - ``--align-and-descend`` 一次走完四步，并把每段耗时打出来。
 
 ## z 这一步是开环的：两个可改的脉冲数
@@ -81,39 +98,50 @@ from __future__ import annotations
 MENU_ENTRY = (21, "x/y 对准物块（含一键就位）")
 
 import argparse
+import dataclasses
 import math
+import os
 import time
 from typing import Optional, Sequence
 
 from modules.arm.config import load_arm_config
 from modules.arm.drive.robot_arm import RobotArm
-from modules.grasp.drive.camera_source import CameraFrameSource
 from modules.grasp.drive.eye_in_hand import (
-    FrameSource,
+    align_x_y,
+    align_z,
+    descend_z,
+    find_object,
+    hover_above_object,
+    probe_jacobian,
+    probe_lift_scale,
+    retract_extension,
+)
+# 配置与值类型只有一个定义处（servo_model），观测判据在 servo_observation，
+# 脉冲原语在 servo_motion，实际控制算法在 eye_in_hand。
+# 这里**不从包顶层导入内部工具**：那些名字是给上层用的会话接口，不是工具装配件。
+from modules.grasp.drive.servo_motion import _move_lift
+from modules.grasp.drive.servo_model import (
+    DEFAULT_CONFIG_PATH,
     LiftScale,
     ObjectSelector,
     ServoConfig,
     ServoError,
     ServoJacobian,
     ServoTarget,
-    _move_lift,
-    align_and_descend,
-    align_x_y,
-    align_z,
-    descend_z,
-    find_object,
     load_jacobian,
     load_lift_scale,
     load_object_selector,
     load_servo_config,
     load_target,
     load_z_target,
-    measure_offset,
-    probe_jacobian,
-    probe_lift_scale,
-    retract_extension,
     save_calibration,
 )
+from modules.grasp.drive.servo_observation import (
+    FrameSource,
+    measure_offset,
+    select_object,
+)
+from modules.grasp.runtime import Grasp
 from modules.motor.config import load_bus_config as load_motor_bus_config
 
 
@@ -121,8 +149,14 @@ def _say(message: str) -> None:
     print(f"  {message}")
 
 
-def _open_source(arguments) -> FrameSource:
-    """按参数开一个观测源；调用方负责 ``close()``。"""
+def _open_source(arguments, *, vision_settings) -> FrameSource:
+    """按参数开一个观测源；调用方负责 ``close()``。
+
+    **本地分支收的是已经读好的快照**（``vision_settings``），不在这里再读一次配置：
+    覆盖值（``--camera`` 等）在 main 里就已经落到快照上了，这里再读一遍会把它们丢掉。
+    TCP 分支**不读、也不校验**本地视觉配置与摄像头——远端路线跟本机模型没关系，
+    所以调用方对 TCP 传 ``vision_settings=None``。
+    """
     if arguments.tcp:
         from modules.camera_link.drive.link import (
             CameraLink,
@@ -139,11 +173,13 @@ def _open_source(arguments) -> FrameSource:
         print(f"接收链路已监听 {link.host}:{link.port}（等远端镜头连上来）")
         return link
 
-    source = CameraFrameSource.from_vision_config(
-        camera_id=arguments.camera, on_message=_say
-    )
-    print(f"已打开摄像头 {arguments.camera if arguments.camera is not None else '（配置里的）'}"
-          f"，观测来自本机 MaterialLocator")
+    from modules.vision.runtime import Vision
+
+    # ``--camera`` 早已落进快照（见 main），所以这里直接问快照要序号：
+    # 再读一次命令行等于给"覆盖没生效"留后门。
+    camera_id = vision_settings.camera_id("windows" if os.name == "nt" else "jetson")
+    source = Vision._open_config(vision_settings)
+    print(f"已打开摄像头 {camera_id}，观测来自本机 MaterialLocator")
     return source
 
 
@@ -274,27 +310,34 @@ def run_calibrate(
     return 0
 
 
-def run_align(
-    *,
-    arm: RobotArm,
-    source: FrameSource,
-    selector,
-    target,
-    jacobian,
-    config,
-    lift_scale: Optional[LiftScale] = None,
-) -> int:
-    """真动：闭环把物块伺服到目标读数（对准就停）。"""
+def run_align(*, grasp: Grasp) -> int:
+    """真动：闭环把物块伺服到目标读数（对准就停）。
+
+    动作由 :meth:`modules.grasp.runtime.Grasp.align_xy` 执行——它包含"配了
+    ``hover_z_mm`` 就先悬停"这一步，再按原规则检查安全高度。这里只负责提示与打印；
+    提示要用的几个值取自**本会话已有的**配置与值对象（工具内部使用，不是上层接口）。
+    """
+    config = grasp._config
+    selector = grasp._selector
+    target = grasp._target
+    jacobian = grasp._jacobian
     print("开始 x/y 对准（只动 底座旋转 与 伸缩，高度不动）")
     print(f"  {selector.describe()}")
     print(f"  {target.summary()}；{jacobian.summary()}")
     print(f"  容差 {config.tolerance_mm:.1f} mm，最多测量 {config.max_iterations} 次")
-    print(f"  每轴脉冲预算 {config.max_total_pulses}（没有标定行程，这是唯一的兜底）\n")
+    print(f"  每轴脉冲预算 {config.max_total_pulses}（没有标定行程，这是唯一的兜底）")
+    if config.hover_z_mm is not None:
+        print(
+            f"  先把悬停高度伺服到 z={config.hover_z_mm:.1f} mm"
+            f"（±{config.z_tolerance_mm:.1f}）——它决定下面那次固定脉冲下降的起点"
+        )
+    print()
 
-    result = align_x_y(
-        arm, source, selector, target, jacobian, config,
-        lift_scale=lift_scale, on_message=_say,
-    )
+    try:
+        result = grasp.align_xy()
+    except ServoError as problem:
+        print(f"\nx/y 对准失败：{problem}")
+        return 1
     print(f"\n{result.summary()}")
     print(
         f"下一步：--align-z（升降下降 {config.z_descend_pulses} 脉冲 + 伸缩后缩 "
@@ -318,12 +361,24 @@ def run_follow(
     每一轮都会重新测量并按当前误差算脉冲；物块不动时误差本来就在容差内，
     于是那一轮只花一次测量、不发任何动作帧。所以"静止"和"被推动"是同一段代码。
 
-    **安全高度只在第一轮查**：跟随期间这套代码不动高度，重复查一次就是白花一次
-    停稳测量（实测约 0.5 s）。要是中途有人手动动过升降，Ctrl+C 重跑一次即可。
+    **安全高度每一轮都查，但用单帧快判**：跟随期间这套代码不动高度，可是别人可能动
+    （另一个终端、手去拨）。所以判据一点都不放宽——只要"单帧读到的 z 比安全高度还高
+    一个余量"就直接放行，否则退回一次完整的停稳测量。绝大多数轮次因此只花一帧
+    （约 0.22 s）而不是一次停稳测量（约 0.54 s）。
     """
     print("开始跟随（只动 底座旋转 与 伸缩，高度不动）")
     print(f"  {target.summary()}；{jacobian.summary()}")
     print(f"  容差 {config.tolerance_mm:.1f} mm；物块移动就会跟着动，Ctrl+C 退出\n")
+
+    # 悬停高度只在**开始**做一次：跟随期间高度不该动，每轮都调就成了自己跟自己打架。
+    if config.hover_z_mm is not None:
+        print(f"  先把悬停高度伺服到 z={config.hover_z_mm:.1f} mm（只做一次）")
+        try:
+            hover_above_object(
+                arm, source, selector, config, scale=lift_scale, on_message=_say
+            )
+        except ServoError as problem:
+            print(f"  悬停失败：{problem}（继续跟随）")
 
     rounds = 0
     moved_rounds = 0
@@ -340,7 +395,7 @@ def run_follow(
                     target,
                     jacobian,
                     config,
-                    ensure_safe_height=rounds == 1,
+                    quick_safe_lift=True,
                     lift_scale=lift_scale,
                 )
             except ServoError as problem:
@@ -349,8 +404,6 @@ def run_follow(
                 print(f"  第 {rounds} 轮：{problem}")
                 time.sleep(0.2)
                 continue
-            if rounds == 2:
-                print("  高度在跟随期间不会变：之后每一轮都不再重复查安全高度")
             elapsed = time.monotonic() - started
             if result.base_pulses or result.radial_pulses:
                 moved_rounds += 1
@@ -460,29 +513,31 @@ def run_teach(
 
 def run_pick_ready(
     *,
-    arm: RobotArm,
-    source: FrameSource,
-    selector: ObjectSelector,
-    target: ServoTarget,
-    jacobian: ServoJacobian,
-    config: ServoConfig,
-    lift_scale: Optional[LiftScale] = None,
+    grasp: Grasp,
     z_pulses: Optional[int] = None,
     retract_pulses: Optional[int] = None,
 ) -> int:
-    """**一键就位**：抬到安全高度 → x/y 对准 → z 下降 → 伸缩后缩。
+    """**一键就位**：悬停高度 → 安全高度 → x/y 对准 → z 下降 → 伸缩后缩。
 
-    这是"把 x、y、z 串起来"的那个入口：x/y 走闭环，z 与后缩走配置里的两个脉冲数，
-    每一段的耗时都会打出来——慢在哪一段一眼能看见（定位一次 178 ms、停稳测量一次
-    约 537 ms，所以省"段数"比省"动作时间"更值钱）。
+    主链由 :meth:`modules.grasp.runtime.Grasp.align_and_descend` 执行：x/y 走闭环，
+    z 与后缩走配置里的两个脉冲数，每一段的耗时都会打出来——慢在哪一段一眼能看见
+    （定位一次 178 ms、停稳测量一次约 537 ms，所以省"段数"比省"动作时间"更值钱）。
     """
-    print("一键就位：安全高度 → x/y 对准 → z 下降 → 伸缩后缩")
-    print(f"  {selector.describe()}")
-    print(f"  {target.summary()}；{jacobian.summary()}")
+    config = grasp._config
+    print("一键就位：悬停高度 → 安全高度 → x/y 对准 → z 下降 → 伸缩后缩")
+    print(f"  {grasp._selector.describe()}")
+    print(f"  {grasp._target.summary()}；{grasp._jacobian.summary()}")
     print(
         f"  容差 {config.tolerance_mm:.1f} mm（粗调阶段按 "
         f"{config.coarse_settle_tolerance_mm:.1f} mm 判停稳）"
     )
+    if config.hover_z_mm is not None:
+        print(
+            f"  先悬停到 z={config.hover_z_mm:.1f} mm（±{config.z_tolerance_mm:.1f}）"
+            "——它决定下降的起点"
+        )
+    else:
+        print("  没配 hover_z_mm：不主动调起始高度（只保证不低于 safe_lift_z_mm）")
     print(
         f"  下降 {config.z_descend_pulses} 脉冲（升降/6 号）、后缩 "
         f"{config.extension_retract_pulses} 脉冲（伸缩/7 号）"
@@ -492,17 +547,8 @@ def run_pick_ready(
     print(f"  下降前要求平面误差 ≤ {config.z_center_tolerance_mm:.1f} mm\n")
 
     try:
-        result = align_and_descend(
-            arm,
-            source,
-            selector,
-            target,
-            jacobian,
-            config,
-            lift_scale=lift_scale,
-            z_pulses=z_pulses,
-            retract_pulses=retract_pulses,
-            on_message=_say,
+        result = grasp.align_and_descend(
+            z_pulses=z_pulses, retract_pulses=retract_pulses
         )
     except ServoError as problem:
         print(f"\n就位失败：{problem}")
@@ -712,6 +758,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="只覆盖 --align-z 这次的下降脉冲数（不改配置文件）",
     )
     parser.add_argument(
+        "--hover-z",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="只覆盖这次的悬停高度（镜头到物块的距离，毫米；不改配置文件）",
+    )
+    parser.add_argument(
         "--retract-pulses",
         type=int,
         default=None,
@@ -740,7 +793,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """菜单和命令行共用的入口。"""
+    """菜单和命令行共用的入口。
+
+    ## 资源创建顺序（本文件的核心约束）
+
+    普通动作（默认对准 / ``--align-and-descend``）走
+    :meth:`modules.grasp.runtime.Grasp._open_settings` 这一条**唯一**的设备创建路径：
+    它先校验 ``target`` / ``jacobian``，再取观测源、开机械臂、使能。所以这里
+    **不能在进入会话之前提前** ``_open_source()`` 或建 ``RobotArm``——那等于把校验
+    又挪到设备之后。
+
+    其余工具模式（watch / status / set-target / target-centred / teach / calibrate /
+    follow / align-z / align-z-visual / raise）各有自己的前置条件，仍然按原来的低层
+    流程走：source 由该分支自己创建和关闭，机械臂仍按原工具初始化 / 使能 / 收尾。
+    **不**给它们加统一的标定门禁——那会造出"缺标定所以不能跑标定"的循环。
+    """
     arguments = build_parser().parse_args(argv)
 
     try:
@@ -754,6 +821,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"配置有问题：{problem}")
         return 1
 
+    if arguments.hover_z is not None:
+        # 只覆盖这一次：配置文件不动。replace 会跑一遍 __post_init__，
+        # 所以"悬停高度低于安全高度"这类错误在这里就会被拦下来。
+        try:
+            config = dataclasses.replace(config, hover_z_mm=arguments.hover_z)
+        except ValueError as problem:
+            print(f"--hover-z 不合法：{problem}")
+            return 1
+        print(f"本次悬停高度改为 z={config.hover_z_mm:.1f} mm（只覆盖这一次）")
+
     if config.min_step_mm > config.tolerance_mm:
         print(
             f"警告：min_step_mm={config.min_step_mm:.2f} 大于 "
@@ -762,12 +839,94 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "要么放宽 tolerance_mm，要么把 min_step_mm 调小。\n"
         )
 
-    try:
-        source = _open_source(arguments)
-    except (SystemExit, FileNotFoundError, RuntimeError, ServoError) as problem:
-        print(f"打不开观测源：{problem}")
+    # 视觉快照只在**非 TCP 路线**读：TCP 用的是远端镜头，本机模型、摄像头和视觉配置
+    # 都不参与，读它只会把"远端能跑"变成"本地配置写错就跑不了"。
+    vision_settings = None
+    if not arguments.tcp:
+        from modules.vision.runtime import _load_settings, _override_settings
+
+        try:
+            vision_settings = _override_settings(
+                _load_settings(), camera_id=arguments.camera
+            )
+        except (ValueError, FileNotFoundError) as problem:
+            print(f"视觉配置有问题：{problem}")
+            return 1
+
+    if arguments.watch or arguments.status or arguments.set_target or arguments.target_centred:
+        return _run_read_only_mode(arguments, vision_settings, selector, target, jacobian, config)
+
+    if arguments.calibrate or arguments.teach or arguments.align_z or arguments.align_z_visual:
+        return _run_low_level_mode(arguments, vision_settings, config)
+
+    if arguments.raise_pulses is not None:
+        return _run_raise_mode(arguments, vision_settings)
+
+    # ---------------------------------------------------------- 普通动作
+    #
+    # 到这一步剩下的都是普通动作：默认对准、--align-and-descend、--follow。
+    # 标定没做完就在**打开串口之前**说清楚：菜单里直接按 21 的人多半还没标定，
+    # 这时候去开硬件毫无意义，还会让人以为程序坏了。
+    if (target is None or jacobian is None) and not arguments.follow:
+        print("还不能真动，先做两步标定（都很快）：\n")
+        if target is None:
+            print("  1) **手动示教**（推荐）：小步挪动机械臂，把爪子挪到物块正上方，")
+            print("     程序实时显示读数，按 t 把当前读数记成目标：")
+            print("     python -m modules.grasp.test.manual.align_xy --teach")
+            print("     （如果相机是正装在抓取点上方的，也可以用 --target-centred 直接设成 (0,0)）")
+        if jacobian is None:
+            step = "  2)" if target is None else "  1)"
+            print(f"{step} 让程序自己动两下，实测「每脉冲让画面挪多少毫米」：")
+            print("     python -m modules.grasp.test.manual.align_xy --calibrate")
+        print("\n标定完先跑 --status 核对数字（只看不动），再跑 --follow 跟随。")
         return 1
 
+    if arguments.follow:
+        return _run_follow_mode(arguments, vision_settings, config)
+
+    # 普通动作统一进同一个会话：读好 arm_config / port，再把它们交给 _open_settings。
+    port = arguments.port or load_motor_bus_config().port
+    print(f"打开机械臂总线 {port}")
+    try:
+        grasp = Grasp._open_settings(
+            config=config,
+            selector=selector,
+            target=target,
+            jacobian=jacobian,
+            lift_scale=lift_scale,
+            arm_config=load_arm_config(),
+            port=port,
+            source_factory=lambda: _open_source(arguments, vision_settings=vision_settings),
+            on_message=_say,
+        )
+    except (SystemExit, FileNotFoundError, RuntimeError, ServoError, ValueError) as problem:
+        print(f"打不开会话：{problem}")
+        return 1
+
+    # with 拥有全部资源（机械臂 + 观测源），工具分支不再重复关一次。
+    with grasp:
+        if arguments.align_and_descend:
+            return run_pick_ready(
+                grasp=grasp,
+                z_pulses=arguments.z_pulses,
+                retract_pulses=arguments.retract_pulses,
+            )
+        return run_align(grasp=grasp)
+
+
+# ------------------------------------------------------------------ 工具分支
+#
+# 下面几个模式各有前置条件，**不走** Grasp 的普通动作门禁；每个分支自己创建并关闭
+# 它需要的资源，机械臂仍按原工具初始化 / 使能 / 收尾。
+
+
+def _run_read_only_mode(arguments, vision_settings, selector, target, jacobian, config) -> int:
+    """watch / status / set-target / target-centred：**不开机械臂串口**。"""
+    try:
+        source = _open_source(arguments, vision_settings=vision_settings)
+    except (SystemExit, FileNotFoundError, RuntimeError, ServoError, ValueError) as problem:
+        print(f"打不开观测源：{problem}")
+        return 1
     try:
         if arguments.watch:
             return run_watch(source=source, selector=selector, config=config)
@@ -775,95 +934,137 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_status(
                 source=source, selector=selector, target=target, jacobian=jacobian, config=config
             )
-        if arguments.set_target or arguments.target_centred:
-            return run_set_target(
-                source=source,
-                selector=selector,
-                config=config,
-                centred=arguments.target_centred,
-            )
-
-        # 标定没做完就在**打开串口之前**说清楚：菜单里直接按 21 的人多半还没标定，
-        # 这时候去开硬件毫无意义，还会让人以为程序坏了。
-        # 本身就是标定/对准手段的那几个模式不受这个闸限制。
-        if not (
-            arguments.calibrate
-            or arguments.teach
-            or arguments.align_z
-            or arguments.align_z_visual
-            or arguments.raise_pulses is not None
-        ) and (target is None or jacobian is None):
-            print("还不能真动，先做两步标定（都很快）：\n")
-            if target is None:
-                print("  1) **手动示教**（推荐）：小步挪动机械臂，把爪子挪到物块正上方，")
-                print("     程序实时显示读数，按 t 把当前读数记成目标：")
-                print("     python -m modules.grasp.test.manual.align_xy --teach")
-                print("     （如果相机是正装在抓取点上方的，也可以用 --target-centred 直接设成 (0,0)）")
-            if jacobian is None:
-                step = "  2)" if target is None else "  1)"
-                print(f"{step} 让程序自己动两下，实测「每脉冲让画面挪多少毫米」：")
-                print("     python -m modules.grasp.test.manual.align_xy --calibrate")
-            print("\n标定完先跑 --status 核对数字（只看不动），再跑 --follow 跟随。")
-            return 1
-
-        # 到这一步才打开机械臂串口。
-        port = arguments.port or load_motor_bus_config().port
-        print(f"打开机械臂总线 {port}")
-        arm = RobotArm(port, config=load_arm_config())
-        try:
-            arm.initialize()
-            arm.enable_all()
-            try:
-                if arguments.calibrate:
-                    return run_calibrate(
-                        arm=arm, source=source, selector=selector, config=config
-                    )
-                if arguments.teach:
-                    return run_teach(
-                        arm=arm, source=source, selector=selector,
-                        config=config, step_pulses=arguments.step,
-                    )
-                if arguments.align_z:
-                    return run_descend_z(
-                        arm=arm, source=source, selector=selector, config=config,
-                        z_pulses=arguments.z_pulses,
-                        retract_pulses=arguments.retract_pulses,
-                    )
-                if arguments.align_z_visual:
-                    return run_align_z_visual(
-                        arm=arm, source=source, selector=selector, config=config,
-                        recalibrate=arguments.recalibrate_lift,
-                    )
-                if arguments.raise_pulses is not None:
-                    return run_raise(arm=arm, pulses=arguments.raise_pulses)
-                if arguments.align_and_descend:
-                    return run_pick_ready(
-                        arm=arm, source=source, selector=selector,
-                        target=target, jacobian=jacobian, config=config,
-                        lift_scale=lift_scale,
-                        z_pulses=arguments.z_pulses,
-                        retract_pulses=arguments.retract_pulses,
-                    )
-                if arguments.follow:
-                    return run_follow(
-                        arm=arm, source=source, selector=selector,
-                        target=target, jacobian=jacobian, config=config,
-                        lift_scale=lift_scale,
-                    )
-                return run_align(
-                    arm=arm, source=source, selector=selector,
-                    target=target, jacobian=jacobian, config=config,
-                    lift_scale=lift_scale,
-                )
-            finally:
-                arm.stop_all()
-                arm.disable_all()
-        finally:
-            arm.close()
+        return run_set_target(
+            source=source,
+            selector=selector,
+            config=config,
+            centred=arguments.target_centred,
+        )
     finally:
-        close = getattr(source, "close", None)
-        if close is not None:
-            close()
+        _close_quietly(source)
+
+
+def _run_low_level_mode(arguments, vision_settings, config) -> int:
+    """calibrate / teach / align-z / align-z-visual：需要机械臂，但各有自己的前提。"""
+    try:
+        source = _open_source(arguments, vision_settings=vision_settings)
+    except (SystemExit, FileNotFoundError, RuntimeError, ServoError, ValueError) as problem:
+        print(f"打不开观测源：{problem}")
+        return 1
+
+    selector = load_object_selector()
+    port = arguments.port or load_motor_bus_config().port
+    print(f"打开机械臂总线 {port}")
+    arm = RobotArm(port, config=load_arm_config())
+    try:
+        arm.initialize()
+        arm.enable_all()
+        try:
+            if arguments.calibrate:
+                return run_calibrate(
+                    arm=arm, source=source, selector=selector, config=config
+                )
+            if arguments.teach:
+                return run_teach(
+                    arm=arm, source=source, selector=selector,
+                    config=config, step_pulses=arguments.step,
+                )
+            if arguments.align_z:
+                return run_descend_z(
+                    arm=arm, source=source, selector=selector, config=config,
+                    z_pulses=arguments.z_pulses,
+                    retract_pulses=arguments.retract_pulses,
+                )
+            return run_align_z_visual(
+                arm=arm, source=source, selector=selector, config=config,
+                recalibrate=arguments.recalibrate_lift,
+            )
+        finally:
+            # 每项独立尝试：stop 报错不该让 disable 与 close 一个都不做。
+            _attempt(arm.stop_all)
+            _attempt(arm.disable_all)
+    finally:
+        _attempt(arm.close)
+        _close_quietly(source)
+
+
+def _run_raise_mode(arguments, vision_settings) -> int:
+    """``--raise``：只驱动升降，不读摄像头、不转底盘（原来就不开观测源）。
+
+    这里同样不开观测源：``_move_lift`` 只需要机械臂。
+    """
+    port = arguments.port or load_motor_bus_config().port
+    print(f"打开机械臂总线 {port}")
+    arm = RobotArm(port, config=load_arm_config())
+    try:
+        arm.initialize()
+        arm.enable_all()
+        try:
+            return run_raise(arm=arm, pulses=arguments.raise_pulses)
+        finally:
+            _attempt(arm.stop_all)
+            _attempt(arm.disable_all)
+    finally:
+        _attempt(arm.close)
+
+
+def _run_follow_mode(arguments, vision_settings, config) -> int:
+    """``--follow``：保留原来的连续跟随算法与循环。
+
+    刻意**不**循环调用含悬停的 ``align_xy``（那会每轮重复悬停与安全检查，自己跟自己
+    打架）；仍然走原来的 :func:`align_x_y` + ``quick_safe_lift=True``，并且保留它原有
+    的 target / jacobian 闸门与动作行为。
+    """
+    target = load_target()
+    jacobian = load_jacobian()
+    if target is None or jacobian is None:
+        print("跟随需要 target 与 jacobian；先跑 --teach / --calibrate。")
+        return 1
+    try:
+        source = _open_source(arguments, vision_settings=vision_settings)
+    except (SystemExit, FileNotFoundError, RuntimeError, ServoError, ValueError) as problem:
+        print(f"打不开观测源：{problem}")
+        return 1
+
+    selector = load_object_selector()
+    port = arguments.port or load_motor_bus_config().port
+    print(f"打开机械臂总线 {port}")
+    arm = RobotArm(port, config=load_arm_config())
+    try:
+        arm.initialize()
+        arm.enable_all()
+        try:
+            return run_follow(
+                arm=arm, source=source, selector=selector,
+                target=target, jacobian=jacobian, config=config,
+                lift_scale=load_lift_scale(),
+            )
+        finally:
+            _attempt(arm.stop_all)
+            _attempt(arm.disable_all)
+    finally:
+        _attempt(arm.close)
+        _close_quietly(source)
+
+
+def _attempt(action) -> None:
+    """尝试一项收尾；失败打印出来但不跳过后面的项。"""
+    try:
+        action()
+    except Exception as problem:  # noqa: BLE001 - 收尾失败要看得见，也要让后面的项继续
+        print(f"  收尾失败：{problem}")
+
+
+def _close_quietly(resource) -> None:
+    """按 ``with`` 协议关一个资源；失败打印出来，不让收尾盖住业务结果。"""
+    close = getattr(resource, "close", None)
+    if close is None:
+        close = getattr(resource, "__exit__", None)
+        if close is None:
+            return
+        _attempt(lambda: close(None, None, None))
+        return
+    _attempt(close)
 
 
 if __name__ == "__main__":

@@ -27,7 +27,8 @@
 
 用法::
 
-    from modules.vision import USBCamera, open_preview, run_preview
+    from modules.vision.drive.camera import USBCamera
+    from modules.vision.drive.preview import open_preview
 
     with USBCamera(0).initialize() as camera:
         run_preview(camera, locator.locate, locator.draw, window=open_preview())

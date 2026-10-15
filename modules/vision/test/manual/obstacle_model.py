@@ -19,18 +19,15 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from modules.vision import (
-    DEFAULT_CLASS_NAMES,
-    USBCamera,
-    create_detector,
-    default_model_path,
-    load_camera_id,
-    run_preview,
-)
+from modules.vision.config import default_model_path
+from modules.vision.detector_factory import create_detector
+from modules.vision.drive.camera import USBCamera, load_camera_id
+from modules.vision.drive.stream import run_preview
+from modules.vision.drive.yolov8 import DEFAULT_CLASS_NAMES
 
 from project_paths import PROJECT_ROOT, models_path, output_path
 
-#: Extension of the model this platform loads (matches ``modules.vision.default_model_path``).
+#: Extension of the model this platform loads (matches ``modules.vision.config.default_model_path``).
 MODEL_SUFFIX = ".engine" if os.name != "nt" else ".onnx"
 
 #: Checkpoint exported by ``python modules/vision/training/train.py --export-onnx``.

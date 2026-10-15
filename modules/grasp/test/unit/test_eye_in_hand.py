@@ -23,6 +23,7 @@ from modules.grasp.drive import eye_in_hand as servo
 from modules.grasp.drive.eye_in_hand import (
     BASE_AXIS,
     RADIAL_AXIS,
+    HoverResult,
     LiftScale,
     ObjectSelector,
     ServoConfig,
@@ -35,6 +36,7 @@ from modules.grasp.drive.eye_in_hand import (
     align_x_y,
     descend_z,
     find_object,
+    hover_above_object,
     load_jacobian,
     load_object_selector,
     load_servo_config,
@@ -235,6 +237,8 @@ class ConfigFileTests(unittest.TestCase):
             {"probe_pulses": 1.5},
             {"z_descend_pulses": 0},
             {"extension_retract_pulses": 1.5},
+            {"hover_z_mm": 0},
+            {"hover_z_mm": "110"},
         ):
             with self.subTest(document=document):
                 self.write(document)
@@ -948,6 +952,19 @@ class CoupledZLink:
         return (sighting_at(self.x, self.y, self.rig.z),)
 
 
+class FirstFrameHigh(CoupledZLink):
+    """第一帧读得偏大（模拟运动模糊），之后读真值。"""
+
+    def __init__(self, rig: LiftRig, *, offset_mm: float) -> None:
+        super().__init__(rig)
+        self.offset_mm = offset_mm
+
+    def frame(self, **_kwargs):
+        self.reads += 1
+        z = self.rig.z + (self.offset_mm if self.reads == 1 else 0.0)
+        return (sighting_at(0.0, 0.0, z),)
+
+
 class BlindLink:
     """画面里什么都没有的假镜头。"""
 
@@ -1021,6 +1038,32 @@ class SafeLiftTests(unittest.TestCase):
         self.assertEqual(rig.calls, [])
         self.assertEqual(link.reads, 2)  # 一次停稳测量 = 两次定位
 
+    def test_the_quick_check_passes_on_a_single_frame_when_clearly_safe(self) -> None:
+        """每一轮都要查的调用方（--follow）用单帧快判：够高就只花一帧。"""
+        rig, link, config = self.make(z_mm=110.0)
+        raised = servo.raise_before_rotating(rig, link, ObjectSelector(), config, quick=True)
+
+        self.assertEqual(raised, 0)
+        self.assertEqual(rig.calls, [])
+        self.assertEqual(link.reads, 1)
+
+    def test_the_quick_check_falls_back_when_the_margin_is_not_met(self) -> None:
+        rig, link, config = self.make(z_mm=102.0)  # 过了安全高度，但不够余量
+        raised = servo.raise_before_rotating(rig, link, ObjectSelector(), config, quick=True)
+
+        self.assertEqual(raised, 0)
+        # 一帧快判 + 一次停稳测量（两次定位）
+        self.assertGreaterEqual(link.reads, 3)
+
+    def test_a_first_frame_that_reads_high_inside_the_margin_does_not_pass(self) -> None:
+        """余量就是为这一条存在的：模糊帧把 z 读大、"以为够高"正是低位转底盘的成因。"""
+        rig, _unused, config = self.make(z_mm=99.0)  # 真值低于安全高度
+        link = FirstFrameHigh(rig, offset_mm=4.0)  # 第一帧读成 103，仍在余量（5 mm）内
+        raised = servo.raise_before_rotating(rig, link, ObjectSelector(), config, quick=True)
+
+        self.assertGreater(len(rig.up_pulses), 0)  # 没被那一帧骗过去：该抬还是抬
+        self.assertEqual(raised, sum(rig.up_pulses))
+
     def test_a_lift_that_changes_nothing_is_reported_instead_of_pushed(self) -> None:
         rig, link, config = self.make(slope=0.0)  # 已经到行程端点：走多少都不变
         raised = servo.raise_before_rotating(
@@ -1047,6 +1090,76 @@ class SafeLiftTests(unittest.TestCase):
         # 没有灵敏度可参照，所以第一段没法判；两段都不动就收手（而不是顶满 20 段）。
         self.assertEqual(len(rig.up_pulses), 2)
         self.assertEqual(raised, 2 * config.safe_lift_step_pulses)
+
+
+class HoverTests(unittest.TestCase):
+    """起始悬停高度（``hover_z_mm``）：配了才动；敢降要有标定；降不到安全高度以下。"""
+
+    def rig(self, *, z_mm: float = 120.0, slope: float = 0.0121, **overrides):
+        arm = LiftRig(z_mm=z_mm, slope=slope)
+        link = CoupledZLink(arm)
+        return arm, link, ServoConfig(**overrides)
+
+    def test_without_the_key_nothing_moves(self) -> None:
+        arm, link, config = self.rig(z_mm=80.0)
+        result = hover_above_object(
+            arm, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        )
+
+        self.assertFalse(result.configured)
+        self.assertEqual(result.pulses, 0)
+        self.assertEqual(arm.calls, [])
+
+    def test_it_lowers_to_the_configured_height(self) -> None:
+        arm, link, config = self.rig(z_mm=120.0, hover_z_mm=100.0)
+        result = hover_above_object(
+            arm, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        )
+
+        self.assertTrue(result.configured)
+        self.assertLess(result.pulses, 0)  # 往下走
+        self.assertAlmostEqual(arm.z, 100.0, delta=config.z_tolerance_mm)
+        self.assertGreaterEqual(arm.z, config.safe_lift_z_mm)
+
+    def test_it_raises_to_the_configured_height(self) -> None:
+        arm, link, config = self.rig(z_mm=80.0, hover_z_mm=110.0)
+        result = hover_above_object(
+            arm, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        )
+
+        self.assertGreater(result.pulses, 0)
+        self.assertAlmostEqual(arm.z, 110.0, delta=config.z_tolerance_mm)
+
+    def test_already_at_the_height_costs_no_motion(self) -> None:
+        arm, link, config = self.rig(z_mm=110.5, hover_z_mm=110.0)
+        result = hover_above_object(
+            arm, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        )
+
+        self.assertEqual(result.pulses, 0)
+        self.assertEqual(arm.calls, [])
+
+    def test_without_a_scale_it_refuses_to_lower(self) -> None:
+        """没标定灵敏度时往下走是在朝物块靠近，宁可不动。"""
+        arm, link, config = self.rig(z_mm=130.0, hover_z_mm=110.0)
+        result = hover_above_object(arm, link, ObjectSelector(), config)
+
+        self.assertTrue(result.stopped_without_scale)
+        self.assertEqual(arm.calls, [])
+
+    def test_without_a_scale_it_still_raises(self) -> None:
+        arm, link, config = self.rig(z_mm=80.0, hover_z_mm=110.0)
+        result = hover_above_object(arm, link, ObjectSelector(), config)
+
+        self.assertGreater(len(arm.up_pulses), 0)
+        self.assertGreaterEqual(arm.z, 110.0 - config.z_tolerance_mm)
+
+    def test_the_config_refuses_a_hover_below_the_safe_height(self) -> None:
+        """悬停得比"转底盘前的安全高度"还低 = 低位转底盘，配置层直接拦。"""
+        with self.assertRaises(ValueError):
+            ServoConfig(hover_z_mm=90.0, safe_lift_z_mm=100.0)
+        with self.assertRaises(ValueError):
+            ServoConfig(hover_z_mm=0.0)
 
 
 class FindObjectTests(unittest.TestCase):
@@ -1113,6 +1226,12 @@ class AlignAndDescendTests(unittest.TestCase):
     """一键就位：四步的顺序、参数传递、耗时记录。"""
 
     def canned(self, order: List[str]):
+        def hover(*_args, **_kwargs):
+            order.append("hover")
+            return HoverResult(
+                configured=True, pulses=-120, start_z_mm=120.0, end_z_mm=100.0
+            )
+
         def lift(*_args, **_kwargs):
             order.append("lift")
             return 250
@@ -1141,10 +1260,10 @@ class AlignAndDescendTests(unittest.TestCase):
             order.append("back")
             return 150
 
-        return lift, align, down, back
+        return lift, align, down, back, hover
 
     def run_it(self, order: List[str], seen: Optional[dict] = None, **overrides):
-        lift, align, down, back = self.canned(order)
+        lift, align, down, back, hover = self.canned(order)
         if seen is not None:
             # 想看命令行覆盖有没有传下去，就把两个脉冲步骤包一层记录。
             # 先存原名再重新绑定，否则闭包里的 down 指的是包好的那个自己。
@@ -1162,11 +1281,11 @@ class AlignAndDescendTests(unittest.TestCase):
         jacobian = ServoJacobian(
             base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091
         )
-        with patch.object(servo, "raise_before_rotating", side_effect=lift), patch.object(
-            servo, "align_x_y", side_effect=align
-        ), patch.object(servo, "descend_z", side_effect=down), patch.object(
-            servo, "retract_extension", side_effect=back
-        ):
+        with patch.object(servo, "hover_above_object", side_effect=hover), patch.object(
+            servo, "raise_before_rotating", side_effect=lift
+        ), patch.object(servo, "align_x_y", side_effect=align), patch.object(
+            servo, "descend_z", side_effect=down
+        ), patch.object(servo, "retract_extension", side_effect=back):
             return align_and_descend(
                 arm=None,
                 link=None,
@@ -1177,18 +1296,19 @@ class AlignAndDescendTests(unittest.TestCase):
                 **overrides,
             )
 
-    def test_the_four_steps_run_in_the_documented_order(self) -> None:
+    def test_the_steps_run_in_the_documented_order(self) -> None:
         order: List[str] = []
         result = self.run_it(order)
 
-        self.assertEqual(order, ["lift", "align", "down", "back"])
+        self.assertEqual(order, ["hover", "lift", "align", "down", "back"])
+        self.assertEqual(result.hover_pulses, -120)
         self.assertEqual(result.raised_pulses, 250)
         self.assertEqual(result.retracted_pulses, 150)
         self.assertEqual(result.descent.pulses, 2200)
         self.assertTrue(result.aligned.aligned)
         self.assertGreaterEqual(result.total_seconds, 0.0)
         summary = result.summary()
-        for keyword in ("就位完成", "抬升 250", "下降 2200", "后缩 150"):
+        for keyword in ("就位完成", "悬停 -120", "抬升 250", "下降 2200", "后缩 150"):
             self.assertIn(keyword, summary)
 
     def test_the_overrides_reach_the_two_pulse_steps(self) -> None:

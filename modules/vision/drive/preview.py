@@ -13,7 +13,8 @@
 
 用法::
 
-    from modules.vision import close_previews, open_preview, run_preview
+    from modules.vision.drive.preview import close_previews, open_preview
+    from modules.vision.drive.stream import run_preview
 
     window = open_preview()
     try:

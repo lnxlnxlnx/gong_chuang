@@ -118,10 +118,49 @@ def load_model_settings(config_path: Path = DEFAULT_CONFIG_PATH) -> ModelSetting
     config_path = Path(config_path)
     document = _read_json(config_path, "vision configuration") if config_path.exists() else {}
     root = _mapping(document, "root")
+    return _model_from_root(root, config_path)
+
+
+def _model_from_root(root: Mapping[str, object], config_path: Path) -> ModelSettings:
+    """从**已经读到的**根对象里取 ``model`` 块。
+
+    ``load_vision_config`` 走这条：它已经有 root 了，不该为了 model 再读一遍同一个文件
+    （那会在"读配置"这件事上留下第二个入口，也让改成自定义路径的会话悄悄回读默认文件）。
+    """
     value = root.get("model")
     if value is None:
         return ModelSettings(source=config_path)
     return _model_settings(_mapping(value, "model"), config_path)
+
+
+def default_model_path(config_path: Path = DEFAULT_CONFIG_PATH) -> Path:
+    """本平台默认加载的模型文件，取自 ``config.json`` 的 ``model`` 块。
+
+    ``model.backend`` 是 ``auto``（默认）时：Windows 取 ``model.onnx``（OpenCV 推理），
+    Jetson 取 ``model.engine``（TensorRT 推理）。想在某平台上强制另一条通道，
+    把 ``backend`` 写成 ``"onnx"`` 或 ``"tensorrt"``。
+    """
+    return load_model_settings(config_path).model_path()
+
+
+def require_model_path(settings: "ModelSettings | None" = None) -> Path:
+    """同 :func:`default_model_path`，但文件不存在时直接说清楚该做什么。"""
+    settings = settings if settings is not None else load_model_settings()
+    path = settings.model_path()
+    if path.is_file():
+        return path
+    if settings.resolve_backend() == BACKEND_TENSORRT:
+        raise FileNotFoundError(
+            f"未找到 TensorRT 引擎：{path}\n"
+            "引擎与板子/GPU/TensorRT 版本绑定，只能在 Jetson 上生成：\n"
+            "    python -m modules.vision.training.build_engine\n"
+            "（换成 OpenCV 的 ONNX 通道：把 modules/vision/config.json 的 "
+            'model.backend 改成 "onnx"）'
+        )
+    raise FileNotFoundError(
+        f"未找到模型文件：{path}\n"
+        "把导出的模型放到这个路径，或改 modules/vision/config.json 的 model.onnx"
+    )
 
 
 def resolve_target_settings(
@@ -265,6 +304,9 @@ class VisionConfig:
     table_depth_mm: Optional[float] = None
     #: 平面标定结果；``None`` 表示还没做实验 A。
     plane: Optional[PlaneCalibration] = None
+    #: ``config.json`` 的 ``model`` 块：用哪个模型、哪些类别算物料、输入边长和阈值。
+    #: 放在**字段尾部**，已有的位置参数顺序不变。
+    model: ModelSettings = field(default_factory=ModelSettings)
 
     def camera_id(self, platform: str) -> int:
         """Return the camera index for one platform or explain what is missing."""
@@ -324,6 +366,8 @@ def load_vision_config(
             calibration_root.get("table_depth_mm"), "calibration.table_depth_mm"
         ),
         plane=_plane_calibration(calibration_root.get("plane")),
+        # 同一份 root 里取 model：一个会话只读一次这个文件，绝不回读默认路径。
+        model=_model_from_root(root, Path(config_path)),
     )
 
 

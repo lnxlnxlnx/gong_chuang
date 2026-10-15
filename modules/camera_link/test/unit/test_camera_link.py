@@ -1,7 +1,11 @@
-"""接收链路：TCP 收行、丢旧取新、按帧分组、断线重连、端口占用。
+"""接收链路：TCP 收行、丢旧取新、按帧分组、断线重连、端口占用、启动中途失败。
 
-这些测试全程走**真 socket**（绑到 ``127.0.0.1`` 的临时端口），不 mock ``socket``：
+功能测试全程走**真 socket**（绑到 ``127.0.0.1`` 的临时端口），不 mock ``socket``：
 这一层存在的意义就是"机械臂在动的时候接收线程还活着"，用假 socket 测不出这件事。
+
+**启动失败的资源归属**是例外：那几条反过来必须注入假 socket / 假线程，因为要测的是
+"setsockopt / listen / getsockname / 线程 start 分别失败时，谁负责关、关几次、未启动的
+线程不许 join"——真 socket 走不到这些分支。
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ import time
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from modules.camera_link.drive.link import (
     CameraLink,
@@ -242,6 +247,150 @@ class CameraLinkLifecycleTests(unittest.TestCase):
                 client.sendall(b"x" * (128 * 1024))
                 self.assertTrue(wait_for(lambda: link.rejected_count >= 1), link.rejected_count)
                 self.assertTrue(link.connected, "超长半行只该被丢掉，不该断开连接")
+
+
+class CameraLinkStartFailureTests(unittest.TestCase):
+    """启动中途失败的资源归属：**没交出去的资源由 CameraLink 自己收尾**。
+
+    这里刻意注入假 socket / 假线程，不绑真实端口：要测的是"哪一步失败之后谁负责关、
+    关闭恰好一次、未启动的线程不许 join"，真 socket 反而测不到这些分支。
+    """
+
+    def test_every_start_step_failure_closes_the_server_exactly_once(self) -> None:
+        """setsockopt / listen / getsockname 分别在一步失败时，server 只关一次。"""
+        for stage in ("setsockopt", "listen", "getsockname"):
+            with self.subTest(stage=stage):
+                fake = FakeSocket(fail_on=stage)
+                link = CameraLink(config=local_config())
+                with patch(
+                    "modules.camera_link.drive.link.socket.socket", return_value=fake
+                ):
+                    with self.assertRaises(Exception):
+                        link.start()
+                self.assertEqual(fake.close_calls, 1, "server 必须恰好关一次")
+                self.assertIsNone(link._server)
+                self.assertIsNone(link._client)
+                self.assertIsNone(link._thread)
+
+    def test_bind_failure_still_reports_the_address_and_closes_once(self) -> None:
+        """bind 失败保留原来的中文提示（含地址），close 仍由失败收尾统一负责。"""
+        fake = FakeSocket(fail_on="bind")
+        link = CameraLink(config=local_config(port=50007))
+        with patch("modules.camera_link.drive.link.socket.socket", return_value=fake):
+            with self.assertRaises(CameraLinkError) as caught:
+                link.start()
+        self.assertIn("127.0.0.1:50007", str(caught.exception))
+        self.assertIn("端口被占用或没有权限", str(caught.exception))
+        self.assertEqual(fake.close_calls, 1)
+
+    def test_unstarted_thread_is_never_joined(self) -> None:
+        """线程 start 本身失败时 ``ident`` 还是 ``None``：绝不能 join。
+
+        ``join`` 一个没启动的线程会抛 ``cannot join thread before it is started``，
+        那会把真正的启动错误盖掉——现场看到的就是一句莫名其妙的 join 报错。
+        """
+        fake_socket = FakeSocket()
+        fake_thread = MockThread(start_fails=True)
+        link = CameraLink(config=local_config())
+        with patch("modules.camera_link.drive.link.socket.socket", return_value=fake_socket):
+            with patch(
+                "modules.camera_link.drive.link.threading.Thread",
+                return_value=fake_thread,
+            ):
+                with self.assertRaises(RuntimeError) as caught:
+                    link.start()
+        self.assertIn("thread start failed", str(caught.exception))
+        self.assertEqual(fake_thread.join_calls, 0, "没启动的线程不许 join")
+        self.assertEqual(fake_socket.close_calls, 1)
+        self.assertIsNone(link._thread)
+
+    def test_close_failure_still_attempts_the_other_socket_and_the_join(self) -> None:
+        """一个 socket close 失败不跳过另一个 socket，也不跳过已启动线程的 join。"""
+        link = CameraLink(config=local_config())
+        failing = FakeSocket(fail_on="close")
+        healthy = FakeSocket()
+        started = MockThread()
+        link._server, link._client, link._thread = failing, healthy, started
+        with self.assertRaises(CameraLinkError) as caught:
+            link.stop()
+        self.assertIn("server.close", str(caught.exception))
+        self.assertIn("boom close", str(caught.exception))
+        self.assertEqual(failing.close_calls, 1)
+        self.assertEqual(healthy.close_calls, 1, "另一个 socket 仍要被关")
+        self.assertEqual(started.join_calls, 1, "已启动线程仍要被 join")
+        # 三项引用都已清空：再调一次 stop 不会有任何重复动作。
+        self.assertIsNone(link._server)
+        self.assertIsNone(link._client)
+        self.assertIsNone(link._thread)
+        link.stop()
+        self.assertEqual(failing.close_calls, 1)
+        self.assertEqual(healthy.close_calls, 1)
+        self.assertEqual(started.join_calls, 1)
+
+    def test_stop_joins_a_real_started_thread_without_blocking(self) -> None:
+        """正常启动的链路：stop 必须真的把线程收掉（join 能返回）。"""
+        link = CameraLink(config=local_config()).start()
+        self.assertIsNotNone(link._thread)
+        link.stop()
+        self.assertIsNone(link._thread)
+
+
+class FakeSocket:
+    """一个假监听 socket：可以指定在哪一步失败，并记录 close 次数。"""
+
+    def __init__(self, *, fail_on: str = "") -> None:
+        self.fail_on = fail_on
+        self.close_calls = 0
+
+    def _maybe_fail(self, stage: str) -> None:
+        if self.fail_on == stage:
+            raise OSError(f"boom {stage}")
+
+    def setsockopt(self, *_args) -> None:
+        self._maybe_fail("setsockopt")
+
+    def bind(self, _address) -> None:
+        self._maybe_fail("bind")
+
+    def listen(self, _backlog) -> None:
+        self._maybe_fail("listen")
+
+    def getsockname(self):
+        self._maybe_fail("getsockname")
+        return ("127.0.0.1", 50007)
+
+    def shutdown(self, *_args) -> None:
+        raise OSError("not connected")
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.fail_on == "close":
+            raise OSError("boom close")
+
+    def settimeout(self, _seconds) -> None:
+        pass
+
+    def accept(self):
+        raise OSError("stopped")
+
+
+class MockThread:
+    """假线程：可以模拟 ``start()`` 失败（那时 ``ident`` 仍是 ``None``）。"""
+
+    def __init__(self, *, start_fails: bool = False) -> None:
+        self.start_fails = start_fails
+        self.join_calls = 0
+
+    @property
+    def ident(self):
+        return None if self.start_fails else 4242
+
+    def start(self) -> None:
+        if self.start_fails:
+            raise RuntimeError("thread start failed")
+
+    def join(self, timeout=None) -> None:
+        self.join_calls += 1
 
 
 class CameraLinkConfigTests(unittest.TestCase):

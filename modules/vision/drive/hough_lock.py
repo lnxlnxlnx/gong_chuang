@@ -326,15 +326,14 @@ def _run_image(locator: HoughRingLocator, image_path: Path) -> int:
 def _run_camera(locator: HoughRingLocator, camera_id: int) -> int:
     import cv2
 
-    from modules.vision import (
+    from modules.vision.drive.camera import USBCamera, looks_blank
+    from modules.vision.drive.preview import (
         BLANK_FRAME_WARNING,
-        USBCamera,
         close_previews,
-        looks_blank,
         open_preview,
-        run_preview,
         warn_blank_preview,
     )
+    from modules.vision.drive.stream import run_preview
 
     window = open_preview()
     blank_frames = 0

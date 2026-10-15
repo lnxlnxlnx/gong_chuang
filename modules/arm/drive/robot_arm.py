@@ -69,18 +69,31 @@ class RobotArm:
         self.settle_seconds = settle_seconds
         # 注入 sleep 便于离线单测；真机默认 time.sleep。
         self._sleep = sleep
+        # 串口是**共享**的：三个驱动器用同一根总线。这里先把它开出来，再建三个驱动器。
+        owns_serial = serial_port is None
         self._serial = serial_port if serial_port is not None else self._open_shared_serial()
-        self._motors = {
-            axis_name: Emm42Driver(
-                port,
-                self.config.motor_id(axis_name),
-                pulses_per_revolution=self.pulses_per_revolution,
-                # 已读取的 5/6/7 配置均为 Response=None，控制帧不回 ACK。
-                expect_ack=False,
-                serial_port=self._serial,
-            )
-            for axis_name in AXIS_NAMES
-        }
+        try:
+            self._motors = {
+                axis_name: Emm42Driver(
+                    port,
+                    self.config.motor_id(axis_name),
+                    pulses_per_revolution=self.pulses_per_revolution,
+                    # 已读取的 5/6/7 配置均为 Response=None，控制帧不回 ACK。
+                    expect_ack=False,
+                    serial_port=self._serial,
+                )
+                for axis_name in AXIS_NAMES
+            }
+        except BaseException as primary:
+            # 构造没返回，就只能由构造器自己收尾：不关掉这个刚开的串口，
+            # 下一个 RobotArm 会打不开同一个口（而调用方根本拿不到对象去关它）。
+            # 外部注入的 serial_port **不归本构造器管**，失败时不许擅自关掉。
+            if owns_serial:
+                try:
+                    self._serial.close()
+                except Exception as cleanup:
+                    raise primary.with_traceback(primary.__traceback__) from cleanup
+            raise
 
     def initialize(self) -> "RobotArm":
         """Return the controller after the shared bus has been prepared."""
