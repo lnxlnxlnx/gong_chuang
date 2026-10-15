@@ -17,7 +17,7 @@ from modules.grasp.test.manual.grasp import (
 )
 from modules.vision.config import TargetSettings, VisionConfig
 from modules.vision.drive.calibration import PlaneCalibration
-from modules.servo.drive.gripper import CLOSE_COMMAND, GripperReport
+from modules.servo.runtime import CLOSE_COMMAND, GripperReport
 
 
 def calibrated_vision() -> VisionConfig:

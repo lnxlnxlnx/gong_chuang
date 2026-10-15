@@ -327,6 +327,11 @@ class Vision:
         if self._closed:
             raise RuntimeError("Vision 已关闭")
 
+    @property
+    def closed(self) -> bool:
+        """会话是否已经关闭；关闭后 ``locate`` / ``frame`` 统一抛 ``RuntimeError``。"""
+        return self._closed
+
     # ------------------------------------------------------------- 取帧与定位
     def _read_report(self, *, timeout: Optional[float] = None):
         """丢掉缓冲里的旧画面，读一帧并定位；读不到返回 ``None``。

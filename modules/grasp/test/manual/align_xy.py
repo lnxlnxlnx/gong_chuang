@@ -105,7 +105,7 @@ import time
 from typing import Optional, Sequence
 
 from modules.arm.config import load_arm_config
-from modules.arm.drive.robot_arm import RobotArm
+from modules.arm.runtime import RobotArm
 from modules.grasp.drive.eye_in_hand import (
     align_x_y,
     align_z,
@@ -805,7 +805,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     其余工具模式（watch / status / set-target / target-centred / teach / calibrate /
     follow / align-z / align-z-visual / raise）各有自己的前置条件，仍然按原来的低层
-    流程走：source 由该分支自己创建和关闭，机械臂仍按原工具初始化 / 使能 / 收尾。
+    流程走：source 由该分支自己创建和关闭，机械臂由 ``RobotArm._from_settings``
+    装配成一次就绪的会话（已经使能），收尾只调一次 ``arm.close()``。
     **不**给它们加统一的标定门禁——那会造出"缺标定所以不能跑标定"的循环。
     """
     arguments = build_parser().parse_args(argv)
@@ -917,7 +918,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 # ------------------------------------------------------------------ 工具分支
 #
 # 下面几个模式各有前置条件，**不走** Grasp 的普通动作门禁；每个分支自己创建并关闭
-# 它需要的资源，机械臂仍按原工具初始化 / 使能 / 收尾。
+# 它需要的资源，机械臂用 ``RobotArm._from_settings`` 装配成一次就绪的会话，
+# 收尾只调一次 ``arm.close()``（停 / 失能 / 关串口都在它内部逐项试行）。
 
 
 def _run_read_only_mode(arguments, vision_settings, selector, target, jacobian, config) -> int:
@@ -955,35 +957,31 @@ def _run_low_level_mode(arguments, vision_settings, config) -> int:
     selector = load_object_selector()
     port = arguments.port or load_motor_bus_config().port
     print(f"打开机械臂总线 {port}")
-    arm = RobotArm(port, config=load_arm_config())
+    # 统一生命周期：``_from_settings`` 读好配置快照、开串口并使能，是一次就绪的会话。
+    arm = RobotArm._from_settings(config=load_arm_config(), port=port)
     try:
-        arm.initialize()
-        arm.enable_all()
-        try:
-            if arguments.calibrate:
-                return run_calibrate(
-                    arm=arm, source=source, selector=selector, config=config
-                )
-            if arguments.teach:
-                return run_teach(
-                    arm=arm, source=source, selector=selector,
-                    config=config, step_pulses=arguments.step,
-                )
-            if arguments.align_z:
-                return run_descend_z(
-                    arm=arm, source=source, selector=selector, config=config,
-                    z_pulses=arguments.z_pulses,
-                    retract_pulses=arguments.retract_pulses,
-                )
-            return run_align_z_visual(
-                arm=arm, source=source, selector=selector, config=config,
-                recalibrate=arguments.recalibrate_lift,
+        if arguments.calibrate:
+            return run_calibrate(
+                arm=arm, source=source, selector=selector, config=config
             )
-        finally:
-            # 每项独立尝试：stop 报错不该让 disable 与 close 一个都不做。
-            _attempt(arm.stop_all)
-            _attempt(arm.disable_all)
+        if arguments.teach:
+            return run_teach(
+                arm=arm, source=source, selector=selector,
+                config=config, step_pulses=arguments.step,
+            )
+        if arguments.align_z:
+            return run_descend_z(
+                arm=arm, source=source, selector=selector, config=config,
+                z_pulses=arguments.z_pulses,
+                retract_pulses=arguments.retract_pulses,
+            )
+        return run_align_z_visual(
+            arm=arm, source=source, selector=selector, config=config,
+            recalibrate=arguments.recalibrate_lift,
+        )
     finally:
+        # ``close`` 内部按 停 → 失能 → 关串口 逐项独立尝试（一项报错不跳过其余），
+        # 所以这里只叫一次，不再自己重复 stop / disable。
         _attempt(arm.close)
         _close_quietly(source)
 
@@ -995,16 +993,11 @@ def _run_raise_mode(arguments, vision_settings) -> int:
     """
     port = arguments.port or load_motor_bus_config().port
     print(f"打开机械臂总线 {port}")
-    arm = RobotArm(port, config=load_arm_config())
+    arm = RobotArm._from_settings(config=load_arm_config(), port=port)
     try:
-        arm.initialize()
-        arm.enable_all()
-        try:
-            return run_raise(arm=arm, pulses=arguments.raise_pulses)
-        finally:
-            _attempt(arm.stop_all)
-            _attempt(arm.disable_all)
+        return run_raise(arm=arm, pulses=arguments.raise_pulses)
     finally:
+        # 收尾只有一处：``close`` 内部自行按 停 → 失能 → 关串口 逐项尝试。
         _attempt(arm.close)
 
 
@@ -1029,20 +1022,15 @@ def _run_follow_mode(arguments, vision_settings, config) -> int:
     selector = load_object_selector()
     port = arguments.port or load_motor_bus_config().port
     print(f"打开机械臂总线 {port}")
-    arm = RobotArm(port, config=load_arm_config())
+    arm = RobotArm._from_settings(config=load_arm_config(), port=port)
     try:
-        arm.initialize()
-        arm.enable_all()
-        try:
-            return run_follow(
-                arm=arm, source=source, selector=selector,
-                target=target, jacobian=jacobian, config=config,
-                lift_scale=load_lift_scale(),
-            )
-        finally:
-            _attempt(arm.stop_all)
-            _attempt(arm.disable_all)
+        return run_follow(
+            arm=arm, source=source, selector=selector,
+            target=target, jacobian=jacobian, config=config,
+            lift_scale=load_lift_scale(),
+        )
     finally:
+        # 收尾只有一处：``close`` 内部自行按 停 → 失能 → 关串口 逐项尝试。
         _attempt(arm.close)
         _close_quietly(source)
 

@@ -19,6 +19,10 @@
 - 这里的坐标是**爪口中心（实际夹持点）**的基座圆柱坐标，不是相机光心，也不是靶标位置；
 - **不保存夹爪业务状态**：夹爪是否有东西属于抓取流程，放进 arm 会让 arm 反向依赖 grasp；
 - 进程重启、掉电、急停或手动拨动之后一律是"未知"：新实例从 :data:`UNKNOWN` 开始。
+
+本模块**没有** ``python -m`` 自测入口：它是包导入路径的一部分，不能被当作可执行入口
+（否则 ``python -m`` 会报 runpy 的 "found in sys.modules" 警告）。它的行为由
+``modules/arm/test/unit/test_arm_runtime.py`` 覆盖。
 """
 
 from __future__ import annotations
@@ -118,46 +122,3 @@ class ArmPose:
             return
         self.pose = pose
         self.source = DEAD_RECKONED
-
-
-# ---------------------------------------------------------------------- 自测
-def _self_test() -> int:
-    """不需要硬件：验证来源标记、未知保护与"未知不推进"。"""
-    state = ArmPose()
-
-    # 新实例必须从"未知"开始：状态只在内存里，掉电即失效。
-    assert not state.is_known and not state.is_absolute
-    assert state.source == UNKNOWN
-    try:
-        state.require_pose()
-    except RuntimeError as error:
-        assert "未知" in str(error), error
-    else:
-        raise AssertionError("未知位姿必须拒绝提供")
-
-    # 未知状态下推进位姿是无效的：不能凭空造一个。
-    state.record_move(CylindricalPose(10.0, 50.0, 30.0))
-    assert not state.is_known, state
-
-    # 回零给出绝对参考。
-    state.record_home(CylindricalPose(0.0, 40.0, 60.0))
-    assert state.is_known and state.is_absolute and state.source == HOMED
-
-    # 走一步之后变成推算：可信度下降，但仍可继续做绝对定位。
-    state.record_move(CylindricalPose(5.0, 45.0, 55.0))
-    assert state.source == DEAD_RECKONED and not state.is_absolute and state.is_known
-
-    # 测量重新给出绝对参考。
-    state.record_measurement(CylindricalPose(5.0, 45.0, 55.0))
-    assert state.is_absolute and state.source == MEASURED
-
-    # 打回未知之后拒绝继续运动。
-    state.mark_unknown()
-    assert not state.is_known and state.pose is None
-
-    print("机械臂位姿自测通过：来源标记、未知保护、未知不推进都正确。")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(_self_test())

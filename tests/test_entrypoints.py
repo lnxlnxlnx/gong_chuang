@@ -130,9 +130,8 @@ class EntryPointTests(unittest.TestCase):
     def test_module_self_test_entries_stay_warning_free(self) -> None:
         """``python -m`` self-tests must not trip runpy's "found in sys.modules".
 
-        包出口只显式导出 ``Vision`` / ``MaterialReport`` / ``RegionReport``，
-        并且不预加载“既能 import、又能 ``python -m``”的流水线模块；一旦有人在
-        ``__init__`` 里急切导入它们，这些入口就会警告（``-W error`` 下直接失败）。
+        包出口只显式导出公开类，并且不预加载“既能 import、又能 ``python -m``”的流水线模块；
+        一旦有人在 ``__init__`` 里急切导入它们，这些入口就会警告（``-W error`` 下直接失败）。
         """
         for module in (
             "modules.vision.drive.hough_lock",
@@ -147,6 +146,52 @@ class EntryPointTests(unittest.TestCase):
                     timeout=180,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_known_runpy_preloads_are_only_the_documented_ones(self) -> None:
+        """``python -m`` 的 runpy 预加载警告只允许出现在**已记录**的模块上。
+
+        ``modules/arm/__init__.py`` 必须导出 ``RobotArm``，而它的真实定义在
+        ``modules/arm/runtime.py``，那条链会经由 ``modules/arm/config.py`` 预加载
+        ``modules.arm.drive.kinematics``。所以 ``python -m modules.arm.drive.kinematics``
+        会警告——这是"包根导出上层类"的既定代价，不是漏改。
+
+        这条用例把它**钉住**：以后新增的预加载（也就是新出现的警告）会让它失败，
+        必须在这里显式记录，否则没人会注意到又一个自测入口被包导入吃掉了。
+        """
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-W",
+                "error::RuntimeWarning",
+                "-c",
+                "import modules.arm.drive.kinematics",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            timeout=60,
+        )
+        # 纯 import 不该有警告：只有 `python -m` 才有 runpy 的"先被导入过"问题。
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # 已记录的例外：这个入口确实会警告，而且是刻意的。
+        warned = subprocess.run(
+            [
+                sys.executable,
+                "-W",
+                "error::RuntimeWarning",
+                "-m",
+                "modules.arm.drive.kinematics",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            timeout=180,
+        )
+        self.assertNotEqual(
+            warned.returncode,
+            0,
+            "如果这里不再警告，说明包导入形态变了——请同时更新本用例与那段说明",
+        )
 
 
 if __name__ == "__main__":

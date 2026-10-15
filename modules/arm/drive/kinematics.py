@@ -199,27 +199,23 @@ def height_above_table(*, table_depth_mm: float, point_depth_mm: float) -> float
     return float(table_depth_mm) - float(point_depth_mm)
 
 
-def marker_height_for_grasp(
-    *,
-    material_height_mm: float,
-    grip_ratio: float,
-    marker_to_grasp_mm: float,
-) -> float:
-    """侧向夹取时，爪上靶标需要到达的高度。
+def grip_height_mm(*, material_height_mm: float, grip_ratio: float) -> float:
+    """侧向夹取时**夹持点**离台面的高度。
 
-    - ``grip_ratio``：夹在物料的哪个高度，``0`` 贴台面、``0.5`` 半高、``1`` 顶面；
-    - ``marker_to_grasp_mm``：靶标相对实际夹持点的竖直偏移，靶标在夹持点**上方**时取正值。
+    - ``grip_ratio``：夹在物料的哪个高度，``0`` 贴台面、``0.5`` 半高、``1`` 顶面。
 
     侧向夹取的夹持点高度依赖物料高度，所以单目测出的物料高度在这里真正被用到；
     这也是 ``MaterialLocator`` 的深度不只为 XY 服务的地方。
+
+    **不含**靶标与夹持点之间的竖直偏移：那个偏移在把观测写成夹持点位姿时**减过一次**
+    （见 ``modules/grasp/drive/pipeline.py`` 的 ``_grasp_pose``），生成目标时不能再加一遍。
     """
     _require_finite("material_height_mm", material_height_mm)
-    _require_finite("marker_to_grasp_mm", marker_to_grasp_mm)
     if not 0.0 <= grip_ratio <= 1.0:
         raise ValueError("grip_ratio must be in 0..1")
     if material_height_mm < 0:
         raise ValueError("material_height_mm must not be negative")
-    return material_height_mm * grip_ratio + marker_to_grasp_mm
+    return material_height_mm * grip_ratio
 
 
 # ---------------------------------------------------------------- 可达性
@@ -330,10 +326,9 @@ def _self_test() -> int:
     # 深度换算成高度：台面 300 mm，物点 285 mm -> 高 15 mm。
     assert abs(height_above_table(table_depth_mm=300.0, point_depth_mm=285.0) - 15.0) < 1e-9
 
-    # 侧向夹取：物料高 20 mm，夹半高，靶标在夹持点上方 12 mm -> 需要到 22 mm。
-    assert abs(
-        marker_height_for_grasp(material_height_mm=20.0, grip_ratio=0.5, marker_to_grasp_mm=12.0) - 22.0
-    ) < 1e-9
+    # 侧向夹取：物料高 20 mm、夹半高 -> 夹持点高 10 mm（不含靶标偏移）。
+    assert abs(grip_height_mm(material_height_mm=20.0, grip_ratio=0.5) - 10.0) < 1e-9
+    assert abs(grip_height_mm(material_height_mm=20.0, grip_ratio=1.0) - 20.0) < 1e-9
 
     # 可达性。
     limit = TravelLimit(-110.0, 110.0)

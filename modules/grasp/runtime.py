@@ -29,13 +29,14 @@ Grasp 实例
 ```
 
 ``open`` 返回即完成资源移交；返回前的失败由取得资源的那一方自己收尾。关闭时
-``arm.stop_all`` / ``arm.disable_all`` / ``arm.close`` / ``source.close`` **每项独立尝试**，
-一项失败不跳过其余；重复关闭不再发任何动作。关闭后的实例立即失败，不自动重连。
+``arm.close`` 与 ``source.close`` **每项独立尝试**，一项失败不跳过其余；``arm.close``
+内部自己按 停 → 失能 → 关串口 逐项试行（统一生命周期里上层不再重复 stop / disable），
+重复关闭不再发任何动作。关闭后的实例立即失败，不自动重连。
 
 ## 校验必须早于设备
 
-普通动作需要 ``target`` 与 ``jacobian``。``RobotArm.__init__`` **已经打开了串口**，
-所以"缺标定"必须在构造 ``RobotArm`` 之前就报出来——见 :meth:`Grasp._open_settings`
+普通动作需要 ``target`` 与 ``jacobian``。``RobotArm._from_settings`` **已经打开了串口**，
+所以"缺标定"必须在装配机械臂之前就报出来——见 :meth:`Grasp._open_settings`
 里的顺序。这也正是"缺标定所以不能跑标定"那个循环的解法：状态 / 示教 / 标定这些
 工具各有自己的前置条件，它们**不走** :meth:`Grasp.open`（详见菜单 21 的实现）。
 
@@ -57,12 +58,12 @@ from modules.grasp.drive.servo_model import GraspReadyResult, ServoError
 def _new_arm(port, arm_config):
     """真实构造机械臂的唯一位置；测试在这里注入假臂。
 
-    ``RobotArm.__init__`` 就会打开串口，所以调用它之前必须已经做完配置校验
+    ``RobotArm`` 的构造会打开串口，所以调用它之前必须已经做完配置校验
     （见 :meth:`Grasp._open_settings`）。
     """
-    from modules.arm.drive.robot_arm import RobotArm
+    from modules.arm.runtime import RobotArm
 
-    return RobotArm(port, config=arm_config)
+    return RobotArm._from_settings(config=arm_config, port=port)
 
 
 class Grasp:
@@ -89,6 +90,13 @@ class Grasp:
         self._arm = None
         self._source = None
         self._closed = False
+        #: 设备是**借来的**吗（``from_modules``）：借来的不收尾，只结束本会话。
+        self._borrowed = False
+
+    @property
+    def closed(self) -> bool:
+        """会话是否已经关闭；关闭后动作方法统一抛 ``RuntimeError``，不自动重开。"""
+        return self._closed
 
     def _require_open(self) -> None:
         if self._closed:
@@ -170,16 +178,14 @@ class Grasp:
     ) -> "Grasp":
         """**普通动作唯一的设备创建路径**（public ``open`` 与菜单 21 都走这里）。
 
-        顺序是硬要求：普通动作的配置校验**不能**挪到 ``RobotArm`` 构造之后——那个构造
-        已经打开了串口。校验通过之后才建会话、取观测源、开机械臂、使能。
+        顺序是硬要求：普通动作的配置校验**不能**挪到装配机械臂之后——``_new_arm``
+        已经打开了串口。校验通过之后才建会话、取观测源、装配机械臂；
+        ``RobotArm._from_settings`` 返回的就是**已使能**的就绪对象，所以这里不再
+        补一次 ``initialize`` / ``enable_all``（统一生命周期，见
+        ``docs/模块调用与统一初始化方案.md`` §2.2）。
         任何一步失败都触发 :meth:`close`，已取得的资源全部尝试释放。
         """
-        if target is None:
-            raise ServoError("缺少 target；先运行现有设目标或示教工具")
-        if jacobian is None:
-            raise ServoError("缺少 jacobian；先运行现有标定工具")
-        # 复用原有的奇异判据（pulses_for 自查行列式），不新增阈值。
-        jacobian.pulses_for(0.0, 0.0)
+        cls._require_action_ready(target=target, jacobian=jacobian)
         session = cls(
             config=config,
             selector=selector,
@@ -191,9 +197,8 @@ class Grasp:
         try:
             # source_factory 返回即**转移所有权**；返回前失败由 factory 自己收尾。
             session._source = source_factory()
+            # ``_from_settings`` 返回时已经使能过：这里不再补 initialize / enable_all。
             session._arm = _new_arm(port, arm_config)
-            session._arm.initialize()
-            session._arm.enable_all()
             return session
         except BaseException as primary:
             try:
@@ -201,6 +206,89 @@ class Grasp:
             except Exception as cleanup:
                 raise primary.with_traceback(primary.__traceback__) from cleanup
             raise
+
+    @classmethod
+    def from_modules(
+        cls, *, arm, vision, config_path=None, on_message=None
+    ) -> "Grasp":
+        """**借用**已经装配好的 arm / vision，读完 eye_in_hand 配置后建立会话。
+
+        ``Robot`` 集成路径用这个：同一个会话里 arm 与 vision 只开一份，抓取复用它。
+
+        - **不打开任何设备**、不重新使能、不读另一份视觉/机械臂配置；
+        - 只读 ``eye_in_hand.json`` 里的 selector / target / jacobian / lift_scale，
+          并做与传统 ``open`` 完全相同的那套校验（含雅可比奇异判据）；
+        - 借来的设备**不归本会话收尾**：:meth:`close` 只结束本会话，
+          不 ``stop`` / ``disable`` / ``close`` 它们；设备最终由装配者（``Robot``）关闭。
+
+        :raises ServoError: 缺 target / jacobian，或雅可比奇异。
+        """
+        from pathlib import Path
+
+        from .drive.servo_model import (
+            DEFAULT_CONFIG_PATH,
+            load_jacobian,
+            load_lift_scale,
+            load_object_selector,
+            load_servo_config,
+            load_target,
+        )
+
+        if arm is None or vision is None:
+            raise ServoError("from_modules 需要已经装配好的 arm 与 vision")
+        grasp_path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
+        return cls._from_modules_settings(
+            config=load_servo_config(grasp_path),
+            selector=load_object_selector(grasp_path),
+            target=load_target(grasp_path),
+            jacobian=load_jacobian(grasp_path),
+            lift_scale=load_lift_scale(grasp_path),
+            arm=arm,
+            vision=vision,
+            on_message=on_message,
+        )
+
+    @classmethod
+    def _from_modules_settings(
+        cls,
+        *,
+        config,
+        selector,
+        target,
+        jacobian,
+        lift_scale,
+        arm,
+        vision,
+        on_message=None,
+    ) -> "Grasp":
+        """借用装配的**唯一接缝**：``Robot`` 在开设备前预校验配置后也走这里。
+
+        与 :meth:`_open_settings` 共用同一份参数校验与同一套动作实现，只是不创建设备。
+        """
+        cls._require_action_ready(target=target, jacobian=jacobian)
+        session = cls(
+            config=config,
+            selector=selector,
+            target=target,
+            jacobian=jacobian,
+            lift_scale=lift_scale,
+            on_message=on_message,
+        )
+        session._arm = arm
+        session._source = vision
+        #: 借来的设备不归本会话收尾；``Robot`` 负责它们的最终关闭。
+        session._borrowed = True
+        return session
+
+    @staticmethod
+    def _require_action_ready(*, target, jacobian) -> None:
+        """普通动作的前置校验：必须在**打开任何设备之前**完成。"""
+        if target is None:
+            raise ServoError("缺少 target；先运行现有设目标或示教工具")
+        if jacobian is None:
+            raise ServoError("缺少 jacobian；先运行现有标定工具")
+        # 复用原有的奇异判据（pulses_for 自查行列式），不新增阈值。
+        jacobian.pulses_for(0.0, 0.0)
 
     # ------------------------------------------------------------- 动作
     def align_xy(self):
@@ -321,26 +409,25 @@ class Grasp:
 
     # ------------------------------------------------------------- 收尾
     def close(self) -> None:
-        """依次尝试停止、失能、关串口、关观测源；全部尝试后报告清理错误。
+        """依次尝试关闭机械臂与观测源；全部尝试后报告清理错误。
 
-        **限制如实说明**：``RobotArm.stop_all`` / ``disable_all`` 内部按轴顺序执行，
-        本方法保证的是"这两项以及后面的串口、视觉收尾分别被尝试"，
+        ``arm.close`` 内部已经按 停 → 失能 → 关串口 逐项试行（统一生命周期里上层
+        不再重复 stop / disable），这里保证的是"机械臂与观测源两项各自被尝试"，
         不是"每个轴都能各自容错"——那要改的是机械臂驱动，不在本次接口重构范围里。
+
+        **借用模式**（:meth:`from_modules`）下设备不归本会话：只结束本会话、把引用放开，
+        不 stop / disable / close 它们——同一个 Robot 会话里 arm 与 vision 还在被用。
         """
         if self._closed:
             return
         self._closed = True
         arm, source = self._arm, self._source
         self._arm = self._source = None
+        if self._borrowed:
+            return
         actions = []
         if arm is not None:
-            actions.extend(
-                (
-                    ("arm.stop_all", arm.stop_all),
-                    ("arm.disable_all", arm.disable_all),
-                    ("arm.close", arm.close),
-                )
-            )
+            actions.append(("arm.close", arm.close))
         if source is not None:
             actions.append(("source.close", source.close))
         errors = []

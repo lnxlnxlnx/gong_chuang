@@ -13,11 +13,13 @@
 
 两个特殊约定：
 
-- **靶标的位姿就是机械臂当前位姿。** 靶标装在爪上，相机测到它，就等于测到了机械臂——
-  这正是"不回零、只靠相机"能成立的原因。
+- **靶标给出的是夹持点所在的竖直轴。** 靶标装在爪上，相机测到它，就等于测到了机械臂——
+  这正是"不回零、只靠相机"能成立的原因。但靶标高于实际夹持点，所以
+  ``pipeline`` 会把测到的位姿按 ``h_grip = h_marker - marker_to_grasp_mm`` 换成**夹持点**
+  再写进 ``arm``（计划 §5.4）；本模块只负责报出靶标自己的位姿。
 - **物料位姿的 ``height_mm`` 是物料高度**（顶面离台面），不是夹持高度。夹持高度由
-  ``pipeline`` 用 :func:`modules.arm.drive.kinematics.marker_height_for_grasp` 按
-  ``grip_ratio`` 算出来，因为侧向夹取夹在哪个高度是**任务**参数，不是视觉参数。
+  ``pipeline`` 直接按 ``material_height_mm * grip_ratio`` 算出来（那个竖直偏移已经在
+  写入夹持点时减过一次，生成目标时不能再加一遍）。
 """
 
 from __future__ import annotations

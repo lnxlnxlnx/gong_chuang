@@ -79,10 +79,10 @@ class FakeArm:
 def arm_double(calls: list, *, estimated_seconds: float = 0.0) -> Mock:
     """一个"既有生命周期、又会如实上报动作时长"的假臂。
 
-    低层工具分支会走 ``initialize`` / ``enable_all`` / ``stop_all`` / ``disable_all`` /
-    ``close``；而 ``descend_z`` / ``retract_extension`` 会真的发脉冲并读动作报告里的
-    ``estimated_seconds``。裸 ``Mock`` 的那个属性是 Mock 本身，``float()`` 会当场炸，
-    所以两个动作方法要显式给一个数（0 才不用真等）。
+    低层工具分支用 ``RobotArm._from_settings`` 装配一次就绪的会话，收尾只调一次
+    ``close``（停 / 失能都在它内部）；而 ``descend_z`` / ``retract_extension`` 会真的
+    发脉冲并读动作报告里的 ``estimated_seconds``。裸 ``Mock`` 的那个属性是 Mock 本身，
+    ``float()`` 会当场炸，所以两个动作方法要显式给一个数（0 才不用真等）。
     """
     report = SimpleNamespace(estimated_seconds=estimated_seconds)
     arm = Mock()
@@ -326,7 +326,7 @@ def fake_motor_bus(port: str = "COM9") -> Mock:
 class MainTests(unittest.TestCase):
     """``main`` 的装配顺序：校验 -> 观测源 -> 机械臂，且只装配一次。
 
-    真机上"提前开设备"的代价不是慢，是**校验被挪到设备之后**：``RobotArm.__init__``
+    真机上"提前开设备"的代价不是慢，是**校验被挪到设备之后**：``RobotArm._from_settings``
     已经打开串口，这时候才发现没标定，机械臂已经在线上了。
     """
 
@@ -363,8 +363,6 @@ class MainTests(unittest.TestCase):
         属性——所以观测源只能从构造参数 ``new=`` 给进去，不能在拿到 patch 之后再挂。
         """
         arm = Mock() if arm is None else arm
-        arm.initialize.return_value = None
-        arm.enable_all.return_value = None
         if source is None:
             source = Mock()
         # ``_read_object`` 会读 ``link.error`` 拼错误信息；Mock 自动生成的属性是
@@ -495,28 +493,35 @@ class MainTests(unittest.TestCase):
     def test_calibrate_is_not_blocked_by_the_calibration_gate(self) -> None:
         """否则就是"缺标定所以不能跑标定"的死循环。"""
         arm = Mock()
-        arm.initialize.return_value = None
-        arm.enable_all.return_value = None
         mocks = self.build_session(target=None, jacobian=None)
         with mocks["loaders"], mocks["vision"], mocks["open_source"], patch.object(
-            menu, "RobotArm", return_value=arm
+            menu, "RobotArm"
         ) as robot_arm, patch.object(
             menu, "probe_jacobian", return_value=healthy_jacobian()
         ) as probe, patch.object(
             menu, "save_calibration", return_value="fake.json"
         ), mocks["new_arm"] as new_arm:
+            robot_arm._from_settings.return_value = arm
             status, printed = self.run_main(["--calibrate"])
 
         self.assertEqual(status, 0)
-        robot_arm.assert_called_once()
+        # 统一生命周期：低层工具分支也走 _from_settings，装配一次就绪会话。
+        robot_arm._from_settings.assert_called_once_with(
+            config=mocks["load_arm_config"].return_value, port="COM9"
+        )
         probe.assert_called_once()
         new_arm.assert_not_called()
         self.assertNotIn("先做两步标定", printed)
+        # 收尾只有一次 close；停 / 失能已经在它内部做过，菜单不再自己重复。
+        arm.close.assert_called_once_with()
+        arm.initialize.assert_not_called()
+        arm.stop.assert_not_called()
+        arm.disable_all.assert_not_called()
 
     def test_manual_modes_do_not_go_through_the_grasp_session(self) -> None:
         """``--align-z`` 有自己的前提（它只要求平面已对准），不走普通动作门禁。
 
-        判据是**走的是哪条路**：低层工具分支自己建 ``RobotArm``、自己收尾；
+        判据是**走的是哪条路**：低层工具分支自己装配 ``RobotArm``、自己收尾；
         普通动作那条会话路径（``modules.grasp.runtime._new_arm``）一次都不该被碰到。
         """
         # 用会如实上报动作时长的假臂，而不是裸 Mock：``run_descend_z`` 真的会发脉冲，
@@ -529,21 +534,26 @@ class MainTests(unittest.TestCase):
         with loaders[0], self.patch_vision(), patch.object(
             menu, "_open_source", new=open_source
         ), patch.object(
-            menu, "RobotArm", return_value=arm
+            menu, "RobotArm"
         ) as robot_arm, patch("modules.grasp.runtime._new_arm") as new_arm:
+            robot_arm._from_settings.return_value = arm
             status, printed = self.run_main(["--align-z"])
             source_calls = open_source.call_count
-            robot_calls = robot_arm.call_count
+            robot_calls = robot_arm._from_settings.call_count
 
         self.assertEqual(status, 0)
         self.assertEqual(source_calls, 1)
-        self.assertEqual(robot_calls, 1, "低层工具分支自己建机械臂")
+        self.assertEqual(robot_calls, 1, "低层工具分支自己装配机械臂")
         self.assertEqual(
             pulses,
             [("down", config.z_descend_pulses), ("back", config.extension_retract_pulses)],
         )
         new_arm.assert_not_called()
         self.assertNotIn("先做两步标定", printed)
+        # 收尾只调一次 close：停三轴与失能由 close 内部逐项试行。
+        arm.close.assert_called_once_with()
+        arm.stop.assert_not_called()
+        arm.disable_all.assert_not_called()
 
 
 if __name__ == "__main__":

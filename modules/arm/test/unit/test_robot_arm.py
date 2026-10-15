@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from modules.motor.drive.motion import estimate_move_seconds
 from modules.motor.drive.emm42 import Direction
-from modules.arm.drive.robot_arm import RobotArm
+from modules.arm.runtime import RobotArm
 from modules.arm.config import ArmConfig, AxisConfig
 
 
@@ -111,17 +111,24 @@ class FakeSerial:
 
 
 class ArmTestCase(unittest.TestCase):
-    """Build an arm whose waits are recorded instead of slept through."""
+    """Build an arm through the assembly seam, with waits recorded instead of slept.
+
+    ``RobotArm._from_settings`` 是 ``open`` 与假设备测试共用的装配接缝：它自己建三个
+    驱动器（真实协议 + 注入的内存串口）并使能，不做任何运动。
+    """
 
     def make_arm(self, serial=None, config=None):
         self.sleep = RecordingSleep()
         self.serial = serial if serial is not None else FakeSerial()
-        self.arm = RobotArm(
-            "/dev/ttyUSB0",
+        self.arm = RobotArm._from_settings(
             config=config if config is not None else fixture_config(),
-            serial_port=self.serial,
+            port="/dev/ttyUSB0",
+            bus=self.serial,
             sleep=self.sleep,
         )
+        # 装配时已经使能三个轴（3 条 0xF3 帧）；本类只看之后的动作帧，使能本身由
+        # RobotArmConstructionTests 与 enable 用例单独断言。
+        self.serial.writes.clear()
         return self.arm
 
 
@@ -163,15 +170,31 @@ class RobotArmBaseAxisTests(ArmTestCase):
         )
 
     def test_rejects_unsafe_or_non_integer_pulse_counts_before_writing(self) -> None:
+        """越界与非整数照旧在发帧之前拒绝；``pulses=0`` 不再是错误，见下一条。"""
         arm = self.make_arm()
 
-        for pulses in (0, arm.config.max_pulses + 1, 1.5):
+        for pulses in (arm.config.max_pulses + 1, 1.5):
             with self.subTest(pulses=pulses):
                 with self.assertRaises(ValueError):
                     arm.rotate_cw(pulses=pulses)  # type: ignore[arg-type]
 
         self.assertEqual(self.serial.writes, [])
         self.assertEqual(self.sleep.calls, [])
+
+    def test_zero_pulses_is_a_no_op_rather_than_an_error_or_a_zero_pulse_frame(self) -> None:
+        """新契约：位移不足半个脉冲就是"已经到位"——不发帧、不报错、不改变位置。
+
+        旧控制器把 0 当成非法输入拒绝；``RobotArm._signed_move`` 现在把它定义成空操作
+        （与 ``move_base_degrees(0.0)`` 同一条规矩），所以断言改成"什么都不发"。
+        """
+        arm = self.make_arm()
+
+        report = arm.rotate_cw(pulses=0)
+
+        self.assertEqual(self.serial.writes, [])
+        self.assertEqual(self.sleep.calls, [])
+        self.assertEqual(report.pulses, 0)
+        self.assertEqual(report.estimated_seconds, 0.0)
 
     def test_uses_the_configured_motion_limit_and_speed(self) -> None:
         config = fixture_config(pulses_per_revolution=4000, default_pulses=1200)
@@ -268,7 +291,7 @@ class RobotArmAxisMappingTests(ArmTestCase):
         arm = self.make_arm()
 
         arm.enable_all()
-        arm.stop_all()
+        arm.stop()
         arm.disable_all()
 
         self.assertEqual(
@@ -288,65 +311,79 @@ class RobotArmAxisMappingTests(ArmTestCase):
 
 
 class RobotArmConstructionTests(unittest.TestCase):
-    """构造中途失败时的资源归属。
+    """装配中途失败时的资源归属。
 
-    ``RobotArm.__init__`` 会**先打开共享串口、再建三个驱动器**。构造没返回时调用方
-    拿不到对象，所以那个串口只能由构造器自己收尾——不收的话下一次构造会莫名其妙地
-    打不开同一个口，而且现场看不出是谁占着。
+    ``RobotArm._from_settings`` 会**先打开共享串口、再建三个驱动器并使能**。装配没返回
+    时调用方拿不到对象，所以那个串口只能由装配方自己收尾——不收的话下一次装配会莫名其妙地
+    打不开同一个口，而且现场看不出是谁占着。借来的串口**不归**本实例管。
     """
 
-    def test_motor_failure_closes_the_serial_the_constructor_opened(self) -> None:
+    def test_assembly_enables_every_axis_without_moving(self) -> None:
+        """装配完就是"已使能、没动过"：三条使能帧，没有动作帧，位姿仍是未知。"""
+        serial = FakeSerial()
+
+        arm = RobotArm._from_settings(
+            config=fixture_config(), port="/dev/ttyUSB0", bus=serial
+        )
+
+        self.assertEqual(
+            serial.writes,
+            [torque_frame(motor_id=motor_id, enabled=True) for motor_id in (5, 6, 7)],
+        )
+        self.assertIsNone(arm.pose, "装配不做任何运动，位姿必须未知")
+
+    def test_motor_failure_closes_the_serial_the_assembly_opened(self) -> None:
         serial = FakeSerial()
         opened = []
 
-        def fake_open(self):
-            opened.append(self)
+        def fake_open(port):
+            opened.append(port)
             return serial
 
-        with patch.object(RobotArm, "_open_shared_serial", fake_open):
+        with patch.object(RobotArm, "_open_serial", fake_open):
             with patch(
-                "modules.arm.drive.robot_arm.Emm42Driver",
+                "modules.arm.runtime.Emm42Driver",
                 side_effect=RuntimeError("motor 6 不存在"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "motor 6 不存在"):
-                    RobotArm("/dev/ttyUSB0", config=fixture_config())
-        self.assertEqual(len(opened), 1, "串口确实由本构造器打开")
+                    RobotArm._from_settings(config=fixture_config(), port="/dev/ttyUSB0")
+        self.assertEqual(opened, ["/dev/ttyUSB0"], "串口确实由本次装配打开")
         self.assertFalse(serial.is_open, "自己开的串口必须由自己关掉")
 
-    def test_injected_serial_is_never_closed_by_a_failed_constructor(self) -> None:
-        """外部注入的 ``serial_port`` **不归**本构造器管，失败时不许擅自关掉。"""
+    def test_injected_serial_is_never_closed_by_a_failed_assembly(self) -> None:
+        """借来的 ``bus`` **不归**本实例管，失败时不许擅自关掉。"""
         serial = FakeSerial()
         with patch(
-            "modules.arm.drive.robot_arm.Emm42Driver",
+            "modules.arm.runtime.Emm42Driver",
             side_effect=RuntimeError("motor 6 不存在"),
         ):
             with self.assertRaisesRegex(RuntimeError, "motor 6 不存在"):
-                RobotArm(
-                    "/dev/ttyUSB0", config=fixture_config(), serial_port=serial
+                RobotArm._from_settings(
+                    config=fixture_config(), port="/dev/ttyUSB0", bus=serial
                 )
-        self.assertTrue(serial.is_open, "注入的串口不该被失败的构造器关掉")
+        self.assertTrue(serial.is_open, "借来的串口不该被失败的装配关掉")
 
-    def test_successful_construction_keeps_the_serial_open(self) -> None:
+    def test_successful_assembly_keeps_the_serial_open(self) -> None:
         """正常路径不能被收尾逻辑误伤：串口要保持打开，三个轴都建好。"""
         arm = ArmTestCase().make_arm()
-        self.assertTrue(arm._serial.is_open)
+        self.assertTrue(arm._bus.is_open)
         self.assertEqual(sorted(arm._motors), ["base", "extension", "lift"])
 
-    def test_cleanup_failure_keeps_the_construction_error_as_primary(self) -> None:
-        """关串口也失败时，构造失败仍是主异常，关串口的错误挂在 ``__cause__``。"""
+    def test_cleanup_failure_keeps_the_assembly_error_as_primary(self) -> None:
+        """关串口也失败时，装配失败仍是主异常，关串口的错误挂在 ``__cause__``。"""
         serial = FakeSerial()
 
         def broken_close() -> None:
             raise RuntimeError("close broke")
 
         serial.close = broken_close
-        with patch.object(RobotArm, "_open_shared_serial", lambda self: serial):
+        with patch.object(RobotArm, "_open_serial", lambda port: serial):
             with patch(
-                "modules.arm.drive.robot_arm.Emm42Driver",
+                "modules.arm.runtime.Emm42Driver",
                 side_effect=RuntimeError("motor 6 不存在"),
             ):
                 with self.assertRaises(RuntimeError) as caught:
-                    RobotArm("/dev/ttyUSB0", config=fixture_config())
+                    RobotArm._from_settings(config=fixture_config(), port="/dev/ttyUSB0")
         self.assertIn("motor 6 不存在", str(caught.exception))
         self.assertIsInstance(caught.exception.__cause__, RuntimeError)
         self.assertIn("close broke", str(caught.exception.__cause__))

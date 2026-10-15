@@ -2,6 +2,9 @@
 
 夹具刻意独立于 ``test_robot_arm.py``：命令帧的字面量在这里重新拼一遍，
 这样即使控制器写错了字段，本文件仍然会失败。
+
+臂通过 ``RobotArm._from_settings`` 装配（真实驱动 + 内存假串口），构造器本身不做 I/O；
+装配时会按统一生命周期使能三个轴，所以夹具把那三条使能帧清掉，只留本文件要看的动作帧。
 """
 
 from __future__ import annotations
@@ -9,7 +12,7 @@ from __future__ import annotations
 import unittest
 
 from modules.arm.config import ArmConfig, AxisConfig
-from modules.arm.drive.robot_arm import RobotArm
+from modules.arm.runtime import RobotArm
 from modules.motor.drive.emm42 import Direction
 
 POSITION_COMMAND = 0xFD
@@ -80,12 +83,15 @@ class UnitMoveTestCase(unittest.TestCase):
     def make_arm(self, config=None):
         self.sleep_calls: list = []
         self.serial = FakeSerial()
-        self.arm = RobotArm(
-            "/dev/ttyUSB0",
+        # 装配接缝：真实驱动 + 注入的假串口，不打开任何真实设备。
+        self.arm = RobotArm._from_settings(
             config=config if config is not None else fixture_config(),
-            serial_port=self.serial,
+            port="/dev/ttyUSB0",
+            bus=self.serial,
             sleep=self.sleep_calls.append,
         )
+        # 装配时已经使能三轴（3 条 0xF3 帧）；本文件只看之后的动作帧。
+        self.serial.writes.clear()
         return self.arm
 
 

@@ -132,21 +132,33 @@ class MecanumDrive:
         # 注入 sleep 便于离线单测；真机默认 time.sleep。
         self._sleep = sleep
 
-        # 四条协议命令必须写同一根总线，因此共享同一个 serial 实例
-        if serial_port is None:
-            serial_port = self._open_shared_serial()
-        self._serial = serial_port
+        # 四条协议命令必须写同一根总线，因此共享同一个 serial 实例。
+        # ``serial_port`` 传进来就是**借用**（同一个 Robot 会话里 arm 与 chassis 共用一条）：
+        # 借来的连接不归本对象关闭，只让自身失效——擅自关掉会切断另一个模块的总线。
+        self._owns_serial = serial_port is None
+        opened = serial_port if serial_port is not None else self._open_shared_serial()
+        self._serial = opened
 
         # 全部4个Emm42Driver共用同一个serial_port(分时复用总线)
-        self.wheels: dict[WheelPosition, Emm42Driver] = {}
-        for wheel in WHEEL_ORDER:
-            self.wheels[wheel] = Emm42Driver(
-                port,
-                self.motor_ids[wheel],
-                timeout=timeout,
-                pulses_per_revolution=pulses_per_revolution,
-                serial_port=self._serial,
-            )
+        try:
+            self.wheels: dict[WheelPosition, Emm42Driver] = {}
+            for wheel in WHEEL_ORDER:
+                self.wheels[wheel] = Emm42Driver(
+                    port,
+                    self.motor_ids[wheel],
+                    timeout=timeout,
+                    pulses_per_revolution=pulses_per_revolution,
+                    serial_port=self._serial,
+                )
+        except BaseException as primary:
+            # 构造没返回，就只能由构造器自己收尾；借来的串口留给它的所有者。
+            self.wheels = {}
+            if self._owns_serial and self._serial is not None:
+                try:
+                    self._serial.close()
+                except Exception as cleanup:
+                    raise primary.with_traceback(primary.__traceback__) from cleanup
+            raise
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -158,10 +170,23 @@ class MecanumDrive:
         """
         return self
 
+    @property
+    def owns_serial(self) -> bool:
+        """这条总线是不是本对象打开的；借用的不归它关。"""
+        return self._owns_serial
+
     def close(self) -> None:
-        """关闭共享的串口（四轮命令走同一根总线，关一次即可）。"""
-        self._serial.close()
-        self._serial = None
+        """关闭**自己打开**的共享串口；借来的只失效自身。
+
+        幂等：重复调用不会关第二次。四个轮子走同一根总线，关一次即可。
+        构造中途失败时本方法也可能被调用（这时 ``wheels`` 还没建完），所以不依赖它。
+        """
+        serial_port, self._serial = getattr(self, "_serial", None), None
+        if serial_port is None:
+            return
+        if not getattr(self, "_owns_serial", False):
+            return
+        serial_port.close()
 
     def _open_shared_serial(self) -> SerialPort:
         try:

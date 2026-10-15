@@ -1,11 +1,16 @@
-"""回零：帧内容、轴顺序、等待时长，以及"必须先使能"这条前提。"""
+"""回零：帧内容、轴顺序、等待时长，以及"必须先使能"这条前提。
+
+臂通过 ``RobotArm._from_settings`` 装配（真实驱动 + 内存假串口）：装配时会按统一生命
+周期使能三个轴，所以夹具把那三条使能帧清掉，只留本文件要看的回零 / 归位帧。
+"""
 
 from __future__ import annotations
 
 import unittest
 
 from modules.arm.config import ArmConfig, AxisConfig, HomingConfig
-from modules.arm.drive.robot_arm import RobotArm
+from modules.arm.drive.kinematics import CylindricalPose, TravelLimit
+from modules.arm.runtime import RobotArm
 from modules.motor.drive.emm42 import HomeMode
 
 PULSES_PER_REVOLUTION = 3200
@@ -66,6 +71,14 @@ def fixture_config(*, homing: HomingConfig = None, **overrides) -> ArmConfig:
             "lift": AxisConfig(motor_id=6, mm_per_motor_rev=40.0),
             "extension": AxisConfig(motor_id=7, mm_per_motor_rev=40.0),
         },
+        # 建立绝对参考的硬前提（计划 §5.2）：safe_pose 与三轴 limits 都要有，而且每个轴的
+        # 两端距参考位都**严格小于半个电机圈**（底座 360/5/2 = 36°、直线轴 40/2 = 20 mm）。
+        # 帧 / 顺序 / 等待时长的用例都要走完 ``home_all(wait=True)`` 的"记参考"那一步，
+        # 所以夹具给一套合格的值；不合格的边界另有专门用例。
+        base_limit=TravelLimit(-30.0, 30.0),
+        radial_limit=TravelLimit(30.0, 50.0),
+        height_limit=TravelLimit(50.0, 70.0),
+        safe_pose=CylindricalPose(0.0, 40.0, 60.0),
         homing=homing,
     )
     settings.update(overrides)
@@ -76,14 +89,17 @@ class HomingTestCase(unittest.TestCase):
     def make_arm(self, config=None):
         self.sleep_calls: list = []
         self.serial = FakeSerial()
-        self.arm = RobotArm(
-            "/dev/ttyUSB0",
+        # 装配接缝：真实驱动 + 注入的假串口，不打开任何真实设备。
+        self.arm = RobotArm._from_settings(
             config=config if config is not None else fixture_config(
                 homing=HomingConfig(mode=HomeMode.SINGLE_TURN_NEAREST)
             ),
-            serial_port=self.serial,
+            port="/dev/ttyUSB0",
+            bus=self.serial,
             sleep=self.sleep_calls.append,
         )
+        # 装配时已经使能三轴（3 条 0xF3 帧）；本文件只看之后的回零 / 归位帧。
+        self.serial.writes.clear()
         return self.arm
 
 
@@ -185,6 +201,28 @@ class HomingPreconditionTests(HomingTestCase):
 
         self.assertEqual(self.serial.writes, [])
 
+    def test_an_ambiguous_single_turn_reference_is_refused_before_the_first_frame(self) -> None:
+        """40 mm/圈、参考 0、行程 [0, 30]：不足一圈，但从 30 就近回零会走到 40。
+
+        所以建立绝对参考必须在**第一条回零帧之前**失败，不能回完零拿一个不知道是哪一圈的
+        位姿继续定位（计划 §5.2）。
+        """
+        arm = self.make_arm(
+            config=fixture_config(
+                homing=HomingConfig(mode=HomeMode.SINGLE_TURN_NEAREST),
+                safe_pose=CylindricalPose(0.0, 40.0, 0.0),
+                base_limit=TravelLimit(-30.0, 30.0),
+                radial_limit=TravelLimit(30.0, 50.0),
+                # 升降 40 mm/圈 -> 半圈 20 mm，而行程上端 30 mm 距参考 0 有 30 mm。
+                height_limit=TravelLimit(0.0, 30.0),
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "半个电机圈"):
+            arm.home_all()
+
+        self.assertEqual(self.serial.writes, [], "预检失败必须在第一条回零帧之前")
+
     def test_homing_is_a_separate_step_from_enabling_torque(self) -> None:
         """手册写明触发回零的前提是"已使能扭矩"，所以控制器不替调用方使能。"""
         arm = self.make_arm()
@@ -236,7 +274,9 @@ class HomingConfigWarningTests(unittest.TestCase):
         self.assertEqual(config.homing_warnings(), ())
 
     def test_missing_safe_pose_is_flagged_because_homing_lands_on_the_zeros(self) -> None:
-        config = fixture_config(homing=HomingConfig(mode=HomeMode.MULTI_TURN_LIMIT_SWITCH))
+        config = fixture_config(
+            homing=HomingConfig(mode=HomeMode.MULTI_TURN_LIMIT_SWITCH), safe_pose=None
+        )
 
         warnings = config.homing_warnings()
 

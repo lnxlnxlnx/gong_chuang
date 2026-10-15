@@ -1,7 +1,10 @@
-"""抓取编排：安全廊道、最短转角、闭环收敛，以及每条失败路径的收尾。
+"""抓取编排：安全廊道、最短转角、闭环收敛、夹持点换算，以及每条失败路径的收尾。
 
 夹具刻意做成**自洽**的：观测直接读假臂的真实位姿，误差只来自假臂自己没走够的背隙。
 这样"命令量 ≠ 到位量"就是真机上的那个来源，而不是靠脚本硬塞一个不一致的观测值。
+
+假臂同时扮演**位姿所有者**：它像 ``RobotArm`` 那样自己持有一份推算位姿
+（``record_measurement`` 写入、相对动作按命令量推进），管线只读 ``arm.pose``。
 """
 
 from __future__ import annotations
@@ -13,14 +16,20 @@ from modules.arm.config import ArmConfig, AxisConfig
 from modules.arm.drive.kinematics import CylindricalPose, TravelLimit, normalize_degrees
 from modules.grasp.config import CorrectionSettings, GraspConfig
 from modules.grasp.drive.perception import CellObservation
-from modules.grasp.drive.pipeline import GraspError, GraspPipeline, _planar_error_mm
-from modules.servo.drive.gripper import CLOSE_COMMAND, OPEN_COMMAND, GripperReport
+from modules.grasp.drive.pipeline import (
+    GraspError,
+    GraspPipeline,
+    GripperState,
+    _planar_error_mm,
+)
+from modules.servo.runtime import CLOSE_COMMAND, OPEN_COMMAND, GripperReport
 
 SAFE = CylindricalPose(0.0, 40.0, 60.0)
 MATERIAL = CylindricalPose(30.0, 90.0, 20.0)
 BACKLASH_MM = 4.0
-GRASP_HEIGHT_MM = 10.0          # 物料高 20 × grip_ratio 0.5 + 靶标偏移 0
-APPROACH_HEIGHT_MM = 30.0       # 夹持高度 + clearance 20
+GRASP_HEIGHT_MM = 10.0          # 夹持点高度 = 物料高 20 × grip_ratio 0.5
+APPROACH_HEIGHT_MM = 30.0       # 夹持点高度 + clearance 20
+MARKER_OFFSET_MM = 12.0         # 靶标在夹持点上方 12 mm（只用于偏移换算的用例）
 
 
 def arm_config(**overrides) -> ArmConfig:
@@ -57,7 +66,12 @@ def grasp_config(**overrides) -> GraspConfig:
 
 
 class FakeArm:
-    """跟踪真实位姿；每次动作后把**绝对**位姿记进 ``poses``，动作量记进事件日志。"""
+    """跟踪真实位姿；每次动作后把**绝对**位姿记进 ``poses``，动作量记进事件日志。
+
+    同时扮演位姿所有者：``pose`` 是它自己按**命令量**推算出来的位姿
+    （``record_measurement`` 写入，相对动作推进），``base`` / ``radial`` / ``height``
+    才是含背隙的真实位置——观测读的是后者，所以"命令量 ≠ 到位量"真的分开。
+    """
 
     def __init__(self, events: list, *, backlash_mm: float = BACKLASH_MM) -> None:
         self.base, self.radial, self.height = 0.0, SAFE.radial_mm, SAFE.height_mm
@@ -66,6 +80,26 @@ class FakeArm:
         self.calls: list = []
         self.poses: list = [(self.base, self.radial, self.height)]
         self._backlash = backlash_mm
+        self._pose = None
+
+    # ------------------------------------------------------- 位姿所有者那一面
+    @property
+    def pose(self):
+        """机械臂自己推算的夹持点位姿；没测量过就是"未知"。"""
+        return self._pose
+
+    def record_measurement(self, pose) -> None:
+        self._pose = pose
+
+    def _advance_pose(self, *, base: float = 0.0, radial: float = 0.0, height: float = 0.0) -> None:
+        """按**命令量**推进推算位姿；本来就未知时保持未知（不能凭空造位置）。"""
+        if self._pose is None:
+            return
+        self._pose = CylindricalPose(
+            normalize_degrees(self._pose.base_degrees + base),
+            self._pose.radial_mm + radial,
+            self._pose.height_mm + height,
+        )
 
     def _record(self, kind: str, value: float) -> None:
         self.events.append(("move", kind, value))
@@ -75,21 +109,24 @@ class FakeArm:
     def move_base_degrees(self, degrees, **_kwargs):
         self.rotations.append((degrees, self.radial))
         self.base += degrees
+        self._advance_pose(base=degrees)
         self._record("base", degrees)
 
     def move_radial_mm(self, millimeters, **_kwargs):
         lost = min(abs(millimeters), self._backlash) if self._backlash else 0.0
         self._backlash -= lost
         self.radial += millimeters - math.copysign(lost, millimeters)
+        self._advance_pose(radial=millimeters)
         self._record("radial", millimeters)
 
     def move_lift_mm(self, millimeters, **_kwargs):
         self.height += millimeters
+        self._advance_pose(height=millimeters)
         self._record("lift", millimeters)
 
-    def stop_all(self):
-        self.calls.append(("stop_all",))
-        self.events.append(("stop_all",))
+    def stop(self):
+        self.calls.append(("stop",))
+        self.events.append(("stop",))
 
     def disable_all(self):
         self.calls.append(("disable_all",))
@@ -341,7 +378,7 @@ class GraspFailureTests(unittest.TestCase):
             pipeline.pick_up()
 
         self.assertFalse(any(event[0] == "move" for event in events), events)
-        self.assertIn(("stop_all",), arm.calls)
+        self.assertIn(("stop",), arm.calls)
         self.assertIn(("disable_all",), arm.calls)
 
     def test_a_cycle_that_never_converges_fails_instead_of_descending(self) -> None:
@@ -360,7 +397,7 @@ class GraspFailureTests(unittest.TestCase):
 
         # 只要没收敛就不许下降：所有高度都停在接近高度或以上。
         self.assertGreaterEqual(min(arm.trace()), APPROACH_HEIGHT_MM - 1e-6, arm.trace())
-        self.assertIn(("stop_all",), arm.calls)
+        self.assertIn(("stop",), arm.calls)
         self.assertIn(("disable_all",), arm.calls)
 
     def test_a_missing_marker_fails_because_the_loop_has_no_feedback(self) -> None:
@@ -430,23 +467,72 @@ class GraspPlaceAndLifecycleTests(unittest.TestCase):
         self.assertEqual(parked, SAFE)
         self.assertAlmostEqual(arm.base, SAFE.base_degrees, places=6)
 
-    def test_close_closes_both_buses(self) -> None:
+    def test_close_leaves_the_borrowed_devices_alone(self) -> None:
+        """arm / gripper 是装配者传进来的**借用**对象：管线不能替它们收尾。
+
+        计划 §3.1：本地会话失效与资源释放分开，停 / 失能 / 关串口由装配者做一次。
+        """
         gripper = FakeGripper(reached=True)
         pipeline, arm, _ = build_pipeline(gripper=gripper)
+        arm_calls_before, gripper_calls_before = list(arm.calls), list(gripper.calls)
 
         pipeline.close()
+        pipeline.close()  # 幂等：重复关闭无动作
 
-        self.assertIn(("close",), arm.calls)
-        self.assertIn("close_port", gripper.calls)
+        self.assertEqual(arm.calls, arm_calls_before, "管线不能停 / 关借用的机械臂")
+        self.assertEqual(gripper.calls, gripper_calls_before, "管线不能关借用的夹爪")
 
-    def test_the_pipeline_reports_the_last_known_pose_or_none(self) -> None:
-        pipeline, _, _ = build_pipeline()
+    def test_actions_after_close_fail_before_touching_the_arm(self) -> None:
+        """会话失效之后动作要明确失败，而不是继续用借来的设备。"""
+        pipeline, arm, _ = build_pipeline()
+        pipeline.close()
+        arm_calls_before = list(arm.calls)
+
+        with self.assertRaisesRegex(GraspError, "已关闭"):
+            pipeline.pick_up()
+
+        self.assertEqual(arm.calls, arm_calls_before, arm.calls)
+
+    def test_the_pipeline_reports_the_arm_pose_and_not_its_own_copy(self) -> None:
+        """位姿只有一份，在机械臂手里：``pipeline.pose`` 就是 ``arm.pose``。"""
+        pipeline, arm, _ = build_pipeline()
         self.assertIsNone(pipeline.pose)
+        self.assertIsNone(arm.pose, "新假臂和真臂一样从「未知」开始")
 
         measured = pipeline.measure_pose()
 
         self.assertEqual(measured, CylindricalPose(0.0, SAFE.radial_mm, SAFE.height_mm))
+        self.assertIs(arm.pose, measured, "写回去的是机械臂自己的那一份")
         self.assertEqual(pipeline.pose, measured)
+
+    def test_the_measurement_is_written_as_the_grasp_point_not_the_marker(self) -> None:
+        """计划 §5.4：靶标高 72、竖直偏移 12 ⇒ 写回的夹持点高 60，XY 不变。"""
+        marker = CylindricalPose(15.0, 88.0, 72.0)
+        pipeline, arm, _ = build_pipeline(
+            observer=FixedObserver(marker, MATERIAL),
+            config=grasp_config(marker_to_grasp_mm=MARKER_OFFSET_MM),
+        )
+
+        measured = pipeline.measure_pose()
+
+        self.assertEqual(
+            measured, CylindricalPose(15.0, 88.0, 72.0 - MARKER_OFFSET_MM)
+        )
+        self.assertEqual(arm.pose, measured)
+
+    def test_the_grasp_height_does_not_add_the_marker_offset_twice(self) -> None:
+        """抓取高度 = 物料高 × grip_ratio；偏移已经在测量里减过一次，不能再加。"""
+        pipeline, _, _ = build_pipeline(
+            config=grasp_config(marker_to_grasp_mm=MARKER_OFFSET_MM)
+        )
+
+        result = pipeline.pick_up()
+
+        # 20 mm 物料夹半高 = 10 mm，不是 10 + 12。
+        self.assertAlmostEqual(result.grasp_pose.height_mm, GRASP_HEIGHT_MM, places=9)
+        self.assertAlmostEqual(
+            result.approach_pose.height_mm, APPROACH_HEIGHT_MM, places=9
+        )
 
     def test_placing_without_a_marker_fails_before_moving(self) -> None:
         events: list = []
@@ -459,6 +545,43 @@ class GraspPlaceAndLifecycleTests(unittest.TestCase):
             pipeline.place_at(CylindricalPose(0.0, 60.0, 20.0))
 
         self.assertFalse(any(event[0] == "move" for event in events), events)
+
+
+class GripperFactsTests(unittest.TestCase):
+    """抓取流程只保存**夹爪事实**；位姿归 arm 自己（原 ArmState 的位姿半边已迁走）。"""
+
+    def test_a_blocked_close_means_the_jaws_are_holding_something(self) -> None:
+        state = GripperState()
+
+        state.record_gripper(position=430, reached=False)
+
+        self.assertTrue(state.holds)
+        self.assertEqual(state.position, 430)
+
+    def test_reaching_the_closed_position_means_an_empty_grasp(self) -> None:
+        state = GripperState()
+
+        state.record_gripper(position=500, reached=True)
+
+        self.assertFalse(state.holds)
+
+    def test_nothing_is_claimed_before_the_first_close(self) -> None:
+        state = GripperState()
+        self.assertIsNone(state.position)
+        self.assertIsNone(state.holds)
+
+    def test_the_pipeline_keeps_no_pose_of_its_own(self) -> None:
+        """``pipeline.pose`` 必须直接来自 arm：本层不再存第二份位置。"""
+        events: list = []
+        arm = FakeArm(events)
+        pipeline, _, _ = build_pipeline(
+            arm=arm, events=events, observer=FixedObserver(MATERIAL, MATERIAL)
+        )
+
+        arm.record_measurement(CylindricalPose(10.0, 50.0, 30.0))
+
+        self.assertEqual(pipeline.pose, arm.pose)
+        self.assertFalse(hasattr(pipeline.state, "pose"))
 
 
 if __name__ == "__main__":

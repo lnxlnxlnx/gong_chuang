@@ -190,6 +190,102 @@ class ArmConfig:
             )
         return self.safe_pose
 
+    # ------------------------------------------------------- 绝对参考的唯一性
+    def motor_turn_span(self, axis_name: str) -> Optional[float]:
+        """一个**电机圈**对应这个轴的多少物理量（度 / 毫米）。
+
+        底座是 ``360 / reduction_ratio`` 度；直线轴就是 ``mm_per_motor_rev`` 毫米。
+        ``None`` 表示这个轴的标定还没填，无法判断单圈回零是否唯一。
+        """
+        if axis_name == "base":
+            try:
+                return self.base_degrees_per_motor_rev()
+            except ValueError:
+                return None
+        axes = getattr(self, "axes", None)
+        if not axes or axis_name not in axes:
+            return None
+        return axes[axis_name].mm_per_motor_rev
+
+    def axis_travel_span(self, axis_name: str) -> Optional[TravelLimit]:
+        """该轴的实测行程；``None`` 表示还没标定。"""
+        return {
+            "base": self.base_limit,
+            "lift": self.height_limit,
+            "extension": self.radial_limit,
+        }.get(axis_name)
+
+    def homing_reference_problems(self) -> Tuple[str, ...]:
+        """建立**绝对参考**之前必须满足的条件；空元组表示可以建立。
+
+        与 :meth:`homing_warnings` 的区别：那个是"提示"（缺 safe_pose、行程超一圈），
+        这个是"建立绝对参考的硬前提"。上层在**第一条回零帧之前**调用它，
+        不满足就明确拒绝，而不是回完零拿一个不知道是哪一圈的位姿继续定位。
+
+        单圈回零（``nearest`` / ``direction``）的条件比"行程小于一圈"更严格：
+
+        1. 行程端点相对参考位（``safe_pose``）的距离，两端都必须**严格小于半个电机圈**；
+        2. 恰好等于半圈也拒绝——等距而方向未明确时无法判定会落到哪一边；
+        3. 三个轴都要检查，不能只看底座。
+
+        例：40 mm/圈、参考 0、行程 ``[0, 30]``——虽然不足一圈，但从 30 就近回零会走到
+        40 而不是 0，所以必须预检失败。
+        """
+        homing = self.homing
+        if homing is None:
+            return ("homing 还没配置：无法建立绝对参考（不知道驱动器会回到哪个物理姿态）",)
+        safe_pose = self.safe_pose
+        if safe_pose is None:
+            return (
+                "safe_pose 还没配置：回零只能让三个轴各自回到驱动器零点，"
+                "而零点姿态处的夹持点坐标必须用相机测出来填进 safe_pose",
+            )
+
+        problems = []
+        reference = {
+            "base": safe_pose.base_degrees,
+            "lift": safe_pose.height_mm,
+            "extension": safe_pose.radial_mm,
+        }
+        labels = {"base": "底座", "lift": "升降", "extension": "伸缩"}
+        units = {"base": "°", "lift": " mm", "extension": " mm"}
+
+        for axis_name in AXIS_NAMES:
+            label, unit = labels[axis_name], units[axis_name]
+            limit = self.axis_travel_span(axis_name)
+            if limit is None:
+                problems.append(
+                    f"{label}（{axis_name}）的行程还没标定（limits），"
+                    "无法确认回零会落到哪一圈"
+                )
+                continue
+            if not homing.is_single_turn:
+                # 多圈模式：不靠单圈编码器，但仍要求参考位落在实测行程内，
+                # 否则"回到参考位"这件事本身没有意义。
+                if not limit.contains(reference[axis_name]):
+                    problems.append(
+                        f"{label}的 safe_pose {reference[axis_name]:.3f}{unit} 不在行程 "
+                        f"{limit.describe()}{unit} 内，回零参考无法成立"
+                    )
+                continue
+            half_turn = self.motor_turn_span(axis_name)
+            if half_turn is None:
+                problems.append(
+                    f"{label}（{axis_name}）缺少转换常数，无法判断单圈回零是否唯一"
+                )
+                continue
+            half_turn = abs(half_turn) / 2.0
+            for name, endpoint in (("最小", limit.minimum), ("最大", limit.maximum)):
+                distance = abs(endpoint - reference[axis_name])
+                if distance >= half_turn:
+                    problems.append(
+                        f"单圈回零下{label}行程{name}端 {endpoint:.3f}{unit} 距参考位 "
+                        f"{reference[axis_name]:.3f}{unit} 有 {distance:.3f}{unit}，"
+                        f"已达到或超过半个电机圈（{half_turn:.3f}{unit}）："
+                        "从那里就近回零可能落到相邻的圈上，绝对参考不唯一"
+                    )
+        return tuple(problems)
+
 
 def load_arm_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ArmConfig:
     """Load one JSON file and reject settings outside the supported protocol range."""

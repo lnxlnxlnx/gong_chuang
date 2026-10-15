@@ -20,15 +20,15 @@ from typing import Callable, List, Optional
 
 from modules.arm.config import ArmConfig, load_arm_config
 from modules.arm.drive.kinematics import CylindricalPose
+from modules.arm.runtime import RobotArm
 from modules.grasp.config import GraspConfig, load_grasp_config
 from modules.grasp.drive.perception import CellPerception
 from modules.grasp.drive.pipeline import GraspError, GraspPipeline
 from modules.motor.config import load_bus_config as load_motor_bus_config
 from modules.servo.config import GripperConfig, load_gripper_config
 from modules.servo.drive.bus_servo import load_bus_config as load_servo_bus_config
-from modules.servo.drive.gripper import GripperServo
+from modules.servo.runtime import GripperServo
 from modules.vision.config import VisionConfig, load_vision_config
-from modules.arm.drive.robot_arm import RobotArm
 
 CAMERA_WIDTH = 1280
 CAMERA_HEIGHT = 720
@@ -174,49 +174,61 @@ def main() -> None:
 
         window = open_preview()
         # 机械臂在步进总线，夹爪在舵机总线：两条串口，两个 loader，不要混。
-        gripper_config: GripperConfig = load_gripper_config()
-        servo_bus = load_servo_bus_config(platform)
-        arm = RobotArm(args.port or load_motor_bus_config(platform).port, config=arm_config)
-        gripper = GripperServo(
-            args.servo_port or servo_bus.port,
-            config=gripper_config,
-            bus_config=servo_bus,
-        )
-        pipeline = GraspPipeline(
-            arm=arm,
-            gripper=gripper,
-            observer=perception,
-            frames=frames,
-            config=grasp_config,
-            arm_config=arm_config,
-        )
-        try:
-            arm.initialize()
-            arm.enable_all()
-            gripper.initialize()
-            print(f"摄像头 {camera_id}；窗口 {window!r}，按 q 关闭预览")
-            if args.home_only:
-                # 回零是机械臂自己的动作，和抓取流程无关：这里直接调原语。
-                waited = arm.home_all()
-                print(f"回零完成（每轴等待 {waited[0]:.1f}s），位姿已可由相机测量确认。")
-                return
-            run_grasp_once(pipeline=pipeline, gripper=gripper)
-        finally:
-            pipeline.abort()
-            _close_quietly(arm, gripper)
+        port = args.port or load_motor_bus_config(platform).port
+        # 统一生命周期：``_from_settings`` 读好配置、开串口并使能，正常收尾交给 ``with``。
+        with RobotArm._from_settings(config=arm_config, port=port) as arm:
+            gripper = _open_gripper(servo_port=args.servo_port, platform=platform)
+            pipeline = GraspPipeline(
+                arm=arm,
+                gripper=gripper,
+                observer=perception,
+                frames=frames,
+                config=grasp_config,
+                arm_config=arm_config,
+            )
+            try:
+                print(f"摄像头 {camera_id}；窗口 {window!r}，按 q 关闭预览")
+                if args.home_only:
+                    # 回零是机械臂自己的动作，和抓取流程无关：这里直接调原语。
+                    waited = arm.home_all()
+                    print(f"回零完成（每轴等待 {waited[0]:.1f}s），位姿已可由相机测量确认。")
+                    return
+                run_grasp_once(pipeline=pipeline, gripper=gripper)
+            except BaseException:
+                # 真出事了才 abort（停三轴、失能）；正常结束不用它代表收尾。
+                pipeline.abort()
+                raise
+            finally:
+                # 本地会话先失效，再按取得资源的逆序关各自的自有资源；
+                # 机械臂那条串口由上面的 with 关一次。
+                pipeline.close()
+                _close_quietly(gripper, "舵机串口")
     finally:
         camera.release()
         if window is not None:
             close_previews()
 
 
-def _close_quietly(arm: RobotArm, gripper: GripperServo) -> None:
-    """两条串口都要关；任何一个失败都不能盖住真正的错误。"""
-    for name, action in (("机械臂串口", arm.close), ("舵机串口", gripper.close)):
-        try:
-            action()
-        except Exception as error:  # noqa: BLE001 - 收尾失败不能掩盖原始异常
-            print(f"[!] 关闭{name}失败：{error!r}", file=sys.stderr)
+def _open_gripper(*, servo_port: Optional[str], platform: str) -> GripperServo:
+    """开夹爪会话：默认走模块自己的 ``open``，只有命令行覆盖端口时才自己装配。
+
+    ``GripperServo.open()`` 读的是同一份 servo 配置（夹爪参数与总线参数都在里面），
+    不接受串口覆盖；而现场就是要用 ``--servo-port`` 改端口。覆盖这一条路径按 ``open``
+    内部同一顺序装配（构造 → ``initialize`` 开总线并上扭矩一次），不是第二套生命周期。
+    """
+    if servo_port is None:
+        return GripperServo.open()
+    bus = load_servo_bus_config(platform)
+    config: GripperConfig = load_gripper_config()
+    return GripperServo(config=config, port=servo_port, baudrate=bus.baudrate).initialize()
+
+
+def _close_quietly(resource, name: str) -> None:
+    """关一个自有资源；失败只打印，不能盖住真正的错误。"""
+    try:
+        resource.close()
+    except Exception as error:  # noqa: BLE001 - 收尾失败不能掩盖原始异常
+        print(f"[!] 关闭{name}失败：{error!r}", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -9,8 +9,8 @@ import os
 import sys
 from typing import Callable, Optional, Tuple
 
-from modules.arm.drive.robot_arm import RobotArm
 from modules.arm.config import ArmConfig, load_arm_config
+from modules.arm.runtime import RobotArm
 from modules.motor.config import load_bus_config
 
 Action = Tuple[str, Optional[Callable[[int], object]]]
@@ -61,26 +61,8 @@ def run_hardware_test(
     pulses: int,
     prompt: Callable[[str], str] = input,
 ) -> None:
-    """Run the interactive sequence and always leave the arm stopped and unpowered."""
-    try:
-        arm.initialize()
-        arm.enable_all()
-        run_sequence(arm, pulses=pulses, prompt=prompt)
-    finally:
-        _cleanup(arm)
-
-
-def _cleanup(arm: RobotArm) -> None:
-    """Attempt every cleanup action without replacing the command that originally failed."""
-    for name, action in (
-        ("停止", arm.stop_all),
-        ("失能", arm.disable_all),
-        ("关闭串口", arm.close),
-    ):
-        try:
-            action()
-        except Exception as error:
-            print(f"[!] 清理{name}失败：{error!r}", file=sys.stderr)
+    """Run the interactive sequence; ``close`` 由调用方的上下文负责收尾。"""
+    run_sequence(arm, pulses=pulses, prompt=prompt)
 
 
 def parse_args(config: ArmConfig) -> argparse.Namespace:
@@ -117,8 +99,9 @@ def _pulse_count(config: ArmConfig) -> Callable[[str], int]:
 def main() -> None:
     config = load_arm_config()
     args = parse_args(config)
-    arm = RobotArm(args.port, config=config)
-    run_hardware_test(arm, pulses=args.pulses)
+    # 统一生命周期：open 已经读过配置、开好串口并使能；收尾交给 with。
+    with RobotArm._from_settings(config=config, port=args.port) as arm:
+        run_hardware_test(arm, pulses=args.pulses)
 
 
 if __name__ == "__main__":

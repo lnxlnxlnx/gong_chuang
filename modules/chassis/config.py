@@ -1,4 +1,10 @@
-"""Load editable platform profiles for mecanum hardware tests."""
+"""Load editable platform profiles for mecanum hardware tests.
+
+**只读并校验配置**：不建驱动、不开串口。装配在
+:meth:`modules.chassis.runtime.MecanumChassis.open`（它会建 :class:`MecanumDrive` 并
+打开或借用那条共享步进总线），所以这里不导入任何上层类型、也不导入 MecanumDrive——
+那样会让"配置"反过来依赖"装配"，成环。
+"""
 
 from __future__ import annotations
 
@@ -7,9 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from modules.chassis.drive.mecanum import MecanumDrive, WheelPosition
-from modules.chassis.drive.chassis import MecanumChassis
-from modules.motor.config import load_bus_config
+from modules.chassis.drive.mecanum import WheelPosition
+from modules.motor.drive.emm42 import Emm42Driver
+
+#: 轮速上限直接取自驱动器，不再绕经 ``MecanumDrive``——那会让配置反过来依赖装配。
+MAX_RPM = Emm42Driver.MAX_RPM
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
@@ -78,40 +86,12 @@ def load_profile(profile_name: str, config_path: Path = DEFAULT_CONFIG_PATH) -> 
         pattern=pattern,
         rotation_gain=rotation_gain,
         motion_transform=motion_transform,
-        individual_rpm=_integer(individual.get("rpm"), "individual_wheels.rpm", minimum=1, maximum=MecanumDrive.MAX_RPM),
+        individual_rpm=_integer(individual.get("rpm"), "individual_wheels.rpm", minimum=1, maximum=MAX_RPM),
         individual_duration=_number(individual.get("duration"), "individual_wheels.duration", minimum=0, exclusive=True),
-        chassis_rpm=_integer(chassis.get("rpm"), "chassis_motion.rpm", minimum=1, maximum=MecanumDrive.MAX_RPM),
+        chassis_rpm=_integer(chassis.get("rpm"), "chassis_motion.rpm", minimum=1, maximum=MAX_RPM),
         chassis_duration=_number(chassis.get("duration"), "chassis_motion.duration", minimum=0, exclusive=True),
         chassis_pause=_number(chassis.get("pause"), "chassis_motion.pause", minimum=0),
     )
-
-
-def create_drive(
-    profile: HardwareProfile,
-    *,
-    port: str | None = None,
-    acceleration: int | None = None,
-) -> MecanumDrive:
-    """Create a controller from the profile, taking the bus port from motor config."""
-    return MecanumDrive(
-        port if port is not None else load_bus_config().port,
-        motor_ids=profile.motor_ids,
-        wheel_signs=profile.wheel_signs,
-        acceleration=profile.acceleration if acceleration is None else acceleration,
-        pattern=profile.pattern,
-        rotation_gain=profile.rotation_gain,
-        motion_transform=profile.motion_transform,
-    )
-
-
-def create_chassis(
-    profile: HardwareProfile,
-    *,
-    port: str | None = None,
-    acceleration: int | None = None,
-) -> MecanumChassis:
-    """Create the application-facing chassis facade from a hardware profile."""
-    return MecanumChassis(create_drive(profile, port=port, acceleration=acceleration))
 
 
 def _mapping(value: object, name: str) -> Mapping[str, object]:

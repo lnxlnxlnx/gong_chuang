@@ -15,7 +15,7 @@ from modules.arm.drive.kinematics import (
     height_above_table,
     inverse_cylindrical,
     linear_pulses_for_mm,
-    marker_height_for_grasp,
+    grip_height_mm,
     mm_for_linear_pulses,
     normalize_degrees,
     require_reachable,
@@ -222,31 +222,26 @@ class HeightTests(unittest.TestCase):
         )
 
     def test_side_grasp_height_follows_the_material_height(self) -> None:
-        # 物料高 20 mm，夹半高 -> 夹持点高 10 mm；靶标在夹持点上方 12 mm -> 靶标要到 22 mm。
+        """物料高 20 mm、夹半高 -> 夹持点高 10 mm。
+
+        **不含**靶标与夹持点之间的竖直偏移：那个偏移在把观测写成夹持点位姿时已经减过
+        一次（``pipeline._grasp_pose``），生成目标时再加一遍就是重复补偿。
+        """
         self.assertAlmostEqual(
-            marker_height_for_grasp(
-                material_height_mm=20.0, grip_ratio=0.5, marker_to_grasp_mm=12.0
-            ),
-            22.0,
-            places=9,
+            grip_height_mm(material_height_mm=20.0, grip_ratio=0.5), 10.0, places=9
         )
         self.assertAlmostEqual(
-            marker_height_for_grasp(
-                material_height_mm=20.0, grip_ratio=1.0, marker_to_grasp_mm=0.0
-            ),
-            20.0,
-            places=9,
+            grip_height_mm(material_height_mm=20.0, grip_ratio=1.0), 20.0, places=9
+        )
+        self.assertAlmostEqual(
+            grip_height_mm(material_height_mm=20.0, grip_ratio=0.0), 0.0, places=9
         )
 
     def test_invalid_grasp_inputs_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
-            marker_height_for_grasp(
-                material_height_mm=20.0, grip_ratio=1.5, marker_to_grasp_mm=0.0
-            )
+            grip_height_mm(material_height_mm=20.0, grip_ratio=1.5)
         with self.assertRaises(ValueError):
-            marker_height_for_grasp(
-                material_height_mm=-1.0, grip_ratio=0.5, marker_to_grasp_mm=0.0
-            )
+            grip_height_mm(material_height_mm=-1.0, grip_ratio=0.5)
 
 
 class TravelLimitTests(unittest.TestCase):

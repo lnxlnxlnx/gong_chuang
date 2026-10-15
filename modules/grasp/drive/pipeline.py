@@ -13,8 +13,26 @@
    :meth:`_visual_align` 的小角度修正可以就地转（爪子本来就悬在物料上方几十毫米），
    不受这条约束——否则每次微调都要缩回一次，太慢且没有必要。
 2. **最短转角。** θ 从 170° 到 -170° 要走 20°，不是 340°。
-3. **任何失败路径都要收尾。** 异常一律走 :meth:`abort`：停三轴、失能。
+3. **失败要收尾，但收尾不等于关设备。** 异常一律走 :meth:`abort`：停三轴、失能。
    刻意**不**张开夹爪——中途失败时松开爪子会把已经抓住的东西掉下去。
+   而 :meth:`close` 只结束**本地会话**：``arm`` / ``gripper`` 都是装配者传进来的
+   借用对象，停 / 失能 / 关串口由装配者负责一次（见
+   ``docs/模块调用与统一初始化方案.md`` §3.1）。
+
+## 位姿只有一份，在机械臂手里
+
+夹持点的当前位姿归 :class:`modules.arm.runtime.RobotArm` 所有：:attr:`pose` 直接读
+``arm.pose``，相机测量用 ``arm.record_measurement(...)`` 写回去；本层**不再**自己存
+第二份位姿，也不再按目标量推进它（相对动作会按实际下发的整数脉冲自己推进）。
+
+写回去的是**夹持点**位置而不是靶标位置（计划 §5.4）：靶标正装在夹持点上方，所以
+
+```
+h_grip = h_marker - marker_to_grasp_mm        （XY 不变）
+```
+
+抓取高度因此直接是 ``material_height_mm * grip_ratio``：那个竖直偏移只在
+:meth:`_grasp_pose` 里减一次，生成目标时**不能**再加一遍。
 
 ## 与标定的一个约定
 
@@ -34,15 +52,13 @@ from modules.arm.config import ArmConfig, load_arm_config
 from modules.arm.drive.kinematics import (
     CylindricalPose,
     forward_cylindrical,
-    marker_height_for_grasp,
     normalize_degrees,
     require_reachable,
     shortest_angle_delta_degrees,
 )
 from modules.grasp.config import GraspConfig, load_grasp_config
-from modules.grasp.drive.arm_state import ArmState
 from modules.grasp.drive.perception import CellObservation
-from modules.servo.drive.gripper import GripperReport
+from modules.servo.runtime import GripperReport
 
 #: 小于这个角度就当作"角度没变"，不必绕安全廊道。
 ANGLE_EPSILON_DEGREES = 0.05
@@ -55,23 +71,50 @@ class GraspError(RuntimeError):
     """抓取流程无法继续（看不到目标、超出可达域、闭环丢目标等）。"""
 
 
-class ArmLike(Protocol):
-    """``RobotArm`` 在抓取流程里用到的部分。"""
+@dataclass
+class GripperState:
+    """夹爪事实：最近一次读回的位置，以及"爪口是不是被挡住了"。
 
+    只属于**抓取流程**，而且只有这两项——机械臂位姿不在这里。它唯一的所有者是
+    ``RobotArm`` 自己（见 :mod:`modules.arm.arm_state`），本层只通过 :attr:`pose` 读。
+
+    ``holds`` 为 ``True`` 说明爪口没走到闭合位（``reached=False``），通常是夹到了物料；
+    也可能是卡料或位置没标定，所以它不单独构成"抓到了"的承诺。
+    """
+
+    #: 夹爪舵机最近一次读回的位置值。
+    position: Optional[int] = None
+    #: 爪口是否被挡住（``None`` 表示还没闭合过）。
+    holds: Optional[bool] = None
+
+    def record_gripper(self, *, position: int, reached: bool) -> None:
+        """记下夹爪读回值。``reached=False`` 说明爪口没到闭合位。"""
+        self.position = int(position)
+        self.holds = not reached
+
+
+class ArmLike(Protocol):
+    """``RobotArm`` 在抓取流程里用到的部分。
+
+    位姿归机械臂自己所有：本层只读 :attr:`pose`，并用 :meth:`record_measurement`
+    写回一次已标定测量。``arm`` 是**借用**的，所以这里没有 ``close``——设备收尾归装配者。
+    """
+
+    @property
+    def pose(self) -> Optional[CylindricalPose]: ...
+    def record_measurement(self, pose: CylindricalPose) -> None: ...
     def move_base_degrees(self, degrees: float, **kwargs) -> object: ...
     def move_lift_mm(self, millimeters: float, **kwargs) -> object: ...
     def move_radial_mm(self, millimeters: float, **kwargs) -> object: ...
-    def stop_all(self) -> None: ...
+    def stop(self) -> None: ...
     def disable_all(self) -> None: ...
-    def close(self) -> None: ...
 
 
 class GripperLike(Protocol):
-    """``GripperServo`` 在抓取流程里用到的部分。"""
+    """``GripperServo`` 在抓取流程里用到的部分；同样是借用的，没有 ``close``。"""
 
     def open_jaws(self, **kwargs) -> GripperReport: ...
     def close_jaws(self, **kwargs) -> GripperReport: ...
-    def close(self) -> None: ...
 
 
 class ObserverLike(Protocol):
@@ -121,7 +164,7 @@ class GraspPipeline:
         frames: Callable[[], object],
         config: Optional[GraspConfig] = None,
         arm_config: Optional[ArmConfig] = None,
-        state: Optional[ArmState] = None,
+        state: Optional[GripperState] = None,
     ) -> None:
         self.arm = arm
         self.gripper = gripper
@@ -129,30 +172,57 @@ class GraspPipeline:
         self.frames = frames
         self.config = config if config is not None else load_grasp_config()
         self.arm_config = arm_config if arm_config is not None else load_arm_config()
-        #: 位姿与夹爪状态。默认自建一个；**要跨模块共享就传进来**——电机和舵机在别处
-        #: 也可能被驱动，状态只该有一个所有者。
-        self.state = state if state is not None else ArmState()
+        #: 夹爪事实（最近一次读回位置、是否夹住）。机械臂位姿**不在**这里：
+        #: 它唯一的所有者是 ``arm`` 自己，本层只通过 :attr:`pose` 读。
+        self.state = state if state is not None else GripperState()
+        self._closed = False
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise GraspError("抓取会话已关闭")
 
     # ------------------------------------------------------------- 观测
     def observe(self) -> CellObservation:
         """取一帧并换算成两个圆柱位姿。"""
+        self._require_open()
         return self.observer.observe(self.frames())
 
     def measure_pose(self) -> CylindricalPose:
-        """用相机重新测量机械臂当前位姿（靠爪上靶标），并记进状态。"""
+        """用相机重新测量机械臂当前位姿（靠爪上靶标），并写回机械臂。
+
+        写回去的是**夹持点**位置而不是靶标位置（计划 §5.4）：
+        ``h_grip = h_marker - marker_to_grasp_mm``，XY 不变。
+        """
         observation = self.observe()
         if observation.marker is None:
             raise GraspError(
                 "画面里看不到夹爪靶标；先确认 targets.marker_diameter_mm 和靶标颜色已配置，"
                 "且靶标装在爪顶、朝向镜头"
             )
-        self.state.record_measurement(_normalized(observation.marker))
-        return self.state.require_pose()
+        pose = self._grasp_pose(observation.marker)
+        self.arm.record_measurement(pose)
+        return pose
 
     @property
     def pose(self) -> Optional[CylindricalPose]:
-        """最近一次已知位姿；没测过就是 ``None``。"""
-        return self.state.pose
+        """机械臂当前的**夹持点**位姿（读 ``arm.pose``）；没测过就是 ``None``。"""
+        return None if self.arm is None else self.arm.pose
+
+    def _grasp_pose(self, marker: CylindricalPose) -> CylindricalPose:
+        """靶标观测 → **夹持点**位姿：竖直偏移只在这里减一次。
+
+        平面位置相同（靶标正装在夹持点上方），高度相差 ``marker_to_grasp_mm``，
+        所以 ``h_grip = h_marker - marker_to_grasp_mm``——这是
+        :func:`modules.arm.drive.kinematics.marker_height_for_grasp` 的逆运算，
+        抓取目标高度不再把偏移加回去。
+        """
+        return _normalized(
+            CylindricalPose(
+                marker.base_degrees,
+                marker.radial_mm,
+                marker.height_mm - self.config.marker_to_grasp_mm,
+            )
+        )
 
     # ------------------------------------------------------------- 主流程
     def pick_up(self) -> PickResult:
@@ -161,17 +231,17 @@ class GraspPipeline:
         顺序：观测 → 可达性 → 绕到物料上方 → 视觉微调 → 下降 → 夹紧 → 抬起 → 退安全位。
         下降段是**盲走**：爪子压上去会遮住物料，所以微调必须在下降之前收敛完。
         """
+        self._require_open()
         try:
             observation = self._observe_both()
             material = observation.material
             if material is None:  # _observe_both 已保证，这里只为类型收窄
                 raise GraspError("画面里没有物料")
 
-            grasp_height = marker_height_for_grasp(
-                material_height_mm=material.height_mm,
-                grip_ratio=self.config.grip_ratio,
-                marker_to_grasp_mm=self.config.marker_to_grasp_mm,
-            )
+            # 夹持点高度 = 物料高 × 夹持比例。靶标在夹持点上方 marker_to_grasp_mm，
+            # 那个偏移已经在 _grasp_pose 里从**测量**中减过一次，这里再加就是重复补偿
+            # （计划 §5.4）。
+            grasp_height = material.height_mm * self.config.grip_ratio
             approach_pose = CylindricalPose(
                 material.base_degrees,
                 material.radial_mm,
@@ -212,6 +282,7 @@ class GraspPipeline:
 
     def place_at(self, pose: CylindricalPose) -> GripperReport:
         """把手里拿的东西放到指定位姿：过去 → 下降 → 张开 → 退回安全位。"""
+        self._require_open()
         self.measure_pose()
         self._require_reachable(pose)
         try:
@@ -232,6 +303,7 @@ class GraspPipeline:
 
     def park(self) -> CylindricalPose:
         """退到安全位并停下；每个循环开始或结束时用它。"""
+        self._require_open()
         self.measure_pose()
         try:
             self._command(self.arm_config.require_safe_pose())
@@ -241,34 +313,43 @@ class GraspPipeline:
         return self._require_pose()
 
     def abort(self) -> None:
-        """失败路径的统一收尾：停三轴、失能，并把位姿标成未知。
+        """失败路径的统一收尾：停三轴、失能；机械臂随之把位姿标成未知。
 
         刻意**不**动夹爪：中途失败时松开爪子会把已经抓住的物料掉下去。
         收尾本身再出错也不能盖住原始异常，所以这里吞掉异常并继续。
+        ``stop`` 只停执行器，不关连接；设备最终收尾仍归装配者。
         """
-        # 停下来之后"我在哪"就不再可信（可能半路被挡过），如实标成未知。
-        self.state.mark_unknown()
-        for action in (self.arm.stop_all, self.arm.disable_all):
+        # 停下来之后"我在哪"就不再可信（可能半路被挡过），机械臂会如实标成未知。
+        for action in (self.arm.stop, self.arm.disable_all):
             try:
                 action()
             except Exception:  # noqa: BLE001 - 收尾失败不能掩盖真正的错误
                 pass
 
     def close(self) -> None:
-        """关闭两侧硬件（机械臂总线与舵机总线是两条串口）。"""
-        self.arm.close()
-        self.gripper.close()
+        """结束**本地会话**：不关借用的 ``arm`` / ``gripper``，也不停/失能它们。
+
+        ``arm`` / ``gripper`` 都是装配者传进来的对象，关掉等于切断别的模块正在用的
+        连接（计划 §3.1）：真正的收尾——``arm.close()`` 里的停 → 失能 → 关串口——
+        由装配者执行一次。这里只让本会话失效并丢掉自己的引用；重复调用无动作。
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self.arm = None
+        self.gripper = None
 
     # ------------------------------------------------------------- 运动
     def _require_pose(self) -> CylindricalPose:
-        """状态里的当前位姿；未知就拒绝动。
+        """机械臂自己报告的当前位姿；未知就拒绝动。
 
         这里只问"知不知道"，不问"够不够信"——位姿来源（回零、相机、还是推算）
         由调用方在流程边界自行决定怎么用。
         """
-        if not self.state.is_known:
-            raise GraspError("还不知道机械臂当前位置；先 measure_pose()，或让状态里已有位姿")
-        return self.state.require_pose()
+        pose = None if self.arm is None else self.arm.pose
+        if pose is None:
+            raise GraspError("还不知道机械臂当前位置；先 measure_pose()，或让机械臂已有位姿")
+        return pose
 
     def _command(self, target: CylindricalPose) -> None:
         """走到 ``target``；要转角度时先经安全廊道缩回抬升。"""
@@ -306,8 +387,8 @@ class GraspPipeline:
             self._move(self.arm.move_lift_mm, delta_height)
         if abs(delta_base) > ANGLE_EPSILON_DEGREES:
             self._move(self.arm.move_base_degrees, delta_base)
-        # 命令发出且 wait=True 已等完，就把状态推进到 waypoint（角度照测量域归一）。
-        self.state.record_move(_normalized(waypoint))
+        # 位姿不再由本层按目标量写：机械臂在每条相对动作里按**实际下发的整数脉冲**
+        # 自己推进（见 RobotArm._advance_pose）。
 
     def _move(self, action: Callable[..., object], value: float) -> None:
         rpm = self.config.motion_rpm
@@ -332,7 +413,7 @@ class GraspPipeline:
             marker, material = observation.marker, observation.material
             if marker is None or material is None:  # _observe_both 已保证
                 raise GraspError("闭环微调时丢了目标")
-            self.state.record_measurement(_normalized(marker))
+            self.arm.record_measurement(self._grasp_pose(marker))
             last_error = _planar_error_mm(marker, material)
             if last_error <= self.config.correction.tolerance_mm:
                 return step
@@ -345,13 +426,7 @@ class GraspPipeline:
                 self._move(self.arm.move_radial_mm, delta_radial)
             if abs(delta_base) > ANGLE_EPSILON_DEGREES:
                 self._move(self.arm.move_base_degrees, delta_base)
-            self.state.record_move(
-                CylindricalPose(
-                    marker.base_degrees + delta_base,
-                    marker.radial_mm + delta_radial,
-                    marker.height_mm,
-                )
-            )
+            # 走完之后位置由机械臂自己按实际脉冲推进，本层不再写第二份。
         raise GraspError(
             f"视觉闭环 {self.config.correction.iterations} 次仍未收敛，"
             f"最后平面误差 {last_error:.1f} mm（容差 {self.config.correction.tolerance_mm:.1f} mm）；"
@@ -360,7 +435,7 @@ class GraspPipeline:
 
     # ------------------------------------------------------------- 校验
     def _observe_both(self) -> CellObservation:
-        """观测并要求靶标和物料都在；把位姿记成测量值。"""
+        """观测并要求靶标和物料都在；把**夹持点**测量写回机械臂。"""
         observation = self.observe()
         if observation.marker is None and observation.material is None:
             raise GraspError("画面里既没有靶标也没有物料")
@@ -368,7 +443,7 @@ class GraspPipeline:
             raise GraspError("画面里看不到夹爪靶标；闭环没有反馈就无法继续")
         if observation.material is None:
             raise GraspError("画面里没有物料")
-        self.state.record_measurement(_normalized(observation.marker))
+        self.arm.record_measurement(self._grasp_pose(observation.marker))
         return observation
 
     def _require_reachable(self, pose: CylindricalPose) -> None:
@@ -410,14 +485,16 @@ def _self_test() -> int:
     from modules.arm.drive.kinematics import TravelLimit
     from modules.grasp.config import CorrectionSettings, GraspConfig
     from modules.grasp.drive.perception import CellObservation
-    from modules.servo.drive.gripper import CLOSE_COMMAND, OPEN_COMMAND, GripperReport
+    from modules.servo.runtime import CLOSE_COMMAND, OPEN_COMMAND, GripperReport
 
     safe_radial = 40.0
 
     class FakeArm:
         """跟踪真实位姿；第一次径向移动故意少走 ``BACKLASH_MM``，模拟背隙。
 
-        这样"命令位姿"和"真实位姿"会真的分开——闭环要修的正是这个差，
+        同时像真臂那样自己持有一份**推算位姿**：``record_measurement`` 写入、每条相对
+        动作按命令量推进；``base`` / ``radial`` / ``height`` 才是含背隙的真实位置，
+        观测读它。于是"命令量 ≠ 到位量"会真的分开——闭环要修的正是这个差，
         而不是靠脚本硬塞一个不一致的观测值。
         """
 
@@ -428,24 +505,45 @@ def _self_test() -> int:
             self.rotations: list = []
             self.calls: list = []
             self._backlash = self.BACKLASH_MM
+            self._pose = None
+
+        @property
+        def pose(self):
+            """机械臂自己推算的夹持点位姿；没测量过就是"未知"。"""
+            return self._pose
+
+        def record_measurement(self, pose):
+            self._pose = pose
+
+        def _advance_pose(self, *, base=0.0, radial=0.0, height=0.0):
+            if self._pose is None:
+                return
+            self._pose = CylindricalPose(
+                normalize_degrees(self._pose.base_degrees + base),
+                self._pose.radial_mm + radial,
+                self._pose.height_mm + height,
+            )
 
         def move_base_degrees(self, degrees, **_kwargs):
             self.rotations.append((degrees, self.radial))
             self.base += degrees
+            self._advance_pose(base=degrees)
             self.calls.append(("base", round(degrees, 3)))
 
         def move_radial_mm(self, millimeters, **_kwargs):
             lost = min(abs(millimeters), self._backlash) if self._backlash else 0.0
             self._backlash -= lost
             self.radial += millimeters - math.copysign(lost, millimeters)
+            self._advance_pose(radial=millimeters)
             self.calls.append(("radial", round(millimeters, 3)))
 
         def move_lift_mm(self, millimeters, **_kwargs):
             self.height += millimeters
+            self._advance_pose(height=millimeters)
             self.calls.append(("lift", round(millimeters, 3)))
 
-        def stop_all(self):
-            self.calls.append(("stop_all",))
+        def stop(self):
+            self.calls.append(("stop",))
 
         def disable_all(self):
             self.calls.append(("disable_all",))
@@ -527,7 +625,7 @@ def _self_test() -> int:
 
     result = pipeline.pick_up()
 
-    # 夹持高度 = 物料高 20 × 0.5 + 靶标偏移 0 = 10 mm。
+    # 夹持点高度 = 物料高 20 × 0.5 = 10 mm（靶标偏移 0，所以这里没有补偿项）。
     assert abs(result.grasp_pose.height_mm - 10.0) < 1e-9, result.grasp_pose
     # 背隙让第一次伸出的 50 mm 只走了 46 mm（落在 86 而不是 90），闭环必须把它修回来。
     assert result.correction_steps == 1, result.correction_steps
@@ -566,7 +664,7 @@ def _self_test() -> int:
         assert "行程" in str(error), error
     else:
         raise AssertionError("超出径向行程的目标必须报 GraspError")
-    assert ("stop_all",) in far_arm.calls and ("disable_all",) in far_arm.calls, far_arm.calls
+    assert ("stop",) in far_arm.calls and ("disable_all",) in far_arm.calls, far_arm.calls
     assert not any(call[0] in ("base", "radial", "lift") for call in far_arm.calls), far_arm.calls
 
     # 看不到靶标：报 GraspError，闭环不能靠猜。
@@ -589,6 +687,20 @@ def _self_test() -> int:
         assert "靶标" in str(error), error
     else:
         raise AssertionError("看不到靶标必须报 GraspError")
+
+    # 结束本地会话**不**动借用的设备：停 / 失能 / 关串口都归装配者做一次（计划 §3.1）。
+    arm_calls_before_close = list(arm.calls)
+    gripper_calls_before_close = list(gripper.calls)
+    pipeline.close()
+    pipeline.close()  # 重复关闭无动作
+    assert arm.calls == arm_calls_before_close, (
+        "close 不能停 / 失能 / 关借用的机械臂",
+        arm.calls,
+    )
+    assert gripper.calls == gripper_calls_before_close, (
+        "close 不能关借用的夹爪",
+        gripper.calls,
+    )
 
     print(f"抓取编排自测通过：{result.summary()}")
     return 0

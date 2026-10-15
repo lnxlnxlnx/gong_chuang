@@ -1,8 +1,9 @@
 """转盘舵机封装：把裸舵机位置值收成"分度到某个工位"的语义接口。
 
 转盘和夹爪挂的是**同一条总线舵机总线**（幻尔半双工，115200 bps），两个舵机只靠 ID 区分：
-夹爪 ``gripper.servo_id``、转盘 ``turntable.servo_id``。所以这里和
-``modules.servo.drive.gripper`` 是同一层的兄弟：共用 ``BusServo``，各自补上自己的语义。
+夹爪 ``gripper.servo_id``、转盘 ``turntable.servo_id``。夹爪的上层现在在
+:mod:`modules.servo.runtime`（原 ``modules/servo/drive/gripper.py`` 已退出），
+两者是同一层的兄弟：共用 ``BusServo``，各自补上自己的语义。
 
 ``BusServo`` 只知道"走到 0..1000 的某个位置"，而转盘的三个位置是**物料放取工位**。
 这一层补上那个语义：位置来自 ``modules/servo/config.json`` 的 ``turntable.stations``，

@@ -2,11 +2,13 @@
 
 这个文件只测**会话生命周期**，不测伺服算法（那些在 ``test_eye_in_hand``）：
 
-1. 普通动作需要 ``target`` 与 ``jacobian``，而 ``RobotArm.__init__`` 已经打开串口，
-   所以"缺标定"必须在**构造设备之前**报出来——断了任何设备都不该被碰到；
-2. 关闭时四项收尾（``stop_all`` / ``disable_all`` / ``arm.close`` / ``source.close``）
-   **每项独立尝试**：``stop_all`` 失败不该让后面三项一个都不做；
-3. 重复关闭不再发任何动作；关闭之后每个动作方法立即失败，不自动重连。
+1. 普通动作需要 ``target`` 与 ``jacobian``，而 ``_new_arm`` 会打开串口，
+   所以"缺标定"必须在**装配设备之前**报出来——断了任何设备都不该被碰到；
+2. 装配机械臂**不做第二次初始化/使能**：``RobotArm._from_settings`` 返回的就绪对象
+   已经使能过（统一生命周期，计划 §2.2）；
+3. 关闭时两项收尾（``arm.close`` / ``source.close``）**每项独立尝试**：机械臂关闭失败
+   不该让观测源也不关；停三轴与失能已经在 ``arm.close`` 内部逐项试行，上层不再重复；
+4. 重复关闭不再发任何动作；关闭之后每个动作方法立即失败，不自动重连。
 """
 
 from __future__ import annotations
@@ -35,9 +37,8 @@ def singular_jacobian() -> ServoJacobian:
 
 
 def fake_arm() -> Mock:
-    """假臂：四个收尾动作都有，``initialize`` / ``enable_all`` 返回 None。"""
+    """假臂：自带停 / 失能 / 关串口（由 ``close`` 内部调用）与重使能。"""
     arm = Mock()
-    arm.initialize.return_value = None
     arm.enable_all.return_value = None
     return arm
 
@@ -111,11 +112,10 @@ class GraspSessionTests(unittest.TestCase):
         new_arm.assert_not_called()
 
     def test_a_session_uses_the_validated_order(self) -> None:
-        """校验 -> 取观测源 -> 建机械臂 -> initialize -> enable_all，一步都不少。"""
+        """校验 -> 取观测源 -> 装配机械臂；就绪对象已经使能，上层不再补一遍。"""
         order: list = []
         arm_config = object()
         arm = Mock()
-        arm.initialize.side_effect = lambda: order.append("initialize")
         arm.enable_all.side_effect = lambda: order.append("enable_all")
 
         def build_arm(port, config):
@@ -129,55 +129,54 @@ class GraspSessionTests(unittest.TestCase):
                 **self.settings(arm_config=arm_config),
             )
 
-        self.assertEqual(order, ["source", "new_arm", "initialize", "enable_all"])
+        self.assertEqual(order, ["source", "new_arm"])
+        # 统一生命周期：open 已经使能过，上层既不 initialize 也不 enable_all 第二次。
+        arm.initialize.assert_not_called()
+        arm.enable_all.assert_not_called()
         self.assertIs(grasp._arm, arm)
         new_arm.assert_called_once()
 
     # ------------------------------------------------------------ 失败收尾
-    def test_a_failing_initialize_still_closes_the_source_and_the_arm(self) -> None:
-        arm = fake_arm()
-        arm.initialize.side_effect = RuntimeError("串口没应答")
+    def test_a_failing_arm_assembly_still_closes_the_source(self) -> None:
+        """装配机械臂失败时：已取得的观测源必须被关掉，不留半就绪会话。"""
         source = Mock()
-        with patch("modules.grasp.runtime._new_arm", return_value=arm):
+        with patch(
+            "modules.grasp.runtime._new_arm", side_effect=RuntimeError("串口没应答")
+        ):
             with self.assertRaisesRegex(RuntimeError, "串口没应答"):
                 Grasp._open_settings(source_factory=lambda: source, **self.settings())
 
         source.close.assert_called_once_with()
-        arm.close.assert_called_once_with()
-        # 还没 enable 就失败了，但仍然逐项尝试：stop/disable 一次都不落。
-        arm.stop_all.assert_called_once_with()
-        arm.disable_all.assert_called_once_with()
 
     def test_cleanup_failure_becomes_the_cause_of_the_primary_error(self) -> None:
         """原业务错误必须是主异常（保留 traceback），收尾错误挂成 ``__cause__``。"""
-        arm = fake_arm()
-        arm.initialize.side_effect = ServoError("初始化失败")
         source = Mock()
         source.close.side_effect = RuntimeError("关不掉观测源")
-        with patch("modules.grasp.runtime._new_arm", return_value=arm):
+        with patch(
+            "modules.grasp.runtime._new_arm", side_effect=ServoError("装配失败")
+        ):
             with self.assertRaises(ServoError) as caught:
                 Grasp._open_settings(source_factory=lambda: source, **self.settings())
 
-        self.assertEqual(str(caught.exception), "初始化失败")
+        self.assertEqual(str(caught.exception), "装配失败")
         cause = caught.exception.__cause__
         self.assertIsInstance(cause, RuntimeError)
         self.assertIn("Grasp 清理失败", str(cause))
         self.assertIn("关不掉观测源", str(cause))
 
     # ------------------------------------------------------------ close
-    def test_failed_stop_still_disables_closes_arm_and_source(self) -> None:
+    def test_a_failed_arm_close_still_closes_the_source(self) -> None:
+        """机械臂关不掉不该让观测源也留着；两项各自独立尝试。"""
         grasp, arm, source, _new_arm = self.open_session()
-        arm.stop_all.side_effect = RuntimeError("stop failed")
+        arm.close.side_effect = RuntimeError("close failed")
 
         with self.assertRaises(RuntimeError) as caught:
             grasp.close()
-        self.assertIn("arm.stop_all", str(caught.exception))
+        self.assertIn("arm.close", str(caught.exception))
 
         # 第二次关：安静返回，不再发任何动作。
         grasp.close()
 
-        arm.stop_all.assert_called_once_with()
-        arm.disable_all.assert_called_once_with()
         arm.close.assert_called_once_with()
         source.close.assert_called_once_with()
 
@@ -186,27 +185,27 @@ class GraspSessionTests(unittest.TestCase):
         grasp.close()
         grasp.close()
         grasp.close()
-        for name in ("stop_all", "disable_all", "close"):
-            with self.subTest(action=name):
-                self.assertEqual(getattr(arm, name).call_count, 1, name)
+
+        self.assertEqual(arm.close.call_count, 1)
         self.assertEqual(source.close.call_count, 1)
+        # 停与失能已经在 arm.close 内部做过一次，上层不再重复（计划 §3）。
+        arm.stop.assert_not_called()
+        arm.disable_all.assert_not_called()
 
     def test_close_reports_every_failing_stage(self) -> None:
         """清单要列全：只报第一项会让人修完一个再发现下一个。"""
         grasp, arm, source, _new_arm = self.open_session()
-        arm.stop_all.side_effect = RuntimeError("stop 坏了")
-        arm.disable_all.side_effect = RuntimeError("disable 坏了")
+        arm.close.side_effect = RuntimeError("arm 关不掉")
         source.close.side_effect = RuntimeError("source 坏了")
 
         with self.assertRaises(RuntimeError) as caught:
             grasp.close()
 
         message = str(caught.exception)
-        for stage in ("arm.stop_all", "arm.disable_all", "source.close"):
+        for stage in ("arm.close", "source.close"):
             self.assertIn(stage, message)
-        self.assertNotIn("arm.close", message, "这一项没失败，不该进清单")
         self.assertIsInstance(caught.exception.__cause__, RuntimeError)
-        self.assertEqual(str(caught.exception.__cause__), "stop 坏了")
+        self.assertEqual(str(caught.exception.__cause__), "arm 关不掉")
 
     # ------------------------------------------------------------ 关闭之后
     def test_actions_after_close_raise_from_every_method(self) -> None:
@@ -233,18 +232,18 @@ class GraspSessionTests(unittest.TestCase):
     # ------------------------------------------------------------ __exit__
     def test_exit_without_a_business_error_propagates_the_cleanup_error(self) -> None:
         grasp, arm, _source, _new_arm = self.open_session()
-        arm.disable_all.side_effect = RuntimeError("disable 坏了")
+        arm.close.side_effect = RuntimeError("关机械臂坏了")
 
         with self.assertRaises(RuntimeError) as caught:
             with grasp:
                 pass
 
         self.assertIn("Grasp 清理失败", str(caught.exception))
-        self.assertIn("disable 坏了", str(caught.exception))
+        self.assertIn("关机械臂坏了", str(caught.exception))
 
     def test_exit_with_a_business_error_keeps_it_primary_and_attaches_the_cleanup(self) -> None:
         grasp, arm, _source, _new_arm = self.open_session()
-        arm.stop_all.side_effect = RuntimeError("stop 坏了")
+        arm.close.side_effect = RuntimeError("关机械臂坏了")
         business = ServoError("平面还没对准就下降")
 
         caught = None

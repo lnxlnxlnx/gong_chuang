@@ -18,17 +18,24 @@ MENU_ENTRY = (8, "底盘演示")
 import time
 import os
 
-from modules.chassis.config import create_chassis, load_profile
+from modules.chassis.config import load_profile
 from modules.chassis.drive.mecanum import WheelPosition
+from modules.chassis.runtime import MecanumChassis
+
+
+def _port() -> str:
+    """步进总线的端口来自 motor 配置（与 arm 共用同一根线）。"""
+    from modules.motor.config import load_bus_config
+
+    return load_bus_config().port
 
 
 def main(profile_name: str | None = None) -> None:
     if profile_name is None:
         profile_name = "windows" if os.name == "nt" else "jetson"
     profile = load_profile(profile_name)
-    car = create_chassis(profile).initialize()
-    try:
-        car.enable_all()
+    # 统一生命周期：_from_settings 已经 initialization + enable_all，收尾交给 with。
+    with MecanumChassis._from_settings(profile=profile, port=_port()) as car:
         time.sleep(0.2)
 
         # 依次演示：前进 → 后退 → 左平移 → 右平移 → 左旋 → 右旋
@@ -44,9 +51,6 @@ def main(profile_name: str | None = None) -> None:
         car.set_wheel_speed(WheelPosition.FL, signed_rpm=20, acceleration=5)
         time.sleep(5.0)
         car.stop()
-    finally:
-        car.disable_all()
-        car.close()
 
 
 if __name__ == "__main__":

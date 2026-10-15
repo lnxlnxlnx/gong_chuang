@@ -16,9 +16,34 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from modules.chassis.drive.mecanum import WHEEL_ORDER, WheelPosition
+from modules.chassis.drive.mecanum import WHEEL_ORDER, MecanumDrive, WheelPosition
 
-from modules.chassis.config import DEFAULT_CONFIG_PATH, create_drive, load_profile
+from modules.chassis.config import DEFAULT_CONFIG_PATH, HardwareProfile, load_profile
+
+
+def _create_drive(
+    profile: HardwareProfile,
+    *,
+    port: str | None = None,
+    acceleration: int | None = None,
+) -> MecanumDrive:
+    """本工具直接驱动四轮控制器（不看整车门面），所以自己建 ``MecanumDrive``。
+
+    原来是 ``modules.chassis.config.create_drive``；那个工厂已退出，装配现在只有
+    :meth:`modules.chassis.runtime.MecanumChassis.open` 一处。这里按同一份 profile 自己建，
+    端口照旧来自 motor 配置。
+    """
+    from modules.motor.config import load_bus_config
+
+    return MecanumDrive(
+        port if port is not None else load_bus_config().port,
+        motor_ids=profile.motor_ids,
+        wheel_signs=profile.wheel_signs,
+        acceleration=profile.acceleration if acceleration is None else acceleration,
+        pattern=profile.pattern,
+        rotation_gain=profile.rotation_gain,
+        motion_transform=profile.motion_transform,
+    )
 
 
 class IndividualWheelDrive(Protocol):
@@ -110,7 +135,7 @@ def main() -> None:
     duration = profile.individual_duration if args.duration is None else args.duration
     if duration <= 0:
         raise ValueError("duration must be positive")
-    car = create_drive(profile, port=args.port, acceleration=args.acceleration)
+    car = _create_drive(profile, port=args.port, acceleration=args.acceleration)
     run_hardware_test(
         car,
         rpm=profile.individual_rpm if args.rpm is None else args.rpm,
