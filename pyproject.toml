@@ -1,0 +1,3 @@
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["F401"]  # 完全关闭F401检测，不再报这个警告

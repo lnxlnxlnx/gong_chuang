@@ -174,43 +174,42 @@ def _result_when_occluded(
     )
 
 
-def _require_step_direction(
+def _step_is_reversed(
     jacobian: ServoJacobian,
     *,
     step: Tuple[int, int],
     measured: Tuple[float, float],
     config: ServoConfig,
-    say: Callable[[str], None],
-) -> None:
-    """这一步走完，画面**该**往哪动是雅可比说了算的；方向明显相反就必须停下。
+) -> bool:
+    """这一步的实测位移与雅可比预测是否**明显相反**。
 
-    雅可比是"每脉冲让画面挪多少"的**一次性**标定。相机重新装过、皮带或联轴器滑过、轴的
-    接线/方向改过之后，它和机器就可能对不上——而闭环只会照着它一直走，直到脉冲预算用完
-    （那时报的是"预算用完"，离真正的原因已经很远，现场看到的就是"越走越偏/方向不对"）。
-
-    判据刻意做窄：只有**预测位移与实测位移明显相反**（点积为负、两边都远高于停稳噪声）
-    才拦。物块被爪子推动、背隙吃掉一小步、雅可比只是偏小这类情况方向仍然一致，不误伤；
-    方向一致时只把"实测 vs 预测"打出来，供现场核对雅可比还准不准。
+    判据刻意做窄：点积为负，而且**两边都远高于停稳噪声**（``4 × settle_tolerance_mm``）。
+    预测本来就很小的一步（细调阶段的 1 mm）不算——那种量级上噪声就能翻转符号。
     """
     predicted = jacobian.displacement_for(step[0], step[1])
     floor = 4.0 * config.settle_tolerance_mm
     if math.hypot(predicted[0], predicted[1]) <= floor:
-        return
+        return False
     if math.hypot(measured[0], measured[1]) <= floor:
-        return
-    if predicted[0] * measured[0] + predicted[1] * measured[1] >= 0.0:
-        say(
-            f"  这一步实测画面位移 ({measured[0]:+.2f}, {measured[1]:+.2f}) mm，"
-            f"雅可比预测 ({predicted[0]:+.2f}, {predicted[1]:+.2f}) mm"
-        )
-        return
-    raise ServoError(
-        f"这一步的实测画面位移与雅可比预测**方向相反**：实测 "
+        return False
+    return predicted[0] * measured[0] + predicted[1] * measured[1] < 0.0
+
+
+def _reversed_step_error(
+    jacobian: ServoJacobian,
+    *,
+    step: Tuple[int, int],
+    measured: Tuple[float, float],
+) -> ServoError:
+    """连续两步都相反时的报错：把两个数都摆出来，并指向重探雅可比。"""
+    predicted = jacobian.displacement_for(step[0], step[1])
+    return ServoError(
+        f"连着两步的实测画面位移都与雅可比预测**方向相反**：最后一次实测 "
         f"({measured[0]:+.2f}, {measured[1]:+.2f}) mm，预测 "
         f"({predicted[0]:+.2f}, {predicted[1]:+.2f}) mm"
         f"（底座 {step[0]:+d}、伸缩 {step[1]:+d} 脉冲）。\n"
-        "  雅可比是“每脉冲让画面挪多少”的一次性标定，方向相反说明它和你现在的机器对不上："
-        "相机重新装过、皮带或联轴器滑过、轴的接线或方向改过。\n"
+        "  雅可比是“每脉冲让画面挪多少”的一次性标定，连续两步相反说明它和你现在的机器"
+        "对不上：相机重新装过、皮带或联轴器滑过、轴的接线或方向改过。\n"
         "  重探一次（探针自带两段同向位移的一致性判据，符号错了它自己会报）：\n"
         "    python -m modules.grasp.test.manual.align_xy --calibrate"
     )
@@ -340,9 +339,11 @@ def align_x_y(
     #: 读到它就会以为"没动过"，于是再发一次同样的指令——表现为来回振荡。
     checkpoint: Optional[float] = None
     #: 上一次动作**之前**的读数，与那一次下发的脉冲。用来核对"实测位移 vs 雅可比预测"：
-    #: 方向相反就是雅可比过时/装反的签名，必须立刻停下而不是把脉冲预算烧完。
+    #: 连续两步方向相反就是雅可比过时/装反的签名，必须停下而不是把脉冲预算烧完。
     previous_offset: Optional[Tuple[float, float]] = None
     previous_step: Optional[Tuple[int, int]] = None
+    #: 连续几步方向相反。**一步不算**（物块被推动、检测跳目标都会这样）。
+    contradictions = 0
     #: 第一次测到的像素直径，用来发现"物块被挡住了"。
     baseline_diameter: Optional[float] = None
     #: 这一轮判"停稳"用的一致性门槛。第一次用细档（要判"是不是已经对准了"），
@@ -421,19 +422,33 @@ def align_x_y(
                 tolerance_mm=config.tolerance_mm,
             )
 
-        # 上一次那一步到底把画面挪到哪了：与雅可比预测**方向相反**就立刻停下
-        # （那是雅可比过时/装反的签名，继续走只会把脉冲预算烧完，现场表现为"越走越偏"）。
+        # 上一次那一步到底把画面挪到哪了：**连续两步**都与雅可比预测方向相反才停下。
+        # 一步不算：物块被爪子推动、检测跳到画面里别的圆上，都会让单独一步看起来相反。
         if previous_step is not None and previous_offset is not None:
-            _require_step_direction(
-                jacobian,
-                step=previous_step,
-                measured=(
-                    offset[0] - previous_offset[0],
-                    offset[1] - previous_offset[1],
-                ),
-                config=config,
-                say=say,
+            measured = (
+                offset[0] - previous_offset[0],
+                offset[1] - previous_offset[1],
             )
+            predicted = jacobian.displacement_for(previous_step[0], previous_step[1])
+            if _step_is_reversed(
+                jacobian, step=previous_step, measured=measured, config=config
+            ):
+                contradictions += 1
+                if contradictions >= 2:
+                    raise _reversed_step_error(
+                        jacobian, step=previous_step, measured=measured
+                    )
+                say(
+                    f"  警告：这一步实测画面位移 ({measured[0]:+.2f}, {measured[1]:+.2f}) mm "
+                    f"与雅可比预测 ({predicted[0]:+.2f}, {predicted[1]:+.2f}) mm 方向相反；"
+                    "一步不算数（物块被推动、检测跳目标也会这样），再看下一步"
+                )
+            else:
+                contradictions = 0
+                say(
+                    f"  这一步实测画面位移 ({measured[0]:+.2f}, {measured[1]:+.2f}) mm，"
+                    f"雅可比预测 ({predicted[0]:+.2f}, {predicted[1]:+.2f}) mm"
+                )
 
         # 粗调 / 细调分档：误差大时放开单步上限，一步把大部分误差消掉，
         # 免得拆成好几轮、每轮都重新取帧定位。

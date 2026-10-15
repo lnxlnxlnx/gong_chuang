@@ -71,13 +71,13 @@ def pick_manual() -> None:
         # robot.arm.home_all()
 
             # 开机对位：把"臂现在停的地方"按你量的数声明成初始位姿
-        robot.arm.record_measurement(
-            CylindricalPose(base_degrees=0.0, radial_mm=180.0, height_mm=0.0)
-        )
-        robot.arm.move_by(x_mm=0, y_mm=0, z_mm=50)
-        time.sleep(1)
+        # robot.arm.record_measurement(
+        #     CylindricalPose(base_degrees=0.0, radial_mm=180.0, height_mm=0.0)
+        # )
+        robot.arm.move_up(pulses=4000)
+        robot.arm.move_forward(3200)
+        # # time.sleep(1)
         
-        # robot.arm.
         report = robot.vision.locate()
         if report.best is None:
             print("画面里没有通过校验的物料")
@@ -89,16 +89,44 @@ def pick_manual() -> None:
             f"{material.z_mm:.1f}) mm"
         )
 
-        # x/y 对准 → 下降 → 后缩；一次都不动高度（除了这一次开环下降）。
-        # robot.grasp.align_xy()
-        # robot.arm.move_by(x_mm=material.x_mm, y_mm=material.y_mm)
+        # # x/y 对准 → 下降 → 后缩；一次都不动高度（除了这一次开环下降）。
+        robot.grasp.align_xy()
+        # robot.arm.move_by(z_mm= - material.z_mm // 2)
+        # robot.arm.move_by(x_mm=- material.x_mm, y_mm= - material.y_mm)
+        # robot.arm.move_by(z_mm=- material.z_mm // 2)
         # pulses = int((material.z_mm) * 40)
         # robot.arm.move_down(pulses = pulses)
         # # print(result.summary())
         # # 就位成功不等于夹到了物料：闭不闭爪是业务的显式动作。
-        # robot.gripper.close_jaws()
+
         # time.sleep(1)
         # robot.gripper.open_jaws()
+
+def grab_box(robot):
+        robot.gripper.set_position(80)
+        robot.arm.rotate_cw(pulses=1000)
+        robot.arm.move_down(pulses=800)
+        robot.gripper.set_position(0)
+        robot.arm.move_up(pulses=1000)
+        robot.arm.rotate_ccw(pulses=1000)
+
+def adjust_arm_align():
+    with Robot.open(grasp=True, gripper=True) as robot:
+        robot.gripper.set_position(80)
+        robot.arm.move_up(pulses=5000)
+        robot.arm.move_forward(3200)
+        time.sleep(1)
+        report = robot.vision.locate()
+        if report.best is None:
+            print("画面里没有通过校验的物料")
+            return
+        material = report.best
+        print(
+            f"物料：{material.name or '未知'}，"
+            f"相机系 xyz=({material.x_mm:.1f}, {material.y_mm:.1f}, "
+            f"{material.z_mm:.1f}) mm"
+        )
+        # robot.arm.move_by(x_mm=- material.x_mm, y_mm= - material.y_mm)
 
 def test_vision():
     with Robot.open(vision=True) as robot:
@@ -112,6 +140,7 @@ def test_vision():
 if __name__ == "__main__":
     # main()
     pick_manual()
+    # adjust_arm_align()
     # locate_material()
     # pick_ready()
     # test_vision()

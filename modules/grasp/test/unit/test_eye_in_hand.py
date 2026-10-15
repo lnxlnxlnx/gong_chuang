@@ -1792,7 +1792,12 @@ class StepDirectionTests(unittest.TestCase):
             radial_dy=-self.TRUTH.radial_dy,
         )
 
-    def test_an_inverted_jacobian_stops_at_the_first_step(self) -> None:
+    def test_an_inverted_jacobian_stops_after_two_contradicting_steps(self) -> None:
+        """存下来的雅可比和机器相反（相机装反/接线改过）→ 连着两步相反就报，不再往下走。
+
+        **一步不算**：物块被爪子推动、检测跳到别的圆上都会让单独一步看起来相反，
+        所以判据要求连续两步；代价是多走一步，换来的是不误伤能收敛的闭环。
+        """
         arm = FakeArm(self.TRUTH)
 
         with self.assertRaises(ServoError) as caught:
@@ -1803,12 +1808,34 @@ class StepDirectionTests(unittest.TestCase):
 
         message = str(caught.exception)
         # 报错里要同时给出实测与预测两个数，现场才能核对；并给出重探的命令。
-        self.assertIn("方向相反", message)
+        self.assertIn("连着两步", message)
         self.assertIn("实测", message)
         self.assertIn("预测", message)
         self.assertIn("--calibrate", message)
-        # 只发了一步的帧（两个轴各一条），没有把预算烧完。
-        self.assertEqual(len(arm.calls), 2, arm.calls)
+        # 走了两步（每步两个轴各一条帧），没有把预算烧完。
+        self.assertEqual(len(arm.calls), 4, arm.calls)
+
+    def test_the_reversed_step_criterion_ignores_small_and_same_direction_steps(self) -> None:
+        """判据本身：方向相反才为真；预测很小（噪声量级）或同向都为假。"""
+        config = self.config()
+        # 预测 10 mm、实测 -5 mm：明显相反。
+        self.assertTrue(
+            algorithms._step_is_reversed(
+                self.TRUTH, step=(1000, 0), measured=(-5.0, 0.0), config=config
+            )
+        )
+        # 同向，只是走少了一半（背隙/被推动）：不算相反。
+        self.assertFalse(
+            algorithms._step_is_reversed(
+                self.TRUTH, step=(1000, 0), measured=(5.0, 0.0), config=config
+            )
+        )
+        # 预测本来就很小（细调阶段 1 mm 量级）：噪声就能翻转符号，不算数。
+        self.assertFalse(
+            algorithms._step_is_reversed(
+                self.TRUTH, step=(10, 0), measured=(-2.0, 0.0), config=config
+            )
+        )
 
     def test_a_partial_step_in_the_right_direction_is_not_flagged(self) -> None:
         """背隙/物块被推动让这一步只走了一部分，方向仍然一致 → 照旧收敛。"""

@@ -4,7 +4,7 @@
     "rpm": 30,
     "acceleration": 5,
     "default_pulses": 800,
-    "max_pulses": 5000
+    "max_pulses": 10000
   },
   "axes": {
     "base": {
@@ -13,11 +13,11 @@
     },
     "lift": {
       "motor_id": 6,
-      "mm_per_motor_rev": 60
+      "mm_per_motor_rev": 10
     },
     "extension": {
       "motor_id": 7,
-      "mm_per_motor_rev": 60
+      "mm_per_motor_rev": 53.45
     }
   },
   "homing": {
