@@ -6,10 +6,10 @@
 
 from __future__ import annotations
 
-from robot import Robot
 # 预览演示的**模块级**导入：``demo_material`` 只定义函数、不开设备，真正的装配发生在
 # 它内部（读配置 + ``Vision._open_config``）；保持模块级也让既有入口用例能直接替换它。
 from modules.vision.app.demo import demo_material
+from robot import Robot
 
 
 def main() -> None:
@@ -60,6 +60,17 @@ def pick_ready(*, grasp_config_path=None, vision_config_path=None) -> None:
         # 就位成功不等于夹到了物料：闭不闭爪是业务的显式动作。
         robot.gripper.close_jaws()
 
+def test_all_modules() -> None:
+    """**上层调用的样子**：一条 ``with`` 完成装配，动作一行一个。
+
+    这是 ``docs/模块调用与统一初始化方案.md`` §2 的目标用法，也是
+    ``tests/test_robot.py`` 覆盖的那条路：``Robot`` 负责开设备与收尾，
+    业务代码只读各个模块并调用动作。
+    """
+    with Robot.open(grasp=True, gripper=True, vision=True) as robot:
+        robot.vision.locate()
+        robot.grasp.align_and_descend()
+        robot.gripper.close_jaws()
 
 if __name__ == "__main__":
     main()

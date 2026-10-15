@@ -51,10 +51,42 @@ Robot 会话（总所有者）
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    List,
+    Optional,
+    Protocol,
+    Tuple,
+    TypeVar,
+)
+
+if TYPE_CHECKING:
+    # 只给注解用的导入：真实装配需要的导入留在各自的装配边界（``open`` 内部），
+    # 这样 ``import robot`` 不会顺带加载 cv2 / 模型 / 串口后端。
+    from modules.arm.config import ArmConfig
+    from modules.arm.runtime import RobotArm
+    from modules.chassis.config import HardwareProfile
+    from modules.chassis.runtime import MecanumChassis
+    from modules.grasp.runtime import Grasp, GraspSettings
+    from modules.motor.drive.emm42 import SerialPort
+    from modules.servo.runtime import GripperServo
+    from modules.vision.config import VisionConfig
+    from modules.vision.runtime import Vision
+T = TypeVar("T")
 
 #: 本轮的"全部"模块：四个设备模块 + 抓取流程。grasp 借用 arm/vision，不额外开设备。
-ALL_MODULES = ("arm", "gripper", "vision", "chassis", "grasp")
+ALL_MODULES: Tuple[str, ...] = ("arm", "gripper", "vision", "chassis", "grasp")
+
+
+class Closable(Protocol):
+    """只声明"能被关掉"这一件事的窄协议。
+
+    清理集合用它，是为了让 :meth:`Robot._attempt` 接受任意可关闭对象，
+    而**不是**把模块字段或属性放宽成这个协议——那两者仍是各自的具体类。
+    """
+
+    def close(self) -> None: ...
 
 
 class Robot:
@@ -63,23 +95,24 @@ class Robot:
     def __init__(
         self,
         *,
-        arm=None,
-        gripper=None,
-        vision=None,
-        chassis=None,
-        grasp=None,
-        bus=None,
+        arm: Optional["RobotArm"] = None,
+        gripper: Optional["GripperServo"] = None,
+        vision: Optional["Vision"] = None,
+        chassis: Optional["MecanumChassis"] = None,
+        grasp: Optional["Grasp"] = None,
+        bus: Optional["SerialPort"] = None,
     ) -> None:
         """只保存**已经装配好的**模块；本构造器不做设备 I/O。
 
         ``bus`` 是那条共享的步进连接（如果有模块用到它），由 :meth:`close` 最后关闭。
+        字段类型如实是 ``Optional[具体模块类]``：本次会话确实可能没启用某个模块。
         """
-        self._arm = arm
-        self._gripper = gripper
-        self._vision = vision
-        self._chassis = chassis
-        self._grasp = grasp
-        self._bus = bus
+        self._arm: Optional[RobotArm] = arm
+        self._gripper: Optional[GripperServo] = gripper
+        self._vision: Optional[Vision] = vision
+        self._chassis: Optional[MecanumChassis] = chassis
+        self._grasp: Optional[Grasp] = grasp
+        self._bus: Optional[SerialPort] = bus
         self._owns_bus = bus is not None
         self._closed = False
 
@@ -88,8 +121,11 @@ class Robot:
         if self._closed:
             raise RuntimeError("Robot 会话已关闭")
 
-    def _module(self, name: str, value):
-        """取一个模块；未启用时**立刻**说清楚，而不是在动作时偷偷打开设备。"""
+    def _module(self, name: str, value: Optional[T]) -> T:
+        """取一个模块；未启用时**立刻**说清楚，而不是在动作时偷偷打开设备。
+
+        返回类型是非空 ``T``：上层拿到对象后不必反复判空。
+        """
         self._require_open()
         if value is None:
             raise RuntimeError(
@@ -99,34 +135,34 @@ class Robot:
         return value
 
     @property
-    def arm(self):
+    def arm(self) -> "RobotArm":
         """机械臂模块实例；未启用时抛 ``RuntimeError``。"""
         return self._module("arm", self._arm)
 
     @property
-    def gripper(self):
+    def gripper(self) -> "GripperServo":
         """夹爪模块实例；未启用时抛 ``RuntimeError``。"""
         return self._module("gripper", self._gripper)
 
     @property
-    def vision(self):
+    def vision(self) -> "Vision":
         """视觉模块实例；未启用时抛 ``RuntimeError``。"""
         return self._module("vision", self._vision)
 
     @property
-    def chassis(self):
+    def chassis(self) -> "MecanumChassis":
         """底盘模块实例；未启用时抛 ``RuntimeError``。"""
         return self._module("chassis", self._chassis)
 
     @property
-    def grasp(self):
+    def grasp(self) -> "Grasp":
         """抓取会话；未启用时抛 ``RuntimeError``。"""
         return self._module("grasp", self._grasp)
 
     @property
-    def modules(self) -> tuple:
+    def modules(self) -> Tuple[str, ...]:
         """本次真正装配起来的模块名（供日志与验收用）。"""
-        found = []
+        found: List[str] = []
         for name, value in (
             ("arm", self._arm),
             ("gripper", self._gripper),
@@ -160,7 +196,7 @@ class Robot:
         vision_calibration_path: Optional[Path] = None,
         chassis_config_path: Optional[Path] = None,
         grasp_config_path: Optional[Path] = None,
-        on_message=None,
+        on_message: Optional[Callable[[str], None]] = None,
     ) -> "Robot":
         """按需装配本次要用的模块；至少明确选择一个。
 
@@ -188,24 +224,28 @@ class Robot:
             vision = True
 
         # ---- 阶段一：把所有配置读完，一个设备都不开 ----
-        arm_config = None
+        # 这些局部变量在"没选那个模块"时确实是 None，所以如实可空；装配点再逐个
+        # 用**实际值**判空缩窄，不靠另一个布尔变量替它们担保。
+        arm_config: Optional[ArmConfig] = None
+        port: Optional[str] = None
+        chassis_profile: Optional[HardwareProfile] = None
+        vision_settings: Optional[VisionConfig] = None
+        grasp_settings: Optional[GraspSettings] = None
+
         if arm:
             arm_path = arm_default if arm_config_path is None else Path(arm_config_path)
             arm_config = load_arm_config(config_path=arm_path)
-        port = None
         if arm or chassis:
             motor_path = motor_default if motor_config_path is None else Path(motor_config_path)
             # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
             port = load_bus_config(config_path=motor_path).port
 
-        chassis_profile = None
         if chassis:
             from modules.chassis.runtime import MecanumChassis
 
             chassis_profile = MecanumChassis.load_hardware_profile(chassis_config_path)
-
-        if arm and chassis:
-            cls._require_distinct_motor_addresses(arm_config, chassis_profile)
+            if arm_config is not None and chassis_profile is not None:
+                cls._require_distinct_motor_addresses(arm_config, chassis_profile)
 
         if gripper:
             # 只**校验**夹爪那份配置（夹爪参数 + 舵机总线）；真正的装配在开启阶段。
@@ -223,29 +263,51 @@ class Robot:
 
             vision_settings = _load_settings(vision_config_path, vision_calibration_path)
 
-        grasp_settings = None
         if grasp:
             grasp_settings = cls._load_grasp_settings(grasp_config_path)
 
         # ---- 阶段二：开始开设备；失败就把已经开的全部收掉 ----
         session = cls()
         try:
+            # arm 与 chassis 共用**一条**步进连接。端口是这条链的硬前置条件：
+            # 选了 arm/chassis 却没有端口，就在这里失败，而不是把 None 传下去。
             if arm or chassis:
+                if port is None:
+                    raise RuntimeError(
+                        "选了 arm/chassis 却没有可用的步进总线端口；"
+                        "请检查 modules/motor/config.json 的端口配置"
+                    )
                 session._bus = session._open_shared_bus(port)
+                # 这条连接是**本会话开的**，所以由本会话最后关闭。
                 session._owns_bus = True
 
             if arm:
                 from modules.arm.runtime import RobotArm
 
+                if arm_config is None:
+                    raise RuntimeError("选了 arm 却没有读到 arm 配置")
+                # 就地判空：不靠上面那个 `arm or chassis` 分支替这次装配担保端口存在。
+                if port is None:
+                    raise RuntimeError("选了 arm 却没有可用的步进总线端口")
                 session._arm = RobotArm._from_settings(
-                    config=arm_config, port=port, bus=session._bus, owns_bus=False
+                    config=arm_config,
+                    port=port,
+                    bus=session._bus,
+                    owns_bus=False,
                 )
 
             if chassis:
                 from modules.chassis.runtime import MecanumChassis
 
+                if chassis_profile is None:
+                    raise RuntimeError("选了 chassis 却没有读到 chassis 配置")
+                if port is None:
+                    raise RuntimeError("选了 chassis 却没有可用的步进总线端口")
                 session._chassis = MecanumChassis._from_settings(
-                    profile=chassis_profile, port=port, bus=session._bus, owns_bus=False
+                    profile=chassis_profile,
+                    port=port,
+                    bus=session._bus,
+                    owns_bus=False,
                 )
 
             if gripper:
@@ -257,16 +319,25 @@ class Robot:
             if vision:
                 from modules.vision.runtime import Vision
 
+                if vision_settings is None:
+                    raise RuntimeError("选了 vision 却没有读到视觉配置")
                 session._vision = Vision._open_config(vision_settings)
 
             if grasp:
                 from modules.grasp.runtime import Grasp
 
+                if grasp_settings is None:
+                    raise RuntimeError("选了 grasp 却没有读到抓取配置快照")
+                # 借用本次会话的同一个 arm 与 vision，不新开设备。
                 session._grasp = Grasp._from_modules_settings(
-                    arm=session._arm,
-                    vision=session._vision,
+                    config=grasp_settings["config"],
+                    selector=grasp_settings["selector"],
+                    target=grasp_settings["target"],
+                    jacobian=grasp_settings["jacobian"],
+                    lift_scale=grasp_settings["lift_scale"],
+                    arm=session.arm,
+                    vision=session.vision,
                     on_message=on_message,
-                    **grasp_settings,
                 )
             return session
         except BaseException as primary:
@@ -287,7 +358,7 @@ class Robot:
         vision_calibration_path: Optional[Path] = None,
         chassis_config_path: Optional[Path] = None,
         grasp_config_path: Optional[Path] = None,
-        on_message=None,
+        on_message: Optional[Callable[[str], None]] = None,
     ) -> "Robot":
         """一键开启本轮的全部五项；配置参数与 :meth:`open` 同名同义。
 
@@ -326,9 +397,14 @@ class Robot:
             )
 
     @staticmethod
-    def _open_shared_bus(port: str):
-        """打开那条共享的 Emm42 连接（arm 与 chassis 时序复用同一条）。"""
-        from modules.motor.drive.emm42 import Emm42Driver
+    @staticmethod
+    def _open_shared_bus(port: str) -> "SerialPort":
+        """打开那条共享的 Emm42 连接（arm 与 chassis 时序复用同一条）。
+
+        返回值标成 :class:`~modules.motor.drive.emm42.SerialPort`：上层只依赖这个窄协议，
+        真实实现仍是 pyserial 的 ``Serial``（它的 ``write`` 与协议声明一致，见那里的说明）。
+        """
+        from modules.motor.drive.emm42 import Emm42Driver, SerialPort as _SerialPort
 
         try:
             import serial
@@ -336,13 +412,17 @@ class Robot:
             raise RuntimeError(
                 "pyserial is required on Jetson. Install it in the target Python environment first."
             ) from error
-        return serial.Serial(port, baudrate=Emm42Driver.BAUDRATE, timeout=0.1)
+        opened: _SerialPort = serial.Serial(
+            port, baudrate=Emm42Driver.BAUDRATE, timeout=0.1
+        )
+        return opened
 
     @staticmethod
-    def _load_grasp_settings(config_path) -> dict:
+    def _load_grasp_settings(config_path: Optional[Path]) -> "GraspSettings":
         """读并校验 eye_in_hand 那份配置；返回可直接喂给 ``_from_modules_settings`` 的快照。
 
-        与 ``Grasp.from_modules`` 共用同一份参数校验，所以校验时机同样是**开设备之前**。
+        与 ``Grasp.from_modules`` 共用同一份参数校验，所以校验时机同样是**开设备之前**；
+        ``_require_action_ready`` 返回缩窄后的非空 target/jacobian，正是这份快照的类型要求。
         """
         from modules.grasp.drive.servo_model import (
             DEFAULT_CONFIG_PATH,
@@ -352,20 +432,19 @@ class Robot:
             load_servo_config,
             load_target,
         )
-        from modules.grasp.runtime import Grasp
+        from modules.grasp.runtime import Grasp, GraspSettings
 
         path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
-        settings = dict(
+        target, jacobian = Grasp._require_action_ready(
+            target=load_target(path), jacobian=load_jacobian(path)
+        )
+        return GraspSettings(
             config=load_servo_config(path),
             selector=load_object_selector(path),
-            target=load_target(path),
-            jacobian=load_jacobian(path),
+            target=target,
+            jacobian=jacobian,
             lift_scale=load_lift_scale(path),
         )
-        Grasp._require_action_ready(
-            target=settings["target"], jacobian=settings["jacobian"]
-        )
-        return settings
 
     # ------------------------------------------------------------- 收尾
     def close(self) -> None:
@@ -393,7 +472,7 @@ class Robot:
         self._grasp = self._vision = self._gripper = self._chassis = self._arm = None
         bus, self._bus = self._bus, None
 
-        errors = []
+        errors: List[Tuple[str, Exception]] = []
         if grasp is not None:
             self._attempt(errors, "grasp.close", grasp.close)
         # 逆序：后取得的先放。
@@ -410,11 +489,15 @@ class Robot:
         self._owns_bus = False
 
         if errors:
-            details = "; ".join("{}: {}".format(stage, error) for stage, error in errors)
+            details = "; ".join(f"{stage}: {error}" for stage, error in errors)
             raise RuntimeError("Robot 清理失败：" + details) from errors[0][1]
 
     @staticmethod
-    def _attempt(errors, stage: str, action) -> None:
+    def _attempt(
+        errors: List[Tuple[str, Exception]],
+        stage: str,
+        action: Callable[[], None],
+    ) -> None:
         """执行一项收尾；失败记进清单，但绝不跳过后面的项。"""
         try:
             action()

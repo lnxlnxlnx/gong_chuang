@@ -47,6 +47,20 @@ class FrameSource(Protocol):
     ) -> Optional[Sequence[MaterialSighting]]: ...
 
 
+class ClosableFrameSource(FrameSource, Protocol):
+    """支持观测与关闭；**是否拥有资源仍由会话装配决定**。
+
+    会话持有的观测源需要在收尾时被关掉，所以比 :class:`FrameSource` 多一条 ``close``。
+    它能调 ``close`` 不等于它拥有那些资源：借来的源（例如 ``Grasp.from_modules`` 传进来的
+    ``Vision``）由装配者收尾，会话只解除自己的引用。
+
+    这样 :class:`modules.vision.runtime.Vision`、``CameraLink`` 与满足协议的离线替身都能
+    注入，工厂到字段之间也不会丢掉关闭能力；而动作算法仍然只要求 :class:`FrameSource`。
+    """
+
+    def close(self) -> None: ...
+
+
 def select_object(
     sightings: Sequence[MaterialSighting], selector: ObjectSelector
 ) -> MaterialSighting:

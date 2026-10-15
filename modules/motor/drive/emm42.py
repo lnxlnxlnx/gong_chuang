@@ -22,11 +22,20 @@ from typing import Optional, Protocol, Tuple
 
 
 class SerialPort(Protocol):
-    """Minimum serial interface used by the driver and its tests."""
+    """Minimum serial interface used by the driver and its tests.
+
+    ``write`` 的形状按 **pyserial 的真实实现**声明，而不是按"看起来更安全"的写法：
+
+    - ``data`` 是位置参数（``/`` 之后不能再按关键字传；pyserial 与现有假串口都这样调）；
+    - 返回值可能是 ``None``（部分后端/假件如此），所以是 ``Optional[int]``。
+
+    本驱动只执行 ``serial_port.write(frame)`` 后 ``flush``，**不消费**这个返回值，
+    所以这里只修正协议声明，不引入"短写要报错"之类的新行为——那是另一件事。
+    """
 
     is_open: bool
 
-    def write(self, data: bytes) -> int: ...
+    def write(self, data: bytes, /) -> Optional[int]: ...
 
     def flush(self) -> None: ...
 

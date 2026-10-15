@@ -102,10 +102,13 @@ class GripperServo:
         self.position_tolerance = position_tolerance
         self.settle_seconds = settle_seconds
         self._sleep = sleep
-        self._borrowed = servo is not None
-        if self._borrowed:
-            self._servo = servo
+        # 直接判断**参数**本身，而不是先算一个布尔字段再据它分支：类型检查器不会因为
+        # ``self._borrowed`` 为真就推断出 ``_servo`` 非空，两个分支各自赋值才能确定。
+        if servo is not None:
+            self._borrowed = True
+            self._servo: BusServo = servo
         else:
+            self._borrowed = False
             if not port:
                 raise ValueError("建真实夹爪会话需要串口名（port）")
             self._servo = BusServo(port, config.servo_id, baudrate=baudrate)

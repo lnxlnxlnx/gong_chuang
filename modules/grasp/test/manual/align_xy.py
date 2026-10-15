@@ -137,6 +137,7 @@ from modules.grasp.drive.servo_model import (
     save_calibration,
 )
 from modules.grasp.drive.servo_observation import (
+    ClosableFrameSource,
     FrameSource,
     measure_offset,
     select_object,
@@ -149,7 +150,7 @@ def _say(message: str) -> None:
     print(f"  {message}")
 
 
-def _open_source(arguments, *, vision_settings) -> FrameSource:
+def _open_source(arguments, *, vision_settings) -> ClosableFrameSource:
     """按参数开一个观测源；调用方负责 ``close()``。
 
     **本地分支收的是已经读好的快照**（``vision_settings``），不在这里再读一次配置：

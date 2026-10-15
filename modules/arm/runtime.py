@@ -714,9 +714,11 @@ class RobotArm:
         位姿本来就未知时什么都不做（不能凭空造一个绝对位置）；已知时按标定换算成
         增量，角度照测量域归一。
         """
-        if not self.pose_state.is_known:
-            return
+        # 直接对**局部**取值判空：``pose_state.is_known`` 是个布尔属性，类型检查器
+        # 不会据此把 ``pose`` 缩窄成非空，而"未知时不推进"这条业务规则必须靠这个判断。
         current = self.pose_state.pose
+        if current is None:
+            return
         if axis_name == BASE_AXIS:
             degrees = base_degrees_for_pulses(
                 signed_pulses,

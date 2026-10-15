@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Callable, Optional, Tuple
 from modules.vision.config import VisionConfig
 
 if TYPE_CHECKING:
+    from modules.vision.drive.camera import USBCamera as Camera
     from modules.vision.drive.material_locate import MaterialLocator
     from modules.vision.drive.sighting import MaterialSighting
     from modules.vision.reports import MaterialReport, RegionReport
@@ -276,8 +277,10 @@ class Vision:
 
     def __init__(self, settings: VisionConfig) -> None:
         self._settings = settings
-        self._camera = None
-        self._locator = None
+        #: 相机与定位器在 ``open`` 之前确实还不存在，所以是可空字段；就绪后由
+        #: :meth:`_require_resources` 缩窄成非空，动作里只用那个局部变量。
+        self._camera: Optional[Camera] = None
+        self._locator: Optional[MaterialLocator] = None
         self._closed = False
         self._clock: Callable[[], float] = time.monotonic
         #: 读帧前丢掉几帧缓冲。摄像头没有队列，这是既有的启发式新鲜度处理。
@@ -327,28 +330,44 @@ class Vision:
         if self._closed:
             raise RuntimeError("Vision 已关闭")
 
+    def _require_resources(self) -> "Tuple[Camera, MaterialLocator]":
+        """校验会话开启并返回**确定存在**的相机与定位器。
+
+        构造之后、``open`` 完成之前这两个字段确实是 ``None``，所以它们如实标成可空；
+        就绪性只在这一处判定，动作方法用返回的局部变量，不再各自判空。
+        """
+        self._require_open()
+        camera, locator = self._camera, self._locator
+        if camera is None or locator is None:
+            raise RuntimeError(
+                "Vision 会话尚未就绪（请用 Vision.open(...) 创建，不要直接构造）"
+            )
+        return camera, locator
+
     @property
     def closed(self) -> bool:
         """会话是否已经关闭；关闭后 ``locate`` / ``frame`` 统一抛 ``RuntimeError``。"""
         return self._closed
 
     # ------------------------------------------------------------- 取帧与定位
-    def _read_report(self, *, timeout: Optional[float] = None):
+    def _read_report(
+        self, *, timeout: Optional[float] = None
+    ) -> "Optional[Tuple[MaterialReport, float]]":
         """丢掉缓冲里的旧画面，读一帧并定位；读不到返回 ``None``。
 
         返回 ``(report, stamp)``：``stamp`` 是**读到帧之后、推理之前**的时刻。
         保留它是因为闭环要靠它判断"手上这帧是不是过期了"；这是启发式新鲜度处理，
         不宣称等于相机曝光时刻，也不能用推理结束时间冒充。
         """
-        self._require_open()
+        camera, locator = self._require_resources()
         # 机械臂刚动完时，摄像头 / OpenCV 的缓冲里可能还压着动作**之前**的画面，
         # 直接读会拿到旧坐标，闭环就会以为没动过。先丢几帧再取。
         for _ in range(max(1, self._drain_frames)):
-            self._camera.read()
+            camera.read()
 
         deadline = None if timeout is None else self._clock() + max(0.0, timeout)
         while True:
-            frame = self._camera.read()
+            frame = camera.read()
             if frame is not None:
                 break
             self.misses += 1
@@ -358,7 +377,7 @@ class Vision:
             time.sleep(0.05)
 
         stamp = self._clock()
-        report = self._locator.locate(frame)
+        report = locator.locate(frame)
         self.frames += 1
         return report, stamp
 

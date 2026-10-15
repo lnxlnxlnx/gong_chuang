@@ -51,11 +51,43 @@ Grasp 实例
 from __future__ import annotations
 
 import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Optional, TypedDict
 
-from modules.grasp.drive.servo_model import GraspReadyResult, ServoError
+from modules.grasp.drive.servo_model import (
+    GraspReadyResult,
+    LiftScale,
+    ObjectSelector,
+    ServoConfig,
+    ServoError,
+    ServoJacobian,
+    ServoResult,
+    ServoTarget,
+)
+from modules.grasp.drive.servo_observation import ClosableFrameSource
+
+if TYPE_CHECKING:
+    from modules.arm.config import ArmConfig
+    from modules.arm.runtime import RobotArm
+    from modules.vision.runtime import Vision
 
 
-def _new_arm(port, arm_config):
+class GraspSettings(TypedDict):
+    """已通过普通抓取动作前置校验的配置快照。
+
+    ``target`` 与 ``jacobian`` 在这里是**非空**的：进这份快照之前必须已经检查过
+    （见 :meth:`Grasp._require_action_ready`），否则"缺标定就在开设备前失败"这条不变式
+    会从类型上消失。``lift_scale`` 保持可空——它本来就是可选的。
+    """
+
+    config: ServoConfig
+    selector: ObjectSelector
+    target: ServoTarget
+    jacobian: ServoJacobian
+    lift_scale: Optional[LiftScale]
+
+
+def _new_arm(port: str, arm_config) -> "RobotArm":
     """真实构造机械臂的唯一位置；测试在这里注入假臂。
 
     ``RobotArm`` 的构造会打开串口，所以调用它之前必须已经做完配置校验
@@ -72,12 +104,12 @@ class Grasp:
     def __init__(
         self,
         *,
-        config,
-        selector,
-        target,
-        jacobian,
-        lift_scale,
-        on_message=None,
+        config: ServoConfig,
+        selector: ObjectSelector,
+        target: ServoTarget,
+        jacobian: ServoJacobian,
+        lift_scale: Optional[LiftScale],
+        on_message: Optional[Callable[[str], None]] = None,
     ) -> None:
         """只保存**已经读好的**配置与值对象：不读文件、不碰设备。"""
         self._config = config
@@ -86,9 +118,13 @@ class Grasp:
         self._jacobian = jacobian
         self._lift_scale = lift_scale
         #: 进度回调；没给就安静。正常公开动作默认不打印任何东西。
-        self._say = on_message if on_message is not None else (lambda message: None)
-        self._arm = None
-        self._source = None
+        self._say: Callable[[str], None] = (
+            on_message if on_message is not None else (lambda message: None)
+        )
+        #: 设备在 ``open`` / ``_from_modules_settings`` 之前确实还不存在，所以如实可空；
+        #: 动作边界用 :meth:`_require_resources` 缩窄。
+        self._arm: Optional[RobotArm] = None
+        self._source: Optional[ClosableFrameSource] = None
         self._closed = False
         #: 设备是**借来的**吗（``from_modules``）：借来的不收尾，只结束本会话。
         self._borrowed = False
@@ -102,16 +138,26 @@ class Grasp:
         if self._closed:
             raise RuntimeError("Grasp 已关闭")
 
+    def _require_resources(self) -> "tuple[RobotArm, ClosableFrameSource]":
+        """校验会话开启并返回**确定存在**的机械臂与观测源。"""
+        self._require_open()
+        arm, source = self._arm, self._source
+        if arm is None or source is None:
+            raise RuntimeError(
+                "Grasp 会话尚未就绪（请用 Grasp.open(...) 或 Grasp.from_modules(...) 创建）"
+            )
+        return arm, source
+
     # ------------------------------------------------------------- 创建
     @classmethod
     def open(
         cls,
         *,
-        config_path=None,
-        vision_config_path=None,
-        vision_calibration_path=None,
-        arm_config_path=None,
-        motor_config_path=None,
+        config_path: Optional[Path] = None,
+        vision_config_path: Optional[Path] = None,
+        vision_calibration_path: Optional[Path] = None,
+        arm_config_path: Optional[Path] = None,
+        motor_config_path: Optional[Path] = None,
     ) -> "Grasp":
         """从现有配置创建本机视觉、机械臂和普通动作会话。
 
@@ -119,15 +165,12 @@ class Grasp:
         视觉来自 vision 模块的 ``config.json`` / ``calibration.json``，
         机械臂来自 ``modules/arm/config.json``，串口来自 ``modules/motor/config.json``。
         """
-        from pathlib import Path
-
         from modules.arm.config import DEFAULT_CONFIG_PATH as arm_default
         from modules.arm.config import load_arm_config
         from modules.motor.config import DEFAULT_CONFIG_PATH as motor_default
         from modules.motor.config import load_bus_config
         from modules.vision.runtime import Vision, _load_settings
-
-        from .drive.servo_model import (
+        from modules.grasp.drive.servo_model import (
             DEFAULT_CONFIG_PATH,
             load_jacobian,
             load_lift_scale,
@@ -141,14 +184,16 @@ class Grasp:
         motor_path = motor_default if motor_config_path is None else Path(motor_config_path)
 
         # 五份配置一次读好，构造后只使用这些值——动作方法里不再读文件。
-        config = load_servo_config(grasp_path)
-        selector = load_object_selector(grasp_path)
-        target = load_target(grasp_path)
-        jacobian = load_jacobian(grasp_path)
-        lift_scale = load_lift_scale(grasp_path)
+        config: ServoConfig = load_servo_config(grasp_path)
+        selector: ObjectSelector = load_object_selector(grasp_path)
+        target: Optional[ServoTarget] = load_target(grasp_path)
+        jacobian: Optional[ServoJacobian] = load_jacobian(grasp_path)
+        lift_scale: Optional[LiftScale] = load_lift_scale(grasp_path)
+        # 在**打开任何设备之前**取得非空 target / jacobian（含奇异判据）。
+        target, jacobian = cls._require_action_ready(target=target, jacobian=jacobian)
         arm_config = load_arm_config(config_path=arm_path)
         # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
-        port = load_bus_config(config_path=motor_path).port
+        port: str = load_bus_config(config_path=motor_path).port
         # 视觉快照在**打开任何设备之前**读好；真正开设备由 source_factory 负责。
         vision_settings = _load_settings(vision_config_path, vision_calibration_path)
         return cls._open_settings(
@@ -166,15 +211,15 @@ class Grasp:
     def _open_settings(
         cls,
         *,
-        config,
-        selector,
-        target,
-        jacobian,
-        lift_scale,
-        arm_config,
-        port,
-        source_factory,
-        on_message=None,
+        config: ServoConfig,
+        selector: ObjectSelector,
+        target: ServoTarget,
+        jacobian: ServoJacobian,
+        lift_scale: Optional[LiftScale],
+        arm_config: "ArmConfig",
+        port: str,
+        source_factory: Callable[[], ClosableFrameSource],
+        on_message: Optional[Callable[[str], None]] = None,
     ) -> "Grasp":
         """**普通动作唯一的设备创建路径**（public ``open`` 与菜单 21 都走这里）。
 
@@ -209,7 +254,12 @@ class Grasp:
 
     @classmethod
     def from_modules(
-        cls, *, arm, vision, config_path=None, on_message=None
+        cls,
+        *,
+        arm: "RobotArm",
+        vision: "Vision",
+        config_path: Optional[Path] = None,
+        on_message: Optional[Callable[[str], None]] = None,
     ) -> "Grasp":
         """**借用**已经装配好的 arm / vision，读完 eye_in_hand 配置后建立会话。
 
@@ -221,11 +271,12 @@ class Grasp:
         - 借来的设备**不归本会话收尾**：:meth:`close` 只结束本会话，
           不 ``stop`` / ``disable`` / ``close`` 它们；设备最终由装配者（``Robot``）关闭。
 
+        这里 ``vision`` 明确是 :class:`~modules.vision.runtime.Vision`：借用分支**不**关闭它，
+        所以它不需要 ``ClosableFrameSource`` 那层能力，类型也就更窄。
+
         :raises ServoError: 缺 target / jacobian，或雅可比奇异。
         """
-        from pathlib import Path
-
-        from .drive.servo_model import (
+        from modules.grasp.drive.servo_model import (
             DEFAULT_CONFIG_PATH,
             load_jacobian,
             load_lift_scale,
@@ -234,15 +285,19 @@ class Grasp:
             load_target,
         )
 
-        if arm is None or vision is None:
-            raise ServoError("from_modules 需要已经装配好的 arm 与 vision")
         grasp_path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
+        config: ServoConfig = load_servo_config(grasp_path)
+        selector: ObjectSelector = load_object_selector(grasp_path)
+        target: Optional[ServoTarget] = load_target(grasp_path)
+        jacobian: Optional[ServoJacobian] = load_jacobian(grasp_path)
+        lift_scale: Optional[LiftScale] = load_lift_scale(grasp_path)
+        target, jacobian = cls._require_action_ready(target=target, jacobian=jacobian)
         return cls._from_modules_settings(
-            config=load_servo_config(grasp_path),
-            selector=load_object_selector(grasp_path),
-            target=load_target(grasp_path),
-            jacobian=load_jacobian(grasp_path),
-            lift_scale=load_lift_scale(grasp_path),
+            config=config,
+            selector=selector,
+            target=target,
+            jacobian=jacobian,
+            lift_scale=lift_scale,
             arm=arm,
             vision=vision,
             on_message=on_message,
@@ -252,18 +307,21 @@ class Grasp:
     def _from_modules_settings(
         cls,
         *,
-        config,
-        selector,
-        target,
-        jacobian,
-        lift_scale,
-        arm,
-        vision,
-        on_message=None,
+        config: ServoConfig,
+        selector: ObjectSelector,
+        target: ServoTarget,
+        jacobian: ServoJacobian,
+        lift_scale: Optional[LiftScale],
+        arm: "RobotArm",
+        vision: "Vision",
+        on_message: Optional[Callable[[str], None]] = None,
     ) -> "Grasp":
         """借用装配的**唯一接缝**：``Robot`` 在开设备前预校验配置后也走这里。
 
         与 :meth:`_open_settings` 共用同一份参数校验与同一套动作实现，只是不创建设备。
+        签名里 ``target`` / ``jacobian`` 是**非空**的（快照类型已经保证），这里再查一次是
+        **纵深防御**：万一有人绕过公开入口直接调这个接缝传入空值，也必须在装配前拦住，
+        而不是等到动作时才炸。
         """
         cls._require_action_ready(target=target, jacobian=jacobian)
         session = cls(
@@ -281,36 +339,43 @@ class Grasp:
         return session
 
     @staticmethod
-    def _require_action_ready(*, target, jacobian) -> None:
-        """普通动作的前置校验：必须在**打开任何设备之前**完成。"""
+    def _require_action_ready(
+        *, target: Optional[ServoTarget], jacobian: Optional[ServoJacobian]
+    ) -> "tuple[ServoTarget, ServoJacobian]":
+        """普通动作的前置校验：必须在**打开任何设备之前**完成。
+
+        返回缩窄后的 ``(target, jacobian)``：调用方拿到的就是非空值，不必在装配完成后
+        再判一次空——那正是"缺标定却先开了设备"的入口。
+        """
         if target is None:
             raise ServoError("缺少 target；先运行现有设目标或示教工具")
         if jacobian is None:
             raise ServoError("缺少 jacobian；先运行现有标定工具")
         # 复用原有的奇异判据（pulses_for 自查行列式），不新增阈值。
         jacobian.pulses_for(0.0, 0.0)
+        return target, jacobian
 
     # ------------------------------------------------------------- 动作
-    def align_xy(self):
+    def align_xy(self) -> ServoResult:
         """包含原 ``run_align`` 的可选悬停，再按原规则检查安全高度并对准。
 
         只动平面（底座 + 伸缩），**不下降、不后缩**。
         """
-        self._require_open()
+        arm, source = self._require_resources()
         from modules.grasp.drive.eye_in_hand import align_x_y, hover_above_object
 
         if self._config.hover_z_mm is not None:
             hover_above_object(
-                self._arm,
-                self._source,
+                arm,
+                source,
                 self._selector,
                 self._config,
                 scale=self._lift_scale,
                 on_message=self._say,
             )
         return align_x_y(
-            self._arm,
-            self._source,
+            arm,
+            source,
             self._selector,
             self._target,
             self._jacobian,
@@ -343,7 +408,7 @@ class Grasp:
         :param retract_pulses: 覆盖后缩脉冲数（只这一次）；``None`` 用配置值。
         :raises ServoError: 任何一步失败；异常信息里会写清卡在哪一步。
         """
-        self._require_open()
+        arm, source = self._require_resources()
         from modules.grasp.drive.eye_in_hand import (
             align_x_y,
             descend_z,
@@ -356,11 +421,11 @@ class Grasp:
         started = time.monotonic()
         say("① 先到物块上方的悬停高度（配了 hover_z_mm 才动），再确认转底盘前的安全高度")
         hovered = hover_above_object(
-            self._arm, self._source, self._selector, self._config,
+            arm, source, self._selector, self._config,
             scale=self._lift_scale, on_message=say,
         )
         raised = raise_before_rotating(
-            self._arm, self._source, self._selector, self._config,
+            arm, source, self._selector, self._config,
             scale=self._lift_scale, on_message=say,
         )
         lift_seconds = time.monotonic() - started
@@ -368,8 +433,8 @@ class Grasp:
         started = time.monotonic()
         say("② x/y 对准（闭环，只动底座与伸缩）")
         aligned = align_x_y(
-            self._arm,
-            self._source,
+            arm,
+            source,
             self._selector,
             self._target,
             self._jacobian,
@@ -383,7 +448,7 @@ class Grasp:
         started = time.monotonic()
         say("③ z 下降（平面已对准，按固定脉冲）")
         descent = descend_z(
-            self._arm, self._source, self._selector, self._config,
+            arm, source, self._selector, self._config,
             pulses=z_pulses, scale=self._lift_scale, on_message=say,
         )
         descend_seconds = time.monotonic() - started
@@ -391,7 +456,7 @@ class Grasp:
         started = time.monotonic()
         say("④ 伸缩后缩")
         retracted = retract_extension(
-            self._arm, self._config, pulses=retract_pulses, on_message=say
+            arm, self._config, pulses=retract_pulses, on_message=say
         )
         retract_seconds = time.monotonic() - started
 
