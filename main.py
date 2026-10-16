@@ -75,7 +75,7 @@ def pick_manual() -> None:
         #     CylindricalPose(base_degrees=0.0, radial_mm=180.0, height_mm=0.0)
         # )
         robot.gripper.set_position(250)
-        robot.arm.move_up(pulses=4000)
+        robot.arm.move_up(pulses=3200)
         robot.arm.move_forward(3200)
         # # time.sleep(1)
         
@@ -92,7 +92,7 @@ def pick_manual() -> None:
 
         # # x/y 对准 → 下降 → 后缩；一次都不动高度（除了这一次开环下降）。
         robot.grasp.align_xy()
-        robot.arm.move_down(pulses= 1500)
+        robot.arm.move_down(pulses= 500)
         grab_box(robot)
         # robot.arm.move_by(z_mm= - material.z_mm // 2)
         # robot.arm.move_by(x_mm=- material.x_mm, y_mm= - material.y_mm)
