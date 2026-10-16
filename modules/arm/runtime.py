@@ -66,6 +66,21 @@ with RobotArm.open(wait_mode=WAIT_IN_POSITION) as arm:
 
 轮询模式还会把**实际等待时长**和**最后一次读到的状态**放进 :class:`MotionReport`，
 所以"估算偏了多少"和"是不是撞上了"都能事后看到，不必再猜。
+
+## 两个状态：爪子在哪，电机转了多少
+
+- ``pose_state``（:class:`modules.arm.arm_state.ArmPose`）：爪口在圆柱坐标里的位置。
+  依赖标定（``mm_per_motor_rev`` 等），缺标定就整体变未知，而且底座角被归一化。
+- ``turns_state``（:class:`modules.arm.arm_state.MotorTurnsState`）：三轴的**命令脉冲
+  里程表**。一个标定都不需要，所以永远有值；底座角**不归一**。
+
+后者是为"底座能转整圈"这件事存在的：``base_degrees`` 归一到 ``(-180, 180]``，连续同向
+转十圈和原地没动看起来一模一样，而线缆会绕死。里程表不归一，所以看得见——但它是**下发
+的脉冲**，丢步和打滑不会体现，要和实测对账就读 ``0x36``。
+
+两张账都只在 ``_send`` 一处推进（回零/绝对归位另把原点清零），所以方向原语、单位制方法
+和绝对规划帧走的是同一条路，既不会漏记也不会把同一次位移记两遍。每次
+:class:`MotionReport` 都会带上该轴累计到那一刻的读数。
 """
 
 from __future__ import annotations
@@ -76,7 +91,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Mapping, Optional, Tuple
 
-from modules.arm.arm_state import ArmPose
+from modules.arm.arm_state import ArmPose, MotorTurns, MotorTurnsState
 from modules.arm.config import AXIS_NAMES, ArmConfig, load_arm_config
 from modules.arm.drive.kinematics import (
     BASE_AXIS,
@@ -129,6 +144,8 @@ class MotionReport:
     #: 轮询到位时最后一次读到的电机状态；估算模式恒为 ``None``
     #: （那条路根本不读驱动器，编不出一个状态来）。
     motor_status: Optional[MotorStatus] = None
+    #: 这一帧发完之后，该轴相对**原点**的累计脉冲与角度（命令里程表，不是实测位置）。
+    turns: Optional[MotorTurns] = None
 
 
 #: 相对 XYZ 分解允许的最小半径（毫米）。再小下去切向分量会被 ``1/r`` 放大：1 mm 半径上
@@ -199,6 +216,10 @@ class RobotArm:
         self._closed = False
         #: 爪口中心的位姿；**唯一所有者是这里**，完成回零或测量写入之前是"未知"。
         self.pose_state = ArmPose()
+        #: 三轴的命令脉冲里程表；与位姿分开，因为它一个标定都不需要（见 arm_state）。
+        self.turns_state = MotorTurnsState(
+            config.pulses_per_revolution, AXIS_NAMES
+        )
 
     # ------------------------------------------------------------- 生命周期
     @classmethod
@@ -548,6 +569,9 @@ class RobotArm:
         self._motors[axis_name].home(homing.mode)
         if wait:
             self._sleep(homing.wait_seconds)
+            # 回零让这根轴停在驱动器零点上，所以原点就定义在这里。
+            # ``wait=False`` 不重置：不知道何时到位，调用方确认后自己调 mark_origin。
+            self.turns_state.mark_origin(axis_name)
         return homing.wait_seconds
 
     def home_all(self, *, wait: bool = True) -> Tuple[float, ...]:
@@ -588,6 +612,8 @@ class RobotArm:
             raise
         # 只有三轴都发完并等待完成，才按配置的 safe_pose 记录参考。
         self.pose_state.record_home(self.config.require_safe_pose())
+        # 三根轴现在都停在驱动器零点上，原点同样定义在这里。
+        self.turns_state.mark_origin()
         return tuple(waited)
 
     # ------------------------------------------------------------- 归位
@@ -620,6 +646,8 @@ class RobotArm:
         self._motors[axis_name].move_absolute_pulses(0, speed, accel)
         if wait:
             self._sleep(seconds)
+            # 绝对归位和回零停在同一个物理点上（驱动器位置计数器 0），原点同此。
+            self.turns_state.mark_origin(axis_name)
         return seconds
 
     def move_all_to_zero(
@@ -874,6 +902,7 @@ class RobotArm:
                 motor_degrees=0.0,
                 output_degrees=0.0 if axis.reduction_ratio is not None else None,
                 estimated_seconds=0.0,
+                turns=self.turns_state.of(axis_name),
             )
         direction = Direction.CW if pulses > 0 else Direction.CCW
         report = self._send(
@@ -906,6 +935,10 @@ class RobotArm:
         )
         signed_pulses = pulses if direction is Direction.CW else -pulses
         self._motors[axis_name].move_relative_pulses(signed_pulses, speed, accel)
+        # 累计里程就在这里推进，而且**只在这里**：所有相对帧——方向原语、单位制方法、
+        # 以及绝对规划出来的 _execute_frame——都经过 _send，所以既不会漏也不会把同一次
+        # 位移记两遍。放在发帧之后：发帧抛异常时不该记账。
+        turns = self.turns_state.record(axis_name, signed_pulses)
         waited = 0.0
         status: Optional[MotorStatus] = None
         if wait:
@@ -926,6 +959,7 @@ class RobotArm:
             estimated_seconds=seconds,
             waited_seconds=waited,
             motor_status=status,
+            turns=turns,
         )
 
     def _wait_for_move(
