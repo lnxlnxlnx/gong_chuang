@@ -66,22 +66,14 @@ def pick_ready(*, grasp_config_path=None, vision_config_path=None) -> None:
 
 def pick_manual() -> None:
     with Robot.open(grasp=True, gripper=True) as robot:
-        # 高度自己点动：相对脉冲，不需要位姿，也不会自己往上冲。
-        # robot.arm.move_up(pulses=4000)
-        # robot.arm.home_all()
-
-            # 开机对位：把"臂现在停的地方"按你量的数声明成初始位姿
-        # robot.arm.record_measurement(
-        #     CylindricalPose(base_degrees=0.0, radial_mm=180.0, height_mm=0.0)
-        # )
         robot.gripper.set_position(250)
         robot.arm.move_up(pulses=3200)
         robot.arm.move_forward(3200)
-        # # time.sleep(1)
         
         report = robot.vision.locate()
         if report.best is None:
             print("画面里没有通过校验的物料")
+            robot.arm.move_axis_to_motor_degrees("extension", 0)
             return
         material = report.best
         print(
@@ -92,18 +84,14 @@ def pick_manual() -> None:
 
         # # x/y 对准 → 下降 → 后缩；一次都不动高度（除了这一次开环下降）。
         robot.grasp.align_xy()
-        robot.arm.move_down(pulses= 500)
-        grab_box(robot)
-        # robot.arm.move_by(z_mm= - material.z_mm // 2)
-        # robot.arm.move_by(x_mm=- material.x_mm, y_mm= - material.y_mm)
-        # robot.arm.move_by(z_mm=- material.z_mm // 2)
-        # pulses = int((material.z_mm) * 40)
-        # robot.arm.move_down(pulses = pulses)
-        # # print(result.summary())
-        # # 就位成功不等于夹到了物料：闭不闭爪是业务的显式动作。
+        robot.arm.move_down(pulses= 800)
+        # grab_box(robot)
+        place_box(robot)
+        robot.arm.move_axis_to_motor_degrees("extension", 0)
 
-        # time.sleep(1)
-        # robot.gripper.open_jaws()
+def test_place_box() -> None:
+    with Robot.open(grasp=True, gripper=True) as robot:
+        place_box(robot)
 
 def grab_box(robot):
         robot.gripper.set_position(250)
@@ -112,6 +100,13 @@ def grab_box(robot):
         robot.gripper.set_position(0)
         robot.arm.move_up(pulses=1000)
         robot.arm.rotate_ccw(pulses=1000)
+        
+def place_box(robot: Robot):
+    robot.gripper.set_position(0)
+    robot.arm.move_axis_to_motor_degrees("lift", 528.7)
+    robot.arm.move_axis_to_motor_degrees("extension", 100)
+    robot.arm.move_axis_to_motor_degrees("base", 1048)
+    robot.gripper.set_position(250)
 
 def adjust_arm_align():
     with Robot.open(grasp=True, gripper=True) as robot:
@@ -144,6 +139,7 @@ def test_vision():
 if __name__ == "__main__":
     # main()
     pick_manual()
+    # test_place_box()
     # test_vision()
     # adjust_arm_align()
     # locate_material()
