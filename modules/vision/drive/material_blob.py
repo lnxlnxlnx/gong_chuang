@@ -14,8 +14,26 @@
 ===========  ==========  ==========  ==========
 
 而且颜色块是**每帧都稳**的：同一距离下连续帧的等效半径只差 0.3 px（约 0.2%），
-霍夫则在几十个候选之间跳。半径用**面积等效半径** ``sqrt(area/π)``：顶面被夹爪
-挡住一角时它仍然稳，外接圆半径会被挡住的那一角带偏。
+霍夫则在几十个候选之间跳。
+
+## 圆心与半径取拟合圆，不取质心 + 面积等效半径
+
+顶面被夹爪挡住一角、或者一半落进阴影里时，掩膜只剩**残缺的圆**：连通域质心被拽向
+可见的那一半，面积等效半径 ``sqrt(area/π)`` 比真实半径小。两个数一起错，距离和 x/y
+就一起错——而且流程**照样接受**这个候选，把错的数交给逆解。
+
+所以圆心与半径优先取 :mod:`modules.vision.drive.circle_fit` 的拟合结果
+（Kåsa + RANSAC：只让"同意同一个圆"的点说话，遮挡留下的那条直边被当成外点），
+拟合不可信（点太少、半径跑到窗口外、内点太少）时才退回原来的质心 + 面积等效半径。
+
+实测（真机帧 ``output/vision_predict/material_locate_live.png``，真值半径 145.4 px，
+从左侧推进一块不属于任何调色板颜色的遮挡）::
+
+    遮挡   面积等效半径   距离误差     拟合半径   距离误差
+     0%      144.6        +0.6 mm     146.4      -0.7 mm
+    15%      136.9        +6.5 mm     146.0      -0.4 mm
+    30%      124.8       +17.2 mm     145.6      -0.1 mm
+    45%      108.2       +35.9 mm     145.1      +0.2 mm
 
 命令行自测::
 
@@ -30,6 +48,7 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
+from modules.vision.drive.circle_fit import CircleFit, fit_circle
 from modules.vision.drive.hough_lock import LockedRegion, RingLock
 
 
@@ -269,16 +288,18 @@ class ColourBlobLocator:
                 area = float(stats[index, cv2.CC_STAT_AREA])
                 if area < self.min_area_px:
                     continue
-                radius = float(np.sqrt(area / np.pi))
-                if low is not None and radius < low:
+                # 圆心与半径优先取拟合圆（见 :meth:`_region_from` 与模块文档）；
+                # 半径窗口按**拟合后的**半径判，因为它才是真实半径的更好估计。
+                region = self._region_from(
+                    mask, stats[index], centroids[index], low=low, high=high
+                )
+                if low is not None and region.radius < low:
                     continue
-                if high is not None and radius > high:
+                if high is not None and region.radius > high:
                     continue
                 if not self._is_round(mask, stats[index], centroids[index]):
                     continue
-                found.append(
-                    LockedRegion(float(centroids[index][0]), float(centroids[index][1]), radius)
-                )
+                found.append(region)
 
         # 调色板里两个颜色相近时同一个物体会被找到两次：按半径从大到小去重，
         # 圆心落在已保留区域内的（即同一个物体的小圈）丢掉，保留物体真正的边界。
@@ -300,6 +321,52 @@ class ColourBlobLocator:
         """返回色块列表（接口与霍夫定位器一致）。"""
         return list(self.locate(frame, min_radius=min_radius, max_radius=max_radius).regions)
 
+    @staticmethod
+    def _component_contour(mask: np.ndarray, stats):
+        """一个连通域的**外轮廓**，返回 ``(裁剪坐标的轮廓, (x, y))``。
+
+        轮廓是在连通域的包围盒里找的（比在整张掩膜上跑一遍再按 label 分拣更省），
+        所以坐标要加上包围盒原点才是整帧坐标，见 :meth:`_contour_points`。
+        ``blob_shape`` 与圆拟合共用这一份，保证"量形状"和"拟合圆"看的是同一条边界。
+        找不到轮廓时返回 ``(None, (0, 0))``。
+        """
+        cv2 = _cv2()
+        x = int(stats[cv2.CC_STAT_LEFT]); y = int(stats[cv2.CC_STAT_TOP])
+        width = int(stats[cv2.CC_STAT_WIDTH]); height = int(stats[cv2.CC_STAT_HEIGHT])
+        crop = mask[y:y + height, x:x + width]
+        contours, _ = cv2.findContours(crop, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            return None, (0, 0)
+        return max(contours, key=cv2.contourArea), (x, y)
+
+    @staticmethod
+    def _contour_points(contour, offset) -> np.ndarray:
+        """轮廓点还原到整帧坐标，返回 ``(N, 2)`` 的 float64 数组。"""
+        points = contour.reshape(-1, 2).astype(np.float64)
+        points[:, 0] += offset[0]
+        points[:, 1] += offset[1]
+        return points
+
+    def _region_from(self, mask: np.ndarray, stats, centroid, *, low, high) -> LockedRegion:
+        """一个连通域变成 :class:`LockedRegion`：**圆心与半径优先取拟合圆**。
+
+        拟合不可信时退回「连通域质心 + 面积等效半径」——那正是加拟合之前的行为，
+        所以轮廓取不到、点太少、解跑到半径窗口外时，定位器不会比原来更差。
+        半径窗口在这里当**合理域**交给拟合：实测退化样本会给出 r=1739 这类解，
+        内点数甚至比真解还多，只有半径域能一眼挡掉（见 ``circle_fit``）。
+        """
+        contour, offset = self._component_contour(mask, stats)
+        if contour is not None:
+            fit: CircleFit | None = fit_circle(
+                self._contour_points(contour, offset), min_radius=low, max_radius=high
+            )
+            if fit is not None:
+                return LockedRegion(fit.center_x, fit.center_y, fit.radius)
+        area = float(stats[_cv2().CC_STAT_AREA])
+        return LockedRegion(
+            float(centroid[0]), float(centroid[1]), float(np.sqrt(area / np.pi))
+        )
+
     def blob_shape(self, mask: np.ndarray, stats, centroid) -> tuple[float, float | None]:
         """色块的 ``(填充率, 边界起伏)``；贴边的色块测不准起伏，第二项返回 ``None``。"""
         cv2 = _cv2()
@@ -310,18 +377,14 @@ class ColourBlobLocator:
             x <= 1 or y <= 1
             or x + width >= mask.shape[1] - 1 or y + height >= mask.shape[0] - 1
         )
-        crop = mask[y:y + height, x:x + width]
-        contours, _ = cv2.findContours(crop, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        if not contours:
+        contour, offset = self._component_contour(mask, stats)
+        if contour is None:
             return 0.0, None
-        contour = max(contours, key=cv2.contourArea)
         _centre, enclosing = cv2.minEnclosingCircle(_decimate_contour(contour))
         fill = float(np.sqrt(area / np.pi) / enclosing) if enclosing > 0 else 0.0
         if clipped:
             return fill, None
-        points = contour.reshape(-1, 2).astype(np.float64)
-        points[:, 0] += x
-        points[:, 1] += y
+        points = self._contour_points(contour, offset)
         distances = np.hypot(points[:, 0] - centroid[0], points[:, 1] - centroid[1])
         mean = float(distances.mean())
         variation = float(distances.std() / mean) if mean > 0 else None

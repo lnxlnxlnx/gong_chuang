@@ -190,17 +190,20 @@ class MaterialLocator:
         source = "palette" if lock.regions else None
         hits: tuple[Detection, ...] = ()
         asked_yolo = False
+        # 严格容差一个色块都没有时，先把"放大 BGR 容差"那一遍的结果**记下来**——
+        # 它是一个**候补**，不是结论。**只放大 BGR 容差**：色相与亮度下限一放就会把
+        # 台面收进掩膜（台面色相离绿料只差 14、亮度比 0.42），而容差放大后掩膜里
+        # 出现的第一块"够大够圆"的色块完全可能是台面。实测 ``models/top_pic_2.jpg``：
+        # 容差 60→90 之后先捞到的是左上角一块台面（r=197 px，正好落在半径窗口里），
+        # 而它一旦成为结论，下面就再也不会去问模型——那块蓝料明明被模型框到
+        # 0.96，却被这一块台面挡在门外。所以候补只在**模型也没辙**时才上场。
+        relaxed_lock: RingLock | None = None
         if not lock.regions:
-            # 严格容差一个色块都没有：先按放大后的 BGR 容差再分割一遍（光照变了、
-            # 颜色整片漂移时救得回来），再问模型。**只放大 BGR 容差**——色相与亮度下限
-            # 一放就会把台面收进掩膜（台面色相离绿料只差 14、亮度比 0.42）。
             relaxed = self._relaxed_locator()
             if relaxed is not None:
                 candidate = self._locate_circles(frame, window, relaxed)
                 if candidate.regions:
-                    lock = candidate
-                    qualities = self._face_qualities(grayscale, candidate)
-                    source = "palette-relaxed"
+                    relaxed_lock = candidate
         if not lock.regions and self.colour_first:
             # 调色板里没有这块料。先问模型：它认出来了，就从它框的中心取一次参考色，
             # 拿这个参考色再分割一遍——换一块料（红、黄……）就不必先量颜色。
@@ -216,15 +219,27 @@ class MaterialLocator:
                     qualities = self._face_qualities(grayscale, candidate)
                     source = "model"
             if not lock.regions:
-                # 模型也没认出来：退回霍夫的形状判据，并在报告里说清是退回来的结果。
-                lock, qualities = self._locate_hough(frame, grayscale, window)
-                source = "hough" if lock.regions else None
+                if relaxed_lock is not None:
+                    # 模型也没认出来，但放宽容差那一遍有东西：它仍然守着调色板的
+                    # 色相与亮度下限，比霍夫的纯形状判据可信，所以排在霍夫前面。
+                    lock = relaxed_lock
+                    qualities = self._face_qualities(grayscale, relaxed_lock)
+                    source = "palette-relaxed"
+                else:
+                    # 什么都没了：退回霍夫的形状判据，并在报告里说清是退回来的结果。
+                    lock, qualities = self._locate_hough(frame, grayscale, window)
+                    source = "hough" if lock.regions else None
         elif not any(self._looks_like_face(quality) for quality in qualities.values()):
             # 主定位器支持放松时有第二遍：近距离焦画面里真实圆边的梯度被摊平，
             # 严格 Canny 阈值只剩夹爪弧线。锐利画面第一遍就找到顶面，不会跑第二遍。
             lock, qualities = self._retry_relaxed(
                 frame, grayscale, window, self.locator, lock, qualities
             )
+        if not lock.regions and relaxed_lock is not None:
+            # 没配颜色时不会走上面那一段，候补在这里补一次机会。
+            lock = relaxed_lock
+            qualities = self._face_qualities(grayscale, relaxed_lock)
+            source = "palette-relaxed"
         focal_px = self.resolved_focal_px(width, height, required=bool(lock.regions))
         if not lock.regions:
             return MaterialReport(
@@ -589,13 +604,47 @@ def _overridden_settings(args):
     )
 
 
-def _run_image(args) -> int:
-    """``--image``：只加载定位器处理给定图片，**不创建相机**。"""
+def read_image(path) -> "np.ndarray | None":
+    """读一张图片，**支持非 ASCII 路径**；读不出来返回 ``None``。
+
+    ``cv2.imread`` 在 Windows 上按 ANSI 打开文件，路径里有中文就直接返回 ``None``
+    （实测 ``models/蓝.jpg``）。所以先自己读字节再交给 ``cv2.imdecode``。
+    """
     import cv2
 
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+    except OSError:
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
+def write_image(path, frame) -> bool:
+    """写一张图片，**支持非 ASCII 路径**；成功返回 ``True``。
+
+    ``cv2.imwrite`` 有和 :func:`read_image` 同样的路径问题，所以先编码成内存里的
+    字节再落盘。后缀决定格式（缺省 PNG）。
+    """
+    import cv2
+
+    suffix = Path(path).suffix or ".png"
+    try:
+        ok, buffer = cv2.imencode(suffix, frame)
+    except cv2.error:
+        return False
+    if not ok:
+        return False
+    buffer.tofile(str(path))
+    return True
+
+
+def _run_image(args) -> int:
+    """``--image``：只加载定位器处理给定图片，**不创建相机**。"""
     from modules.vision.runtime import _build_locator
 
-    frame = cv2.imread(str(args.image))
+    frame = read_image(args.image)
     if frame is None:
         print(f"读不出图片：{args.image}")
         return 1
@@ -607,7 +656,9 @@ def _run_image(args) -> int:
         print(report.summary())
         if args.save is not None:
             args.save.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(args.save), locator.draw(frame, report))
+            if not write_image(args.save, locator.draw(frame, report)):
+                print(f"写不出图片：{args.save}")
+                return 1
             print(f"标注图已写入 {args.save}")
     finally:
         locator.close()
@@ -661,6 +712,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help='物料调色板 "green:165,252,114;blue:248,122,41"；'
                              "换物料颜色只改这里")
     parser.add_argument("--tolerance", type=float, default=60.0, help="颜色容差（默认 60）")
+    parser.add_argument("--diameter", type=float, default=None,
+                        help="物料顶面真实直径（毫米）；默认取 config.json 的 "
+                             "targets.material_diameter_mm")
     args = parser.parse_args(argv)
     if args.camera is not None:
         return _run_camera(args)

@@ -230,8 +230,16 @@ def fit_circle(
         distances = np.hypot(array[:, 0] - center_x, array[:, 1] - center_y)
         inliers = np.abs(distances - radius) <= band_px
         count = int(inliers.sum())
-        if count > best_count:
-            best_count, best_inliers = count, inliers
+        if count <= best_count:
+            continue
+        # **覆盖度要在投票时就查，不能等拟合完再查。**
+        # 遮挡留下的那条直边本身也能被一个半径几千像素的圆"解释"：直线上取三点，
+        # 解出来的大圆在这条线附近缓慢偏离，带宽 2.5 px 够它罩住整条弦。遮挡
+        # 超过一半时弦比可见的弧还长，按内点数投票它反而赢——实测 55% 遮挡就是
+        # 这样丢掉了真解。加上这一条，只有"绕圆心铺开够宽"的解才算候选。
+        if angular_coverage(array[inliers], center_x, center_y) < min_coverage:
+            continue
+        best_count, best_inliers = count, inliers
 
     if best_inliers is None or best_count < 3:
         return None

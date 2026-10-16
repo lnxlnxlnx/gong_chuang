@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import unittest
 
 import numpy as np
 
-from modules.vision.drive.hough_lock import synthetic_rings
+from modules.vision.drive.hough_lock import LockedRegion, RingLock, synthetic_rings
 from modules.vision.drive.material_blob import (
     ENCLOSING_MAX_POINTS,
     ColourBlobLocator,
@@ -324,6 +325,140 @@ class PaletteFallbackTests(unittest.TestCase):
             material_palette={"green": MATERIAL_BGR},
         )
         self.assertEqual(locator.locator.references, (MATERIAL_BGR,))
+
+
+class FittedCircleGeometryTests(unittest.TestCase):
+    """顶面被挡掉一块时，圆心与半径必须来自拟合圆。
+
+    这是这次改动的**回归测试**：改动之前用的是「连通域质心 + 面积等效半径」，
+    遮挡会让质心被拽向可见的那一半、半径比真值小一截，而流程**照样接受**这个候选，
+    于是把错的圆心和错的距离一起交给逆解。真机帧上实测过：遮挡 30% 时距离报远
+    17.2 mm、45% 时报远 35.9 mm，而拟合圆的误差在 0.2 mm 以内。
+    """
+
+    #: 遮挡用的颜色：黑色。任何调色板颜色都匹配不上它（色相无从谈起、亮度 0 低于
+    #: 所有参考色的亮度下限），所以它只会让掩膜**缺一块**，不会混进色块。
+    OCCLUDER = (0, 0, 0)
+
+    def covered_face(self, *, radius: int = 140, coverage: float = 0.4):
+        """一块被左侧竖直遮挡盖掉 ``coverage`` 比例直径的顶面。"""
+        import cv2
+
+        frame = np.full((480, 640, 3), (40, 70, 55), dtype=np.uint8)
+        center_x, center_y = 320, 240
+        cv2.circle(frame, (center_x, center_y), radius, MATERIAL_BGR, -1)
+        cut = int(center_x - radius + 2 * radius * coverage)
+        cv2.rectangle(frame, (0, 0), (cut, frame.shape[0]), self.OCCLUDER, -1)
+        return frame, (float(center_x), float(center_y), float(radius))
+
+    def test_a_partly_covered_face_keeps_its_true_centre_and_radius(self) -> None:
+        frame, (center_x, center_y, radius) = self.covered_face(coverage=0.4)
+        locator = ColourBlobLocator(MATERIAL_BGR)
+        lock = locator.locate(frame)
+
+        self.assertEqual(len(lock.regions), 1)
+        region = lock.regions[0]
+        self.assertAlmostEqual(region.radius, radius, delta=3.0)
+        self.assertAlmostEqual(region.center_x, center_x, delta=3.0)
+        self.assertAlmostEqual(region.center_y, center_y, delta=3.0)
+
+        # 对照：同一帧上「面积等效半径」偏多少。这条断言保证上面三行不是白测的——
+        # 少了它，把圆心与半径改回质心 + 面积等效半径这个测试仍然会通过。
+        area = float((locator.mask_for(frame, MATERIAL_BGR) > 0).sum())
+        self.assertLess(math.sqrt(area / math.pi), radius - 12.0)
+
+    def test_the_centre_follows_the_fit_and_not_the_visible_half(self) -> None:
+        """质心会被可见的那一半拽偏，拟合圆心不会——两侧遮挡各测一次。"""
+        locator = ColourBlobLocator(MATERIAL_BGR)
+        for coverage, side in ((0.4, "left"), (0.4, "right")):
+            with self.subTest(side=side):
+                frame, (center_x, center_y, radius) = self.covered_face(coverage=coverage)
+                if side == "right":
+                    frame = frame[:, ::-1]
+                    center_x = frame.shape[1] - 1 - center_x
+                region = locator.locate(frame).regions[0]
+                self.assertAlmostEqual(region.center_x, center_x, delta=3.0)
+                self.assertAlmostEqual(region.radius, radius, delta=3.0)
+
+    def test_a_blob_that_fits_no_circle_falls_back_to_the_old_estimate(self) -> None:
+        """拟合不可信时要退回原来的估计，而不是丢掉这个候选。
+
+        一条细长的同色条带没有半径窗口、也拟合不出可信的圆（角度覆盖太小），
+        它仍然应当按老办法被找出来——定位器不能因为多了一步拟合就变得更容易漏检。
+        """
+        import cv2
+
+        frame = np.full((480, 640, 3), (40, 70, 55), dtype=np.uint8)
+        cv2.rectangle(frame, (200, 200), (440, 230), MATERIAL_BGR, -1)
+        locator = ColourBlobLocator(
+            MATERIAL_BGR, max_boundary_variation=None, min_fill_ratio=None,
+        )
+        lock = locator.locate(frame)
+        self.assertEqual(len(lock.regions), 1)
+        area = float((locator.mask_for(frame, MATERIAL_BGR) > 0).sum())
+        self.assertAlmostEqual(lock.regions[0].radius, math.sqrt(area / math.pi), delta=1.5)
+
+
+class RelaxedPassOrderingTests(unittest.TestCase):
+    """放宽容差那一遍是**候补**，不是结论。
+
+    实测 ``models/top_pic_2.jpg``：BGR 容差 60→90 之后，放宽容差那一遍先捞到的是
+    左上角一块台面（r=197 px，正好落在半径窗口里）。它一旦成为结论，下面就再也
+    不会去问模型——那块蓝料明明被模型框到 0.96，却被这块台面挡在门外。
+    所以候补只在模型也没辙时才上场。
+    """
+
+    class _StubRelaxed:
+        """假扮"放宽容差那一遍"：交回指定的圆，不看颜色、不看画面。"""
+
+        def __init__(self, regions) -> None:
+            self._regions = tuple(regions)
+            self.calls = 0
+
+        def locate(self, _frame, min_radius=None, max_radius=None):
+            self.calls += 1
+            return RingLock(self._regions)
+
+    def test_a_garbage_relaxed_pass_does_not_block_the_model_rescue(self) -> None:
+        import cv2
+
+        from modules.vision.drive.yolov8 import Detection
+
+        frame = np.full((480, 640, 3), (40, 70, 55), dtype=np.uint8)
+        cv2.circle(frame, (400, 300), 80, (30, 40, 210), -1)     # 红料，调色板里没有
+        hit = Detection(x1=310.0, y1=210.0, x2=490.0, y2=390.0,
+                        score=0.9, class_id=0, name="red")
+        locator = MaterialLocator(
+            yolo=FakeYOLO([hit]), focal_px=500.0,
+            material_palette={"green": MATERIAL_BGR},
+        )
+        garbage = self._StubRelaxed([LockedRegion(80.0, 80.0, 60.0)])
+        locator._relaxed_locator = lambda: garbage          # type: ignore[method-assign]
+
+        report = locator.locate(frame)
+
+        self.assertEqual(garbage.calls, 1, "放宽容差那一遍应当跑过一次")
+        self.assertEqual(report.colour_source, "model",
+                         "放宽容差捞到的台面不该挡住模型那条救回路径")
+        self.assertIsNotNone(report.best)
+        self.assertEqual(report.best.name, "red")
+        self.assertAlmostEqual(report.best.region.radius, 80.0, delta=4)
+
+    def test_the_relaxed_candidate_is_used_when_the_model_finds_nothing(self) -> None:
+        """模型也没辙时，候补仍然要上场——它守着调色板的色相与亮度下限，比霍夫可信。"""
+        frame = synthetic_scene()
+        locator = MaterialLocator(
+            yolo=FakeYOLO(), focal_px=500.0,
+            material_palette={"blue": (248.0, 122.0, 41.0)},   # 画面里其实是绿料
+        )
+        candidate = RingLock((LockedRegion(300.0, 240.0, 90.0),))
+        locator._relaxed_locator = lambda: self._StubRelaxed([candidate.regions[0]])  # type: ignore[method-assign]
+
+        report = locator.locate(frame)
+
+        self.assertEqual(report.colour_source, "palette-relaxed")
+        self.assertEqual(len(report.regions), 1)
+        self.assertAlmostEqual(report.regions[0].region.radius, 90.0, delta=1e-6)
 
 
 if __name__ == "__main__":

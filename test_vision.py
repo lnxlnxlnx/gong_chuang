@@ -130,12 +130,29 @@ def _label_for(region: RegionReport) -> str:
     if region.accepted:
         return (
             f"{region.name or 'material'} x={region.x_mm:+.1f} y={region.y_mm:+.1f} "
-            f"z={region.z_mm:.1f}mm c={_confidence(region)}"
+            f"z={region.z_mm:.1f}mm r={region.region.radius:.0f}px c={_confidence(region)}"
         )
     return (
         f"rejected std={region.face.interior_std:.1f} "
         f"edge={region.face.edge_support:.2f}"
     )
+
+
+def matching_box(region: RegionReport, report: MaterialReport):
+    """这个圆面落在哪个 YOLO 框里（取最小的那个；没有就返回 ``None``）。
+
+    用来把**圆拟合出来的半径**和**模型框的尺寸**摆在一起看：顶面是个圆，
+    框得住它的时候 ``(宽 + 高) / 4`` 就是半径的另一个独立估计。两者接近说明
+    这一帧的圆心和半径互相印证；差得远说明框是松的（模型把台面/夹爪一起框进去了），
+    这时只该信圆。实测两个接近的例子差 0.6 px 与 1.4 px；松框能差到 40 px 以上。
+    """
+    boxes = [
+        hit for hit in report.hits
+        if hit.x1 <= region.center_x_px <= hit.x2 and hit.y1 <= region.center_y_px <= hit.y2
+    ]
+    if not boxes:
+        return None
+    return min(boxes, key=lambda hit: hit.width * hit.height)
 
 
 def draw_report(frame: np.ndarray, report: MaterialReport) -> np.ndarray:
@@ -219,11 +236,21 @@ def describe(report: MaterialReport, *, focal_px: Optional[float] = None) -> str
         )
     for index, region in enumerate(report.regions, start=1):
         verdict = "接受" if region.accepted else "丢掉"
+        box = matching_box(region, report)
+        if box is None:
+            box_text = "｜YOLO 框：无"
+        else:
+            implied = (box.width + box.height) / 4.0
+            gap = implied - region.region.radius
+            box_text = (
+                f"｜YOLO 框 {box.width:.0f}x{box.height:.0f} → 半径约 {implied:.1f} px"
+                f"（与圆差 {gap:+.1f} px）"
+            )
         lines.append(
             f"  候选{index} {verdict}：圆心 ({region.center_x_px:.0f}, {region.center_y_px:.0f}) "
             f"半径 {region.region.radius:.1f} px｜内部σ {region.face.interior_std:.1f}、"
             f"边界支撑 {region.face.edge_support:.2f}｜类别 {region.name or '未知'}"
-            f"（{_confidence(region)}）"
+            f"（{_confidence(region)}）{box_text}"
         )
     return "\n".join(lines)
 
