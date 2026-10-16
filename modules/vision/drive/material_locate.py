@@ -18,9 +18,23 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from modules.vision.drive.hough_lock import HoughRingLocator, LockedRegion, RingLock
-from modules.vision.drive.material_blob import ColourBlobLocator, sample_reference
+from modules.vision.drive.material_blob import (
+    DEFAULT_HUE_TOLERANCE,
+    DEFAULT_MAX_BOUNDARY_VARIATION,
+    DEFAULT_MIN_AREA_PX,
+    DEFAULT_MIN_FILL_RATIO,
+    DEFAULT_VALUE_RATIO,
+    ColourBlobLocator,
+    sample_reference,
+)
 from modules.vision.drive.material_class import ClassResult, MaterialClassifier
-from modules.vision.drive.material_face import FaceQuality, measure_face, to_grayscale
+from modules.vision.drive.material_face import (
+    DEFAULT_EDGE_SUPPORT_MIN,
+    DEFAULT_INTERIOR_STD_MAX,
+    FaceQuality,
+    measure_face,
+    to_grayscale,
+)
 from modules.vision.drive.material_yolo import MaterialYOLO
 from modules.vision.drive.pinhole import (
     DEFAULT_FOCAL_PX_AT_1280 as DEFAULT_FOCAL_PX_AT_1280,
@@ -70,11 +84,26 @@ class MaterialLocator:
         material_bgr: tuple[float, float, float] | None = None,
         material_palette: Mapping[str, Sequence[float]] | None = None,
         colour_tolerance: float = 60.0,
+        hue_tolerance: float = DEFAULT_HUE_TOLERANCE,
+        value_ratio: float = DEFAULT_VALUE_RATIO,
+        min_area_px: float = DEFAULT_MIN_AREA_PX,
+        max_boundary_variation: float | None = DEFAULT_MAX_BOUNDARY_VARIATION,
+        min_fill_ratio: float | None = DEFAULT_MIN_FILL_RATIO,
+        interior_std_max: float = DEFAULT_INTERIOR_STD_MAX,
+        edge_support_min: float = DEFAULT_EDGE_SUPPORT_MIN,
+        colour_relax_factor: float = 1.5,
     ) -> None:
         if focal_px is not None and focal_px <= 0:
             raise ValueError("focal_px must be positive")
         if top_diameter_mm <= 0:
             raise ValueError("top_diameter_mm must be positive")
+        if colour_relax_factor < 1.0:
+            raise ValueError("colour_relax_factor must be at least 1.0")
+        #: 形状判据的两个阈值：现场光照差时内部标准差会整体抬高，写死会把真顶面挡掉。
+        self.interior_std_max = float(interior_std_max)
+        self.edge_support_min = float(edge_support_min)
+        #: 严格颜色容差一个色块都没找到时，按这个倍数再分割一遍（1.0 = 不放松）。
+        self.colour_relax_factor = float(colour_relax_factor)
         self.material_bgr = (
             None if material_bgr is None
             else tuple(float(channel) for channel in material_bgr)
@@ -85,12 +114,21 @@ class MaterialLocator:
                   for name, value in dict(material_palette).items()}
         )
         self.colour_tolerance = float(colour_tolerance)
+        #: 颜色块路径的全部放宽参数（默认值与 ``material_blob`` 的常量逐字相同）。
+        self.blob_options = {
+            "tolerance": self.colour_tolerance,
+            "hue_tolerance": float(hue_tolerance),
+            "value_ratio": float(value_ratio),
+            "min_area_px": float(min_area_px),
+            "max_boundary_variation": max_boundary_variation,
+            "min_fill_ratio": min_fill_ratio,
+        }
         if locator is not None:
             self.locator = locator
         elif self.material_palette:
-            self.locator = ColourBlobLocator(self.material_palette, tolerance=self.colour_tolerance)
+            self.locator = ColourBlobLocator(self.material_palette, **self.blob_options)
         elif self.material_bgr is not None:
-            self.locator = ColourBlobLocator(self.material_bgr, tolerance=self.colour_tolerance)
+            self.locator = ColourBlobLocator(self.material_bgr, **self.blob_options)
         else:
             self.locator = HoughRingLocator()
         self._fallback_locator: HoughRingLocator | None = None
@@ -152,6 +190,17 @@ class MaterialLocator:
         source = "palette" if lock.regions else None
         hits: tuple[Detection, ...] = ()
         asked_yolo = False
+        if not lock.regions:
+            # 严格容差一个色块都没有：先按放大后的 BGR 容差再分割一遍（光照变了、
+            # 颜色整片漂移时救得回来），再问模型。**只放大 BGR 容差**——色相与亮度下限
+            # 一放就会把台面收进掩膜（台面色相离绿料只差 14、亮度比 0.42）。
+            relaxed = self._relaxed_locator()
+            if relaxed is not None:
+                candidate = self._locate_circles(frame, window, relaxed)
+                if candidate.regions:
+                    lock = candidate
+                    qualities = self._face_qualities(grayscale, candidate)
+                    source = "palette-relaxed"
         if not lock.regions and self.colour_first:
             # 调色板里没有这块料。先问模型：它认出来了，就从它框的中心取一次参考色，
             # 拿这个参考色再分割一遍——换一块料（红、黄……）就不必先量颜色。
@@ -159,7 +208,8 @@ class MaterialLocator:
             asked_yolo = True
             sampled = self._sampled_palette(frame, hits)
             if sampled:
-                trial = ColourBlobLocator(sampled, tolerance=self.colour_tolerance)
+                options = dict(self.blob_options)
+                trial = ColourBlobLocator(sampled, **options)
                 candidate = self._locate_circles(frame, window, trial)
                 if candidate.regions:
                     lock = candidate
@@ -169,7 +219,7 @@ class MaterialLocator:
                 # 模型也没认出来：退回霍夫的形状判据，并在报告里说清是退回来的结果。
                 lock, qualities = self._locate_hough(frame, grayscale, window)
                 source = "hough" if lock.regions else None
-        elif not any(quality.looks_like_face for quality in qualities.values()):
+        elif not any(self._looks_like_face(quality) for quality in qualities.values()):
             # 主定位器支持放松时有第二遍：近距离焦画面里真实圆边的梯度被摊平，
             # 严格 Canny 阈值只剩夹爪弧线。锐利画面第一遍就找到顶面，不会跑第二遍。
             lock, qualities = self._retry_relaxed(
@@ -190,13 +240,20 @@ class MaterialLocator:
         reports = tuple(
             self._report_for_region(
                 frame, hits, region, qualities[region], focal_px, width, height,
-                colour_path=source in ("palette", "model"),
+                colour_path=source in ("palette", "palette-relaxed", "model"),
             )
             for region in lock.regions
         )
         return MaterialReport(
             lock=lock, hits=hits, regions=reports, focal_px=focal_px,
             radius_window_px=window, colour_source=source,
+        )
+
+    def _looks_like_face(self, quality: FaceQuality) -> bool:
+        """按**配置里的阈值**判断一个候选像不像物料顶面（默认值与常量相同）。"""
+        return quality.passes(
+            interior_std_max=self.interior_std_max,
+            edge_support_min=self.edge_support_min,
         )
 
     @staticmethod
@@ -222,14 +279,14 @@ class MaterialLocator:
         放松只在这里发生（而且只在第一遍一无所获时），所以锐利画面、以及没有近距
         离焦问题的机位行为完全不变。
         """
-        if any(quality.looks_like_face for quality in qualities.values()):
+        if any(self._looks_like_face(quality) for quality in qualities.values()):
             return lock, qualities
         factory = getattr(locator, "relaxed", None)
         if factory is None:
             return lock, qualities
         candidate = self._locate_circles(frame, window, factory())
         candidate_qualities = self._face_qualities(grayscale, candidate)
-        if any(quality.looks_like_face for quality in candidate_qualities.values()):
+        if any(self._looks_like_face(quality) for quality in candidate_qualities.values()):
             return candidate, candidate_qualities
         return lock, qualities
 
@@ -263,16 +320,25 @@ class MaterialLocator:
         """
         return {region: measure_face(grayscale(), region) for region in lock.regions}
 
-    @staticmethod
-    def _accepted(region: LockedRegion, face: FaceQuality, hits, *, colour_path: bool) -> bool:
+    def _accepted(
+        self,
+        region: LockedRegion,
+        face: FaceQuality,
+        hits,
+        *,
+        colour_path: bool,
+    ) -> bool:
         """最终认不认这个候选：**形状判据通过，或者模型给它盖了章**。
 
         两条证据互相补：顶面被光照分成亮暗两块时，颜色掩膜的边界会毛糙、形状判据
         可能不通过，但模型照样框得准；反过来模型在近距离焦画面里可能一个框都没有，
         这时只能信形状。走霍夫那一路（``colour_path=False``）时没有颜色证据，
         就只认形状判据——上一版在这里漏了一刀，把退回来的几十个假圆全当物料了。
+
+        形状判据用的是**配置里的**阈值（``interior_std_max`` / ``edge_support_min``），
+        现场光照差时内部标准差会整体抬高，写死的 12.0 会把真顶面一起挡掉。
         """
-        if face.looks_like_face:
+        if self._looks_like_face(face):
             return True
         if not colour_path:
             return False
@@ -300,6 +366,25 @@ class MaterialLocator:
             except ValueError:
                 return None
         return resolve_focal_px(width, height, self.focal_px)
+
+    def _relaxed_locator(self) -> "ColourBlobLocator | None":
+        """严格容差没找到色块时的第二遍定位器；不需要放松时返回 ``None``。
+
+        只在两件事同时成立时给出：调用方配了 ``colour_relax_factor > 1``，而且主定位器
+        确实是颜色块定位器（霍夫那条路有自己的 ``relaxed``，不归这里管）。
+        **只放大 BGR 容差**：色相与亮度下限保持不动，因为台面正好卡在那两个阈值的另一侧
+        （色相差 14、亮度比 0.42），一放就会把整张台面收进掩膜。
+
+        代价是"什么都没找到"的那一帧要多跑一遍颜色分割（实测那一遍是整帧最贵的一段），
+        所以它只在**一无所获**时发生：找到料的那一帧行为与开销都不变。
+        """
+        if self.colour_relax_factor <= 1.0:
+            return None
+        if not isinstance(self.locator, ColourBlobLocator):
+            return None
+        options = dict(self.blob_options)
+        options["tolerance"] = self.colour_tolerance * self.colour_relax_factor
+        return ColourBlobLocator(self.locator.references, **options)
 
     def _report_for_region(
         self,

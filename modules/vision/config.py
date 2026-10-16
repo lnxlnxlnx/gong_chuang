@@ -286,6 +286,30 @@ class TargetSettings:
     #: 给了它，物料定位就走颜色块（夹爪、台面、线材进不了掩膜）。空表示不按颜色区分。
     material_palette: Mapping[str, Tuple[float, float, float]] = field(default_factory=dict)
 
+    # ---------------------------------------------------- 颜色块路径的放宽参数
+    # 这几项原来写死在 ``material_blob`` / ``material_face`` 里。现场光照一变就得改代码，
+    # 所以搬到这里；默认值与那些常量**逐字相同**，不配就与搬之前完全一致。
+    #: 色相容差（OpenCV 0–179 标度）。参考色换灯以后 BGR 会整片平移，色相却基本不变，
+    #: 所以掩膜是"BGR 距离够近 **或** 色相够近且不太暗"。调大能救回偏色的料，
+    #: 但台面的色相离绿料只差 14——**别超过 12**，否则台面会整片进掩膜。
+    hue_tolerance: float = 10.0
+    #: 亮度下限：候选像素的 V 至少是参考色 V 的这个倍数。台面 V≈85、物料 V≈204–252，
+    #: 所以这个比值必须**大于 0.42**，否则台面也会被当成料。
+    value_ratio: float = 0.65
+    #: 小于这么多像素的色块不当物料（噪点、反光、背景上一小块同色）。
+    min_area_px: float = 500.0
+    #: 边界起伏上限（轮廓点到形心距离的变异系数）；``None`` 表示不查这一项。
+    max_boundary_variation: Optional[float] = 0.35
+    #: 填充率下限（等效半径 / 外接圆半径）；``None`` 表示不查这一项。
+    min_fill_ratio: Optional[float] = 0.65
+    #: 形状判据"像不像物料顶面"：内部灰度标准差上限、圆周边界支撑比例下限。
+    #: 放宽这两项会让夹爪圆弧、背景平地也更容易混进来。
+    interior_std_max: float = 12.0
+    edge_support_min: float = 0.55
+    #: 严格颜色容差**一个色块都没找到**时的第二遍倍数（只放大 BGR 容差，
+    #: 不动色相与亮度下限——那两个一放就会把台面收进来）。``1.0`` 表示不放松。
+    colour_relax_factor: float = 1.5
+
     @property
     def can_split_by_color(self) -> bool:
         """两类目标都有参考颜色时才可能在同一帧里把它们分开。"""
@@ -454,6 +478,38 @@ def _targets(value: object) -> TargetSettings:
         ),
         material_palette=_material_palette(
             document.get("material_palette"), "targets.material_palette"
+        ),
+        hue_tolerance=_positive_number(
+            document.get("hue_tolerance", TargetSettings().hue_tolerance),
+            "targets.hue_tolerance",
+        ),
+        value_ratio=_positive_number(
+            document.get("value_ratio", TargetSettings().value_ratio),
+            "targets.value_ratio",
+        ),
+        min_area_px=_positive_number(
+            document.get("min_area_px", TargetSettings().min_area_px),
+            "targets.min_area_px",
+        ),
+        max_boundary_variation=_optional_positive_number(
+            document.get("max_boundary_variation", TargetSettings().max_boundary_variation),
+            "targets.max_boundary_variation",
+        ),
+        min_fill_ratio=_optional_positive_number(
+            document.get("min_fill_ratio", TargetSettings().min_fill_ratio),
+            "targets.min_fill_ratio",
+        ),
+        interior_std_max=_positive_number(
+            document.get("interior_std_max", TargetSettings().interior_std_max),
+            "targets.interior_std_max",
+        ),
+        edge_support_min=_positive_number(
+            document.get("edge_support_min", TargetSettings().edge_support_min),
+            "targets.edge_support_min",
+        ),
+        colour_relax_factor=_positive_number(
+            document.get("colour_relax_factor", TargetSettings().colour_relax_factor),
+            "targets.colour_relax_factor",
         ),
     )
 

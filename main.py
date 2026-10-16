@@ -74,6 +74,7 @@ def pick_manual() -> None:
         # robot.arm.record_measurement(
         #     CylindricalPose(base_degrees=0.0, radial_mm=180.0, height_mm=0.0)
         # )
+        robot.gripper.set_position(250)
         robot.arm.move_up(pulses=4000)
         robot.arm.move_forward(3200)
         # # time.sleep(1)
@@ -91,6 +92,8 @@ def pick_manual() -> None:
 
         # # x/y 对准 → 下降 → 后缩；一次都不动高度（除了这一次开环下降）。
         robot.grasp.align_xy()
+        robot.arm.move_down(pulses= 1500)
+        grab_box(robot)
         # robot.arm.move_by(z_mm= - material.z_mm // 2)
         # robot.arm.move_by(x_mm=- material.x_mm, y_mm= - material.y_mm)
         # robot.arm.move_by(z_mm=- material.z_mm // 2)
@@ -103,16 +106,16 @@ def pick_manual() -> None:
         # robot.gripper.open_jaws()
 
 def grab_box(robot):
-        robot.gripper.set_position(80)
-        robot.arm.rotate_cw(pulses=1000)
-        robot.arm.move_down(pulses=800)
+        robot.gripper.set_position(250)
+        # robot.arm.rotate_cw(pulses=1000)
+        # robot.arm.move_down(pulses=800)
         robot.gripper.set_position(0)
         robot.arm.move_up(pulses=1000)
         robot.arm.rotate_ccw(pulses=1000)
 
 def adjust_arm_align():
     with Robot.open(grasp=True, gripper=True) as robot:
-        robot.gripper.set_position(80)
+        robot.gripper.set_position(250)
         robot.arm.move_up(pulses=5000)
         robot.arm.move_forward(3200)
         time.sleep(1)
@@ -129,8 +132,9 @@ def adjust_arm_align():
         # robot.arm.move_by(x_mm=- material.x_mm, y_mm= - material.y_mm)
 
 def test_vision():
-    with Robot.open(vision=True) as robot:
+    with Robot.open(vision=True, gripper=True) as robot:
         report = robot.vision.locate()
+        robot.gripper.set_position(200)
         if report.best is None:
             print("画面里没有通过校验的物料")
             return
@@ -140,6 +144,7 @@ def test_vision():
 if __name__ == "__main__":
     # main()
     pick_manual()
+    # test_vision()
     # adjust_arm_align()
     # locate_material()
     # pick_ready()

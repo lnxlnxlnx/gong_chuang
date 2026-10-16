@@ -61,13 +61,27 @@ class FaceQuality:
     #: 实际参与统计的方向数（贴边被跳过的方向不计）。
     sampled_rays: int
 
+    def passes(
+        self,
+        *,
+        interior_std_max: float = DEFAULT_INTERIOR_STD_MAX,
+        edge_support_min: float = DEFAULT_EDGE_SUPPORT_MIN,
+    ) -> bool:
+        """按**给定阈值**判断像不像物料顶面。
+
+        两个阈值可以从 ``modules/vision/config.json`` 的 ``targets`` 传进来
+        （``interior_std_max`` / ``edge_support_min``）：现场光照差时内部标准差会整体
+        抬高，写死的 12.0 会把真顶面一起挡掉。默认值就是那两个常量，不配时行为不变。
+        """
+        return (
+            self.interior_std <= interior_std_max
+            and self.edge_support >= edge_support_min
+        )
+
     @property
     def looks_like_face(self) -> bool:
-        """够均匀、边界也够完整时才算像物料顶面。"""
-        return (
-            self.interior_std <= DEFAULT_INTERIOR_STD_MAX
-            and self.edge_support >= DEFAULT_EDGE_SUPPORT_MIN
-        )
+        """默认阈值下够不够均匀、边界够不够完整（保持原语义）。"""
+        return self.passes()
 
     def summary(self) -> str:
         return (

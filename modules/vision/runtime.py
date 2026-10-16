@@ -106,6 +106,16 @@ def _build_locator(settings: VisionConfig, *, focal_px: Optional[float] = None) 
             material_palette=targets.material_palette or None,
             colour_tolerance=targets.color_tolerance,
             top_diameter_mm=targets.material_diameter_mm,
+            # 颜色块路径与形状判据的放宽参数：原来写死在 material_blob / material_face
+            # 里，现场光照一变就得改代码，现在从 targets 块读（默认值与常量逐字相同）。
+            hue_tolerance=targets.hue_tolerance,
+            value_ratio=targets.value_ratio,
+            min_area_px=targets.min_area_px,
+            max_boundary_variation=targets.max_boundary_variation,
+            min_fill_ratio=targets.min_fill_ratio,
+            interior_std_max=targets.interior_std_max,
+            edge_support_min=targets.edge_support_min,
+            colour_relax_factor=targets.colour_relax_factor,
         )
     except BaseException as primary:
         # 构造未返回的对象只能由构造器自己收尾：不关掉 detector 就是泄漏一个已加载的模型。
@@ -134,6 +144,12 @@ def _override_settings(
     material_palette=None,
     colour_tolerance: Optional[float] = None,
     top_diameter_mm: Optional[float] = None,
+    hue_tolerance: Optional[float] = None,
+    value_ratio: Optional[float] = None,
+    min_area_px: Optional[float] = None,
+    interior_std_max: Optional[float] = None,
+    edge_support_min: Optional[float] = None,
+    colour_relax_factor: Optional[float] = None,
 ) -> VisionConfig:
     """为**本次调用**生成一份覆盖后的快照；``None`` 表示不覆盖，不读写文件。
 
@@ -214,6 +230,20 @@ def _override_settings(
                 top_diameter_mm, "targets.material_diameter_mm"
             ),
         )
+    # 颜色块路径与形状判据的放宽参数（现场调光照时最常用的几项）。
+    for name, value in (
+        ("hue_tolerance", hue_tolerance),
+        ("value_ratio", value_ratio),
+        ("min_area_px", min_area_px),
+        ("interior_std_max", interior_std_max),
+        ("edge_support_min", edge_support_min),
+        ("colour_relax_factor", colour_relax_factor),
+    ):
+        if value is None:
+            continue
+        from modules.vision.config import _positive_number
+
+        targets = replace(targets, **{name: _positive_number(value, f"targets.{name}")})
     if targets is not settings.targets:
         settings = replace(settings, targets=targets)
     return settings

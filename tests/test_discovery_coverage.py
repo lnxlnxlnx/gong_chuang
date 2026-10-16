@@ -28,6 +28,12 @@ ROOT = PROJECT_ROOT
 #: 数据、生成产物和随仓库附带的厂商例程都不是源码，扫描必须跳过它们。
 SKIPPED_DIRECTORIES = frozenset({"__pycache__", "docs", "models", "output"})
 
+#: 根目录下以 ``test_`` 开头的**交互入口**：它们不是 unittest 模块（跑起来要开摄像头 /
+#: 串口），所以不进离线发现。``test.py`` 本身没有下划线，不会落进下面那个 glob；
+#: ``test_vision.py``（实时看视觉识别）是唯一一个需要在这里点名的。
+#: 按**相对项目根的路径**点名：同名文件出现在别的包里时仍然必须被离线跑器发现。
+ENTRY_SCRIPTS = frozenset({"test_vision.py"})
+
 
 def test_files_on_disk(root: Path = ROOT) -> tuple[Path, ...]:
     """Return every ``test_*.py`` outside hidden, data and vendor directories."""
@@ -41,7 +47,9 @@ def test_files_on_disk(root: Path = ROOT) -> tuple[Path, ...]:
         found.extend(
             Path(directory) / name
             for name in filenames
-            if name.startswith("test_") and name.endswith(".py")
+            if name.startswith("test_")
+            and name.endswith(".py")
+            and (Path(directory) / name).relative_to(root).as_posix() not in ENTRY_SCRIPTS
         )
     return tuple(sorted(found))
 
@@ -79,6 +87,23 @@ class OfflineDiscoveryTests(unittest.TestCase):
             if path.resolve() not in collected
         ]
         self.assertEqual(orphaned, [], "这些测试文件不会被离线跑器发现")
+
+    def test_the_excluded_entry_scripts_still_exist(self) -> None:
+        """点名排除的入口脚本必须还在：它被删掉以后，这条排除就成了会骗人的死配置。"""
+        for name in sorted(ENTRY_SCRIPTS):
+            self.assertTrue((ROOT / name).is_file(), f"{name} 不在了，请把这条排除删掉")
+
+    def test_an_entry_script_in_a_package_is_still_required(self) -> None:
+        """排除只认根目录那一份：同名文件出现在包里时，仍然必须被离线跑器发现。"""
+        with scratch_directory() as root:
+            (root / "pkg").mkdir()
+            (root / "pkg" / "test_vision.py").write_text("", encoding="utf-8")
+
+            found = [
+                path.relative_to(root).as_posix() for path in test_files_on_disk(root)
+            ]
+
+        self.assertEqual(found, ["pkg/test_vision.py"])
 
     def test_data_and_vendor_directories_are_skipped(self) -> None:
         """Generated data and bundled examples must not be treated as source."""

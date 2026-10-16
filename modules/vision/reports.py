@@ -167,6 +167,9 @@ class MaterialReport:
         if self.colour_source == "model":
             lines.append("  调色板里没有这块料：参考色是从模型框里现取的"
                          "（要固定下来就把它加进 targets.material_palette）")
+        elif self.colour_source == "palette-relaxed":
+            lines.append("  严格颜色容差一个色块都没找到，已按 targets.colour_relax_factor "
+                         "放大后的 BGR 容差再分割一遍（光照/颜色漂移时的救回路径）")
         elif self.colour_fallback:
             lines.append("  调色板里没有这块料，模型也没认出来：已退回霍夫的形状判据，"
                          "请把它的颜色加进 targets.material_palette")
