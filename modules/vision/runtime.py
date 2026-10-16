@@ -47,10 +47,27 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional, Tuple
 
 from modules.vision.config import VisionConfig
+# 这两个默认值只定义一次，就住在 sequence 里（那里是判据的出处）；本模块转发它们，
+# 免得"停止判据"在两个地方各写一个数。
+from modules.vision.drive.sequence import DEFAULT_MIN_SAMPLES, DEFAULT_STILL_MM
+
+#: 一次多帧融合连拍几帧。实测本机一帧定位约 178 ms，7 帧约 1.25 s——
+#: 短到转盘转过的那点角度可以用直线近似，长到够剔掉一两个野值。
+DEFAULT_MEASURE_FRAMES = 7
+
+#: 认为"已经停稳"的最大批内偏差（毫米）。这是**批内一致性**，比伺服容差严：
+#: 容差管的是"要不要再动一下"，这里管的是"这个读数本身稳不稳"。
+DEFAULT_SETTLE_MM = 1.0
+
+#: :meth:`Vision.measure_settled` 的重试上限（秒）。与抓取侧
+#: ``ServoConfig.settle_timeout_seconds`` 的默认值一致：同一台机器上"等停稳"
+#: 的耐心不该有两个数。
+DEFAULT_SETTLE_TIMEOUT_SECONDS = 4.0
 
 if TYPE_CHECKING:
     from modules.vision.drive.camera import USBCamera as Camera
     from modules.vision.drive.material_locate import MaterialLocator
+    from modules.vision.drive.sequence import Fusion, TimedPoint
     from modules.vision.drive.sighting import MaterialSighting
     from modules.vision.reports import MaterialReport, RegionReport
 
@@ -299,6 +316,29 @@ def _sightings_from_report(
     )
 
 
+def _timed_point_from_report(
+    report: "MaterialReport", stamp: float
+) -> "Optional[TimedPoint]":
+    """整帧报告 → 一个带时刻的观测点；这一帧没有合格物料时返回 ``None``。
+
+    取 ``report.best`` 的**判据**而不是另一个近似规则：下游（抓取、逆解）要的就是
+    这一个，多一套"取哪个圆"的规则只会让两处结果对不上。
+    """
+    from modules.vision.drive.sequence import TimedPoint
+
+    best = report.best
+    if best is None:
+        return None
+    return TimedPoint(
+        stamp=stamp,
+        x_mm=float(best.x_mm),
+        y_mm=float(best.y_mm),
+        z_mm=float(best.distance_mm),
+        diameter_px=float(2 * best.region.radius),
+        color=best.name,
+    )
+
+
 class Vision:
     """一次视觉会话：拥有相机与定位器（含模型），可重复定位。
 
@@ -440,6 +480,93 @@ class Vision:
             return None
         report, stamp = result
         return _sightings_from_report(report, received_at=stamp)
+
+    # ------------------------------------------------------------- 多帧融合
+    def measure(
+        self,
+        *,
+        frames: int = DEFAULT_MEASURE_FRAMES,
+        timeout: Optional[float] = None,
+        still_mm: float = DEFAULT_STILL_MM,
+        settle_mm: Optional[float] = None,
+        min_samples: int = DEFAULT_MIN_SAMPLES,
+    ) -> "Optional[Fusion]":
+        """连拍若干帧，稳健融合成**一个**值；有效读数不够时返回 ``None``。
+
+        这是给"物料在转盘上会动、会停"准备的：一帧定位既躲不开运动模糊，也说不清
+        "现在到底稳没稳"。这里连拍 ``frames`` 帧，交给
+        :func:`modules.vision.drive.sequence.fuse` 剔除与其余帧不一致的那些，
+        再给出值、偏差、速度，以及**"还在动"这个结论本身**。
+
+        三条要点：
+
+        - **返回 ``None`` 表示"这批读数不够（少于 ``min_samples`` 个有效值）"**，
+          不要把 ``None`` 当成"位置是 0"或者退回单帧值——那正是要挡掉的东西。
+        - ``moving`` 为 ``True`` 时那个值仍然可用（它是按拟合速度外推到参考时刻的），
+          但调用方应当知道"目标还在动"：要么等它停，要么接受这个外推。
+        - ``settle_mm`` 给定时**会提前收工**：攒够 ``min_samples`` 帧、没在动、
+          且最大偏差不超过它，就不用再拍满 ``frames`` 帧。省下的是几帧 ×
+          约 178 ms 的定位时间。默认 ``None`` = 一定拍满，行为可预测。
+
+        :raises RuntimeError: 会话未就绪或已关闭（与 :meth:`locate` 一致）。
+        """
+        from modules.vision.drive.sequence import fuse
+
+        if frames < 1:
+            raise ValueError("frames must be positive")
+        samples = []
+        for _ in range(frames):
+            result = self._read_report(timeout=timeout)
+            if result is None:
+                # 读不到画面与"读到了但没有物料"在这里是同一件事：这一帧没有观测。
+                samples.append(None)
+                continue
+            report, stamp = result
+            samples.append(_timed_point_from_report(report, stamp))
+            if settle_mm is not None:
+                partial = fuse(
+                    samples, still_mm=still_mm, min_samples=min_samples
+                )
+                if (
+                    partial is not None
+                    and not partial.moving
+                    and partial.spread_mm <= settle_mm
+                ):
+                    return partial
+        return fuse(samples, still_mm=still_mm, min_samples=min_samples)
+
+    def measure_settled(
+        self,
+        *,
+        timeout: float = DEFAULT_SETTLE_TIMEOUT_SECONDS,
+        frames: int = DEFAULT_MEASURE_FRAMES,
+        still_mm: float = DEFAULT_STILL_MM,
+        settle_mm: float = DEFAULT_SETTLE_MM,
+        min_samples: int = DEFAULT_MIN_SAMPLES,
+    ) -> "Optional[Fusion]":
+        """反复连拍，直到拿到一次"已停稳"的融合（或者超时，返回最后一次）。
+
+        转盘停止、机械臂停下的那一刻，前一批读数多半还在动（``moving``），
+        所以"拍一批就下结论"是不够的。这里按批重试，直到 :attr:`Fusion.confident`
+        成立；超时则返回**最后一批**——它带着 ``moving`` 与 ``spread_mm``，
+        调用方自己决定要不要用，而不是被悄悄塞一个"看起来没事"的值。
+
+        读不到画面（相机掉线）不算"还在动"：连续读失败会一直重试到超时，
+        与 :func:`modules.grasp.drive.servo_observation.measure_settled` 的取舍一致。
+        """
+        deadline = self._clock() + max(0.0, timeout)
+        last = None
+        while True:
+            current = self.measure(
+                frames=frames, still_mm=still_mm, settle_mm=settle_mm,
+                min_samples=min_samples,
+            )
+            if current is not None:
+                last = current
+                if current.confident:
+                    return current
+            if self._clock() >= deadline:
+                return last
 
     # ------------------------------------------------------------- 收尾
     def close(self) -> None:

@@ -55,7 +55,13 @@ from modules.vision.config import TargetSettings, VisionConfig
 from modules.vision.drive.preview import close_previews
 from modules.vision.drive.stream import PreviewStats, run_preview
 from modules.vision.reports import MaterialReport, RegionReport
-from modules.vision.runtime import Vision, _load_settings, _override_settings
+from modules.vision.runtime import (
+    DEFAULT_MEASURE_FRAMES,
+    DEFAULT_SETTLE_TIMEOUT_SECONDS,
+    Vision,
+    _load_settings,
+    _override_settings,
+)
 from project_paths import PROJECT_ROOT
 
 #: 窗口名必须是 ASCII：``cv2.putText`` / HighGUI 都画不出中文。
@@ -97,6 +103,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--window", type=float, nargs=2, default=None, dest="working_distance_mm",
                         metavar=("NEAR", "FAR"), help="targets.working_distance_mm：工作距离窗口（毫米）")
     parser.add_argument("--conf", type=float, default=None, help="model.conf_thresh：YOLO 置信度阈值")
+    # ---- 多帧融合：物料放在转盘上时会动，单帧读数的坏法不止一种 ----
+    parser.add_argument("--measure", action="store_true",
+                        help=f"连拍若干帧做一次稳健融合后退出（默认 {DEFAULT_MEASURE_FRAMES} 帧）")
+    parser.add_argument("--settle", action="store_true",
+                        help="反复连拍直到停稳（配合 --measure；超时返回最后一批并写明还在动）")
+    parser.add_argument("--frames", type=int, default=DEFAULT_MEASURE_FRAMES,
+                        help=f"一次融合连拍几帧（默认 {DEFAULT_MEASURE_FRAMES}）")
+    parser.add_argument("--settle-timeout", type=float, default=DEFAULT_SETTLE_TIMEOUT_SECONDS,
+                        help=f"--settle 的耐心上限，秒（默认 {DEFAULT_SETTLE_TIMEOUT_SECONDS:.0f}）")
     return parser
 
 
@@ -255,6 +270,59 @@ def describe(report: MaterialReport, *, focal_px: Optional[float] = None) -> str
     return "\n".join(lines)
 
 
+def describe_fusion(fusion) -> str:
+    """把一次多帧融合写成终端可读的几行（含"还在动 / 已停稳"的结论）。"""
+    lines = [fusion.summary()]
+    lines.append(
+        f"  值：相机系 xyz=({fusion.point.x_mm:+.2f}, {fusion.point.y_mm:+.2f}, "
+        f"{fusion.point.z_mm:.2f}) mm（参考时刻 t={fusion.point.stamp:.3f}）"
+    )
+    if fusion.moving:
+        vx, vy, vz = fusion.velocity_mm_s
+        lines.append(
+            f"  还在动：速度 ({vx:+.2f}, {vy:+.2f}, {vz:+.2f}) mm/s，合 "
+            f"{fusion.speed_mm_s:.2f} mm/s —— 上面那个值是**外推**到参考时刻的，"
+            "等停稳再采一次才是真值"
+        )
+    else:
+        lines.append(f"  已停稳：批内最大偏差 {fusion.spread_mm:.2f} mm")
+    if fusion.misses:
+        lines.append(
+            f"  有 {fusion.misses} 帧没看到物料（运动模糊 / 被挡住 / 画面里没料）"
+        )
+    if len(fusion.colors) > 1:
+        lines.append(
+            f"  注意：这一批里出现了 {'、'.join(fusion.colors)} —— 可能换了一个目标，"
+            "这个结果不该当成同一个物的位置"
+        )
+    if not fusion.confident:
+        lines.append("  结论：**不算一次可信测量**（内点不够 / 还在动 / 野值过半）")
+    return "\n".join(lines)
+
+
+def run_measure(
+    vision: Vision, *, frames: int, settled: bool, timeout: float
+) -> int:
+    """多帧融合：连拍一批（``--settle`` 时反复拍到停稳），打印结论后退出。
+
+    退出码：``0`` = 拿到一次可信测量，``1`` = 没拿到（有效读数不够 / 还在动）。
+    这样脚本里可以直接用它当判据。
+    """
+    if settled:
+        fusion = vision.measure_settled(timeout=timeout, frames=frames)
+    else:
+        fusion = vision.measure(frames=frames)
+    if fusion is None:
+        print(
+            f"这一批（{frames} 帧）里有效读数不够：至少要有 3 帧看到物料。\n"
+            "  运动模糊、爪子挡住、画面里没料都会让某一帧没有读数；"
+            "把料放好，或者加 --frames 多拍几帧。"
+        )
+        return 1
+    print(describe_fusion(fusion))
+    return 0 if fusion.confident else 1
+
+
 def save_frame(frame: np.ndarray, directory: Path) -> Path:
     """把一帧（含标注）存成 PNG，返回写出的路径。"""
     import cv2
@@ -345,6 +413,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print("这些值来自 modules/vision/config.json；命令行覆盖只对本次运行生效。")
     try:
         with Vision._open_config(settings, focal_px=arguments.focal) as vision:
+            if arguments.measure or arguments.settle:
+                return run_measure(
+                    vision,
+                    frames=arguments.frames,
+                    settled=arguments.settle,
+                    timeout=arguments.settle_timeout,
+                )
             if arguments.once:
                 return run_once(vision, save_dir=save_dir)
             return run_preview_session(

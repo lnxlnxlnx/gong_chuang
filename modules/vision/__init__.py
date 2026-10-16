@@ -11,9 +11,23 @@
     from modules.vision import Vision
 
     with Vision.open(config_path="modules/vision/config.json") as vision:
-        report = vision.locate()
+        report = vision.locate()          # 一帧
         if report.best is not None:
             print(report.best.x_mm, report.best.y_mm, report.best.z_mm)
+
+        fused = vision.measure()          # 多帧稳健融合（物料会动时用这个）
+        if fused is not None and fused.confident:
+            print(fused.point.x_mm, fused.point.y_mm, fused.point.z_mm)
+
+## 一帧还是多帧
+
+``locate()`` / ``frame()`` 是**单帧**接口：快，但读数的好坏全押在这一帧上。物料放在
+转盘上（会转、会停）时单帧不够用：运动模糊会让某一帧整个检不到，而"停稳了没有"
+是单帧回答不了的问题。
+
+``measure()`` 连拍若干帧、剔掉与其余帧不一致的那些，给出一个值**以及**
+"目标还在不在动"。判据与取舍在 :mod:`modules.vision.drive.sequence`；只想等到停稳
+就用 :meth:`~modules.vision.runtime.Vision.measure_settled`。
 
 ## 其余能力去哪里找
 
@@ -24,6 +38,7 @@
 - 预览窗口 → :mod:`modules.vision.drive.preview`；两线程预览 → :mod:`modules.vision.drive.stream`
 - 模型路径与设置 → :mod:`modules.vision.config`；检测器工厂 → :mod:`modules.vision.detector_factory`
 - 帧级定位算法 → :mod:`modules.vision.drive.material_locate` 等 ``drive`` 子模块
+- 圆心 / 半径拟合 → :mod:`modules.vision.drive.circle_fit`；多帧融合 → :mod:`modules.vision.drive.sequence`
 - 单目测距 → :mod:`modules.vision.drive.distance`；默认类别表 → :mod:`modules.vision.drive.yolov8`
 
 导入本包**不读配置、不开设备、不加载推理后端**：``Vision.open()`` 才做那些事。
