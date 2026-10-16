@@ -17,6 +17,8 @@ from modules.arm.drive.kinematics import (
     linear_pulses_for_mm,
     grip_height_mm,
     mm_for_linear_pulses,
+    motor_degrees_for_pulses,
+    motor_pulses_for_degrees,
     normalize_degrees,
     require_reachable,
     shortest_angle_delta_degrees,
@@ -25,6 +27,81 @@ from modules.arm.drive.kinematics import (
 PULSES_PER_REVOLUTION = 3200
 BASE_REDUCTION = 5
 MM_PER_MOTOR_REV = 40.0
+
+
+class MotorAxisConversionTests(unittest.TestCase):
+    """**电机轴**角度与脉冲互换：三个轴同一把尺，与减速比、导程都无关。"""
+
+    def test_one_motor_turn_is_pulses_per_revolution(self) -> None:
+        self.assertEqual(
+            motor_pulses_for_degrees(
+                360.0, pulses_per_revolution=PULSES_PER_REVOLUTION
+            ),
+            PULSES_PER_REVOLUTION,
+        )
+
+    def test_the_measured_travels_round_trip_within_half_a_pulse(self) -> None:
+        """现场实测：升降 1024°、伸缩 1057.4°、底座 1800°（= 360° 输出 x 5）。
+
+        只能精确到**半个脉冲**：一个脉冲就是 0.1125°，所以 1057.4° 实际落在
+        9399 脉冲 = 1057.3875°。要求更多位小数是自欺欺人。
+        """
+        half_pulse = 360.0 / PULSES_PER_REVOLUTION / 2.0
+        for degrees in (1024.0, 1057.4, 1800.0):
+            with self.subTest(degrees=degrees):
+                pulses = motor_pulses_for_degrees(
+                    degrees, pulses_per_revolution=PULSES_PER_REVOLUTION
+                )
+                back = motor_degrees_for_pulses(
+                    pulses, pulses_per_revolution=PULSES_PER_REVOLUTION
+                )
+                self.assertLessEqual(abs(back - degrees), half_pulse)
+
+    def test_an_output_turn_of_the_base_is_five_motor_turns(self) -> None:
+        """同一件事的两种尺：输出 360°（要减速比）对上电机 1800°（不要减速比）。"""
+        self.assertEqual(
+            base_pulses_for_degrees(
+                360.0,
+                pulses_per_revolution=PULSES_PER_REVOLUTION,
+                reduction_ratio=BASE_REDUCTION,
+            ),
+            motor_pulses_for_degrees(
+                360.0 * BASE_REDUCTION, pulses_per_revolution=PULSES_PER_REVOLUTION
+            ),
+        )
+
+    def test_multi_turn_angles_are_not_wrapped(self) -> None:
+        """行程超过一圈，所以角度是累计量：1048° 就是 1048°，不是 1048-720。"""
+        self.assertEqual(
+            motor_pulses_for_degrees(
+                1048.0, pulses_per_revolution=PULSES_PER_REVOLUTION
+            ),
+            9316,
+        )
+
+    def test_negative_angles_are_symmetric(self) -> None:
+        self.assertEqual(
+            motor_pulses_for_degrees(
+                -1800.0, pulses_per_revolution=PULSES_PER_REVOLUTION
+            ),
+            -16000,
+        )
+
+    def test_half_pulses_round_away_from_zero_on_both_signs(self) -> None:
+        for degrees, expected in ((0.05625, 1), (-0.05625, -1)):
+            with self.subTest(degrees=degrees):
+                self.assertEqual(
+                    motor_pulses_for_degrees(
+                        degrees, pulses_per_revolution=PULSES_PER_REVOLUTION
+                    ),
+                    expected,
+                )
+
+    def test_a_non_positive_pulses_per_revolution_is_rejected(self) -> None:
+        for bad in (0, -3200):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    motor_pulses_for_degrees(360.0, pulses_per_revolution=bad)
 
 
 class BaseAxisConversionTests(unittest.TestCase):

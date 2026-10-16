@@ -36,7 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
 
-from modules.arm.drive.kinematics import CylindricalPose
+from modules.arm.drive.kinematics import CylindricalPose, motor_degrees_for_pulses
 
 #: 位姿来源。
 UNKNOWN = "unknown"
@@ -145,7 +145,9 @@ class MotorTurns:
 
     @property
     def motor_degrees(self) -> float:
-        return self.pulses * 360.0 / self.pulses_per_revolution
+        return motor_degrees_for_pulses(
+            self.pulses, pulses_per_revolution=self.pulses_per_revolution
+        )
 
     @property
     def motor_revolutions(self) -> float:

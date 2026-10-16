@@ -102,6 +102,8 @@ from modules.arm.drive.kinematics import (
     base_pulses_for_degrees,
     linear_pulses_for_mm,
     mm_for_linear_pulses,
+    motor_degrees_for_pulses,
+    motor_pulses_for_degrees,
     normalize_degrees,
 )
 from modules.arm.motion_plan import PlanError, plan_absolute, plan_xyz
@@ -669,6 +671,122 @@ class RobotArm:
                 axis_name, rpm=rpm, acceleration=acceleration, wait=wait
             )
             for axis_name in self.HOME_ORDER
+        )
+
+    # --------------------------------------------- 按里程表走绝对位置
+    def move_axis_to_motor_pulses(
+        self,
+        axis_name: str,
+        pulses: int,
+        *,
+        rpm: Optional[int] = None,
+        acceleration: Optional[int] = None,
+        wait: bool = True,
+    ) -> MotionReport:
+        """把一根轴走到**相对原点**的绝对电机脉冲位置。
+
+        ``pulses`` 是**目标**不是增量：增量由 :attr:`turns_state` 的当前累计量算出来，
+        所以同一个目标反复调用是幂等的——已经在目标上就一帧都不发。
+
+        和驱动器自己的绝对模式（``0xFD … 01``）**不是一回事**：那个的零点在驱动器计数器
+        里，这里的零点由 :meth:`modules.arm.arm_state.MotorTurnsState.mark_origin` 定义
+        （回零与绝对归位会自动清零它）。所以这条路仍然只发相对帧，与本模块其余部分一致。
+
+        增量超过 ``motion.max_pulses`` 时自动**拆成多段**，每段都不超过单帧上限。
+        拆段需要 ``wait=True``：不等待的话后一帧会在前一帧还没走完时改写目标。
+        """
+        self._require_open()
+        if isinstance(pulses, bool) or not isinstance(pulses, int):
+            raise ValueError("pulses must be an integer")
+        delta = pulses - self.turns_state.of(axis_name).pulses
+        return self._move_delta(
+            axis_name, delta, rpm=rpm, acceleration=acceleration, wait=wait
+        )
+
+    def move_axis_to_motor_degrees(
+        self,
+        axis_name: str,
+        degrees: float,
+        *,
+        rpm: Optional[int] = None,
+        acceleration: Optional[int] = None,
+        wait: bool = True,
+    ) -> MotionReport:
+        """同上，用**电机角度**给目标：``3200 脉冲 = 360°``，
+        三个轴同一把尺，与机构无关。
+
+        **不取模**：这台机器三个轴的行程都超过一个电机圈（底座 1800°、升降 1024°、
+        伸缩 1057°），所以 ``move_axis_to_motor_degrees("base", 1048.0)`` 的意思是
+        "走到累计 1048° 那个位置"，而不是 1048 mod 360。
+
+        注意别和 :meth:`move_base_degrees` 搞混：那个是**输出轴**角度、按增量走。
+        """
+        return self.move_axis_to_motor_pulses(
+            axis_name,
+            motor_pulses_for_degrees(
+                degrees, pulses_per_revolution=self.pulses_per_revolution
+            ),
+            rpm=rpm,
+            acceleration=acceleration,
+            wait=wait,
+        )
+
+    def _move_delta(
+        self,
+        axis_name: str,
+        delta: int,
+        *,
+        rpm: Optional[int],
+        acceleration: Optional[int],
+        wait: bool,
+    ) -> MotionReport:
+        """发一段带符号增量；一次走不完就拆段，每段等完再发下一段。"""
+        if delta == 0:
+            # 已经在目标上：走 _signed_move 的空操作分支，一帧都不发。
+            return self._signed_move(axis_name, 0, rpm, acceleration, wait)
+        cap = self.config.max_pulses
+        if abs(delta) <= cap:
+            return self._signed_move(axis_name, delta, rpm, acceleration, wait)
+        if not wait:
+            raise ValueError(
+                f"这次绝对移动要走 {abs(delta)} 脉冲，超过单帧上限 {cap}；"
+                "拆段必须 wait=True，否则后一帧会在前一帧还没走完时改写目标"
+            )
+        reports: List[MotionReport] = []
+        remaining = delta
+        while remaining != 0:
+            step = max(-cap, min(cap, remaining))
+            report = self._signed_move(axis_name, step, rpm, acceleration, wait)
+            reports.append(report)
+            remaining -= step
+            # 轮询模式下这一段没到位就别再往下发了（估算模式没有状态可看，照旧走完）。
+            if report.motor_status is not None and not report.motor_status.in_position:
+                break
+        return self._merge_reports(axis_name, delta, reports)
+
+    def _merge_reports(
+        self, axis_name: str, delta: int, reports: List[MotionReport]
+    ) -> MotionReport:
+        """把拆开的几段合成一份报告：脉冲数与角度是**总量**，不是最后一段的量。"""
+        axis = self.config.axes[axis_name]
+        motor_degrees = abs(
+            motor_degrees_for_pulses(
+                delta, pulses_per_revolution=self.pulses_per_revolution
+            )
+        )
+        return MotionReport(
+            motor_id=axis.motor_id,
+            pulses=abs(delta),
+            motor_degrees=motor_degrees,
+            output_degrees=(
+                motor_degrees / axis.reduction_ratio
+                if axis.reduction_ratio is not None
+                else None
+            ),
+            estimated_seconds=sum(item.estimated_seconds for item in reports),
+            waited_seconds=sum(item.waited_seconds for item in reports),
+            motor_status=reports[-1].motor_status,
+            turns=self.turns_state.of(axis_name),
         )
 
     def _zero_travel_pulses(self, axis_name: str) -> int:

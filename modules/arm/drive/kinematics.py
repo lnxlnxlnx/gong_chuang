@@ -82,6 +82,36 @@ class TravelLimit:
 
 
 # ---------------------------------------------------------------- 单位换算
+def motor_pulses_for_degrees(
+    degrees: float,
+    *,
+    pulses_per_revolution: int,
+) -> int:
+    """**电机轴**转角（度）换算成脉冲数（四舍五入，带符号）。
+
+    注意和 :func:`base_pulses_for_degrees` 的区别：那个给的是**输出轴**角度、
+    要乘减速比；这个是电机自己转过的角度，``3200 脉冲 = 360°``，与机构无关，
+    三个轴用同一把尺。
+
+    这台机器的三个轴行程都超过一个电机圈（底座 1800°、升降 1024°、伸缩 1057°），
+    所以这里**不做取模、不做归一**——转了几圈就是几圈。累加与原点见
+    :class:`modules.arm.arm_state.MotorTurnsState`。
+    """
+    _require_positive_integer("pulses_per_revolution", pulses_per_revolution)
+    _require_finite("degrees", degrees)
+    return _round_half_away(degrees * pulses_per_revolution / 360.0)
+
+
+def motor_degrees_for_pulses(
+    pulses: int,
+    *,
+    pulses_per_revolution: int,
+) -> float:
+    """**电机轴**脉冲数换算成转角（度）；与 :func:`motor_pulses_for_degrees` 互逆。"""
+    _require_positive_integer("pulses_per_revolution", pulses_per_revolution)
+    return pulses * 360.0 / pulses_per_revolution
+
+
 def base_pulses_for_degrees(
     degrees: float,
     *,

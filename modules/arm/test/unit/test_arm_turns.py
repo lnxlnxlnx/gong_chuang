@@ -269,5 +269,105 @@ class RobotArmTurnsTests(unittest.TestCase):
         self.assertEqual(reading.motor_degrees, 337.5)
 
 
+class RobotArmAbsoluteMotorPositionTests(unittest.TestCase):
+    """``move_axis_to_motor_pulses`` / ``move_axis_to_motor_degrees``：
+    按里程表走绝对位置。
+
+    目标用**电机脉冲或电机角度**给（``3200 脉冲 = 360°``），增量由累计量算出来——
+    所以这条路天然幂等，也不需要驱动器自己的绝对模式。
+    """
+
+    def setUp(self) -> None:
+        self.serial = FakeSerial()
+        self.sleep = RecordingSleep()
+        self.arm = RobotArm._from_settings(
+            config=turns_config(),
+            port="/dev/ttyUSB0",
+            bus=self.serial,
+            sleep=self.sleep,
+        )
+        self.serial.writes.clear()
+
+    def test_walking_to_an_absolute_motor_angle(self) -> None:
+        self.arm.move_axis_to_motor_degrees("base", 1048.0)
+
+        reading = self.arm.turns_state.of("base")
+        self.assertEqual(reading.pulses, 9316)
+        self.assertAlmostEqual(reading.motor_degrees, 1048.05, places=2)
+
+    def test_walking_to_an_absolute_pulse_position(self) -> None:
+        self.arm.move_axis_to_motor_pulses("extension", 4700)
+
+        self.assertEqual(self.arm.turns_state.of("extension").pulses, 4700)
+        self.assertAlmostEqual(
+            self.arm.turns_state.of("extension").motor_degrees, 528.75, places=2
+        )
+
+    def test_the_same_target_twice_sends_nothing_the_second_time(self) -> None:
+        """幂等：已经在目标上，一帧都不发。"""
+        self.arm.move_axis_to_motor_degrees("base", 1048.0)
+        frames_after_first = len(self.serial.writes)
+
+        report = self.arm.move_axis_to_motor_degrees("base", 1048.0)
+
+        self.assertEqual(report.pulses, 0)
+        self.assertEqual(len(self.serial.writes), frames_after_first)
+        self.assertEqual(self.arm.turns_state.of("base").pulses, 9316)
+
+    def test_the_angle_can_also_go_backwards(self) -> None:
+        self.arm.move_axis_to_motor_degrees("base", 1048.0)
+        self.arm.move_axis_to_motor_degrees("base", 500.0)
+
+        reading = self.arm.turns_state.of("base")
+        self.assertEqual(reading.pulses, 4444)
+        self.assertAlmostEqual(reading.motor_degrees, 499.95, places=2)
+
+    def test_the_angle_is_not_wrapped_to_one_turn(self) -> None:
+        """行程超过一圈：1048° 与 328° 是两个不同的位置，不许取模。"""
+        self.arm.move_axis_to_motor_degrees("base", 1048.0)
+        self.arm.move_axis_to_motor_degrees("base", 328.0)
+
+        self.assertEqual(self.arm.turns_state.of("base").pulses, 2916)
+
+    def test_a_distance_beyond_one_frame_is_split_into_segments(self) -> None:
+        """夹具里 ``max_pulses = 5000``，而 16000 脉冲（= 1800°）要走完。"""
+        report = self.arm.move_axis_to_motor_degrees("base", 1800.0)
+
+        self.assertEqual(len(self.serial.writes), 4)  # 5000 + 5000 + 5000 + 1000
+        self.assertEqual(self.arm.turns_state.of("base").pulses, 16000)
+        # 报告给的是**总量**，不是最后一段的量。
+        self.assertEqual(report.pulses, 16000)
+        self.assertAlmostEqual(report.motor_degrees, 1800.0, places=6)
+
+    def test_splitting_refuses_to_run_without_waiting(self) -> None:
+        """不等待就拆段，后一帧会在前一帧还没走完时改写目标。"""
+        with self.assertRaisesRegex(ValueError, "wait=True"):
+            self.arm.move_axis_to_motor_degrees("base", 1800.0, wait=False)
+
+        self.assertEqual(self.serial.writes, [])
+        self.assertEqual(self.arm.turns_state.of("base").pulses, 0)
+
+    def test_a_non_integer_pulse_target_is_rejected_before_any_frame(self) -> None:
+        with self.assertRaises(ValueError):
+            self.arm.move_axis_to_motor_pulses("base", 100.5)  # type: ignore[arg-type]
+
+        self.assertEqual(self.serial.writes, [])
+
+    def test_an_unknown_axis_is_rejected(self) -> None:
+        with self.assertRaises(KeyError):
+            self.arm.move_axis_to_motor_pulses("nope", 100)
+
+    def test_it_goes_through_the_same_counter_as_everything_else(self) -> None:
+        """先相对走一段，再绝对走到某角度：增量按**累计量**算，不是从零算。"""
+        self.arm.move_up(pulses=1000)
+        self.arm.move_axis_to_motor_degrees("lift", 1024.0)
+
+        self.assertEqual(len(self.serial.writes), 3)  # 1000 + 5000 + 4102
+        self.assertEqual(self.arm.turns_state.of("lift").pulses, 9102)
+        self.assertAlmostEqual(
+            self.arm.turns_state.of("lift").motor_degrees, 1023.98, places=2
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
