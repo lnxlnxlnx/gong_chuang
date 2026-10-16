@@ -40,6 +40,32 @@ with RobotArm.open() as arm:          # 读配置 + 开（或借）一条串口
 （度 / 毫米），同样不需要位姿已知——极坐标的每个轴本来就能相对走。唯一的例外是
 ``move_by`` 的 x/y：X-Y 到 (底座角, 半径) 的换算随所在方位变化，所以那一对增量需要
 当前位姿才能分解，详见那里的说明。
+
+## 等一次动作走完：两种策略
+
+``wait=True`` 必须知道"这次动作什么时候结束"，有两种做法：
+
+| ``wait_mode`` | 做法 | 代价 |
+|---|---|---|
+| :data:`WAIT_ESTIMATE`（默认） | 按公式估算耗时后 ``sleep`` | 估算；**堵转了照睡不误** |
+| :data:`WAIT_IN_POSITION` | 轮询 ``0x3A`` 到位位 | 每次动作多几次串口往返 |
+
+默认仍是 :data:`WAIT_ESTIMATE`：它已经在真机上跑通，而轮询要在真机上确认
+"读命令在 ``Response=None`` 的 5/6/7 号轴上确实回包"之后才值得打开。
+**注意轮询是"发完帧才开始读"**：一旦 ``0x3A`` 读不到或帧不对，本方法会抛异常，
+而那时动作帧已经发出去了——轴会继续走完，只是上层拿不到结果。所以先在一根轴上
+单步验证过再切。
+切换方式：
+
+```python
+with RobotArm.open(wait_mode=WAIT_IN_POSITION) as arm:
+    report = arm.move_up(pulses=800)
+    if report.motor_status is not None and report.motor_status.stalled:
+        ...   # 轴撞上了东西——这是估算模式永远给不出的信息
+```
+
+轮询模式还会把**实际等待时长**和**最后一次读到的状态**放进 :class:`MotionReport`，
+所以"估算偏了多少"和"是不是撞上了"都能事后看到，不必再猜。
 """
 
 from __future__ import annotations
@@ -64,8 +90,28 @@ from modules.arm.drive.kinematics import (
     normalize_degrees,
 )
 from modules.arm.motion_plan import PlanError, plan_absolute, plan_xyz
-from modules.motor.drive.emm42 import Direction, Emm42Driver, SerialPort
-from modules.motor.drive.motion import DEFAULT_SETTLE_SECONDS, estimate_move_seconds
+from modules.motor.drive.emm42 import Direction, Emm42Driver, MotorStatus, SerialPort
+from modules.motor.drive.motion import (
+    DEFAULT_SETTLE_SECONDS,
+    estimate_move_seconds,
+    in_position_timeout_seconds,
+)
+
+#: 等待策略：按曲线加减速公式估算耗时后 ``sleep``。当前默认，已在真机上跑通。
+WAIT_ESTIMATE = "estimate"
+
+#: 等待策略：轮询 ``0x3A`` 到位位。更准，而且是堵转的唯一软件证据；
+#: 需要真机确认读命令可用后再切。
+WAIT_IN_POSITION = "in_position"
+
+#: 允许的等待策略，见模块文档字符串的"等一次动作走完"一节。
+WAIT_MODES = (WAIT_ESTIMATE, WAIT_IN_POSITION)
+
+
+def _require_wait_mode(value: str) -> str:
+    if value not in WAIT_MODES:
+        raise ValueError(f"wait_mode must be one of {WAIT_MODES}, got {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -76,8 +122,13 @@ class MotionReport:
     pulses: int
     motor_degrees: float
     output_degrees: Optional[float]
-    #: 本次动作的估算耗时（秒）；``wait=False`` 时调用方可以自己用它来等。
+    #: 本次动作的**估算**耗时（秒）；``wait=False`` 时调用方可以自己用它来等。
     estimated_seconds: float = 0.0
+    #: 实际等待时长（秒）。估算模式等于 ``estimated_seconds``；轮询模式是实测值。
+    waited_seconds: float = 0.0
+    #: 轮询到位时最后一次读到的电机状态；估算模式恒为 ``None``
+    #: （那条路根本不读驱动器，编不出一个状态来）。
+    motor_status: Optional[MotorStatus] = None
 
 
 #: 相对 XYZ 分解允许的最小半径（毫米）。再小下去切向分量会被 ``1/r`` 放大：1 mm 半径上
@@ -121,6 +172,8 @@ class RobotArm:
         owns_bus: bool = False,
         sleep: Callable[[float], None] = time.sleep,
         settle_seconds: float = DEFAULT_SETTLE_SECONDS,
+        wait_mode: str = WAIT_ESTIMATE,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """只保存**已经装配好的**依赖：本构造器不做任何设备 I/O。
 
@@ -129,11 +182,17 @@ class RobotArm:
 
         :param owns_bus: 这条串口是不是**本实例打开**的。只有自己开的才在 ``close``
             里物理关闭；借来的（同一个 Robot 会话里 arm 与 chassis 共用一条）只失效自身。
+        :param wait_mode: ``wait=True`` 时怎么知道动作走完了，
+            取值见 :data:`WAIT_MODES`。
+        :param clock: 单调时钟；轮询模式下由它和 ``sleep`` 一起判定超时，
+            测试注入假实现。
         """
         self.config = config
         self.pulses_per_revolution = config.pulses_per_revolution
         self.settle_seconds = settle_seconds
+        self.wait_mode = _require_wait_mode(wait_mode)
         self._sleep = sleep
+        self._clock = clock
         self._motors = dict(motors)
         self._bus = bus
         self._owns_bus = bool(owns_bus) and bus is not None
@@ -150,6 +209,7 @@ class RobotArm:
         motor_config_path: Optional[Path] = None,
         bus: Optional[SerialPort] = None,
         owns_bus: Optional[bool] = None,
+        wait_mode: str = WAIT_ESTIMATE,
     ) -> "RobotArm":
         """按配置开一条步进连接并返回就绪实例。
 
@@ -159,6 +219,8 @@ class RobotArm:
             给了它就借用，不再自己开第二条、也不会在 ``close`` 里关掉它。
         :param owns_bus: 显式声明这条 ``bus`` 归不归本实例；默认按"是不是自己开的"判断。
             传 ``bus`` 时默认 ``False``（借来的）。
+        :param wait_mode: ``wait=True`` 时怎么知道动作走完了，
+            取值见 :data:`WAIT_MODES`。
         """
         from modules.motor.config import DEFAULT_CONFIG_PATH as motor_default
         from modules.motor.config import load_bus_config
@@ -168,7 +230,12 @@ class RobotArm:
         bus_path = Path(motor_config_path) if motor_config_path is not None else motor_default
         port = load_bus_config(config_path=bus_path).port
         session = cls._from_settings(
-            config=config, port=port, bus=bus, owns_bus=owns_bus, sleep=time.sleep
+            config=config,
+            port=port,
+            bus=bus,
+            owns_bus=owns_bus,
+            sleep=time.sleep,
+            wait_mode=wait_mode,
         )
         return session
 
@@ -182,6 +249,8 @@ class RobotArm:
         owns_bus: Optional[bool] = None,
         sleep: Callable[[float], None] = time.sleep,
         settle_seconds: float = DEFAULT_SETTLE_SECONDS,
+        wait_mode: str = WAIT_ESTIMATE,
+        clock: Callable[[], float] = time.monotonic,
     ) -> "RobotArm":
         """按**已经读好的配置快照**装配：Robot 与独立 ``open`` 共用这一处。
 
@@ -189,6 +258,8 @@ class RobotArm:
         构造中途失败时，自己开的串口由本方法释放，外部注入的**不擅自关闭**
         （那会切断别的模块的连接）。
         """
+        # 先把纯参数校验做完再碰设备：wait_mode 写错不该以"漏一条打开的串口"收场。
+        _require_wait_mode(wait_mode)
         borrowing = bus is not None
         owner = (not borrowing) if owns_bus is None else bool(owns_bus)
         opened = bus
@@ -221,6 +292,8 @@ class RobotArm:
             owns_bus=owner and not borrowing,
             sleep=sleep,
             settle_seconds=settle_seconds,
+            wait_mode=wait_mode,
+            clock=clock,
         )
         try:
             # 使能属于会话生命周期（对齐旧菜单脚本的 initialize + enable_all），
@@ -833,9 +906,12 @@ class RobotArm:
         )
         signed_pulses = pulses if direction is Direction.CW else -pulses
         self._motors[axis_name].move_relative_pulses(signed_pulses, speed, accel)
+        waited = 0.0
+        status: Optional[MotorStatus] = None
         if wait:
-            # 驱动器只收命令、不回 ACK / 到位包，只能按估算耗时等它走完。
-            self._sleep(seconds)
+            waited, status = self._wait_for_move(
+                axis_name, pulses, speed, accel, seconds
+            )
         motor_degrees = pulses * 360 / self.pulses_per_revolution
         axis = self.config.axes[axis_name]
         return MotionReport(
@@ -848,7 +924,37 @@ class RobotArm:
                 else None
             ),
             estimated_seconds=seconds,
+            waited_seconds=waited,
+            motor_status=status,
         )
+
+    def _wait_for_move(
+        self,
+        axis_name: str,
+        pulses: int,
+        speed: int,
+        accel: int,
+        estimate: float,
+    ) -> Tuple[float, Optional[MotorStatus]]:
+        """按 :data:`WAIT_MODES` 等这一次动作走完，返回 (实际等待秒数, 最后读到的状态)。
+
+        估算模式返回的时长就是估算值本身——它是"睡了多久"，不是"走了多久"。
+        轮询模式返回实测时长，并带上**最后一次** ``0x3A`` 读数：超时那一刻的
+        ``stalled`` / ``stall_protected`` 就是"轴没走到位"的软件证据。
+        """
+        if self.wait_mode == WAIT_ESTIMATE:
+            # 驱动器不回 ACK / 到位包，只能按估算耗时等它走完。
+            self._sleep(estimate)
+            return estimate, None
+        started = self._clock()
+        status = self._motors[axis_name].wait_until_in_position(
+            in_position_timeout_seconds(
+                pulses, speed, self.pulses_per_revolution, accel, self.settle_seconds
+            ),
+            sleep=self._sleep,
+            clock=self._clock,
+        )
+        return self._clock() - started, status
 
     def _advance_pose(self, axis_name: str, signed_pulses: int) -> None:
         """按实际下发的带符号整数脉冲推进位姿。

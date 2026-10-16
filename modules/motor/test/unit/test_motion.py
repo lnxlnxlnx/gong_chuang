@@ -6,9 +6,12 @@ import unittest
 
 from modules.motor.drive.motion import (
     DEFAULT_SETTLE_SECONDS,
+    IN_POSITION_TIMEOUT_FACTOR,
+    IN_POSITION_TIMEOUT_MARGIN_SECONDS,
     MAX_ACCELERATION,
     cruise_seconds,
     estimate_move_seconds,
+    in_position_timeout_seconds,
     ramp_seconds,
 )
 
@@ -65,6 +68,32 @@ class EstimateMoveSecondsTests(unittest.TestCase):
     def test_rejects_negative_settle_margin(self) -> None:
         with self.assertRaises(ValueError):
             estimate_move_seconds(3200, 60, 3200, 5, settle_seconds=-0.1)
+
+
+class InPositionTimeoutSecondsTests(unittest.TestCase):
+    """轮询到位的超时上限：从估算耗时推出来，并且必须比估算更宽松。"""
+
+    def test_is_the_estimate_scaled_by_the_factor_plus_the_margin(self) -> None:
+        expected = (
+            estimate_move_seconds(1000, 10, 3200, 5) * IN_POSITION_TIMEOUT_FACTOR
+            + IN_POSITION_TIMEOUT_MARGIN_SECONDS
+        )
+        self.assertAlmostEqual(
+            in_position_timeout_seconds(1000, 10, 3200, 5), expected, places=9
+        )
+
+    def test_is_always_generous_than_the_estimate_it_is_built_from(self) -> None:
+        """估算偏短是常态；超时若不比估算宽松，正常动作会被误判成堵转。"""
+        for pulses, rpm in ((1, 3000), (800, 30), (10000, 10)):
+            with self.subTest(pulses=pulses, rpm=rpm):
+                self.assertGreater(
+                    in_position_timeout_seconds(pulses, rpm, 3200, 5),
+                    estimate_move_seconds(pulses, rpm, 3200, 5),
+                )
+
+    def test_rejects_the_same_bad_input_as_the_estimate(self) -> None:
+        with self.assertRaises(ValueError):
+            in_position_timeout_seconds(0, 10, 3200, 5)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from modules.motor.drive.motion import estimate_move_seconds
 from modules.motor.drive.emm42 import Direction
-from modules.arm.runtime import RobotArm
+from modules.arm.runtime import WAIT_ESTIMATE, WAIT_IN_POSITION, RobotArm
 from modules.arm.config import ArmConfig, AxisConfig
 
 
@@ -264,6 +264,121 @@ class RobotArmWaitTests(ArmTestCase):
 
         self.assertEqual(self.serial.writes, [])
         self.assertEqual(self.sleep.calls, [])
+
+
+class FakeClock:
+    """A monotonic clock that only advances when something calls its sleep."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class PositionStatusSerial(FakeSerial):
+    """Records every frame and answers ``0x3A`` from a scripted flag sequence.
+
+    控制帧**不回 ACK**：5/6/7 号轴是 ``Response=None``，而且真机上不回的应答会留在
+    接收缓冲里，把紧跟着的读命令答非所问地顶掉——这台假串口照实模拟这一点。
+    """
+
+    def __init__(self, flags_sequence: list[int]) -> None:
+        super().__init__()
+        self._flag_sequence = list(flags_sequence)
+
+    def write(self, data: bytes) -> int:
+        frame = bytes(data)
+        self.writes.append(frame)
+        # [地址][0x3A][校验] 是读取命令；其余都是控制帧，只记录不回包。
+        if len(frame) == 3 and frame[-1] == FRAME_TAIL:
+            flags = (
+                self._flag_sequence.pop(0)
+                if len(self._flag_sequence) > 1
+                else self._flag_sequence[0]
+            )
+            self._receive_buffer.extend(bytes((frame[0], frame[1], flags, FRAME_TAIL)))
+        return len(frame)
+
+
+class RobotArmInPositionWaitTests(unittest.TestCase):
+    """``WAIT_IN_POSITION``：等的是驱动器实测的到位位，不是加减速公式。"""
+
+    def make_polling_arm(self, flags_sequence, config=None):
+        self.clock = FakeClock()
+        self.serial = PositionStatusSerial(flags_sequence)
+        self.arm = RobotArm._from_settings(
+            config=config if config is not None else fixture_config(),
+            port="/dev/ttyUSB0",
+            bus=self.serial,
+            sleep=self.clock.sleep,
+            clock=self.clock,
+            wait_mode=WAIT_IN_POSITION,
+        )
+        self.serial.writes.clear()
+        return self.arm
+
+    def test_move_returns_as_soon_as_the_driver_reports_in_position(self) -> None:
+        """到位位说到了就返回：不再无条件睡满估算的 2.15 s。"""
+        arm = self.make_polling_arm([0x03, 0x01, 0x03])
+
+        report = arm.move_up(pulses=1000)
+
+        # 一条动作帧，然后三次状态读取：离开到位区、确认离开、等到位。
+        self.assertEqual(
+            self.serial.writes,
+            [relative_position_frame(motor_id=6, direction=Direction.CW, pulses=1000)]
+            + [bytes((6, 0x3A, FRAME_TAIL))] * 3,
+        )
+        self.assertIsNotNone(report.motor_status)
+        assert report.motor_status is not None
+        self.assertTrue(report.motor_status.in_position)
+        self.assertLess(report.waited_seconds, report.estimated_seconds)
+
+    def test_move_hands_a_stall_back_to_the_caller_instead_of_sleeping_through_it(
+        self,
+    ) -> None:
+        """估算模式对堵转完全无感；轮询模式必须把它交回调用方。"""
+        arm = self.make_polling_arm([0x01, 0x05])
+
+        report = arm.move_up(pulses=1000)
+
+        self.assertIsNotNone(report.motor_status)
+        assert report.motor_status is not None
+        self.assertTrue(report.motor_status.stalled)
+        self.assertFalse(report.motor_status.in_position)
+        self.assertLess(report.waited_seconds, report.estimated_seconds)
+
+    def test_estimate_mode_still_reports_no_status_at_all(self) -> None:
+        """默认路径不变：估算模式不读驱动器，所以也编不出一个状态来。"""
+        self.sleep = RecordingSleep()
+        arm = RobotArm._from_settings(
+            config=fixture_config(),
+            port="/dev/ttyUSB0",
+            bus=FakeSerial(),
+            sleep=self.sleep,
+            wait_mode=WAIT_ESTIMATE,
+        )
+
+        report = arm.move_up(pulses=1000)
+
+        self.assertIsNone(report.motor_status)
+        self.assertEqual(report.waited_seconds, report.estimated_seconds)
+        self.assertEqual(self.sleep.calls, [report.estimated_seconds])
+
+    def test_unknown_wait_mode_is_rejected_before_the_serial_is_opened(self) -> None:
+        with self.assertRaises(ValueError):
+            RobotArm._from_settings(
+                config=fixture_config(),
+                port="/dev/ttyUSB0",
+                bus=FakeSerial(),
+                wait_mode="whatever",
+            )
 
 
 class RobotArmAxisMappingTests(ArmTestCase):

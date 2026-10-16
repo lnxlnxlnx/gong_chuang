@@ -34,7 +34,17 @@ Emm42 的位置模式命令是"发完就返回"：驱动器一收到帧就开始
 ```
 
 这是估算值（把驱动器减速段和串口往返都折进"到位余量"），不是编码器实测。
-需要毫秒级精确时必须改用 ``0x3A`` 读运动状态标志轮询到位位。
+
+## 什么时候可以不用估算
+
+``Response=None`` 只影响**控制动作命令**要不要回包，读取类命令一直可用，所以
+``Emm42Driver.wait_until_in_position()`` 能轮询 ``0x3A`` 的到位位（判据是
+|输入位置角度 - 电机实时位置角度| < 位置到达窗口，默认 0.3°）。轮询比估算**更准**
+（不依赖加减速公式与实际负载是否一致），而且是"命令发了、轴却不动"这种堵转的
+唯一软件证据 —— 估算模式对此完全无感。
+
+轮询需要一个**超时上限**，由 :func:`in_position_timeout_seconds` 从估算耗时推出来：
+估算偏短是常态，所以给足倍数再余量，超时才更像是真的堵住了。
 """
 
 from __future__ import annotations
@@ -54,6 +64,14 @@ DEFAULT_SETTLE_SECONDS: Final = 0.15
 
 #: 位置模式一条命令能表达的最大脉冲数（协议为 4 字节大端无符号）。
 MAX_PULSES: Final = 0xFFFFFFFF
+
+#: 轮询到位时，最长等待 = 估算耗时 × 本系数 + 下面的固定余量。
+#: 估算把减速段折进了固定余量、本身偏短，所以给足一倍半再超时，
+#: 才能把"估算偏短"和"真的走不动/堵住了"区分开。
+IN_POSITION_TIMEOUT_FACTOR: Final = 1.5
+
+#: 轮询到位的固定超时余量（秒）：覆盖串口往返和驱动器起转延迟。
+IN_POSITION_TIMEOUT_MARGIN_SECONDS: Final = 1.0
 
 
 def ramp_seconds(rpm: int, acceleration: int) -> float:
@@ -90,6 +108,27 @@ def estimate_move_seconds(
         ramp_seconds(rpm, acceleration)
         + cruise_seconds(pulses, rpm, pulses_per_revolution)
         + float(settle_seconds)
+    )
+
+
+def in_position_timeout_seconds(
+    pulses: int,
+    rpm: int,
+    pulses_per_revolution: int,
+    acceleration: int = 0,
+    settle_seconds: float = DEFAULT_SETTLE_SECONDS,
+) -> float:
+    """Return how long to keep polling for one move before calling it stalled.
+
+    Built from :func:`estimate_move_seconds` so the two wait strategies share one
+    notion of "this move should take about this long".
+    """
+    return (
+        estimate_move_seconds(
+            pulses, rpm, pulses_per_revolution, acceleration, settle_seconds
+        )
+        * IN_POSITION_TIMEOUT_FACTOR
+        + IN_POSITION_TIMEOUT_MARGIN_SECONDS
     )
 
 
