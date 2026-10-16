@@ -160,13 +160,54 @@ class ArmLinearCalibrationConfigTests(ArmPoseConfigTestCase):
 
 
 class ProjectArmConfigTests(unittest.TestCase):
-    def test_the_repository_config_loads_and_is_honest_about_being_uncalibrated(self) -> None:
+    """仓库配置里已经**实测**填上的标定值。
+
+    2026-10-16 实测（操作流程见 ``only_for_test/README.md``）：
+
+    - 底座：16000 脉冲回到原位 -> ``reduction_ratio = 5``（实验 A0）；
+    - 升降 / 伸缩：3200 脉冲 = 61 mm -> ``mm_per_motor_rev = 61``（实验 B/C）；
+    - 行程：底座 360°、升降 1024° = 173.5 mm（底端离台面 10 mm）、
+      伸缩 1057° = 179.1 mm（全缩回时半径 180 mm）（实验 F）。
+
+    这些都是**量出来的**，所以钉住它们：改回占位值（升降曾经写的是 ``10``，差 6.1 倍）
+    必须让测试红，而不是像以前那样只断言"应该是 None"。
+    """
+
+    def test_the_repository_config_carries_the_measured_transmission_constants(self) -> None:
         config = load_arm_config()
         self.assertEqual(config.base_reduction, 5)
+        self.assertEqual(config.mm_per_motor_rev("lift"), 61.0)
+        self.assertEqual(config.mm_per_motor_rev("extension"), 61.0)
+
+    def test_the_repository_config_carries_the_measured_travel_limits(self) -> None:
+        config = load_arm_config()
+        self.assertEqual(config.base_limit, TravelLimit(-180.0, 180.0))
+        self.assertEqual(config.height_limit, TravelLimit(10.0, 183.5))
+        self.assertEqual(config.radial_limit, TravelLimit(180.0, 359.1))
+
+    def test_the_pulse_ceiling_stays_inside_the_measured_travel(self) -> None:
+        """``max_pulses`` 曾经是 10000，比两个直线轴的实测行程都长（9102 / 9396）。
+
+        那意味着一条 ``move_up(10000)`` 会在顶到机械止挡之后再顶 17 mm —— 而当时
+        ``limits`` 全是 ``null``，没有任何软件保护。这条守住"脉冲上限不得超过实测行程"。
+        """
+        config = load_arm_config()
+        for axis in ("lift", "extension"):
+            limit = config.axis_travel_span(axis)
+            assert limit is not None
+            span_mm = limit.maximum - limit.minimum
+            travel_pulses = round(
+                span_mm
+                * config.pulses_per_revolution
+                / config.require_mm_per_motor_rev(axis)
+            )
+            with self.subTest(axis=axis):
+                self.assertLessEqual(config.max_pulses, travel_pulses)
+
+    def test_safe_pose_is_still_honest_about_being_unmeasured(self) -> None:
+        """``safe_pose`` 只能由相机测出零点姿态后填，不许默认一个值。"""
+        config = load_arm_config()
         self.assertIsNone(config.safe_pose)
-        self.assertIsNone(config.base_limit)
-        self.assertIsNone(config.mm_per_motor_rev("lift"))
-        self.assertIsNone(config.mm_per_motor_rev("extension"))
 
 
 if __name__ == "__main__":

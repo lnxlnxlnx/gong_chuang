@@ -4,7 +4,7 @@
     "rpm": 30,
     "acceleration": 5,
     "default_pulses": 800,
-    "max_pulses": 10000
+    "max_pulses": 9000
   },
   "axes": {
     "base": {
@@ -13,11 +13,11 @@
     },
     "lift": {
       "motor_id": 6,
-      "mm_per_motor_rev": 10
+      "mm_per_motor_rev": 61.0
     },
     "extension": {
       "motor_id": 7,
-      "mm_per_motor_rev": 53.45
+      "mm_per_motor_rev": 61.0
     }
   },
   "homing": {
@@ -26,9 +26,9 @@
     "settle_seconds": 0.5
   },
   "limits": {
-    "base_degrees": null,
-    "radial_mm": null,
-    "height_mm": null
+    "base_degrees": [-180.0, 180.0],
+    "radial_mm": [180.0, 359.1],
+    "height_mm": [10.0, 183.5]
   },
   "safe_pose": {
     "base_degrees": null,

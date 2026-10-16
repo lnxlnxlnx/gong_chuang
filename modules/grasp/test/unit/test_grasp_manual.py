@@ -61,7 +61,12 @@ def calibrated_grasp() -> GraspConfig:
 
 
 class CalibrationReportTests(unittest.TestCase):
-    def test_the_uncalibrated_repository_state_lists_every_missing_item(self) -> None:
+    def test_the_repository_state_lists_exactly_what_is_still_missing(self) -> None:
+        """仓库现在是**部分标定**：直线轴换算与三个轴的行程已经实测填上，视觉链和 safe_pose 还没有。
+
+        两侧都要断言：还缺的必须报出来；已经标定的不许再报——否则一个永远报满的清单
+        会让人分不清"真缺"和"清单没跟着更新"。
+        """
         from modules.arm.config import load_arm_config
         from modules.grasp.config import load_grasp_config
         from modules.vision.config import load_vision_config
@@ -71,9 +76,13 @@ class CalibrationReportTests(unittest.TestCase):
         )
         self.assertGreater(len(missing), 5, missing)
         joined = "\n".join(missing)
+        # 还没有的：整条视觉链与安全位。
         for keyword in ("平面标定", "focal_px", "table_depth_mm", "marker_diameter_mm",
-                        "mm_per_motor_rev", "safe_pose", "limits", "marker_to_grasp_mm"):
+                        "safe_pose", "marker_to_grasp_mm"):
             self.assertIn(keyword, joined, keyword)
+        # 已经实测填上的：不许再出现在"缺什么"的清单里。
+        for keyword in ("mm_per_motor_rev", "limits"):
+            self.assertNotIn(keyword, joined, keyword)
 
     def test_a_fully_calibrated_setup_reports_nothing(self) -> None:
         self.assertEqual(
