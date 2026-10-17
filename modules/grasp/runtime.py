@@ -358,8 +358,27 @@ class Grasp:
         return target, jacobian
 
     # ------------------------------------------------------------- 动作
+    @staticmethod
+    def _selector_for(want, default: ObjectSelector) -> ObjectSelector:
+        """本次动作按哪个物块判别：``want`` 给了就用它，没给就用配置里的那一份。
+
+        为什么要按次传：``eye_in_hand.json`` 里的 ``object`` 是**默认值**，而"一次
+        main.py 里依次抓红、绿、蓝"要求判别条件每抓一个就换一次——写死在文件里就得
+        抓一个改一次文件。``want`` 与 ``vision.locate("red")`` 是**同一套说法**
+        （类别名，或从 1 开始的编号），见 :meth:`ObjectSelector.from_want`。
+        """
+        if want is None:
+            return default
+        return ObjectSelector.from_want(want)
+
     def align_xy(
-        self, *, hover: bool = False, ensure_safe_height: bool = False
+        self,
+        *,
+        hover: bool = False,
+        ensure_safe_height: bool = False,
+        single_step: bool = False,
+        reading=None,
+        want=None,
     ) -> ServoResult:
         """只做 x/y 对准：**默认一步都不动高度**，高度由调用方负责。
 
@@ -372,40 +391,70 @@ class Grasp:
             因为默认值要跟"不动高度"一致。这意味着**低位转底盘会撞到台面上的物块**
             （现场发生过），所以调用方必须先自己点动到够高，或者显式传 ``True`` 把这次
             检查要回来。传 ``True`` 时底层拿到的是它自己的默认值（关键字一个都不传）。
+        :param single_step: **单帧一步**：最多取一帧、走一步就返回，动作之后不再测量。
+        :param reading: 已经量好的平面读数 ``(x_mm, y_mm)``；给了它连那一帧都不取。
+            "``locate`` 一次 + 走一步"的跟随循环就用它::
+
+                while True:
+                    report = robot.vision.locate("green")
+                    if report.best is None:
+                        continue
+                    robot.grasp.align_xy(reading=(report.best.x_mm, report.best.y_mm))
+
+            每轮只取**一帧**、只走**一步**；``reading`` 给了就等于 ``single_step``。
+            结果里的 ``unverified`` 为真——读数说的是动作**之前**那一次。
+        :param want: 这一次要抓**哪一个**物料：类别名（``"red"``）或从 1 开始的编号，
+            与 ``vision.locate(want)`` 同一套说法。**不传就用 ``eye_in_hand.json`` 里
+            ``object`` 那一份**（那份只是默认值）。一次程序里依次抓多种物料就靠它::
+
+                for colour in ("red", "green", "blue"):
+                    report = robot.vision.locate(colour)
+                    if report.best is None:
+                        continue
+                    robot.grasp.align_xy(
+                        reading=(report.best.x_mm, report.best.y_mm), want=colour
+                    )
         """
         arm, source = self._require_resources()
         from modules.grasp.drive.eye_in_hand import align_x_y, hover_above_object
 
+        selector = self._selector_for(want, self._selector)
         if hover and self._config.hover_z_mm is not None:
             hover_above_object(
                 arm,
                 source,
-                self._selector,
+                selector,
                 self._config,
                 scale=self._lift_scale,
                 on_message=self._say,
             )
+        # 两条分支只差"要不要自己查安全高度"，其余关键字一模一样：这样加参数时不会
+        # 只改到其中一条（以前那种写法正是这么漂移的）。
+        options = dict(
+            single_step=single_step,
+            reading=reading,
+            lift_scale=self._lift_scale,
+            on_message=self._say,
+        )
         if not ensure_safe_height:
             return align_x_y(
                 arm,
                 source,
-                self._selector,
+                selector,
                 self._target,
                 self._jacobian,
                 self._config,
                 ensure_safe_height=False,
-                lift_scale=self._lift_scale,
-                on_message=self._say,
+                **options,
             )
         return align_x_y(
             arm,
             source,
-            self._selector,
+            selector,
             self._target,
             self._jacobian,
             self._config,
-            lift_scale=self._lift_scale,
-            on_message=self._say,
+            **options,
         )
 
     def align_and_descend(
@@ -415,7 +464,9 @@ class Grasp:
         retract_pulses=None,
         hover: bool = True,
         ensure_safe_height: bool = True,
+        want=None,
     ) -> GraspReadyResult:
+        # NOTE: 这个函数不再使用
         """执行抓取前就位；**不闭合夹爪，也不承诺完成搬运**。
 
         顺序不是随便定的：
@@ -444,6 +495,14 @@ class Grasp:
         :param ensure_safe_height: 要不要在转底盘之前把高度抬到安全高度（默认要）。传
             ``False`` = 高度由调用方自己负责，本方法一次都不动升降（除了第 3 步那次下降）。
             **低位转底盘会撞到台面上的物块**，关掉它之前请先自己点动到够高。
+        :param want: 这一次要抓**哪一个**物料：类别名（``"red"``）或从 1 开始的编号，
+            与 ``vision.locate(want)`` 同一套说法；不传就用 ``eye_in_hand.json`` 里
+            ``object`` 那一份。**一次程序里依次抓多个物体**就靠它::
+
+                for colour in ("red", "green", "blue"):
+                    robot.grasp.align_and_descend(want=colour)
+                    robot.gripper.close_jaws()
+                    robot.gripper.set_position(250)      # 张开，放下一个
         :raises ServoError: 任何一步失败；异常信息里会写清卡在哪一步。
 
         高度自己管的一条典型用法（第 1 步整体让开，下降脉冲按现场改）::
@@ -463,6 +522,8 @@ class Grasp:
         )
 
         say = self._say
+        # 这一次抓哪一个：按次传的 want 优先，否则用配置里那份默认。
+        selector = self._selector_for(want, self._selector)
         started = time.monotonic()
         if hover or ensure_safe_height:
             say("① 先到物块上方的悬停高度（配了 hover_z_mm 才动），再确认转底盘前的安全高度")
@@ -470,7 +531,7 @@ class Grasp:
             say("① 不动高度：转底盘前的高度由调用方自己保证（低位转动会撞到台面上的物块）")
         hovered = (
             hover_above_object(
-                arm, source, self._selector, self._config,
+                arm, source, selector, self._config,
                 scale=self._lift_scale, on_message=say,
             )
             if hover
@@ -478,7 +539,7 @@ class Grasp:
         )
         raised = (
             raise_before_rotating(
-                arm, source, self._selector, self._config,
+                arm, source, selector, self._config,
                 scale=self._lift_scale, on_message=say,
             )
             if ensure_safe_height
@@ -491,7 +552,7 @@ class Grasp:
         aligned = align_x_y(
             arm,
             source,
-            self._selector,
+            selector,
             self._target,
             self._jacobian,
             self._config,
@@ -504,7 +565,7 @@ class Grasp:
         started = time.monotonic()
         say("③ z 下降（平面已对准，按固定脉冲）")
         descent = descend_z(
-            arm, source, self._selector, self._config,
+            arm, source, selector, self._config,
             pulses=z_pulses, scale=self._lift_scale, on_message=say,
         )
         descend_seconds = time.monotonic() - started

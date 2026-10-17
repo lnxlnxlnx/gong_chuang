@@ -104,20 +104,31 @@ class MaterialClassifier:
         """Turn one detection into a candidate (no filtering)."""
         return MaterialCandidate(name=hit.name, label=self.label_for(hit.name), score=float(hit.score))
 
+    def qualifies(self, hit, *, materials: Sequence[str] | None = None) -> bool:
+        """这个框够不够格算物料：**类别 + 置信度 + 面积**三条判据的唯一出处。
+
+        :meth:`classify` 用它筛候选；``material_locate`` 的主算路径也用它筛"哪些框该
+        变成物料候选"——两处如果各写一份阈值，现场调了 ``min_score`` 之后
+        "报告里有它、候选里没它"这种不一致就会冒出来。
+        """
+        accepted = set(self.materials if materials is None else materials)
+        return (
+            hit.name in accepted
+            and hit.score >= self.min_score
+            and float(hit.width) * float(hit.height) >= self.min_area_px
+        )
+
     def classify(self, hits: Iterable, *, materials: Sequence[str] | None = None) -> ClassResult:
         """Return the best material class among ``hits`` (or an empty result).
 
         ``materials`` 可以在这一帧覆盖类别表：换了模型（类别名不再是 ``obj-*``）时，
         调用方按模型自己声明的类别传进来，不必重建分类器。
         """
-        accepted = set(self.materials if materials is None else materials)
         candidates = sorted(
             (
                 self.describe(hit)
                 for hit in hits
-                if hit.name in accepted
-                and hit.score >= self.min_score
-                and float(hit.width) * float(hit.height) >= self.min_area_px
+                if self.qualifies(hit, materials=materials)
             ),
             key=lambda candidate: candidate.score,
             reverse=True,

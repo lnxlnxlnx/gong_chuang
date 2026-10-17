@@ -327,13 +327,39 @@ USB 摄像头 + YOLOv8 检测，封装为 `modules.vision` 包，供主程序和
 - `modules.vision.looks_blank(frame)` / `modules.vision.warn_blank_preview(camera_id)`：`read()` 成功但画面是纯黑/纯白时（被别的程序占用、序号指向没有画面的设备、镜头盖关着）打印排查清单，而不是让用户对着一个纯色窗口猜。
 - `modules.vision.DistanceEstimator`：单目测距（针孔模型，需要已知类别真实宽度）。
 
-### 物料顶部圆面定位
+### 物料定位：YOLO 主算，圆面辅助
 
-霍夫圆变换给出物料顶部圆面的圆心与像素半径。检出圆面就视为有物料；YOLO 只补充类别，
-漏检时仍返回位置和距离。顶部内侧圆面的实际直径为 30 mm，距离按
-`focal_px × 30 / (2 × radius_px)` 计算。未传焦距时，默认使用
-`top_pic_2.jpg` 在约 145 mm 实测距离下得到的一次粗标定（1280×720 时约 1012 px）。
-完整说明见 [modules/vision/docs/视觉物料定位.md](modules/vision/docs/视觉物料定位.md)。
+**主算**用 YOLO 的物料框：框中心当物料中心、框的等效半径 `(w+h)/4` 当顶面半径，
+一个像素的霍夫都不跑（本机实测一帧 **27–29 ms**）。**辅助**是原来的"颜色块 / 霍夫找顶面圆"
+那套（实测一帧 357–668 ms），**只在主算一个合格物料框都给不出来时才执行**；
+它现在住在一个可以整个换掉的方法里（`MaterialLocator.locate_auxiliary`），主流程不关心它内部怎么做。
+
+| 路 | 什么时候跑 | 读数从哪来 | 一帧实测 |
+|---|---|---|---|
+| 主算 | 有合格物料框（常态） | 框中心 + 框的等效半径 | 27–29 ms |
+| 辅助 | 一个合格框都没有 | 顶面圆的圆心 + 像素半径（30 mm 直径按针孔模型换算） | 357–668 ms |
+
+**框比顶面大**——同色桌面、可见的侧面都会进框（实测一帧里 30 mm 顶面是 253 px 直径，
+模型给的框是 401×439 px），所以由框反推的深度偏近。这**不影响 x/y 对准**：视觉伺服在
+同一套读数里闭环，尺度的系统偏差会被实测出来的雅可比吸收掉；但 `report.best.z_mm`
+不是真实距离。报告里 `colour_source == "yolo"` 就表示这一帧的读数是框给的。
+
+**画面里有多种物料时**，`locate()` 一个参数就能指定要哪一个，抓取侧同样按次传：
+
+```python
+report = vision.locate("red")     # 只要红的；也可以传编号，如 locate(2)
+...
+robot.grasp.align_xy(reading=(report.best.x_mm, report.best.y_mm), want="red")
+robot.grasp.align_and_descend(want="red")     # 整轮就位（悬停 → x/y → 下降 → 后缩）
+```
+
+`want` 与 `vision.locate(want)` 是**同一套说法**（类别名，或从 1 开始的编号），按次生效——
+一次程序里依次抓红、绿、蓝就靠它，不用改任何配置文件。指定的那一种不在画面里时
+`report.best is None`（**不回退**到别的物料：拿蓝的顶上等于让机械臂朝错误的目标动）。
+
+`eye_in_hand.json` 的 `object` 是**没传 `want` 时才用**的默认值，留给菜单/工具那些
+没有按次传参的入口。两个都不给时，物块被定义成"画面里唯一的目标"；主算路径下这和
+"每一个物料框都是一条观测"放在一起，就意味着画面里多于一个目标会直接报错。
 
 ```python
 from modules.vision import Vision

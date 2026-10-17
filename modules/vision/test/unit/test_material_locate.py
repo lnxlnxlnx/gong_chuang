@@ -1,4 +1,4 @@
-"""Checks for the circle-first material report."""
+"""Checks for the YOLO-first material report and its auxiliary circle path."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ import math
 import numpy as np
 
 from modules.vision.drive.hough_lock import HoughRingLocator, LockedRegion, RingLock, synthetic_rings
-from modules.vision.drive.material_locate import MaterialLocator, parse_depth_range
+from modules.vision.drive.material_locate import MaterialLocator, parse_depth_range, parse_want
 from modules.vision.drive.yolov8 import Detection
+from modules.vision.reports import MaterialReport
 
 
 class FakeYOLO:
@@ -47,6 +48,12 @@ def hit(name, score, x):
 
 
 class MaterialLocatorTests(unittest.TestCase):
+    """**主算**：YOLO 有物料框就用框，圆面那一路一个像素都不跑。
+
+    ``self.frame`` 是 ``synthetic_rings()``（画面上真有 3 个圆），而模型只给了 2 个框
+    ——正是为了证明"有框时结果只由框决定，和圆面找得到几个无关"。
+    """
+
     def setUp(self):
         self.frame = synthetic_rings()
         self.locator = MaterialLocator(
@@ -55,27 +62,40 @@ class MaterialLocatorTests(unittest.TestCase):
         )
         self.report = self.locator.locate(self.frame)
 
-    def test_each_circle_is_a_material_even_when_yolo_misses_one(self):
-        self.assertEqual(len(self.report.regions), 3)
-        self.assertTrue(self.report.present)
-        self.assertEqual([region.name for region in self.report.regions],
-                         ["red", None, "blue"])
+    def test_every_material_box_becomes_a_candidate(self):
+        self.assertEqual(len(self.report.regions), 2)
+        self.assertEqual([region.name for region in self.report.regions], ["red", "blue"])
+        self.assertEqual(self.report.colour_source, "yolo")
+        self.assertTrue(self.report.from_model_box)
         self.assertTrue(all(region.present for region in self.report.regions))
 
-    def test_distance_uses_circle_diameter(self):
-        for region in self.report.regions:
-            self.assertAlmostEqual(region.distance_mm,
-                                   300 * 30 / (2 * region.region.radius))
+    def test_the_reading_comes_from_the_box_not_from_a_circle(self):
+        """框 (140,220)-(180,260)：中心 (160,240)，等效半径 (40+40)/4 = 20 px。"""
+        item = self.report.regions[0]
+        self.assertEqual((item.center_x_px, item.center_y_px), (160.0, 240.0))
+        self.assertAlmostEqual(item.region.radius, 20.0)
+        self.assertAlmostEqual(item.z_mm, 300 * 30 / 40.0)
+        self.assertAlmostEqual(item.x_mm, (160 - 320) * item.z_mm / 300)
+        self.assertAlmostEqual(item.y_mm, 0.0)
+
+    def test_the_circle_locator_is_never_called_when_a_box_exists(self):
+        """这一版快下来的全部原因：有框就不碰圆面定位器。"""
+        recorder = RecordingLocator((LockedRegion(160.0, 240.0, 40.0),))
+        report = MaterialLocator(
+            locator=recorder, yolo=FakeYOLO([hit("red", 0.9, 160)]), focal_px=300
+        ).locate(self.frame)
+
+        self.assertEqual(recorder.calls, [])
+        self.assertEqual(len(report.regions), 1)
 
     def test_best_prefers_the_highest_classification_score(self):
         self.assertEqual(self.report.best.name, "red")
 
-    def test_summary_keeps_the_unknown_category_and_distance(self):
+    def test_summary_keeps_the_category_and_the_box_provenance(self):
         summary = self.report.summary()
         self.assertIn("red", summary)
         self.assertIn("blue", summary)
-        self.assertIn("mm", summary)
-        self.assertIn("3", summary)
+        self.assertIn("主算", summary)
         self.assertIn("xyz=", summary)
         self.assertIn("confidence=0.90", summary)
 
@@ -85,55 +105,190 @@ class MaterialLocatorTests(unittest.TestCase):
         self.assertTrue(np.array_equal(self.frame, before))
         self.assertFalse(np.array_equal(marked, before))
 
-    def test_yolo_miss_keeps_all_circles(self):
-        report = MaterialLocator(yolo=FakeYOLO(), focal_px=300).locate(self.frame)
-        self.assertEqual(len(report.regions), 3)
-        self.assertTrue(all(region.name is None for region in report.regions))
-
-    def test_no_circle_means_no_material_even_with_a_yolo_box(self):
-        blank = np.full((480, 640, 3), 128, dtype=np.uint8)
-        report = self.locator.locate(blank)
-        self.assertFalse(report.present)
-        self.assertEqual(report.regions, ())
-        self.assertIsNone(report.best)
-
     def test_invalid_calibration_is_rejected(self):
         with self.assertRaises(ValueError):
             MaterialLocator(yolo=FakeYOLO(), focal_px=0)
         with self.assertRaises(ValueError):
             MaterialLocator(yolo=FakeYOLO(), top_diameter_mm=0)
 
-    def test_public_result_has_camera_coordinates_and_confidence(self):
-        frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        locator = MaterialLocator(
-            locator=FixedCircleLocator(),
-            yolo=FakeYOLO([Detection(380, 180, 420, 220, 0.8, 2, "blue")]),
-            focal_px=300,
-        )
 
-        report = locator.locate(frame)
+class AuxiliaryLocateTests(unittest.TestCase):
+    """**辅助定位**：YOLO 一个合格物料框都给不出来时才执行；算法本身可以整个换掉。"""
+
+    def test_locate_falls_back_to_it_when_yolo_is_silent(self):
+        report = MaterialLocator(yolo=FakeYOLO(), focal_px=300).locate(synthetic_rings())
+
+        self.assertEqual(len(report.regions), 3)
+        self.assertTrue(all(region.name is None for region in report.regions))
+        self.assertFalse(report.from_model_box)
+
+    def test_a_box_without_a_circle_is_a_material(self):
+        """主算：模型说它是物料，就不需要圆面来盖章。
+
+        框 (380,180)-(420,220)：中心 (400,200)，等效半径 20 px -> z = 300*30/40 = 225。
+        """
+        frame = np.full((480, 640, 3), 128, dtype=np.uint8)
+        report = MaterialLocator(
+            yolo=FakeYOLO([Detection(380, 180, 420, 220, 0.8, 2, "blue")]), focal_px=300
+        ).locate(frame)
+
         item = report.regions[0]
         self.assertTrue(report.present)
         self.assertEqual(item.name, "blue")
         self.assertAlmostEqual(item.confidence, 0.8)
         self.assertEqual((item.center_x_px, item.center_y_px), (400.0, 200.0))
-        self.assertAlmostEqual(item.x_mm, 20.0)
-        self.assertAlmostEqual(item.y_mm, -10.0)
-        self.assertAlmostEqual(item.z_mm, 75.0)
-        self.assertAlmostEqual(item.distance_mm, 75.0)
-        self.assertAlmostEqual(item.range_mm, math.sqrt(20**2 + 10**2 + 75**2))
+        self.assertAlmostEqual(item.z_mm, 225.0)
+        self.assertAlmostEqual(item.x_mm, 60.0)
+        self.assertAlmostEqual(item.y_mm, -30.0)
+        self.assertAlmostEqual(item.distance_mm, 225.0)
+        self.assertAlmostEqual(item.range_mm, math.sqrt(60**2 + 30**2 + 225**2))
 
-    def test_yolo_miss_keeps_position_but_has_no_confidence(self):
-        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    def test_an_empty_frame_without_a_box_is_empty(self):
+        frame = np.full((480, 640, 3), 128, dtype=np.uint8)
+        report = MaterialLocator(
+            yolo=FakeYOLO([hit("red", 0.9, 160)]), focal_px=300
+        ).locate(frame)
+
+        self.assertTrue(report.present)
+
+    def test_nothing_at_all_stays_an_empty_report(self):
+        """只有"框不合格 + 圆面也没有"才是真的空报告。"""
+        frame = np.full((480, 640, 3), 128, dtype=np.uint8)
+        weak = Detection(140, 220, 180, 260, 0.05, 0, "red")
+        report = MaterialLocator(yolo=FakeYOLO([weak]), focal_px=300).locate(frame)
+
+        self.assertFalse(report.present)
+        self.assertEqual(report.regions, ())
+        self.assertIsNone(report.best)
+
+    def test_a_box_touching_no_circle_still_loses_to_a_real_circle(self):
+        """主算没有结果时，辅助定位找到的圆面就是结论（模型框为空）。"""
+        frame = synthetic_rings()
+        report = MaterialLocator(yolo=FakeYOLO(), focal_px=300).locate(frame)
+        self.assertEqual(report.colour_source, "palette")
+        self.assertEqual(len(report.regions), 3)
+
+    def test_the_auxiliary_circle_gives_millimetres_without_any_model(self):
         report = MaterialLocator(
             locator=FixedCircleLocator(), yolo=FakeYOLO(), focal_px=300
-        ).locate(frame)
+        ).locate(np.zeros((480, 640, 3), dtype=np.uint8))
 
         item = report.regions[0]
         self.assertTrue(report.present)
         self.assertIsNone(item.name)
         self.assertIsNone(item.confidence)
         self.assertEqual((item.x_mm, item.y_mm, item.z_mm), (20.0, -10.0, 75.0))
+
+    def test_overriding_locate_auxiliary_replaces_the_whole_auxiliary_path(self):
+        class StubAuxiliary(MaterialLocator):
+            def __init__(self, **kwargs) -> None:
+                super().__init__(**kwargs)
+                self.auxiliary_calls = 0
+
+            def locate_auxiliary(self, frame, *, want=None, hits=None):
+                self.auxiliary_calls += 1
+                return MaterialReport(
+                    lock=RingLock(()), hits=(), regions=(), focal_px=300.0,
+                    colour_source="stub", want=want,
+                )
+
+        silent = StubAuxiliary(yolo=FakeYOLO(), focal_px=300)
+        report = silent.locate(synthetic_rings())
+        self.assertEqual(report.colour_source, "stub")
+        self.assertEqual(silent.auxiliary_calls, 1)
+
+        # 主算有框时，辅助定位一次都不该被执行——这是"有结果就不执行它"。
+        loud = StubAuxiliary(yolo=FakeYOLO([hit("red", 0.9, 160)]), focal_px=300)
+        report = loud.locate(synthetic_rings())
+        self.assertEqual(report.colour_source, "yolo")
+        self.assertEqual(loud.auxiliary_calls, 0)
+
+    def test_the_auxiliary_is_handed_the_boxes_so_it_does_not_ask_twice(self):
+        """主流程已经问过模型（一个框都没有），辅助定位不能再问第二遍。"""
+
+        class CountingYOLO:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def detect(self, _frame, *, materials_only=False):
+                self.calls += 1
+                return []
+
+            def close(self):
+                pass
+
+        yolo = CountingYOLO()
+        MaterialLocator(yolo=yolo, focal_px=300).locate(synthetic_rings())
+        self.assertEqual(yolo.calls, 1)
+
+
+class WantTests(unittest.TestCase):
+    """画面里有红、黄、蓝三块料时，``locate("red")`` 只要红的。"""
+
+    @staticmethod
+    def scene(hits=None):
+        frame = np.full((480, 640, 3), 128, dtype=np.uint8)
+        return frame, FakeYOLO(hits if hits is not None else [
+            Detection(100, 200, 140, 240, 0.90, 0, "red"),
+            Detection(300, 200, 340, 240, 0.85, 1, "yellow"),
+            Detection(500, 200, 540, 240, 0.80, 2, "blue"),
+        ])
+
+    def test_the_wanted_colour_is_the_one_reported(self):
+        frame, yolo = self.scene()
+        locator = MaterialLocator(yolo=yolo, focal_px=300)
+
+        self.assertEqual(locator.locate(frame, want="red").best.name, "red")
+        self.assertEqual(locator.locate(frame, want="blue").best.name, "blue")
+
+    def test_case_and_surrounding_space_do_not_matter(self):
+        frame, yolo = self.scene()
+        locator = MaterialLocator(yolo=yolo, focal_px=300)
+        self.assertEqual(locator.locate(frame, want="  ReD ").best.name, "red")
+
+    def test_a_colour_that_is_not_there_is_none_not_a_substitute(self):
+        """"我要红的、画面里只有蓝的"必须报"没有"——拿蓝的顶上就是朝错的目标动。"""
+        frame, yolo = self.scene([
+            Detection(500, 200, 540, 240, 0.80, 2, "blue"),
+        ])
+        report = MaterialLocator(yolo=yolo, focal_px=300).locate(frame, want="red")
+
+        self.assertIsNone(report.best)
+        self.assertEqual(report.want, "red")
+        self.assertEqual(len(report.regions), 1, "画面里有什么仍然要列出来")
+        self.assertIn("画面里没有", report.summary())
+
+    def test_the_number_matches_the_summary_numbering(self):
+        frame, yolo = self.scene()
+        locator = MaterialLocator(yolo=yolo, focal_px=300)
+
+        self.assertEqual(locator.locate(frame, want=1).best.name, "red")
+        self.assertEqual(locator.locate(frame, want=3).best.name, "blue")
+        self.assertIsNone(locator.locate(frame, want=4).best)
+
+    def test_the_whole_frame_is_still_listed(self):
+        frame, yolo = self.scene()
+        report = MaterialLocator(yolo=yolo, focal_px=300).locate(frame, want="yellow")
+        self.assertEqual(len(report.regions), 3)
+        self.assertEqual(report.best.name, "yellow")
+
+    def test_bad_wants_are_rejected_before_anything_else(self):
+        frame, yolo = self.scene()
+        locator = MaterialLocator(yolo=yolo, focal_px=300)
+        for bad in (0, -1, "", "   ", 1.5, True, ["red"]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    locator.locate(frame, want=bad)
+
+    def test_parse_want_reads_the_command_line_form(self):
+        self.assertIsNone(parse_want(None))
+        self.assertIsNone(parse_want(""))
+        self.assertEqual(parse_want("red"), "red")
+        self.assertEqual(parse_want(" 2 "), 2)
+
+    def test_the_default_still_picks_the_highest_score(self):
+        frame, yolo = self.scene()
+        self.assertEqual(MaterialLocator(yolo=yolo, focal_px=300).locate(frame).best.name, "red")
 
 
 class PerFrameRedundancyTests(unittest.TestCase):
@@ -311,15 +466,18 @@ class BestCircleTests(unittest.TestCase):
         self.assertIsNone(report.best)
         self.assertIn("距离不可用", report.summary())
 
-    def test_classification_still_wins_over_uniformity(self) -> None:
-        frame, regions = self.scene()
-        hit = Detection(x1=530, y1=370, x2=590, y2=430, score=0.8, class_id=2, name="blue")
+    def test_a_box_wins_even_when_the_circle_looks_wrong(self) -> None:
+        """主算：模型说它是物料，形状判据就不再有机会否决它。"""
+        frame = np.full((480, 640, 3), 90, dtype=np.uint8)  # 平坦画面：形状判据必然不过
+        hit = Detection(x1=260, y1=210, x2=380, y2=330, score=0.8, class_id=2, name="blue")
         report = MaterialLocator(
-            locator=RecordingLocator(regions), yolo=FakeYOLO([hit]), focal_px=500.0
+            locator=RecordingLocator((LockedRegion(320.0, 240.0, 70.0),)),
+            yolo=FakeYOLO([hit]),
+            focal_px=500.0,
         ).locate(frame)
 
-        self.assertEqual(report.best.region, regions[2])
         self.assertEqual(report.best.name, "blue")
+        self.assertEqual((report.best.center_x_px, report.best.center_y_px), (320.0, 270.0))
 
     def test_summary_shows_the_window_and_the_chosen_circle(self) -> None:
         frame, regions = self.scene()

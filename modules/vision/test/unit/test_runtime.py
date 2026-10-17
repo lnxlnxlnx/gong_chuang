@@ -250,7 +250,7 @@ class VisionReadTests(unittest.TestCase):
             report, _stamp = vision._read_report(timeout=1.0)
         self.assertIsNotNone(report)
         sleep.assert_called_once_with(0.05)
-        locator.locate.assert_called_once_with(good)
+        locator.locate.assert_called_once_with(good, want=None)
 
     def test_timeout_gives_up_once_the_deadline_passes(self) -> None:
         """时钟走过 deadline 之后立刻放弃，不再空转重试。"""
@@ -277,7 +277,7 @@ class VisionReadTests(unittest.TestCase):
 
         vision, _camera, locator = self._session(frames=[None, None, good], clock=clock)
         locator.locate.side_effect = (
-            lambda _frame: order.append("locate") or SimpleNamespace(best=None)
+            lambda _frame, **_kwargs: order.append("locate") or SimpleNamespace(best=None)
         )
         _report, stamp = vision._read_report()
         self.assertEqual(stamp, 123.0)

@@ -84,8 +84,10 @@ def select_object(
     if len(matched) > 1 and selector.is_open:
         listing = "、".join(f"物料 {item.material_id}({item.color})" for item in matched)
         raise ServoError(
-            f"画面里有多个目标（{listing}），不知道该对准哪一个；"
-            "请在 modules/grasp/eye_in_hand.json 的 object 里填 material_id 或 color"
+            f"画面里有多个目标（{listing}），不知道该对准哪一个。两种办法：\n"
+            "  按次传（推荐，一次程序里抓多种物料就用这个）："
+            "robot.grasp.align_xy(want=\"red\")，只读定位是 robot.vision.locate(\"red\")；\n"
+            "  或者填默认值：modules/grasp/eye_in_hand.json 的 object 里写 material_id 或 color"
         )
     return matched[-1]
 
@@ -124,6 +126,7 @@ def _settled_sighting(
     *,
     after: Optional[float] = None,
     tolerance: Optional[float] = None,
+    include_depth: bool = True,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> MaterialSighting:
     """等到画面不再变，返回那一刻的整条观测（不只是坐标）。
@@ -133,7 +136,14 @@ def _settled_sighting(
 
     ``tolerance`` 覆盖一致性判据：粗调阶段（离目标还有十几毫米）用
     ``coarse_settle_tolerance_mm`` 就够，不必为了 0.4 mm 多等好几帧——每一帧都要跑一次
-    定位，本机实测 178 ms。
+    定位（主算路径实测 27–29 ms，辅助定位那一路 357–668 ms）。
+
+    ``include_depth=False`` 时一致性**只比平面内的 x/y**。x/y 对准（``align_x_y``）用这个：
+    它一个 z 都不参与解算，而 z 是按像素半径反推的（``z = f·D/2r``，本机约 0.42 mm/px），
+    1 px 的半径抖动就顶掉整个细档 0.4 mm——实测真机帧上连续两帧的 Δz 中位数是
+    1.7–2.7 mm（≤0.4 mm 的只占 13%），于是判据**永远不满足**，每次测量都要等满
+    ``settle_timeout_seconds``（默认 4 s）才拿最后读数走人。这就是"对准有时要等好几秒"
+    的全部来源。测 z 的步骤（抬升 / 悬停 / ``align_z``）保持三维判据不变。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     allowed = config.settle_tolerance_mm if tolerance is None else tolerance
@@ -154,12 +164,16 @@ def _settled_sighting(
         else:
             last = current
             point = (current.x_mm, current.y_mm, current.z_mm)
-            if previous is not None and math.sqrt(
-                (point[0] - previous[0]) ** 2
-                + (point[1] - previous[1]) ** 2
-                + (point[2] - previous[2]) ** 2
-            ) <= allowed:
-                return current
+            if previous is not None:
+                # ``include_depth=False`` 时把 z 那一项**置零**而不是换一个判据：
+                # 三维那条路算出来的数与以前逐位相同（同一个 sqrt、同样三项）。
+                depth_delta = (point[2] - previous[2]) ** 2 if include_depth else 0.0
+                if math.sqrt(
+                    (point[0] - previous[0]) ** 2
+                    + (point[1] - previous[1]) ** 2
+                    + depth_delta
+                ) <= allowed:
+                    return current
             previous = point
         if time.monotonic() >= deadline:
             if last is None:
@@ -211,7 +225,7 @@ def _probe_visible(link: FrameSource, selector: ObjectSelector, config: ServoCon
     """快速回答"物块在不在画面里"，**不等停稳**。
 
     为什么可以不等：这一步只问"在不在"，不问"在哪"——差几毫米无所谓。而等停稳
-    （连续两帧一致）至少要 537 ms；看不到时还要一直等到 ``settle_timeout_seconds``
+    （连续两帧一致）至少要两帧；看不到时还要一直等到 ``settle_timeout_seconds``
     （默认 4 s）才认输，乘上"抬起来找"的步数就是几十秒。
 
     代价是可能被一帧运动模糊骗到：所以连读 :data:`VISIBILITY_PROBE_FRAMES` 帧，
