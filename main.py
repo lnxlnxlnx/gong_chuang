@@ -83,7 +83,12 @@ def pick_manual() -> None:
         )
 
         # # x/y 对准 → 下降 → 后缩；一次都不动高度（除了这一次开环下降）。
-        robot.grasp.align_xy()
+        try:
+            robot.grasp.align_xy()
+        except Exception as e:
+            print(f"对准失败: {e}")
+            robot.arm.move_axis_to_motor_degrees("extension", 0)
+            return
         robot.arm.move_down(pulses= 800)
         # grab_box(robot)
         place_box(robot)
