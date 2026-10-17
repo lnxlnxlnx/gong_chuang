@@ -1,4 +1,21 @@
-"""物料定位：霍夫圆面决定存在与距离，YOLO 只补充类别。
+"""物料定位：**YOLO 主算**，算不出来时才走辅助定位（颜色块 / 霍夫找顶面圆）。
+
+## 两条路的顺序
+
+1. **主算 = YOLO 的物料框**（:meth:`MaterialLocator.locate`）。模型给出物料框，就地用它：
+   框中心当物料中心、框的等效半径 ``(w+h)/4`` 换深度。**一个像素的霍夫都不跑**——
+   这是常态路径，也是快的来源（圆面那一路要给几十个候选逐个量顶面，本机实测一帧
+   170–380 ms；一次 YOLO 推理约 20 ms）。
+2. **辅助定位 = :meth:`MaterialLocator.locate_auxiliary`**，**只在主算一个合格物料框都
+   给不出来时**执行。里面现在是"颜色块 / 霍夫找顶面圆"那套，**换算法就换这个方法**，
+   主流程不用动。
+
+## 框的几何：x/y 够用，z 别当真
+
+框比物料顶面大——同色桌面、可见的侧面都会进框：实测 30 mm 顶面在一帧里是 253 px 直径，
+模型给的框却是 401×439 px（``output/debug/now.png``），由框反推的深度因此偏近几十毫米。
+**这不影响 x/y 对准**：伺服在**同一套读数**里闭环，尺度的系统偏差会被实测出来的雅可比
+吸收掉；但报告里的 ``z_mm`` 不是真实距离。
 
 圆面实际直径固定为 30 mm。未传入像素焦距时，使用实拍样本的粗标定值。
 
@@ -12,6 +29,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -45,7 +63,7 @@ from modules.vision.drive.pinhole import (
 from modules.vision.drive.yolov8 import Detection
 # 报告类型只有一份定义，住在 reports（那里顶层只依赖标准库）：
 # 本模块是它的消费者，不再自己定义一份，也不做转发别名。
-from modules.vision.reports import MaterialReport, RegionReport
+from modules.vision.reports import MaterialReport, RegionReport, normalize_want
 
 
 class MaterialLocator:
@@ -167,8 +185,102 @@ class MaterialLocator:
         )
 
     # ------------------------------------------------------------- 主流程
-    def locate(self, frame: np.ndarray) -> MaterialReport:
-        """从一帧 BGR 图像返回圆面、类别和近似相机坐标。"""
+    def locate(self, frame: np.ndarray, *, want=None) -> MaterialReport:
+        """从一帧 BGR 图像返回物料、类别和近似相机坐标。
+
+        ## 两条路，顺序是硬要求
+
+        1. **主算：YOLO 的物料框。** 有框就用框，**一个像素的霍夫都不跑**——框的中心
+           当物料中心、框的等效半径 ``(w+h)/4`` 换出深度。这是常态路径，也是快的来源：
+           圆面那一路在真实台面图上要给几十个候选逐个量顶面（本机实测一帧 170–380 ms），
+           而一次 YOLO 推理约 20 ms。
+        2. **辅助定位（:meth:`locate_auxiliary`）：YOLO 一个物料框都给不出来时才跑。**
+           YOLO 有结果就**不执行**它。里面现在是"颜色块 / 霍夫找顶面圆"那套，
+           可以整个换掉（覆盖 :meth:`locate_auxiliary` 即可），主流程不用动。
+
+        ``want`` 指定**要哪一个物料**：类别名（``"red"``）或从 1 开始的编号；
+        它只影响 ``report.best`` 挑哪一个，整帧的候选照旧列在 ``report.regions`` 里。
+        写法不合法当场报错（见 :func:`modules.vision.reports.normalize_want`）。
+
+        ## 框的几何：x/y 够用，z 别当真
+
+        框比物料顶面大——同色桌面、可见的侧面都会进框（实测 ``output/debug/now.png``：
+        30 mm 顶面在画面里是 253 px，模型给的框是 401×439 px），所以由框反推的深度偏近。
+        **这不影响 x/y 对准**：伺服是在**同一套读数**里闭环，尺度的系统偏差会被实测出来的
+        雅可比吸收掉；但 ``report.best.z_mm`` 不是真实距离——要真实距离得让辅助定位去量圆面。
+        """
+        want = normalize_want(want)
+        hits = tuple(self.yolo.detect(frame, materials_only=True))
+        from_boxes = self._report_from_boxes(frame, hits, want=want)
+        if from_boxes is not None:
+            return from_boxes
+        # 一个合格的物料框都没有：这才轮到辅助定位。框已经问过了，传下去（空元组）
+        # 让它别再问第二遍——同一个 frame、同样的参数，结果必然一样，重跑只是白花 20 ms。
+        return self.locate_auxiliary(frame, want=want, hits=hits)
+
+    def _report_from_boxes(
+        self, frame: np.ndarray, hits: Sequence[Detection], *, want=None
+    ) -> MaterialReport | None:
+        """**主算**：把每一个合格的物料框变成一个物料候选；一个都没有时返回 ``None``。
+
+        每个框都进候选，不是只留置信度最高的那个——这样"画面里有红绿蓝三块"时
+        ``locate("red")`` 才挑得到红的。**决定挑哪一个的地方只有一处**：
+        :attr:`modules.vision.reports.MaterialReport.best`。
+        """
+        materials = self._materials()
+        boxes = [hit for hit in hits if self.classifier.qualifies(hit, materials=materials)]
+        if not boxes:
+            return None
+        height, width = frame.shape[:2]
+        # 灰度图"用到才转、一帧只转一次"：每个框都要量一次"像不像顶面"，而 1280×720
+        # 转一次是 12.0 ms（实测）。这个数**不参与接受与否**（框是主算，模型说它是物料
+        # 它就是），只写进报告供排查——比如同色桌面那个假框，这一项会明显偏大。
+        gray_frame = None
+
+        def grayscale():
+            nonlocal gray_frame
+            if gray_frame is None:
+                gray_frame = to_grayscale(frame)
+            return gray_frame
+
+        # 画幅规则与像素焦距只有一个定义，在 modules.vision.drive.pinhole 里。
+        focal_px = resolve_focal_px(width, height, self.focal_px)
+        regions = tuple(self._region_from_box(hit) for hit in boxes)
+        reports = tuple(
+            self._report_for_region(
+                frame, boxes, region, measure_face(grayscale(), region),
+                focal_px, width, height,
+                # 主算路径没有"颜色路径"可言；模型框本身就是结论，不再让形状判据否决它。
+                colour_path=False, force_accept=True,
+            )
+            for region in regions
+        )
+        return MaterialReport(
+            lock=RingLock(regions, None), hits=hits, regions=reports,
+            focal_px=focal_px, radius_window_px=self.radius_window(width, height),
+            colour_source="yolo", want=want,
+        )
+
+    def locate_auxiliary(
+        self, frame: np.ndarray, *, want=None, hits: Sequence[Detection] | None = None
+    ) -> MaterialReport:
+        """**辅助定位**：YOLO 一个物料框都给不出来时才走这条路。
+
+        现在是"颜色块 / 霍夫找顶面圆"那套：圆的半径给出深度，模型框（``hits``）用来给
+        圆面盖章、或从框里现取参考色。**它只在主算无结果时被调用**，所以"一个圆面都没通过
+        校验"就是这一帧的最终结论——不会再兜第二次。
+
+        **换检测算法就换这个方法**（覆盖它，或在子类里重写）：:meth:`locate` 不关心它内部
+        怎么做，只要返回一个 :class:`~modules.vision.reports.MaterialReport`。
+
+        :param hits: ``None`` = 还没问过模型（直接调这个方法的人），自己去问一次；
+            空元组 = 主流程已经问过、一个框都没有——不再问第二遍。
+        """
+        want = normalize_want(want)
+        # ``None`` 与空元组的区别就是"问过没有"：同一个 frame 问两遍模型是白花 20 ms。
+        asked_yolo = hits is not None
+        found: tuple[Detection, ...] = () if hits is None else tuple(hits)
+
         height, width = frame.shape[:2]
         window = self.radius_window(width, height)
         # 灰度图**一帧只转一次**，而且要"用到才转"：measure_face 每量一个候选圆
@@ -188,8 +300,6 @@ class MaterialLocator:
         lock = self._locate_circles(frame, window, self.locator)
         qualities = self._face_qualities(grayscale, lock)
         source = "palette" if lock.regions else None
-        hits: tuple[Detection, ...] = ()
-        asked_yolo = False
         # 严格容差一个色块都没有时，先把"放大 BGR 容差"那一遍的结果**记下来**——
         # 它是一个**候补**，不是结论。**只放大 BGR 容差**：色相与亮度下限一放就会把
         # 台面收进掩膜（台面色相离绿料只差 14、亮度比 0.42），而容差放大后掩膜里
@@ -207,9 +317,10 @@ class MaterialLocator:
         if not lock.regions and self.colour_first:
             # 调色板里没有这块料。先问模型：它认出来了，就从它框的中心取一次参考色，
             # 拿这个参考色再分割一遍——换一块料（红、黄……）就不必先量颜色。
-            hits = tuple(self.yolo.detect(frame, materials_only=True))
-            asked_yolo = True
-            sampled = self._sampled_palette(frame, hits)
+            if not asked_yolo:
+                found = tuple(self.yolo.detect(frame, materials_only=True))
+                asked_yolo = True
+            sampled = self._sampled_palette(frame, found)
             if sampled:
                 options = dict(self.blob_options)
                 trial = ColourBlobLocator(sampled, **options)
@@ -240,28 +351,29 @@ class MaterialLocator:
             lock = relaxed_lock
             qualities = self._face_qualities(grayscale, relaxed_lock)
             source = "palette-relaxed"
+        # 圆面盖章要用模型框，所以有圆面时才需要问模型（问过就不再问）。
+        if lock.regions and not asked_yolo:
+            found = tuple(self.yolo.detect(frame, materials_only=True))
+            asked_yolo = True
+
         focal_px = self.resolved_focal_px(width, height, required=bool(lock.regions))
         if not lock.regions:
             return MaterialReport(
-                lock=lock, hits=hits, regions=(), focal_px=focal_px,
-                radius_window_px=window, colour_source=source,
+                lock=lock, hits=found, regions=(), focal_px=focal_px,
+                radius_window_px=window, colour_source=source, want=want,
             )
-        if not hits and not asked_yolo:
-            # 上面已经问过模型的话，这一帧就不再问第二遍：同一个 frame、同样的参数，
-            # 结果必然一样，重跑一次只是白花 20 ms（ONNX 通道实测）。
-            hits = tuple(self.yolo.detect(frame, materials_only=True))
         # 画幅规则与像素焦距只有一个定义，在 modules.vision.drive.pinhole 里。
         focal_px = resolve_focal_px(width, height, self.focal_px)
         reports = tuple(
             self._report_for_region(
-                frame, hits, region, qualities[region], focal_px, width, height,
+                frame, found, region, qualities[region], focal_px, width, height,
                 colour_path=source in ("palette", "palette-relaxed", "model"),
             )
             for region in lock.regions
         )
         return MaterialReport(
-            lock=lock, hits=hits, regions=reports, focal_px=focal_px,
-            radius_window_px=window, colour_source=source,
+            lock=lock, hits=found, regions=reports, focal_px=focal_px,
+            radius_window_px=window, colour_source=source, want=want,
         )
 
     def _looks_like_face(self, quality: FaceQuality) -> bool:
@@ -310,6 +422,22 @@ class MaterialLocator:
         if self._fallback_locator is None:
             self._fallback_locator = HoughRingLocator()
         return self._fallback_locator
+
+    # ------------------------------------------------------- 框 → 候选
+    @staticmethod
+    def _region_from_box(hit: Detection) -> LockedRegion:
+        """把一个检测框**当成**一个"圆面"：中心取框中心，半径取等效半径 ``(w+h)/4``。
+
+        框不是圆，而且比物料顶面大——同色桌面、可见的侧面都会进框：实测 30 mm 顶面在一帧
+        里是 253 px 直径，模型给的框却是 401×439 px，于是由框反推的深度偏近几十毫米。
+        **这不影响 x/y 对准**：伺服在**同一套读数**里闭环，尺度的系统偏差会被实测出来的
+        雅可比吸收掉；但报告里的 z 不是真实距离，要真实距离得让辅助定位去量圆面。
+        """
+        return LockedRegion(
+            center_x=(float(hit.x1) + float(hit.x2)) / 2.0,
+            center_y=(float(hit.y1) + float(hit.y2)) / 2.0,
+            radius=max((float(hit.width) + float(hit.height)) / 4.0, 1.0),
+        )
 
     def _locate_circles(self, frame: np.ndarray, window, locator) -> RingLock:
         """用（可选的）半径窗口调一次圆定位器。"""
@@ -412,8 +540,13 @@ class MaterialLocator:
         height: int,
         *,
         colour_path: bool,
+        force_accept: bool = False,
     ) -> RegionReport:
-        """用圆面直径估深度，再将圆心投影回相机坐标系。"""
+        """用圆面直径估深度，再将圆心投影回相机坐标系。
+
+        ``force_accept=True`` 给框兜底那条路用：那个"圆面"就是模型框本身，
+        "像不像顶面"与"模型有没有盖章"两条判据都不适用（它们否掉的正是这一帧）。
+        """
         visible = [
             hit for hit in hits
             if region.contains(*hit.center, margin=self.region_margin)
@@ -432,7 +565,10 @@ class MaterialLocator:
             region=region,
             classification=self.classifier.classify(visible, materials=self._materials()),
             face=face,
-            accepted=self._accepted(region, face, hits, colour_path=colour_path),
+            accepted=(
+                True if force_accept
+                else self._accepted(region, face, hits, colour_path=colour_path)
+            ),
             x_mm=fix.x_mm,
             y_mm=fix.y_mm,
             distance_mm=fix.depth_mm,
@@ -503,29 +639,72 @@ class MaterialLocator:
 
 # ---------------------------------------------------------------------- 自测
 def _self_test() -> int:
-    """Check circle presence and 30 mm distance without a model or camera."""
+    """两条路各验一次，都不需要摄像头和真模型。"""
     import cv2
     import numpy as np
 
-    class EmptyYOLO:
+    class BoxYOLO:
+        """主算用：一个物料框，别的什么都不给。"""
+
+        def __init__(self, hits=()) -> None:
+            self.hits = tuple(hits)
+
         def detect(self, _frame, *, materials_only=False):
-            return []
+            return list(self.hits)
 
         def close(self):
             pass
 
+    # --- 主算：有框就用框，一个像素的霍夫都不跑 ---------------------------------
+    blank = np.full((480, 640, 3), 80, dtype=np.uint8)
+    box = Detection(x1=280.0, y1=200.0, x2=360.0, y2=280.0, score=0.9, class_id=0, name="red")
+    primary = MaterialLocator(yolo=BoxYOLO([box]), focal_px=300).locate(blank, want="red")
+    if len(primary.regions) != 1 or primary.best is None or primary.best.name != "red":
+        print(f"自测失败：主算应从模型框给出 1 个 red 候选，实际 {primary.summary()}")
+        return 1
+    if primary.colour_source != "yolo" or not primary.from_model_box:
+        print(f"自测失败：主算结果的来源应标成 yolo，实际 {primary.colour_source!r}")
+        return 1
+    # 框 (280,200)-(360,280)：中心 (320,240)，等效半径 (80+80)/4 = 40 px -> 112.5 mm。
+    expected_mm = 300 * 30 / (2 * 40.0)
+    if abs(primary.best.distance_mm - expected_mm) > 1e-6:
+        print(f"自测失败：框的等效半径应给出 {expected_mm} mm，实际 {primary.best.distance_mm}")
+        return 1
+
+    class CountingAuxiliary(MaterialLocator):
+        """把辅助定位换成一个计数器：主算有结果时它必须一次都不执行。"""
+
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.calls = 0
+
+        def locate_auxiliary(self, frame, *, want=None, hits=None):
+            self.calls += 1
+            return super().locate_auxiliary(frame, want=want, hits=hits)
+
+    counting = CountingAuxiliary(yolo=BoxYOLO([box]), focal_px=300)
+    counting.locate(blank, want="red")
+    if counting.calls != 0:
+        print(f"自测失败：主算有结果时辅助定位不该执行，实际执行了 {counting.calls} 次")
+        return 1
+
+    # --- 辅助定位：模型一个框都没有时才跑，圆面照旧给出毫米 ----------------------
     frame = np.full((480, 640, 3), 80, dtype=np.uint8)
     cv2.circle(frame, (320, 240), 70, (220, 220, 220), 8)
-    report = MaterialLocator(yolo=EmptyYOLO(), focal_px=300).locate(frame)
-    print(report.summary())
+    report = MaterialLocator(yolo=BoxYOLO(), focal_px=300).locate(frame)
     if len(report.regions) != 1:
-        print("自测失败：应找到一个圆面")
+        print("自测失败：辅助定位应找到一个圆面")
         return 1
     result = report.regions[0]
     if result.name is not None or abs(result.distance_mm - 300 * 30 / (2 * result.region.radius)) > 1e-6:
-        print("自测失败：YOLO 漏检后应保留圆面距离和未知类别")
+        print("自测失败：模型一个框都没有时，辅助定位应保留圆面距离和未知类别")
         return 1
-    print("自测通过：圆面决定存在与距离，YOLO 漏检只影响类别。")
+    if report.from_model_box:
+        print("自测失败：辅助定位的结果不该标成来自模型框")
+        return 1
+
+    print(report.summary())
+    print("自测通过：YOLO 主算用框给出读数；它一个框都没有时，辅助定位用圆面兜住位置与距离。")
     return 0
 
 
@@ -542,6 +721,18 @@ def parse_depth_range(text: str | None) -> tuple[float, float] | None:
     if len(parts) != 2:
         raise ValueError('深度范围要写成 "近,远"，例如 "60,80"（毫米）')
     return normalize_depth_range((float(parts[0]), float(parts[1])))
+
+
+def parse_want(text: str | None):
+    """把命令行的 ``--want`` 解析成 :func:`~modules.vision.reports.normalize_want` 的输入。
+
+    纯数字当**编号**（``--want 2`` 就是「物料 2」），其余当**类别名**（``--want red``）；
+    空值表示不指定。不在这里做合法性判断——那些规则只有一个出处（``normalize_want``）。
+    """
+    if text is None or text == "":
+        return None
+    stripped = text.strip()
+    return int(stripped) if stripped.isdigit() else stripped
 
 
 def parse_bgr(text) -> tuple[float, float, float] | None:
@@ -652,7 +843,7 @@ def _run_image(args) -> int:
     # 焦距按原样直传：图片路径一直用的是显式 --focal（或粗标定），与摄像头会话一致。
     locator = _build_locator(settings, focal_px=args.focal)
     try:
-        report = locator.locate(frame)
+        report = locator.locate(frame, want=args.want)
         print(report.summary())
         if args.save is not None:
             args.save.parent.mkdir(parents=True, exist_ok=True)
@@ -678,6 +869,8 @@ def _run_camera(args) -> int:
     try:
         with Vision._open_config(settings, focal_px=args.focal) as vision:
             print(f"摄像头 {args.camera}；窗口 {window!r}，按 q 退出")
+            if args.want is not None:
+                print(f"只要 {args.want}（类别名或编号）；画面里没有它时标成 no material")
 
             def overlay(annotated, report, _stats) -> None:
                 best = None if report is None else report.best
@@ -685,7 +878,9 @@ def _run_camera(args) -> int:
                 cv2.putText(annotated, text, (10, 24),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-            run_preview(vision._camera, vision._locator.locate, vision._locator.draw,
+            # ``run_preview`` 只按 ``frame`` 调定位器，所以把 "要哪一个" 绑在这里。
+            locate = functools.partial(vision._locator.locate, want=args.want)
+            run_preview(vision._camera, locate, vision._locator.draw,
                         window=window, overlay=overlay)
     finally:
         close_previews()
@@ -715,6 +910,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--diameter", type=float, default=None,
                         help="物料顶面真实直径（毫米）；默认取 config.json 的 "
                              "targets.material_diameter_mm")
+    parser.add_argument("--want", default=None,
+                        help='画面里有多种物料时只要哪一种：类别名（如 "red"）'
+                             "或从 1 开始的编号；省略则按原规则挑"
+                             "（认出来的里置信度最高的那个）")
     args = parser.parse_args(argv)
     if args.camera is not None:
         return _run_camera(args)

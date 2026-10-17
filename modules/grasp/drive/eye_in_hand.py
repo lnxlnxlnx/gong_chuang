@@ -131,6 +131,125 @@ def _clamp_pulses(value: float, limit: int) -> int:
     return max(-limit, min(limit, rounded))
 
 
+def _plan_planar_step(
+    error_x: float,
+    error_y: float,
+    jacobian: ServoJacobian,
+    config: ServoConfig,
+    *,
+    limit: int,
+) -> Tuple[int, int]:
+    """**平面误差 → 这一步该走多少脉冲**；闭环与单帧一步共用这一处。
+
+    ``limit`` 是这一档的单步上限（粗调/细调的分档由调用方按
+    :meth:`ServoConfig.step_limit_for` 定）。每个轴的门槛按**各自的灵敏度**换算
+    （:meth:`ServoJacobian.minimum_pulses`），并且不超过这个上限——安全优先。
+
+    这就是"逆运动解算"这一步的全部内容：``p = −J⁻¹·e``（:meth:`ServoJacobian.pulses_for`），
+    再夹到脉冲预算里。它本身是一瞬间的事；慢的从来不是它。
+
+    :raises ServoError: 两个轴都取整成 0，但误差还在（大不了调不动，不该静默收工）。
+    """
+    base_min, radial_min = jacobian.minimum_pulses(config.min_step_mm)
+    base_wanted, radial_wanted = jacobian.pulses_for(error_x, error_y)
+    base_step = _apply_minimum(
+        _clamp_pulses(base_wanted, limit), base_wanted, min(base_min, limit)
+    )
+    radial_step = _apply_minimum(
+        _clamp_pulses(radial_wanted, limit), radial_wanted, min(radial_min, limit)
+    )
+    if base_step == 0 and radial_step == 0:
+        raise ServoError(
+            f"这一轮算出来要走的脉冲都取整成 0（想要 底座 {base_wanted:.2f}、"
+            f"伸缩 {radial_wanted:.2f}），但误差还有 {math.hypot(error_x, error_y):.2f} mm。"
+            "把 max_pulses_per_step 调大，或者雅可比标定得太小需要重标"
+        )
+    return base_step, radial_step
+
+
+def _given_offset(reading) -> Tuple[float, float]:
+    """把"调用方已经量好的平面读数"校验成 ``(x_mm, y_mm)``。
+
+    ``str`` / ``bytes`` 明确拒掉：``"12"`` 拆成两个字符也能转成 ``(1.0, 2.0)``——
+    一个手滑写错的字符串会**静默变成**一个合法坐标，而机械臂会照着它动。
+    这种错误必须在动任何东西之前响亮地报出来。
+    """
+    if isinstance(reading, (str, bytes)):
+        raise ValueError(f"reading 要写成 (x_mm, y_mm) 两个数，收到字符串 {reading!r}")
+    try:
+        first, second = reading
+        return (float(first), float(second))
+    except (TypeError, ValueError) as problem:
+        raise ValueError(f"reading 要写成 (x_mm, y_mm) 两个数，收到 {reading!r}") from problem
+
+
+def _single_step(
+    arm,
+    target: ServoTarget,
+    jacobian: ServoJacobian,
+    config: ServoConfig,
+    offset: Tuple[float, float],
+    say: Callable[[str], None],
+) -> ServoResult:
+    """**单帧一步**：拿这一帧的读数算一次脉冲、走一步就返回；动作之后不再测量。
+
+    为什么要它：跟随（物体一直在动）时，"等画面停稳"是在等一个**永远等不到**的东西——
+    下一帧物体又动了。跟随循环每一轮都会立刻重新测一次，所以这里再测一遍只是白花两帧
+    （约 250 ms，而且是在 30 fps 上）。
+
+    代价写在 :attr:`~modules.grasp.drive.servo_model.ServoResult.unverified` 上：
+    结果里的读数与误差是**动作之前**那一次，不代表现在的位置。也正因为没有第二次测量，
+    闭环里那两条"事后核对"的判据这里都没有：与雅可比预测方向相反、像素直径突变
+    （爪子挡住物块）。单步幅度本来就被 ``step_limit_for`` 夹住，所以撞上去的风险不大，
+    但**调用方必须自己看下一帧**——这本来就是它的循环在做的事。
+    """
+    error_x = offset[0] - target.x_mm
+    error_y = offset[1] - target.y_mm
+    error = math.hypot(error_x, error_y)
+    say(f"单帧一步：物块 ({offset[0]:+.2f}, {offset[1]:+.2f}) mm，误差 {error:.2f} mm")
+
+    def result(*, base_pulses: int, radial_pulses: int, resolution_limited: bool = False):
+        return ServoResult(
+            target=target,
+            readings=(offset,),
+            error_x=error_x,
+            error_y=error_y,
+            base_pulses=base_pulses,
+            radial_pulses=radial_pulses,
+            iterations=1,
+            tolerance_mm=config.tolerance_mm,
+            resolution_limited=resolution_limited,
+            unverified=True,
+        )
+
+    if error <= config.tolerance_mm:
+        say(f"  误差已在容差 {config.tolerance_mm:.1f} mm 内，一步都不动")
+        return result(base_pulses=0, radial_pulses=0)
+    if error < config.min_step_mm:
+        say(
+            f"  误差 {error:.2f} mm 已小于背隙地板 {config.min_step_mm:.2f} mm，"
+            "再走只会跨过目标；按分辨率极限收工"
+        )
+        return result(base_pulses=0, radial_pulses=0, resolution_limited=True)
+
+    limit = config.step_limit_for(error)
+    base_step, radial_step = _plan_planar_step(
+        error_x, error_y, jacobian, config, limit=limit
+    )
+    # 单帧一步没有"累计"可算，所以拿**整份预算**当这一步的上限：它拦不住慢慢磨，
+    # 但拦得住"雅可比标反了于是想走几万脉冲"那种。
+    if abs(base_step) > config.max_total_pulses or abs(radial_step) > config.max_total_pulses:
+        raise ServoError(
+            f"这一步就要 底座 {base_step:+d}、伸缩 {radial_step:+d} 脉冲，超过单次预算 "
+            f"{config.max_total_pulses}。这通常说明雅可比标反了或符号错了，先跑 --calibrate 重标"
+        )
+    coarse = error > config.coarse_error_mm
+    say(f"  走（{'粗调' if coarse else '细调'}，上限 {limit}）：底座 {base_step:+d}、伸缩 {radial_step:+d} 脉冲")
+    move_seconds = _move_axes(arm, base_step, radial_step, config)
+    say(f"  动作耗时 {move_seconds:.2f} s（这一步之后没有再验证）")
+    return result(base_pulses=base_step, radial_pulses=radial_step)
+
+
 def _result_when_occluded(
     readings: List[Tuple[float, float]],
     target: ServoTarget,
@@ -294,6 +413,8 @@ def align_x_y(
     ensure_safe_height: bool = True,
     quick_safe_lift: bool = False,
     lift_scale: Optional[LiftScale] = None,
+    single_step: bool = False,
+    reading: Optional[Sequence[float]] = None,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> ServoResult:
     """闭环把物块伺服到 ``(tx, ty)``；只动 底座 与 伸缩，不碰高度。
@@ -306,7 +427,19 @@ def align_x_y(
         测量）。给"每一轮都要查"的 ``--follow`` 用：判据不放宽，但绝大多数轮次只花
         一帧（约 0.22 s）而不是一次停稳测量（约 0.54 s）。
     :param lift_scale: 已标定的升降灵敏度，交给 :func:`raise_before_rotating` 一步算到位。
+    :param single_step: **单帧一步**：最多取一帧、算一次脉冲、走一步就返回，**动作之后不再
+        测量**（见 :func:`_single_step`）。给跟随循环用——调用方本来就会立刻再测一次，
+        而"等画面停稳"在物体一直在动时是在等一个永远等不到的东西。默认关：普通对准要的是
+        "一直调到准为止"，那必须是闭环。
+    :param reading: 调用方**已经量好**的平面读数 ``(x_mm, y_mm)``。给了它就连那一帧都不取
+        （``single_step`` 自动为真）——这正是"``locate`` 一次 + 走一步"的组合::
+
+            report = robot.vision.locate("green")        # 一帧：YOLO 像素 → x/y 毫米
+            robot.grasp.align_xy(reading=(report.best.x_mm, report.best.y_mm))
+
+        放进循环就是跟随：每轮只取**一帧**、只走**一步**，中间没有第二次测量。
     :raises ServoError: 看不到物块、雅可比奇异、脉冲预算用完，或迭代用尽仍未进容差。
+    :raises ValueError: ``reading`` 不是两个数。
 
     物块**中途看不见**分两种，处理方式不同：
 
@@ -317,8 +450,28 @@ def align_x_y(
 
     "画面里有多个目标"和"等不到新观测"**不属于遮挡**（那是
     :class:`~modules.grasp.drive.servo_model.ObjectMissing` 之外的类型），永远报错。
+
+    ## 为什么停稳判据不看 z
+
+    每一次测量都要求"连续两帧读数一致"，而那个判据默认是**三维**的。本函数只用
+    ``x_mm`` / ``y_mm``（另加像素直径做干涉判据），z 一个数都不进解算——可 z 恰恰是
+    最不稳的那个：它按像素半径反推（``z = f·D/2r``，本机约 0.42 mm/px），1 px 的半径
+    抖动就顶掉整个细档 0.4 mm。
+
+    实测（真机帧 + σ=1–2 灰阶噪声）：连续两帧的 Δxy 中位数是 0.02–0.26 mm（≤0.4 mm 的
+    占 74–100%），Δz 中位数却是 1.7–2.7 mm（≤0.4 mm 的只占 13%）。于是细档判据**永远
+    不满足**，每次测量都要等满 ``settle_timeout_seconds``（默认 4 s）才拿最后读数走人：
+    对准本身很快，等的是这个。
+
+    所以这里传 ``include_depth=False``，只比平面内的 x/y。测 z 的那几条路
+    （:func:`raise_before_rotating` / :func:`hover_above_object` / :func:`align_z`）
+    照旧比三维——那里的 z 就是被控量，抖动必须等它停下来。
     """
     say = on_message if on_message is not None else (lambda _message: None)
+    if reading is not None:
+        # 参数错误要在**动任何东西之前**报出来；给了已经量好的读数就自然是单帧一步。
+        given = _given_offset(reading)
+        single_step = True
     # x/y 的每一步都要转底盘，所以先在**打开动作之前**抬到安全高度。这是机械结构上的
     # 硬约束：低位转底盘会撞到台面上的物块。刻意不自动降回去——降回去正是撞到它的动作。
     if ensure_safe_height:
@@ -331,6 +484,14 @@ def align_x_y(
             quick=quick_safe_lift,
             on_message=say,
         )
+    if single_step:
+        if reading is None:
+            # 只取一帧，**不等停稳**：跟随的时候画面永远在变，等它停稳等于永远等下去。
+            # 这一帧可能带运动模糊，但单步幅度本来就被 step_limit_for 夹住，
+            # 而且下一步立刻会用新的一帧纠正回来。
+            sighting = _read_object(link, selector, config)
+            given = (sighting.x_mm, sighting.y_mm)
+        return _single_step(arm, target, jacobian, config, given, say)
     readings: List[Tuple[float, float]] = []
     total_base = 0
     total_radial = 0
@@ -354,7 +515,15 @@ def align_x_y(
         started = time.monotonic()
         try:
             sighting = _settled_sighting(
-                link, selector, config, after=checkpoint, tolerance=settle_tolerance
+                link,
+                selector,
+                config,
+                after=checkpoint,
+                tolerance=settle_tolerance,
+                # 只比平面内的 x/y：本函数一个 z 都不参与解算（见 docstring 的
+                # "为什么停稳判据不看 z"）。z 那一路的抖动会把每次测量拖到
+                # settle_timeout_seconds 才收工，实测那是"对准要等好几秒"的唯一来源。
+                include_depth=False,
             )
         except ObjectMissing:
             # 只有"一个目标都没有"走这条路：可能只是爪子悬到物块上方把光挡住了。
@@ -476,20 +645,10 @@ def align_x_y(
             )
 
         # 每个轴的门槛按各自灵敏度换算，并且不能超过这一档的单步上限（安全优先）。
-        base_min, radial_min = jacobian.minimum_pulses(config.min_step_mm)
-        base_wanted, radial_wanted = jacobian.pulses_for(error_x, error_y)
-        base_step = _apply_minimum(
-            _clamp_pulses(base_wanted, limit), base_wanted, min(base_min, limit)
+        # 解算本身在 _plan_planar_step 里，和"单帧一步"共用同一处定义。
+        base_step, radial_step = _plan_planar_step(
+            error_x, error_y, jacobian, config, limit=limit
         )
-        radial_step = _apply_minimum(
-            _clamp_pulses(radial_wanted, limit), radial_wanted, min(radial_min, limit)
-        )
-        if base_step == 0 and radial_step == 0:
-            raise ServoError(
-                f"这一轮算出来要走的脉冲都取整成 0（想要 底座 {base_wanted:.2f}、"
-                f"伸缩 {radial_wanted:.2f}），但误差还有 {error:.2f} mm。"
-                "把 max_pulses_per_step 调大，或者雅可比标定得太小需要重标"
-            )
         if abs(total_base + base_step) > config.max_total_pulses or abs(
             total_radial + radial_step
         ) > config.max_total_pulses:

@@ -25,7 +25,15 @@ python -m modules.grasp.test.manual.align_xy --calibrate    # 程序自己动两
 python -m modules.grasp.test.manual.align_xy
 
 # **跟随**：物块被移动时持续跟着对准，Ctrl+C 退出
+# （每轮**只取一帧**、只走一步：单帧一步，不等画面停稳）
 python -m modules.grasp.test.manual.align_xy --follow
+
+# 自己想怎么写循环就怎么写：locate 一帧 → 走一步 → 再来一次
+#   while True:
+#       report = robot.vision.locate("green")     # 一帧：YOLO 像素 → 实际 x/y 毫米
+#       if report.best is None:
+#           continue
+#       robot.grasp.align_xy(reading=(report.best.x_mm, report.best.y_mm))
 
 # 平面稳定之后往下走：升降下降 + 伸缩后缩（两个固定脉冲数）
 python -m modules.grasp.test.manual.align_xy --align-z
@@ -51,19 +59,51 @@ x/y 对准**不动高度**，所以"对准时爪子停在哪一层"原本只由 
 | 环节 | 实测 | 说明 |
 |---|---|---|
 | `camera.read()` | 32 ms | 30 fps 一帧 |
-| 每帧定位 | 178 ms | Hough + YOLO，**单帧地板价** |
-| 一次取帧 | 221 ms | 丢 2 帧 + 读 + 定位 |
-| 一次**停稳测量** | 537 ms | 闭环每测一次至少两次定位 |
+| 一次定位（**主算**） | **27–29 ms** | YOLO 的物料框，一个像素的霍夫都不跑 |
+| 一次定位（辅助） | 357–668 ms | 只有 YOLO 一个框都没有时才跑：霍夫/颜色 + 逐候选量顶面 |
+| 一次取帧 | 约 125 ms | 丢 2 帧 + 读 + **主算**定位 |
+| 一次**停稳测量** | 约 250 ms | 闭环每测一次至少两次定位 |
 
 所以"少测几次"比"少动几下"更值钱。几处提速（都在 ``modules/grasp/eye_in_hand.json`` 里可关）：
 
+- **停稳判据只看 x/y**（``align_x_y`` 传 ``include_depth=False``）：x/y 对准一个 z 都不用，
+  而 z 是按像素半径反推的（约 0.42 mm/px），1 px 的半径抖动就顶掉整个细档 0.4 mm。
+  实测真机帧上连续两帧的 Δz 中位数 1.7–2.7 mm（≤0.4 mm 的只占 13%），Δxy 中位数
+  0.02–0.26 mm——三维判据下每次测量都要等满 ``settle_timeout_seconds``（默认 4 s），
+  这就是以前"对准有时要等好几秒"的来源。测 z 的步骤（抬升 / 悬停 / ``--align-z``）
+  照旧比三维；
 - 抬到安全高度：标过 ``lift_scale`` 就按"还差多少毫米"**一步算到位**（夹在
   ``safe_lift_max_pulses_per_step`` 内），而不是 500 脉冲一段地试——最多省十几段测量；
 - 粗调阶段用 ``coarse_settle_tolerance_mm`` 判停稳（远的时候不必为了 0.4 mm 多等帧）；
 - ``--follow`` **每一轮仍然查安全高度**，但用"单帧快判 + 余量（``safe_lift_quick_margin_mm``）"：
-  够高就直接放行（一帧，约 0.22 s），读数偏低或落在余量内就退回完整的停稳测量（约 0.54 s）。
-  判据一点没放宽，省的是"绝大多数轮次都够高"这件事上的重复测量；
+  够高就直接放行（一帧），读数偏低或落在余量内就退回完整的停稳测量。判据一点没放宽，
+  省的是"绝大多数轮次都够高"这件事上的重复测量；
 - ``--align-and-descend`` 一次走完四步，并把每段耗时打出来。
+
+## 认出"哪一个物块"：按次传 `want`，JSON 只是默认值
+
+主算路径上**每一个物料框都是一个候选**，所以画面里有红绿蓝三块料时就是三条观测。
+这时候必须说清"要哪一个"，有两种办法：
+
+```powershell
+# 1) 按次传（推荐）：一次程序里依次抓多种物料就用这个，配置文件一个字都不用改
+python -m modules.grasp.test.manual.align_xy --want green
+python -m modules.grasp.test.manual.align_xy --follow --want red
+```
+
+```python
+# 2) 代码里按次传，与 vision.locate("red") 是同一套说法（类别名 / 从 1 开始的编号）
+for colour in ("red", "green", "blue"):
+    report = robot.vision.locate(colour)          # 一帧：像素 → x/y 毫米
+    if report.best is None:
+        continue
+    robot.grasp.align_xy(reading=(report.best.x_mm, report.best.y_mm), want=colour)
+    # 或者整轮就位：robot.grasp.align_and_descend(want=colour)
+```
+
+`eye_in_hand.json` 的 `object` 是**没传时才用**的默认值。两个都不给时，物块被定义成
+"画面里唯一的目标"，多于一个就直接报错——猜错目标会让机械臂朝错误的方向动，
+而动作本身看起来完全正常。
 
 ## z 这一步是开环的：两个可改的脉冲数
 
@@ -148,6 +188,19 @@ from modules.motor.config import load_bus_config as load_motor_bus_config
 
 def _say(message: str) -> None:
     print(f"  {message}")
+
+
+def _selector_for(arguments) -> ObjectSelector:
+    """本次会话按**哪个**物块判别：``--want`` 给了就用它，否则读配置里的 ``object``。
+
+    ``--want`` 与 ``vision.locate("red")`` 是同一套说法（类别名，或从 1 开始的编号）。
+    它按次生效，所以一次程序里依次抓多种物料不必改配置文件。
+    """
+    if arguments.want is None:
+        return load_object_selector()
+    from modules.vision.drive.material_locate import parse_want
+
+    return ObjectSelector.from_want(parse_want(arguments.want))
 
 
 def _open_source(arguments, *, vision_settings) -> ClosableFrameSource:
@@ -359,13 +412,24 @@ def run_follow(
 ) -> int:
     """跟随：物块被移动时持续把它伺服回目标读数。
 
-    每一轮都会重新测量并按当前误差算脉冲；物块不动时误差本来就在容差内，
-    于是那一轮只花一次测量、不发任何动作帧。所以"静止"和"被推动"是同一段代码。
+    每一轮重新测**一帧**、按当前误差算脉冲、走一步（``single_step=True``）。
+    物块不动时误差本来就在容差内，于是那一轮**一帧都不发动作**。所以"静止"和"被推动"
+    是同一段代码——而"静止"这一轮只花一帧（主算路径实测 27–29 ms 定位）。
+
+    为什么不等停稳：跟随的时候画面**永远在变**，等"连续两帧一致"是在等一个永远等不到的
+    东西。单步幅度本来就被 ``step_limit_for`` 夹住，下一步立刻会用新的一帧纠正回来。
 
     **安全高度每一轮都查，但用单帧快判**：跟随期间这套代码不动高度，可是别人可能动
     （另一个终端、手去拨）。所以判据一点都不放宽——只要"单帧读到的 z 比安全高度还高
-    一个余量"就直接放行，否则退回一次完整的停稳测量。绝大多数轮次因此只花一帧
-    （约 0.22 s）而不是一次停稳测量（约 0.54 s）。
+    一个余量"就直接放行，否则退回一次完整的停稳测量。
+
+    想自己写循环的话，等价的一段就是::
+
+        while True:
+            report = robot.vision.locate("green")        # 一帧
+            if report.best is None:
+                continue
+            robot.grasp.align_xy(reading=(report.best.x_mm, report.best.y_mm))
     """
     print("开始跟随（只动 底座旋转 与 伸缩，高度不动）")
     print(f"  {target.summary()}；{jacobian.summary()}")
@@ -398,6 +462,9 @@ def run_follow(
                     config,
                     quick_safe_lift=True,
                     lift_scale=lift_scale,
+                    # **单帧一步**：跟随的时候画面永远在变，"等停稳"等于永远等下去。
+                    # 每一轮本来就会立刻重新测一次，再测第二帧只是白花（约 125 ms）。
+                    single_step=True,
                 )
             except ServoError as problem:
                 # 跟随过程中"这一帧没看到物块"是常见的（手挡住、移出视野），
@@ -786,6 +853,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="只驱动升降：正数抬升、负数下降。转底盘前先用它抬起来（低位转会撞到物块）",
     )
     parser.add_argument("--step", type=int, default=100, help="--teach 的默认步进脉冲数（默认 100）")
+    parser.add_argument(
+        "--want",
+        default=None,
+        help='这次要抓哪一种物料：类别名（如 "green"）或从 1 开始的编号；'
+             "省略则用 modules/grasp/eye_in_hand.json 的 object（那份只是默认值）",
+    )
     parser.add_argument("--tcp", action="store_true", help="观测改从 TCP 远端镜头来（默认用本机摄像头）")
     parser.add_argument("--camera", type=int, default=None, help="摄像头序号；省略则读 modules/vision/config.json")
     parser.add_argument("--port", default=None, help="机械臂步进总线串口；省略则用 modules/motor/config.json")
@@ -814,7 +887,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         config = load_servo_config()
-        selector = load_object_selector()
+        selector = _selector_for(arguments)
         target = load_target()
         jacobian = load_jacobian()
         # 升降灵敏度只用来"抬到安全高度时一步算到位"和打印预计深度；没标定就是 None。
@@ -955,7 +1028,7 @@ def _run_low_level_mode(arguments, vision_settings, config) -> int:
         print(f"打不开观测源：{problem}")
         return 1
 
-    selector = load_object_selector()
+    selector = _selector_for(arguments)
     port = arguments.port or load_motor_bus_config().port
     print(f"打开机械臂总线 {port}")
     # 统一生命周期：``_from_settings`` 读好配置快照、开串口并使能，是一次就绪的会话。
@@ -1020,7 +1093,7 @@ def _run_follow_mode(arguments, vision_settings, config) -> int:
         print(f"打不开观测源：{problem}")
         return 1
 
-    selector = load_object_selector()
+    selector = _selector_for(arguments)
     port = arguments.port or load_motor_bus_config().port
     print(f"打开机械臂总线 {port}")
     arm = RobotArm._from_settings(config=load_arm_config(), port=port)

@@ -272,7 +272,9 @@ class SampledColourTests(unittest.TestCase):
             yolo=FakeYOLO([hit]), focal_px=500.0,
             material_palette={"green": MATERIAL_BGR},
         )
-        report = locator.locate(frame)
+        # 走**辅助定位**：这条规矩（调色板没命中就从模型框里现取参考色）住在那一层。
+        # ``locate()`` 在主算有框时会直接返回框，根本到不了这里——那不是它的职责。
+        report = locator.locate_auxiliary(frame)
 
         self.assertEqual(report.colour_source, "model")
         self.assertFalse(report.colour_fallback)
@@ -435,7 +437,9 @@ class RelaxedPassOrderingTests(unittest.TestCase):
         garbage = self._StubRelaxed([LockedRegion(80.0, 80.0, 60.0)])
         locator._relaxed_locator = lambda: garbage          # type: ignore[method-assign]
 
-        report = locator.locate(frame)
+        # 走**辅助定位**：主算（YOLO 框）有结果时根本不会跑到这里，
+        # 而这条用例测的正是辅助定位内部的"候补 vs 模型"顺序。
+        report = locator.locate_auxiliary(frame)
 
         self.assertEqual(garbage.calls, 1, "放宽容差那一遍应当跑过一次")
         self.assertEqual(report.colour_source, "model",

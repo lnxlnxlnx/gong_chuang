@@ -421,13 +421,16 @@ class Vision:
 
     # ------------------------------------------------------------- 取帧与定位
     def _read_report(
-        self, *, timeout: Optional[float] = None
+        self, *, timeout: Optional[float] = None, want=None
     ) -> "Optional[Tuple[MaterialReport, float]]":
         """丢掉缓冲里的旧画面，读一帧并定位；读不到返回 ``None``。
 
         返回 ``(report, stamp)``：``stamp`` 是**读到帧之后、推理之前**的时刻。
         保留它是因为闭环要靠它判断"手上这帧是不是过期了"；这是启发式新鲜度处理，
         不宣称等于相机曝光时刻，也不能用推理结束时间冒充。
+
+        ``want`` 原样交给定位器，决定 :attr:`MaterialReport.best` 挑哪一个物料
+        （``frame`` 那条闭环路径不传它：那边由 ``ObjectSelector`` 选观测）。
         """
         camera, locator = self._require_resources()
         # 机械臂刚动完时，摄像头 / OpenCV 的缓冲里可能还压着动作**之前**的画面，
@@ -447,17 +450,29 @@ class Vision:
             time.sleep(0.05)
 
         stamp = self._clock()
-        report = locator.locate(frame)
+        report = locator.locate(frame, want=want)
         self.frames += 1
         return report, stamp
 
-    def locate(self) -> "MaterialReport":
-        """取帧并定位一次。
+    def locate(self, want=None) -> "MaterialReport":
+        """取帧并定位一次；``want`` 指定**要哪一个物料**。
+
+        - ``None``（默认，保持原行为）：认出来的里置信度最高的那个，否则半径最大的
+          已接受顶面；
+        - ``"red"``：类别名，大小写与前后空格无关（``locate("Red")`` 等价）；
+        - ``2``：编号，与报告 ``summary()`` 打印的「物料 N:」**同一个编号**（从 1 开始，
+          只数通过校验的顶面）。
+
+        指定的那一种不在画面里时 ``report.best is None``——**不回退**到别的物料：
+        "我要红的、画面里只有蓝的"必须报"没有"，拿蓝的顶上等于让机械臂朝错的目标动，
+        而动作本身看起来完全正常。画面里的其它候选仍然照常列在报告里，便于看清到底
+        看到了什么。
 
         :raises RuntimeError: 读不到摄像头画面（设备掉线）。画面里没有合格物料
             是**正常的空报告**（``report.best is None``），不是失败。
+        :raises ValueError: ``want`` 写法不合法（**在取帧之前**就报出来）。
         """
-        result = self._read_report()
+        result = self._read_report(want=want)
         if result is None:
             raise RuntimeError("读不到摄像头画面")
         return result[0]

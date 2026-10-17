@@ -96,6 +96,27 @@ class ObjectSelector:
             return False
         return True
 
+    @classmethod
+    def from_want(cls, want) -> "ObjectSelector":
+        """把 ``vision.locate("red")`` 那套说法变成一个判别条件。
+
+        - 字符串 = 类别名（``"red"``，大小写与空格无关）→ ``color``；
+        - 整数 = 编号（从 1 开始）→ ``material_id``；两边是**同一个编号**：
+          ``_sightings_from_report`` 就是按 ``MaterialReport.faces`` 从 1 数出来的，
+          与报告里打印的「物料 N:」一致。
+
+        校验直接复用 :func:`modules.vision.reports.normalize_want`——**只有一处**定义
+        "want 长什么样"，所以 ``locate`` 与 ``align_xy`` 不可能对同一种写法有两种态度。
+        """
+        from modules.vision.reports import normalize_want
+
+        normalized = normalize_want(want)
+        if normalized is None:
+            return cls()
+        if isinstance(normalized, int):
+            return cls(material_id=normalized)
+        return cls(color=normalized)
+
     @property
     def is_open(self) -> bool:
         """没配判别条件时为真，此时要求画面里只有一个目标。"""
@@ -509,6 +530,11 @@ class ServoResult:
     #: 收工，而不是继续要新帧。它表示"没有再验证过"，**不是**"已经对准"——调用方要据此
     #: 决定后面还能不能做开环动作（例如下降）。
     occluded: bool = False
+    #: 是不是**单帧一步**（:func:`modules.grasp.drive.eye_in_hand.align_x_y` 的
+    #: ``single_step``）：只测了一帧、走了一步就返回，**动作之后没有再看过**。
+    #: 所以 ``readings`` / ``error_x`` / ``error_y`` 说的是**动作之前**那一次，
+    #: 不代表现在的位置——调用方本来就会立刻再测一次（跟随循环就是这样）。
+    unverified: bool = False
 
     @property
     def error_mm(self) -> float:
@@ -527,6 +553,8 @@ class ServoResult:
             verdict = "未达标"
         if self.occluded:
             verdict += "（物块被挡住，按最后一次读数收工，未再验证）"
+        if self.unverified:
+            verdict += "（单帧一步：动作之后没有再验证）"
         return (
             f"x/y 对准{verdict}："
             f"最终读数 ({self.readings[-1][0]:+.2f}, {self.readings[-1][1]:+.2f}) mm，"

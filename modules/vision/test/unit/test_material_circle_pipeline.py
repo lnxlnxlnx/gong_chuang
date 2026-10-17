@@ -54,7 +54,12 @@ class MaterialCirclePipelineTests(unittest.TestCase):
             300 * 30 / (2 * report.regions[0].region.radius),
         )
 
-    def test_yolo_classifies_but_its_box_width_does_not_set_distance(self):
+    def test_yolo_classifies_and_the_auxiliary_circle_sets_distance(self):
+        """辅助定位那条路上：类别来自模型框，距离来自圆面半径（不是框的宽度）。
+
+        ``FakeYOLO()`` 是空的，所以走的是辅助定位；这里的框**只是**走的第二条分支
+        （调色板没命中就退回霍夫），所以下面断言的是"圆面半径决定距离"这条老规矩。
+        """
         hit = Detection(
             x1=150, y1=150, x2=170, y2=170,
             score=0.9, class_id=2, name="blue",
@@ -68,7 +73,8 @@ class MaterialCirclePipelineTests(unittest.TestCase):
             300 * 30 / (2 * report.regions[0].region.radius),
         )
 
-    def test_yolo_box_without_a_circle_is_not_a_material(self):
+    def test_a_yolo_box_without_a_circle_is_still_a_material(self):
+        """**主算**：模型说它是物料就够了——圆面找不找得到都不影响这一帧有没有料。"""
         hit = Detection(
             x1=100, y1=100, x2=200, y2=200,
             score=0.9, class_id=2, name="blue",
@@ -76,8 +82,19 @@ class MaterialCirclePipelineTests(unittest.TestCase):
         frame = np.full((320, 320, 3), 128, dtype=np.uint8)
         report = MaterialLocator(yolo=FakeYOLO([hit]), focal_px=300).locate(frame)
 
+        self.assertTrue(report.present)
+        self.assertEqual(report.best.name, "blue")
+        self.assertEqual(report.colour_source, "yolo")
+        # 框 (100,100)-(200,200)：中心 (150,150)，等效半径 (100+100)/4 = 50 px。
+        self.assertAlmostEqual(report.best.z_mm, 300 * 30 / 100.0)
+
+    def test_no_box_and_no_circle_is_an_empty_report(self):
+        frame = np.full((320, 320, 3), 128, dtype=np.uint8)
+        report = MaterialLocator(yolo=FakeYOLO(), focal_px=300).locate(frame)
+
         self.assertFalse(report.present)
         self.assertEqual(report.regions, ())
+        self.assertIsNone(report.best)
 
     def test_measured_calibration_scales_with_16_by_9_frame_width(self):
         class FixedCircle:

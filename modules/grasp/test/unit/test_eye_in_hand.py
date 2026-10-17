@@ -186,6 +186,32 @@ class ObjectSelectorTests(unittest.TestCase):
             select_object((self.green,), ObjectSelector(material_id=99))
         self.assertIn("物料 4", str(caught.exception))
 
+    def test_the_ambiguity_error_names_both_ways_out(self) -> None:
+        """报错要说清两条路：按次传（推荐），或者填默认值。"""
+        with self.assertRaises(ServoError) as caught:
+            select_object((self.green, self.blue), ObjectSelector())
+        message = str(caught.exception)
+        self.assertIn("want=", message)
+        self.assertIn("eye_in_hand.json", message)
+
+    def test_from_want_speaks_the_same_language_as_locate(self) -> None:
+        """``locate("red")`` 与 ``align_xy(want="red")`` 必须是同一套说法。"""
+        by_colour = ObjectSelector.from_want("  GREEN ")
+        self.assertEqual(by_colour.color, "green")
+        self.assertFalse(by_colour.is_open)
+        self.assertEqual(select_object((self.green, self.blue), by_colour).material_id, 4)
+
+        by_number = ObjectSelector.from_want(2)          # 编号从 1 开始，与「物料 N」一致
+        self.assertEqual(by_number.material_id, 2)
+
+        self.assertTrue(ObjectSelector.from_want(None).is_open)
+
+    def test_from_want_rejects_the_same_bad_writes_as_locate(self) -> None:
+        for bad in (0, -3, "", "   ", 1.5, True):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    ObjectSelector.from_want(bad)
+
 
 class ServoConfigTests(unittest.TestCase):
     def test_defaults_are_sane(self) -> None:
@@ -376,6 +402,32 @@ class EmptyLink:
         return None
 
 
+class JumpyDepthLink:
+    """x/y 一动不动，**z 每帧乱跳**——真机上 z 就是这样。
+
+    ``z`` 是按像素半径反推的（``z = f·D/2r``，本机约 0.42 mm/px），所以 1 px 的半径
+    抖动就顶掉整个细档 0.4 mm。实测真机帧（``output/debug/now.png``、``p1_after.png``，
+    加 σ=1–2 灰阶噪声）连续两帧的 Δz 中位数是 1.7–2.7 mm、≤0.4 mm 的只占 13%，
+    而 Δxy 中位数是 0.02–0.26 mm、≤0.4 mm 的占 74–100%。
+    """
+
+    error = None
+
+    def __init__(self, depths=(100.0, 103.0), *, x: float = 0.4, y: float = -0.5, arm=None) -> None:
+        self._depths = tuple(depths)
+        self._x = x
+        self._y = y
+        #: 给了假机械臂就跟着它的真实位移报 x/y（闭环才会真的收敛），只让 z 乱跳。
+        self._arm = arm
+        self.reads = 0
+
+    def frame(self, **_kwargs):
+        self.reads += 1
+        depth = self._depths[(self.reads - 1) % len(self._depths)]
+        x, y = self._arm.offset if self._arm is not None else (self._x, self._y)
+        return (sighting_at(x, y, depth),)
+
+
 class SettleTests(unittest.TestCase):
     """``measure_settled``：等到画面连续两次读数一致才算数。
 
@@ -465,6 +517,250 @@ class SettleTests(unittest.TestCase):
                 EmptyLink(), ObjectSelector(),
                 ServoConfig(settle_timeout_seconds=0.2, settle_poll_seconds=0.02),
             )
+
+    def test_a_jumping_depth_does_not_hold_the_planar_gate(self) -> None:
+        """``include_depth=False``：z 乱跳时两帧就该收工。
+
+        这是"对准有时要等好几秒"的正解——x/y 对准一个 z 都不用，没有理由等 z 停下来。
+        """
+        link = JumpyDepthLink()
+        settled = observation._settled_sighting(
+            link, ObjectSelector(),
+            ServoConfig(settle_tolerance_mm=0.4, settle_timeout_seconds=2.0,
+                        settle_poll_seconds=0.01),
+            include_depth=False,
+        )
+
+        self.assertEqual(link.reads, 2, "只比 x/y 时第二帧就该收工")
+        self.assertEqual((settled.x_mm, settled.y_mm), (0.4, -0.5))
+
+    def test_the_same_jumping_depth_still_gates_the_steps_that_measure_z(self) -> None:
+        """默认（三维）判据一个字没改：测 z 的那几条路照旧要等 z 停稳。"""
+        link = JumpyDepthLink()
+        messages = []
+        settled = observation._settled_sighting(
+            link, ObjectSelector(),
+            ServoConfig(settle_tolerance_mm=0.4, settle_timeout_seconds=0.05,
+                        settle_poll_seconds=0.005),
+            on_message=messages.append,
+        )
+
+        self.assertGreater(link.reads, 2, "z 一直跳，三维判据下不该两帧就收工")
+        self.assertTrue(any("等停稳超时" in message for message in messages), messages)
+        self.assertEqual((settled.x_mm, settled.y_mm), (0.4, -0.5))
+
+
+class AlignDoesNotWaitForDepthTests(unittest.TestCase):
+    """x/y 对准**不该等 z 停下来**——真机上那一次等待就是"好几秒"的来源。
+
+    修好之前：细档判据要求连续两帧在三维上都一致（含 z），而 z 的抖动必然超过 0.4 mm，
+    于是每次测量都要等满 ``settle_timeout_seconds``（默认 4 s）才拿最后读数走人。
+    """
+
+    JACOBIAN = ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+
+    @staticmethod
+    def config(**overrides) -> ServoConfig:
+        values = dict(
+            tolerance_mm=4.0,
+            settle_tolerance_mm=0.4,
+            coarse_settle_tolerance_mm=3.0,
+            coarse_error_mm=10.0,
+            min_step_mm=1.0,
+            max_iterations=12,
+            # 特意给得很大：判据要是把 z 算进去，这条用例就会真的等满它。
+            settle_timeout_seconds=5.0,
+            settle_poll_seconds=0.01,
+        )
+        values.update(overrides)
+        return ServoConfig(**values)
+
+    def test_an_already_aligned_object_returns_after_two_frames(self) -> None:
+        arm = FakeArm(self.JACOBIAN)
+        link = JumpyDepthLink(x=0.4, y=-0.5)  # 误差 0.64 mm，已经在容差里
+        started = time.monotonic()
+        result = align_x_y(
+            arm, link, ObjectSelector(), ServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
+            self.config(), ensure_safe_height=False,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(link.reads, 2, "x/y 已经对准：两帧就该收工")
+        self.assertEqual(result.iterations, 1)
+        self.assertEqual(arm.calls, [], "已经对准就不该再发动作")
+        self.assertLess(elapsed, 1.0, "判据若把 z 算进去，这里会等满 settle_timeout_seconds")
+
+    def test_a_jumping_depth_does_not_multiply_the_measurements(self) -> None:
+        """闭环该走几步就走几步；z 每帧乱跳不该让每一步都多等一次超时。
+
+        目标在 (0,0)，假机械臂从 (12, -7) 出发：雅可比是精确的，所以第一步就该到位，
+        然后第二步确认并收工。**每次停稳测量两帧**（判据是"连续两帧一致"），
+        所以两次迭代 = 四帧；修好之前这里会是"两帧 + 两次等满 5 s"。
+        """
+        arm = FakeArm(self.JACOBIAN)
+        link = JumpyDepthLink(arm=arm)
+        started = time.monotonic()
+        result = align_x_y(
+            arm, link, ObjectSelector(), ServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
+            self.config(), ensure_safe_height=False,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(link.reads, 2 * result.iterations, "每次停稳测量两帧，没有额外空转")
+        self.assertEqual(result.iterations, 2)
+        self.assertLessEqual(result.error_mm, self.config().tolerance_mm)
+        self.assertLess(elapsed, 1.0)
+
+
+class SingleStepTests(unittest.TestCase):
+    """**单帧一步**：最多取一帧、走一步、不验证——跟随循环的基础。
+
+    ``locate`` 一次 + ``align_xy(reading=...)`` 的组合就是"YOLO 像素 → 实际 x/y →
+    机械臂动一下"，每轮只取一帧；放进循环就是跟踪。
+    """
+
+    JACOBIAN = ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+
+    @staticmethod
+    def config(**overrides) -> ServoConfig:
+        values = dict(
+            tolerance_mm=4.0,
+            min_step_mm=1.0,
+            coarse_error_mm=10.0,
+            max_pulses_per_step=1200,
+            coarse_max_pulses_per_step=4000,
+            max_total_pulses=10000,
+            settle_timeout_seconds=5.0,
+        )
+        values.update(overrides)
+        return ServoConfig(**values)
+
+    def call(self, arm, link, **kwargs):
+        return align_x_y(
+            arm, link, ObjectSelector(), ServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
+            kwargs.pop("config", self.config()), ensure_safe_height=False, **kwargs
+        )
+
+    def test_a_given_reading_moves_once_without_taking_any_frame(self) -> None:
+        arm = FakeArm(self.JACOBIAN)
+        link = JumpyDepthLink(arm=arm)
+        result = self.call(arm, link, reading=(12.0, -7.0))
+
+        self.assertEqual(link.reads, 0, "调用方已经量过了：这一步不该再取帧")
+        self.assertTrue(result.unverified)
+        self.assertEqual(result.iterations, 1)
+        # 走的这一步应当正好把误差抵消（线性化下 J·p = −e）；脉冲取整会留下
+        # 不到半个脉冲的残差（实测量级 0.002 mm），所以比的是容差而不是"正好 0"。
+        moved_x, moved_y = self.JACOBIAN.displacement_for(
+            result.base_pulses, result.radial_pulses
+        )
+        self.assertAlmostEqual(moved_x + 12.0, 0.0, delta=0.05)
+        self.assertAlmostEqual(moved_y - 7.0, 0.0, delta=0.05)
+
+    def test_a_given_reading_inside_the_tolerance_moves_nothing(self) -> None:
+        arm = FakeArm(self.JACOBIAN)
+        link = JumpyDepthLink(arm=arm)
+        result = self.call(arm, link, reading=(1.0, -2.0))
+
+        self.assertEqual(arm.calls, [])
+        self.assertEqual((result.base_pulses, result.radial_pulses), (0, 0))
+        self.assertEqual(result.error_mm, math.hypot(1.0, -2.0))
+
+    def test_without_a_reading_it_takes_exactly_one_frame(self) -> None:
+        arm = FakeArm(self.JACOBIAN)
+        link = JumpyDepthLink(arm=arm)          # x/y 跟着假机械臂走
+        result = self.call(arm, link, single_step=True)
+
+        self.assertEqual(link.reads, 1, "单帧一步只取一帧，不等停稳")
+        self.assertTrue(result.unverified)
+        self.assertTrue(arm.calls, "误差 13.9 mm，应当走了一步")
+
+    def test_a_single_step_is_clamped_by_the_per_step_limit(self) -> None:
+        """单步幅度照样被 step_limit_for 夹住：撞上去的风险由此兜住。"""
+        arm = FakeArm(self.JACOBIAN)
+        link = JumpyDepthLink(arm=arm)
+        config = self.config()
+        result = self.call(arm, link, reading=(200.0, 200.0), config=config)
+
+        self.assertLessEqual(abs(result.base_pulses), config.coarse_max_pulses_per_step)
+        self.assertLessEqual(abs(result.radial_pulses), config.coarse_max_pulses_per_step)
+
+    def test_bad_readings_are_rejected_before_anything_moves(self) -> None:
+        arm = FakeArm(self.JACOBIAN)
+        link = JumpyDepthLink(arm=arm)
+        for bad in ("12", b"12", (1.0,), (1.0, 2.0, 3.0), 3.0, (1.0, "x")):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    self.call(arm, link, reading=bad)
+        self.assertEqual(arm.calls, [], "参数错了就一个动作帧都不该发")
+        self.assertEqual(link.reads, 0)
+
+    def test_the_summary_says_it_was_not_verified(self) -> None:
+        arm = FakeArm(self.JACOBIAN)
+        result = self.call(arm, JumpyDepthLink(arm=arm), reading=(12.0, -7.0))
+        self.assertIn("单帧一步", result.summary())
+        self.assertIn("没有再验证", result.summary())
+        # 读数说的是动作**之前**那一次——这一点必须写在结果里，别让调用方误读。
+        self.assertEqual(result.readings, ((12.0, -7.0),))
+        self.assertEqual(result.error_mm, math.hypot(12.0, -7.0))
+
+    def test_locate_then_align_in_a_loop_converges(self) -> None:
+        """用户要的那个循环：**量一次 → 走一步**，几轮之内把误差收进容差。
+
+        ``reading`` 就是 ``vision.locate()`` 给出的 ``(report.best.x_mm, y_mm)``；
+        这里直接读假机械臂的位置来代表它。给了读数，这一路**一帧都不取**。
+        """
+        arm = FakeArm(self.JACOBIAN)
+        link = JumpyDepthLink(arm=arm)
+        config = self.config()
+        target = ServoTarget(x_mm=0.0, y_mm=0.0)
+
+        rounds = 0
+        for _ in range(8):
+            reading = (arm.offset[0], arm.offset[1])
+            if math.hypot(*reading) <= config.tolerance_mm:
+                break
+            align_x_y(
+                arm, link, ObjectSelector(), target, self.JACOBIAN, config,
+                ensure_safe_height=False, reading=reading,
+            )
+            rounds += 1
+
+        self.assertLessEqual(math.hypot(*arm.offset), config.tolerance_mm)
+        self.assertLessEqual(rounds, 2, "雅可比精确时两轮之内就该收工")
+        self.assertEqual(link.reads, 0, "给了读数就不该再取帧")
+
+    def test_the_loop_follows_a_block_that_gets_pushed(self) -> None:
+        """物块被推走 → 循环把它收回画面里的目标读数上（这就是跟踪）。
+
+        "被推走"在相机看来就是读数多了一个偏移（机械臂自己没动）；伺服要做的正是把
+        这个偏移收掉——所以收敛之后**读数**应当回到目标，而不是机械臂回到原位。
+
+        推得远时**一轮收不完**，这是设计使然：单步幅度被 ``step_limit_for`` 夹住
+        （这里实测 51 mm 的偏移一步只能收掉 46 mm），所以循环还要再转一轮。
+        这正是"单帧一步 + 外层循环"这个分工的样子。
+        """
+        arm = FakeArm(self.JACOBIAN)
+        link = JumpyDepthLink(arm=arm)
+        config = self.config()
+        target = ServoTarget(x_mm=0.0, y_mm=0.0)
+
+        for push in ((15.0, -12.0), (-25.0, 20.0), (3.0, 3.0)):
+            with self.subTest(push=push):
+                reading = (arm.offset[0] + push[0], arm.offset[1] + push[1])
+                for _ in range(4):
+                    if math.hypot(*reading) <= config.tolerance_mm:
+                        break
+                    align_x_y(
+                        arm, link, ObjectSelector(), target, self.JACOBIAN, config,
+                        ensure_safe_height=False, reading=reading,
+                    )
+                    reading = (arm.offset[0] + push[0], arm.offset[1] + push[1])
+
+                self.assertLessEqual(
+                    math.hypot(*reading), config.tolerance_mm,
+                    "循环转几轮之后，画面里的偏移应当被收进容差",
+                )
 
 
 class ProbeJacobianTests(unittest.TestCase):
@@ -1448,6 +1744,63 @@ class GraspAlignXYSessionTests(unittest.TestCase):
             session.mock("align").assert_called_once()
 
         self.assertTrue(result.aligned)
+
+    def test_a_given_reading_and_single_step_reach_align_x_y(self) -> None:
+        """跟随循环要的两个口子必须**原样**传到 ``align_x_y``，不能被中间层吃掉。
+
+        吃掉的后果很隐蔽：循环照样转，只是每轮多等两帧、而且用的是自己刚测过的旧读数。
+        """
+        rig = self.build(hover_z_mm=None)
+        with rig as session:
+            session.grasp.align_xy(reading=(3.0, -4.0))
+            self.assertEqual(
+                session.mock("align").call_args.kwargs["reading"], (3.0, -4.0)
+            )
+
+            session.mock("align").reset_mock()
+            session.grasp.align_xy(single_step=True)
+            self.assertIs(session.mock("align").call_args.kwargs["single_step"], True)
+
+            # 两个都不给时也不该凭空塞值进去（底层默认必须是它自己的默认）。
+            session.mock("align").reset_mock()
+            session.grasp.align_xy()
+            kwargs = session.mock("align").call_args.kwargs
+            self.assertIsNone(kwargs["reading"])
+            self.assertIs(kwargs["single_step"], False)
+
+    def test_a_per_call_want_replaces_the_configured_selector(self) -> None:
+        """一次程序里抓多种物料：``want`` 按次生效，配置文件一个字都不用改。"""
+        rig = self.build(hover_z_mm=None)
+        with rig as session:
+            session.grasp.align_xy(want="blue")
+            selector = session.mock("align").call_args.args[2]
+            self.assertEqual(selector.color, "blue")
+            self.assertFalse(selector.is_open)
+
+            session.mock("align").reset_mock()
+            session.grasp.align_xy(want=2)
+            self.assertEqual(session.mock("align").call_args.args[2].material_id, 2)
+
+            # 不传就用配置里那份（这里的会话配置是"画面里唯一的目标"）。
+            session.mock("align").reset_mock()
+            session.grasp.align_xy()
+            self.assertTrue(session.mock("align").call_args.args[2].is_open)
+
+    def test_a_per_call_want_reaches_every_step_of_align_and_descend(self) -> None:
+        """整轮就位（悬停 → 安全高度 → x/y → 下降）每一步都得看同一个 want。
+
+        漏掉任何一步，那一步就会去对准**别的**物料——而且是静默的。
+        （``retract_extension`` 不收 selector，所以不在这里查。）
+        """
+        rig = self.build(hover_z_mm=105.0)
+        with rig as session:
+            session.grasp.align_and_descend(want="red")
+
+            wanted = ObjectSelector(color="red")
+            for name in ("hover", "raise", "align", "down"):
+                with self.subTest(step=name):
+                    # 这四个底层函数的前三个位置参数都是 (arm, source, selector)。
+                    self.assertEqual(session.mock(name).call_args.args[2], wanted)
 
 
 class GraspAlignAndDescendTests(unittest.TestCase):
