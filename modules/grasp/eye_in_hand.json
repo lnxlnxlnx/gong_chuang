@@ -1,0 +1,57 @@
+{
+  "object": {
+    "material_id": null,
+    "color": null
+  },
+  "target": {
+    "x_mm": 0.0,
+    "y_mm": 0.0
+  },
+  "jacobian": {
+    "base_dx": -0.08174204217107724,
+    "base_dy": -0.007583697824866524,
+    "radial_dx": -0.0002735146342596506,
+    "radial_dy": 0.01812172800295296
+  },
+  "tolerance_mm": 4.0,
+  "max_iterations": 12,
+  "max_pulses_per_step": 1200,
+  "coarse_max_pulses_per_step": 4000,
+  "coarse_error_mm": 10.0,
+  "min_step_mm": 1.0,
+  "parallel_rotation_limit_pulses": 600,
+  "max_total_pulses": 10000,
+  "probe_pulses": 100,
+  "frame_timeout_seconds": 2.0,
+  "frame_margin_seconds": 0.0,
+  "settle_tolerance_mm": 0.4,
+  "coarse_settle_tolerance_mm": 3.0,
+  "settle_timeout_seconds": 4.0,
+  "settle_poll_seconds": 0.01,
+  "diameter_change_limit_ratio": 0.25,
+  "inter_frame_seconds": 0.03,
+  "safe_lift_z_mm": 80.0,
+  "safe_lift_step_pulses": 500,
+  "safe_lift_use_scale": true,
+  "safe_lift_quick_margin_mm": 5.0,
+  "safe_lift_max_pulses_per_step": 2000,
+  "safe_lift_max_steps": 20,
+  "safe_lift_pulses": 0,
+  "safe_lift_angle_degrees": 1.0,
+  "hover_z_mm": 80.0,
+  "z_descend_pulses": 2000,
+  "extension_retract_pulses": 150,
+  "z_target_mm": 90.0,
+  "lift_scale": {
+    "dz_per_pulse": 0.01209273118599441
+  },
+  "z_tolerance_mm": 3.0,
+  "z_center_tolerance_mm": 6.0,
+  "z_min_mm": 85.0,
+  "z_max_mm": 160.0,
+  "z_max_pulses_per_step": 600,
+  "z_max_total_pulses": 8000,
+  "lift_probe_pulses": 150,
+  "find_lift_step_pulses": 500,
+  "find_max_steps": 10
+}

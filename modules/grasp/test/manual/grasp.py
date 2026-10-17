@@ -1,0 +1,235 @@
+"""真机抓取流程入口。
+
+启动前会把"还没标定"的东西一次列全并拒绝运行——抓取流程牵涉标定最多，缺一项都会变成
+一句难懂的运行时报错，所以在打开硬件之前先说清楚。
+
+    python test.py            # 菜单选 19
+
+只想核对标定、不想让机械臂动：``--observe-only``。它会打开摄像头、打印每一帧测到的
+机械臂位姿与物料位姿（圆柱坐标），不做任何动作。
+"""
+
+from __future__ import annotations
+
+MENU_ENTRY = (19, "抓取流程")
+
+import argparse
+import os
+import sys
+from typing import Callable, List, Optional
+
+from modules.arm.config import ArmConfig, load_arm_config
+from modules.arm.drive.kinematics import CylindricalPose
+from modules.arm.runtime import RobotArm
+from modules.grasp.config import GraspConfig, load_grasp_config
+from modules.grasp.drive.perception import CellPerception
+from modules.grasp.drive.pipeline import GraspError, GraspPipeline
+from modules.motor.config import load_bus_config as load_motor_bus_config
+from modules.servo.config import GripperConfig, load_gripper_config
+from modules.servo.drive.bus_servo import load_bus_config as load_servo_bus_config
+from modules.servo.runtime import GripperServo
+from modules.vision.config import VisionConfig, load_vision_config
+
+CAMERA_WIDTH = 1280
+CAMERA_HEIGHT = 720
+
+
+def calibration_report(
+    *,
+    vision: VisionConfig,
+    arm: ArmConfig,
+    grasp: GraspConfig,
+) -> List[str]:
+    """列出还缺哪些标定；空列表表示可以开跑。
+
+    顺序按"实验 A → B/C → 靶标/夹爪"排，照这个顺序做下来每一步都能单独验收。
+    """
+    missing: List[str] = []
+    if vision.plane is None:
+        missing.append("视觉：还没做平面标定（实验 A），calibration.json 的 plane 全空")
+    elif vision.plane.rms_mm > 5.0:
+        missing.append(
+            f"视觉：平面标定残差 {vision.plane.rms_mm:.1f} mm 偏大，"
+            "抓取精度会被它直接拖住，建议重标（实验 A）"
+        )
+    if vision.focal_px is None:
+        missing.append("视觉：calibration.json 的 focal_px 还是空的（真实安装高度下重标焦距）")
+    if vision.table_depth_mm is None:
+        missing.append("视觉：calibration.json 的 table_depth_mm 还是空的（镜头到台面的深度）")
+    if vision.targets.marker_diameter_mm is None:
+        missing.append("视觉：config.json 的 targets.marker_diameter_mm 还没填")
+    if not vision.targets.can_split_by_color:
+        missing.append(
+            "视觉：targets.material_bgr / marker_bgr 没配对，无法在同一帧里区分物料与靶标"
+        )
+    for axis, label in (("lift", "升降"), ("extension", "伸缩")):
+        if arm.mm_per_motor_rev(axis) is None:
+            missing.append(f"机械臂：{label}轴 ({axis}) 的 mm_per_motor_rev 还没标（实验 B/C）")
+    if arm.safe_pose is None:
+        missing.append("机械臂：safe_pose 还没配置（转角度前后的安全位）")
+    if arm.base_limit is None or arm.radial_limit is None or arm.height_limit is None:
+        missing.append("机械臂：limits 还有空的，等于这几个轴没有软件行程保护")
+    if grasp.marker_to_grasp_mm == 0.0:
+        missing.append(
+            "抓取：marker_to_grasp_mm 还是 0；除非靶标正好在夹持点高度，否则必须实测后填上"
+        )
+    # 回零自身的配置问题（safe_pose 缺失、单圈回零却超出一个电机圈……）由 ArmConfig 判断，
+    # 这里只是把它的结论并进同一份清单，不再重写一遍规则。
+    missing.extend(f"回零：{item}" for item in arm.homing_warnings())
+    return missing
+
+
+def describe(observation) -> str:
+    """把一帧观测打印成一行。"""
+    return observation.summary()
+
+
+def run_observe_only(
+    *,
+    perception: CellPerception,
+    frames: Callable[[], object],
+    prompt: Callable[[str], str] = input,
+    print_line: Callable[[str], None] = print,
+) -> None:
+    """只观测不动：用来核对平面标定与靶标检出。"""
+    while True:
+        observation = perception.observe(frames())
+        print_line(describe(observation))
+        answer = prompt("回车再看一帧，输入 q 结束：").strip().lower()
+        if answer == "q":
+            return
+
+
+def run_grasp_once(
+    *,
+    pipeline: GraspPipeline,
+    gripper: GripperServo,
+    prompt: Callable[[str], str] = input,
+    print_line: Callable[[str], None] = print,
+) -> bool:
+    """走一次完整抓取；返回是否真的抓起并退回了安全位。"""
+    observation = pipeline.observe()
+    print_line(describe(observation))
+    if observation.material is None:
+        print_line("画面里没有物料，先放一个再试。")
+        return False
+    if observation.marker is None:
+        print_line("画面里看不到夹爪靶标；检查靶标是否装好、颜色是否配对。")
+        return False
+    if prompt("准备抓取；确认工作区内无人，输入大写 YES 执行：").strip() != "YES":
+        print_line("已取消。")
+        return False
+
+    result = pipeline.pick_up()
+    print_line(result.summary())
+    if not result.held_something:
+        print_line("[!] 夹爪走到闭合位 = 空夹；多半是标定或夹持高度的问题，先别继续。")
+    return result.held_something
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="摄像头识别 + 机械臂抓取")
+    parser.add_argument("--observe-only", action="store_true", help="只看不动：打印观测后退出")
+    parser.add_argument(
+        "--home-only",
+        action="store_true",
+        help="只回零，不做抓取；用来单独验收回零是否落到正确的位置",
+    )
+    parser.add_argument("--port", default=None, help="覆盖 Emm42 总线串口")
+    parser.add_argument("--servo-port", default=None, help="覆盖舵机总线串口")
+    parser.add_argument("--camera", type=int, default=None, help="覆盖摄像头编号")
+    return parser.parse_args()
+
+
+def main() -> None:
+    from modules.vision.drive.camera import USBCamera
+    from modules.vision.drive.preview import close_previews, open_preview
+
+    args = parse_args()
+    platform = "windows" if os.name == "nt" else "jetson"
+    vision = load_vision_config()
+    arm_config = load_arm_config()
+    grasp_config = load_grasp_config()
+
+    missing = calibration_report(vision=vision, arm=arm_config, grasp=grasp_config)
+    if missing:
+        print("还缺以下标定，先补齐再跑（详见 modules/grasp/docs/抓取坐标链路.md）：", file=sys.stderr)
+        for item in missing:
+            print(f"  - {item}", file=sys.stderr)
+        raise SystemExit(2)
+
+    camera_id = args.camera if args.camera is not None else vision.camera_id(platform)
+    window = None
+    camera = USBCamera(camera_id, width=CAMERA_WIDTH, height=CAMERA_HEIGHT).initialize()
+    try:
+        frame = camera.read()
+        if frame is None:
+            raise RuntimeError("摄像头没有返回图像")
+        perception = CellPerception.from_vision_config(vision, frame.shape)
+        frames = camera.read
+
+        if args.observe_only:
+            run_observe_only(perception=perception, frames=frames)
+            return
+
+        window = open_preview()
+        # 机械臂在步进总线，夹爪在舵机总线：两条串口，两个 loader，不要混。
+        port = args.port or load_motor_bus_config(platform).port
+        # 统一生命周期：``_from_settings`` 读好配置、开串口并使能，正常收尾交给 ``with``。
+        with RobotArm._from_settings(config=arm_config, port=port) as arm:
+            gripper = _open_gripper(servo_port=args.servo_port, platform=platform)
+            pipeline = GraspPipeline(
+                arm=arm,
+                gripper=gripper,
+                observer=perception,
+                frames=frames,
+                config=grasp_config,
+                arm_config=arm_config,
+            )
+            try:
+                print(f"摄像头 {camera_id}；窗口 {window!r}，按 q 关闭预览")
+                if args.home_only:
+                    # 回零是机械臂自己的动作，和抓取流程无关：这里直接调原语。
+                    waited = arm.home_all()
+                    print(f"回零完成（每轴等待 {waited[0]:.1f}s），位姿已可由相机测量确认。")
+                    return
+                run_grasp_once(pipeline=pipeline, gripper=gripper)
+            except BaseException:
+                # 真出事了才 abort（停三轴、失能）；正常结束不用它代表收尾。
+                pipeline.abort()
+                raise
+            finally:
+                # 本地会话先失效，再按取得资源的逆序关各自的自有资源；
+                # 机械臂那条串口由上面的 with 关一次。
+                pipeline.close()
+                _close_quietly(gripper, "舵机串口")
+    finally:
+        camera.release()
+        if window is not None:
+            close_previews()
+
+
+def _open_gripper(*, servo_port: Optional[str], platform: str) -> GripperServo:
+    """开夹爪会话：默认走模块自己的 ``open``，只有命令行覆盖端口时才自己装配。
+
+    ``GripperServo.open()`` 读的是同一份 servo 配置（夹爪参数与总线参数都在里面），
+    不接受串口覆盖；而现场就是要用 ``--servo-port`` 改端口。覆盖这一条路径按 ``open``
+    内部同一顺序装配（构造 → ``initialize`` 开总线并上扭矩一次），不是第二套生命周期。
+    """
+    if servo_port is None:
+        return GripperServo.open()
+    bus = load_servo_bus_config(platform)
+    config: GripperConfig = load_gripper_config()
+    return GripperServo(config=config, port=servo_port, baudrate=bus.baudrate).initialize()
+
+
+def _close_quietly(resource, name: str) -> None:
+    """关一个自有资源；失败只打印，不能盖住真正的错误。"""
+    try:
+        resource.close()
+    except Exception as error:  # noqa: BLE001 - 收尾失败不能掩盖原始异常
+        print(f"[!] 关闭{name}失败：{error!r}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

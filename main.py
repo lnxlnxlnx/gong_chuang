@@ -1,108 +1,147 @@
-"""项目应用入口：按顺序演示底盘、机械臂和视觉功能。
+"""项目应用入口。
 
-在 ``main()`` 里注释暂时不用的演示调用即可。所有运动都需要现场回车确认。
+只保留**业务动作**：装配交给 :class:`robot.Robot`，动作一行一个。
+菜单选择式的人工测试仍在 :mod:`test` 的菜单里（``python test.py``），那里不经过本文件。
 """
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
+import time
 
-from mecanum_config import HardwareProfile, create_chassis, load_profile
-from motor_drivers import BusServo
-from robot_arm import RobotArm
-from robot_arm_config import load_arm_config
-from vision import default_model_path, load_camera_id
+from modules.arm.drive.kinematics import CylindricalPose
 
-
-def _confirmed(label: str) -> bool:
-    """Only execute a hardware action after the operator confirms it."""
-    return input(f"准备{label}，回车执行，输入 q 跳过：").strip().lower() != "q"
-
-
-def demo_chassis(profile: HardwareProfile) -> None:
-    """Run two short whole-vehicle motions using the configured calibration."""
-    car = create_chassis(profile)
-    try:
-        car.initialize()
-        car.enable_all()
-        if _confirmed("底盘前进"):
-            car.forward(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
-        if _confirmed("底盘顺时针旋转"):
-            car.rotate_cw(rpm=profile.chassis_rpm, duration=profile.chassis_duration)
-    finally:
-        car.stop()
-        car.disable_all()
-        car.close()
-
-
-def demo_arm(port: str) -> None:
-    """Run one bounded position command in each arm direction."""
-    config = load_arm_config()
-    arm = RobotArm(port, config=config)
-    try:
-        arm.initialize()
-        arm.enable_all()
-        motions = (
-            ("底座顺时针", arm.rotate_cw),
-            ("底座逆时针", arm.rotate_ccw),
-            ("机械臂向上", arm.move_up),
-            ("机械臂向下", arm.move_down),
-            ("机械臂前伸", arm.move_forward),
-            ("机械臂后缩", arm.move_backward),
-        )
-        for label, action in motions:
-            if _confirmed(label):
-                action(config.default_pulses)
-    finally:
-        arm.stop_all()
-        arm.disable_all()
-        arm.close()
-
-
-def demo_vision(model_path: str | Path | None = None, camera_id: int | None = None) -> None:
-    """Preview detections until q is pressed in the image window."""
-    model_path = Path(model_path) if model_path is not None else default_model_path()
-    camera_id = camera_id if camera_id is not None else load_camera_id(
-        "windows" if os.name == "nt" else "jetson")
-    if not model_path.is_file():
-        raise FileNotFoundError(f"未找到模型文件：{model_path}")
-    import cv2
-    from vision import USBCamera, create_detector
-
-    try:
-        with USBCamera(camera_id).initialize() as camera, create_detector(model_path) as detector:
-            while True:
-                frame = camera.read()
-                if frame is None:
-                    raise RuntimeError("摄像头未返回图像")
-                hits = detector.detect(frame)
-                cv2.imshow("项目视觉演示", detector.draw(frame, hits))
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
-    finally:
-        cv2.destroyAllWindows()
-
-
-def demo_servo(port: str, servo_id: int = 1) -> None:
-    """Read a bus servo's position without commanding movement."""
-    servo = BusServo(port, servo_id).initialize()
-    try:
-        print(f"舵机 {servo_id} 当前的位置：{servo.read_position()}")
-    finally:
-        servo.close()
+# 预览演示的**模块级**导入：``demo_material`` 只定义函数、不开设备，真正的装配发生在
+# 它内部（读配置 + ``Vision._open_config``）；保持模块级也让既有入口用例能直接替换它。
+from modules.vision.app.demo import demo_material
+from robot import Robot
 
 
 def main() -> None:
-    profile = load_profile("windows" if os.name == "nt" else "jetson")
+    """默认演示：物料定位预览。
 
-    # 按需注释以下调用；机械臂和底盘使用同一平台配置中的步进总线端口。
-    demo_chassis(profile)
-    demo_arm(profile.port)
-    demo_vision()
-    # 总线舵机使用独立串口；确认设备名后取消注释并填写端口。
-    # demo_servo("<舵机串口>")
+    其余演示留在各自模块里：``modules.arm.app.demo``、``modules.servo.app.demo``、
+    ``modules.chassis.app``（路线）。
 
+    **上层调用的样子**见 :func:`locate_material`、:func:`pick_ready` 与
+    :func:`pick_manual`：一条 ``with`` 完成装配，动作一行一个，收尾交给 ``Robot``。
+    """
+    demo_material()
+
+
+def locate_material(*, config_path=None) -> None:
+    """**上层调用的样子**：一条 ``with`` 完成装配，动作一行。
+
+    这是 ``docs/模块调用与统一初始化方案.md`` §2 的目标用法，也是
+    ``tests/test_robot.py`` 覆盖的那条路：``Robot`` 负责开设备与收尾，
+    业务代码只读 ``robot.vision`` 并调用动作。
+    """
+    with Robot.open(vision=True, vision_config_path=config_path) as robot:
+        report = robot.vision.locate()
+        if report.best is not None:
+            material = report.best
+            print(
+                f"物料：{material.name or '未知'}，"
+                f"相机系 xyz=({material.x_mm:.1f}, {material.y_mm:.1f}, "
+                f"{material.z_mm:.1f}) mm"
+            )
+        else:
+            print("画面里没有通过校验的物料")
+
+
+def pick_ready(*, grasp_config_path=None, vision_config_path=None) -> None:
+    """**抓取就位的例子**：抓取借用同一个 arm 与 vision，是否闭爪由业务显式决定。
+
+    ``grasp=True`` 已经包含 arm 与 vision，不会再开第二份设备。
+    """
+    with Robot.open(
+        grasp=True,
+        gripper=True,
+        grasp_config_path=grasp_config_path,
+        vision_config_path=vision_config_path,
+    ) as robot:
+        result = robot.grasp.align_and_descend()
+        print(result.summary())
+        # 就位成功不等于夹到了物料：闭不闭爪是业务的显式动作。
+        robot.gripper.close_jaws()
+
+def pick_manual() -> None:
+    with Robot.open(grasp=True, gripper=True) as robot:
+        robot.gripper.set_position(250)
+        robot.arm.move_up(pulses=3200)
+        robot.arm.move_forward(3200)
+        
+        report = robot.vision.locate()
+        if report.best is None:
+            print("画面里没有通过校验的物料")
+            robot.arm.move_axis_to_motor_degrees("extension", 0)
+            return
+        material = report.best
+        print(
+            f"物料：{material.name or '未知'}，"
+            f"相机系 xyz=({material.x_mm:.1f}, {material.y_mm:.1f}, "
+            f"{material.z_mm:.1f}) mm"
+        )
+
+        # # x/y 对准 → 下降 → 后缩；一次都不动高度（除了这一次开环下降）。
+        robot.grasp.align_xy()
+        robot.arm.move_down(pulses= 800)
+        # grab_box(robot)
+        place_box(robot)
+        robot.arm.move_axis_to_motor_degrees("extension", 0)
+
+def test_place_box() -> None:
+    with Robot.open(grasp=True, gripper=True) as robot:
+        place_box(robot)
+
+def grab_box(robot):
+        robot.gripper.set_position(250)
+        # robot.arm.rotate_cw(pulses=1000)
+        # robot.arm.move_down(pulses=800)
+        robot.gripper.set_position(0)
+        robot.arm.move_up(pulses=1000)
+        robot.arm.rotate_ccw(pulses=1000)
+        
+def place_box(robot: Robot):
+    robot.gripper.set_position(0)
+    robot.arm.move_axis_to_motor_degrees("lift", 528.7)
+    robot.arm.move_axis_to_motor_degrees("extension", 100)
+    robot.arm.move_axis_to_motor_degrees("base", 1048)
+    robot.gripper.set_position(250)
+
+def adjust_arm_align():
+    with Robot.open(grasp=True, gripper=True) as robot:
+        robot.gripper.set_position(250)
+        robot.arm.move_up(pulses=5000)
+        robot.arm.move_forward(3200)
+        time.sleep(1)
+        report = robot.vision.locate()
+        if report.best is None:
+            print("画面里没有通过校验的物料")
+            return
+        material = report.best
+        print(
+            f"物料：{material.name or '未知'}，"
+            f"相机系 xyz=({material.x_mm:.1f}, {material.y_mm:.1f}, "
+            f"{material.z_mm:.1f}) mm"
+        )
+        # robot.arm.move_by(x_mm=- material.x_mm, y_mm= - material.y_mm)
+
+def test_vision():
+    with Robot.open(vision=True, gripper=True) as robot:
+        report = robot.vision.locate()
+        robot.gripper.set_position(200)
+        if report.best is None:
+            print("画面里没有通过校验的物料")
+            return
+        print("z =", report.best.z_mm)      # 必须在 55–160 之间，最好 80–120
+        print("坐标:", report.best.x_mm, report.best.y_mm, report.best.z_mm)
 
 if __name__ == "__main__":
-    main()
+    # main()
+    pick_manual()
+    # test_place_box()
+    # test_vision()
+    # adjust_arm_align()
+    # locate_material()
+    # pick_ready()
+    # test_vision()

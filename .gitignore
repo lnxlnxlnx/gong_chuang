@@ -1,8 +1,8 @@
 登录.txt
 .worktrees/
+.dsh-vision-router/
 __pycache__/
 models/
 *.pt
 *.pdf
-__pycache__/
 output/
