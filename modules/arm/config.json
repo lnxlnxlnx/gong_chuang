@@ -20,6 +20,11 @@
       "mm_per_motor_rev": 61.0
     }
   },
+  "initial_motor_degrees": {
+    "base": 0.0,
+    "lift": 0.0,
+    "extension": 270.0
+  },
   "homing": {
     "mode": "nearest",
     "expected_seconds": 12.0,

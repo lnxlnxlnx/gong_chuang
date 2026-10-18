@@ -1,6 +1,6 @@
 {
   "windows": {
-    "port": "COM35"
+    "port": "COM36"
   },
   "jetson": {
     "port": "/dev/ttyUSB1"

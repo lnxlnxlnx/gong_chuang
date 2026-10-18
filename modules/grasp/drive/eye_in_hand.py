@@ -451,10 +451,30 @@ def align_x_y(
     "画面里有多个目标"和"等不到新观测"**不属于遮挡**（那是
     :class:`~modules.grasp.drive.servo_model.ObjectMissing` 之外的类型），永远报错。
 
+    ## 为什么不按"像素直径突变"判遮挡
+
+    z 是按像素半径反推的（``z = f·D/2r``），所以直径一变，算出来的距离就跟着变。
+    曾经在这里按"直径相对第一次测量变化超过 25%"判"爪子挡住了物块"并**直接报错**
+    （``diameter_change_limit_ratio``），但真机上它总在误报：实测一次对准里直径从
+    272 px 变成 397 px（1.46 倍，f=1012 px、顶面 30 mm，等价于 z 从 112 mm 报成 77 mm）。
+    那次根本没有遮挡——报错文字说的"被遮住一部分 → 可见区域变小"是反方向。
+
+    它也不是本函数的正确性问题：x/y 由像素**圆心**直接决定
+    （``x = (u-cx)·z/f``），目标是画面中心时把 x 驱动到 0 就是 ``u→cx``，与 z 的尺度
+    无关。尺度错了只影响**每一步走多远**、以及"进容差"实际有多严（差 1.46 倍就是 4 mm
+    容差实际 5.8 mm），下一步重新测量就纠正回来，不会把爪子带到别处去。所以这条判据
+    去掉了，闭环需要的反馈一点没少。
+
+    "转底盘之前必须先够高"仍由 :func:`raise_before_rotating`（``ensure_safe_height``，
+    按 **z** 判安全高度）负责——那是机械结构上的硬约束，与像素尺度无关。
+
+    :func:`align_z` 里那条直径判据留着：那里升降**确实**按设计改变距离，而"检测换了
+    目标"是另一回事（真物块被推出半径窗口后检测会锁到画面里别的东西上）。
+
     ## 为什么停稳判据不看 z
 
     每一次测量都要求"连续两帧读数一致"，而那个判据默认是**三维**的。本函数只用
-    ``x_mm`` / ``y_mm``（另加像素直径做干涉判据），z 一个数都不进解算——可 z 恰恰是
+    ``x_mm`` / ``y_mm``，z 一个数都不进解算——可 z 恰恰是
     最不稳的那个：它按像素半径反推（``z = f·D/2r``，本机约 0.42 mm/px），1 px 的半径
     抖动就顶掉整个细档 0.4 mm。
 
@@ -505,8 +525,6 @@ def align_x_y(
     previous_step: Optional[Tuple[int, int]] = None
     #: 连续几步方向相反。**一步不算**（物块被推动、检测跳目标都会这样）。
     contradictions = 0
-    #: 第一次测到的像素直径，用来发现"物块被挡住了"。
-    baseline_diameter: Optional[float] = None
     #: 这一轮判"停稳"用的一致性门槛。第一次用细档（要判"是不是已经对准了"），
     #: 之后误差还大就换粗档——粗档少等几帧，而每帧都要跑一次 178 ms 的定位。
     settle_tolerance = config.settle_tolerance_mm
@@ -549,23 +567,8 @@ def align_x_y(
         offset = (sighting.x_mm, sighting.y_mm)
         readings.append(offset)
 
-        # 物块被挡住时，可见区域从整圆变成月牙，等效半径变小——测距公式按直径反推距离，
-        # 于是会报成"物块突然远了几十毫米"。那看起来完全像一次正常观测，其实与机械臂
-        # 位置毫无关系；照着它解算只会让闭环空转。这里把它变成一句说人话的报错。
-        if sighting.diameter_px:
-            if baseline_diameter is None:
-                baseline_diameter = sighting.diameter_px
-            else:
-                ratio = sighting.diameter_px / baseline_diameter
-                if abs(ratio - 1.0) > config.diameter_change_limit_ratio:
-                    raise ServoError(
-                        f"画面里物块的像素直径从 {baseline_diameter:.0f} px 变成 "
-                        f"{sighting.diameter_px:.0f} px（{ratio:.2f} 倍），"
-                        f"距镜头 {sighting.z_mm:.0f} mm。多半是**爪子或别的结构挡住了物块**"
-                        "（被遮住一部分时可见区域变小，测距就会把它算成变远）。\n"
-                        "  x/y 对准必须让爪子**高于**物块，否则转动底座时爪瓣会从物块上扫过去。"
-                        "先把升降抬起来（或用菜单 2 的「机械臂向上」点动几下）再试。"
-                    )
+        # 这里**不再**按"像素直径突变"判遮挡：真机上它总在误报，而 x/y 由像素圆心
+        # 直接决定、与 z 的尺度无关（见 docstring 的"为什么不按像素直径突变判遮挡"）。
         error_x = offset[0] - target.x_mm
         error_y = offset[1] - target.y_mm
         error = math.hypot(error_x, error_y)

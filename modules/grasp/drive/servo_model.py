@@ -397,12 +397,6 @@ class ServoConfig:
     #: 白等 50 ms，而一次停稳测量至少要轮询两次。别调成 0——那样会在没新帧时打转空转
     #: CPU，也失去了"等一帧"的语义。
     settle_poll_seconds: float = 0.01
-    #: 画面里物块的**像素直径**相对第一次测量变化超过这个比例就判为"被遮挡了"。
-    #:
-    #: 为什么用直径：相机在臂上时，爪瓣扫过物块会把它挡住一部分，可见区域从整圆变成
-    #: 月牙，等效半径随之变小——而测距公式按直径反推距离，于是会被算成"物块突然远了
-    #: 几十毫米"。那正是"爪子挡住了物块"的签名，而且它看起来完全像一次正常的观测。
-    diameter_change_limit_ratio: float = 0.25
 
     def __post_init__(self) -> None:
         # 与 load_servo_config 的判据保持一致：容差、超时、粗调门槛为 0 都没有意义
@@ -429,8 +423,6 @@ class ServoConfig:
                 "coarse_settle_tolerance_mm 不能小于 settle_tolerance_mm："
                 "粗调档只该更宽松，不该更严"
             )
-        if self.diameter_change_limit_ratio <= 0:
-            raise ValueError("diameter_change_limit_ratio 必须是正数")
         if self.inter_frame_seconds < 0:
             raise ValueError("inter_frame_seconds 不能是负数")
         if self.safe_lift_pulses < 0:
@@ -738,10 +730,6 @@ def load_servo_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ServoConfig:
         settle_poll_seconds=_positive(
             document.get("settle_poll_seconds", defaults.settle_poll_seconds),
             "settle_poll_seconds",
-        ),
-        diameter_change_limit_ratio=_positive(
-            document.get("diameter_change_limit_ratio", defaults.diameter_change_limit_ratio),
-            "diameter_change_limit_ratio",
         ),
         inter_frame_seconds=_non_negative(
             document.get("inter_frame_seconds", defaults.inter_frame_seconds),

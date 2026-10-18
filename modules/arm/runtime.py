@@ -78,6 +78,11 @@ with RobotArm.open(wait_mode=WAIT_IN_POSITION) as arm:
 转十圈和原地没动看起来一模一样，而线缆会绕死。里程表不归一，所以看得见——但它是**下发
 的脉冲**，丢步和打滑不会体现，要和实测对账就读 ``0x36``。
 
+它记的是**相对原点**的读数，而"程序启动那一刻轴在哪"由配置的 ``initial_motor_degrees``
+声明（缺省表示三根轴都在原点上）。换爪子、重新对齿或重装电机之后某根轴的机械初始位不再
+落在原点上时（例如伸缩停在 270° = 2400 脉冲），就在那里如实声明，而不是让软件继续以为
+它在原点；回零 / 绝对归零重新定义原点之后，读数照旧回到 0。
+
 两张账都只在 ``_send`` 一处推进（回零/绝对归位另把原点清零），所以方向原语、单位制方法
 和绝对规划帧走的是同一条路，既不会漏记也不会把同一次位移记两遍。每次
 :class:`MotionReport` 都会带上该轴累计到那一刻的读数。
@@ -219,8 +224,16 @@ class RobotArm:
         #: 爪口中心的位姿；**唯一所有者是这里**，完成回零或测量写入之前是"未知"。
         self.pose_state = ArmPose()
         #: 三轴的命令脉冲里程表；与位姿分开，因为它一个标定都不需要（见 arm_state）。
+        #: **启程读数**取自配置的 ``initial_motor_degrees``：程序启动那一刻轴若不在原点上
+        #: （换爪子、重新对齿之后就是这种情况），就按那里的声明起算；回零 / 绝对归零会把
+        #: 原点重新定义，届时读数照旧清成 0。
         self.turns_state = MotorTurnsState(
-            config.pulses_per_revolution, AXIS_NAMES
+            config.pulses_per_revolution,
+            AXIS_NAMES,
+            initial_pulses={
+                axis_name: config.initial_motor_pulses(axis_name)
+                for axis_name in AXIS_NAMES
+            },
         )
 
     # ------------------------------------------------------------- 生命周期
@@ -718,6 +731,10 @@ class RobotArm:
         **不取模**：这台机器三个轴的行程都超过一个电机圈（底座 1800°、升降 1024°、
         伸缩 1057°），所以 ``move_axis_to_motor_degrees("base", 1048.0)`` 的意思是
         "走到累计 1048° 那个位置"，而不是 1048 mod 360。
+
+        这里的 0 是**原点**（回零 / 绝对归零定义的那个点），不是"程序启动位置"：启动时轴若
+        停在别处，第一次绝对定位会先把那段差额走掉——差额由配置的 ``initial_motor_degrees``
+        声明（见 :meth:`modules.arm.config.ArmConfig.initial_motor_pulses`）。
 
         注意别和 :meth:`move_base_degrees` 搞混：那个是**输出轴**角度、按增量走。
         """

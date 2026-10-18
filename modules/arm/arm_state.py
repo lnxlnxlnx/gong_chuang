@@ -34,7 +34,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Mapping, Optional
 
 from modules.arm.drive.kinematics import CylindricalPose, motor_degrees_for_pulses
 
@@ -173,13 +173,36 @@ class MotorTurnsState:
     "什么时候算原点"**不由这里决定**：回零、绝对归位、还是程序启动那一刻，是调用方的
     策略（和 :class:`ArmPose` 同一条规矩：这一层只记状态）。调用方在合适的时刻调
     :meth:`mark_origin`。
+
+    ## 启程读数（``initial_pulses``）
+
+    默认每根轴都从 0 开始，意思是"程序启动那一刻它就在原点上"。这个默认在结构上并不
+    总是成立：换了爪子、重新对齿或重装电机之后，某根轴的**机械初始位**可能离原点一整个
+    角度（例如伸缩轴停在 270° = 2400 脉冲 = 45.75 mm 处）。这时由调用方在构造时**如实
+    声明**启程读数，而不是让软件继续以为它在原点。
+
+    声明的是**事实，不是动作**：它既不发电也不动轴，错了就是这条路上所有绝对目标整体
+    偏一个常数。回零或绝对归位一旦重新定义原点（:meth:`mark_origin`），启程读数照旧被
+    清成 0——那时轴真的停在驱动器零点上，启程读数已经没有意义。
     """
 
-    def __init__(self, pulses_per_revolution: int, axis_names: Iterable[str]) -> None:
+    def __init__(
+        self,
+        pulses_per_revolution: int,
+        axis_names: Iterable[str],
+        initial_pulses: Optional[Mapping[str, int]] = None,
+    ) -> None:
+        """``initial_pulses`` 是"程序启动那一刻每根轴在哪"的声明；没给的轴按 0。"""
         if pulses_per_revolution <= 0:
             raise ValueError("pulses_per_revolution must be positive")
         self.pulses_per_revolution = pulses_per_revolution
         self._pulses: Dict[str, int] = {name: 0 for name in axis_names}
+        declared = {} if initial_pulses is None else initial_pulses
+        for axis_name, pulses in declared.items():
+            self.of(axis_name)  # 轴名非法就 KeyError，与 record 一致
+            if isinstance(pulses, bool) or not isinstance(pulses, int):
+                raise ValueError(f"initial_pulses[{axis_name!r}] must be an integer")
+            self._pulses[axis_name] = pulses
 
     def of(self, axis_name: str) -> MotorTurns:
         """读一根轴的当前累计量。"""

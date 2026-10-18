@@ -131,8 +131,10 @@ def _settled_sighting(
 ) -> MaterialSighting:
     """等到画面不再变，返回那一刻的整条观测（不只是坐标）。
 
-    返回观测而不只是 ``(x, y)``，是因为**像素直径**也要用：爪瓣扫过物块会把它挡住一部分，
-    那是闭环唯一能自己发现的"机械干涉"信号。
+    返回观测而不只是 ``(x, y)``：调用方还要用 ``z_mm``（安全抬升、悬停、``align_z``
+    都按它判高度）和 ``diameter_px``（``align_z`` 用它发现"检测换了目标"）。
+    按像素直径判遮挡那条路已经从 ``align_x_y`` 去掉——真机上它总在误报，理由写在
+    :func:`modules.grasp.drive.eye_in_hand.align_x_y` 的 docstring 里。
 
     ``tolerance`` 覆盖一致性判据：粗调阶段（离目标还有十几毫米）用
     ``coarse_settle_tolerance_mm`` 就够，不必为了 0.4 mm 多等好几帧——每一帧都要跑一次

@@ -56,7 +56,7 @@ class RecordingSleep:
         self.calls.append(seconds)
 
 
-def turns_config() -> ArmConfig:
+def turns_config(*, initial_motor_degrees=None) -> ArmConfig:
     """A fully calibrated arm so the absolute-planning path is usable too."""
     return ArmConfig(
         pulses_per_revolution=PULSES_PER_REVOLUTION,
@@ -74,6 +74,9 @@ def turns_config() -> ArmConfig:
         height_limit=TravelLimit(10.0, 183.5),
         # 绝对规划要先有一个安全位（转角度前回到它），所以夹具也得给。
         safe_pose=CylindricalPose(0.0, 200.0, 100.0),
+        initial_motor_degrees=(
+            {} if initial_motor_degrees is None else dict(initial_motor_degrees)
+        ),
     )
 
 
@@ -87,6 +90,59 @@ class MotorTurnsStateTests(unittest.TestCase):
         for axis in ("base", "lift", "extension"):
             with self.subTest(axis=axis):
                 self.assertEqual(self.turns.of(axis).pulses, 0)
+
+    def test_a_declared_starting_reading_is_kept_for_the_named_axis(self) -> None:
+        """启程读数：结构上这根轴不在原点时**如实声明**，而不是继续假装它是 0。
+
+        现场例子：换过爪子之后 7 号轴的机械初始位在原点外 270° = 2400 脉冲。
+        """
+        turns = MotorTurnsState(
+            PULSES_PER_REVOLUTION,
+            ("base", "lift", "extension"),
+            initial_pulses={"extension": 2400},
+        )
+
+        self.assertEqual(turns.of("extension").pulses, 2400)
+        self.assertEqual(turns.of("extension").motor_degrees, 270.0)
+        self.assertEqual(turns.of("base").pulses, 0)
+        self.assertEqual(turns.of("lift").pulses, 0)
+
+    def test_the_starting_reading_can_be_negative(self) -> None:
+        """270° 与 -90° 在同一圈上方向相反：声明的是带符号读数，不做归一。"""
+        turns = MotorTurnsState(
+            PULSES_PER_REVOLUTION, ("extension",), initial_pulses={"extension": -800}
+        )
+
+        self.assertEqual(turns.of("extension").pulses, -800)
+        self.assertEqual(turns.of("extension").motor_degrees, -90.0)
+
+    def test_an_unknown_axis_in_the_starting_reading_is_rejected(self) -> None:
+        with self.assertRaises(KeyError):
+            MotorTurnsState(
+                PULSES_PER_REVOLUTION, ("base",), initial_pulses={"nope": 100}
+            )
+
+    def test_a_non_integer_starting_reading_is_rejected(self) -> None:
+        for bad in (1.5, True, "2400"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    MotorTurnsState(
+                        PULSES_PER_REVOLUTION,
+                        ("extension",),
+                        initial_pulses={"extension": bad},  # type: ignore[dict-item]
+                    )
+
+    def test_marking_the_origin_clears_a_declared_starting_reading(self) -> None:
+        """回零 / 绝对归零把原点重新定义在这根轴上，启程读数随之作废。"""
+        turns = MotorTurnsState(
+            PULSES_PER_REVOLUTION,
+            ("base", "extension"),
+            initial_pulses={"extension": 2400},
+        )
+
+        turns.mark_origin("extension")
+
+        self.assertEqual(turns.of("extension").pulses, 0)
 
     def test_a_full_motor_revolution_is_360_degrees(self) -> None:
         reading = self.turns.record("lift", PULSES_PER_REVOLUTION)
@@ -267,6 +323,61 @@ class RobotArmTurnsTests(unittest.TestCase):
         reading = self.arm.turns_state.of("base")
         self.assertEqual(reading.pulses, 3000)
         self.assertEqual(reading.motor_degrees, 337.5)
+
+
+class RobotArmInitialTurnsTests(unittest.TestCase):
+    """配置里声明的启程读数，就是装配后里程表的第一个读数。
+
+    现场用法：换过爪子之后 7 号轴的机械初始位在原点外 270°（2400 脉冲 = 45.75 mm），
+    于是 ``move_axis_to_motor_degrees("extension", 0)`` 会把那 2400 脉冲老老实实收回去，
+    而不是因为"读数是 0"一帧都不发。
+    """
+
+    def setUp(self) -> None:
+        self.serial = FakeSerial()
+        self.sleep = RecordingSleep()
+        self.arm = RobotArm._from_settings(
+            config=turns_config(initial_motor_degrees={"extension": 270.0}),
+            port="/dev/ttyUSB0",
+            bus=self.serial,
+            sleep=self.sleep,
+        )
+        self.serial.writes.clear()
+
+    def test_the_declared_starting_angle_is_the_first_reading(self) -> None:
+        reading = self.arm.turns_state.of("extension")
+
+        self.assertEqual(reading.pulses, 2400)
+        self.assertEqual(reading.motor_degrees, 270.0)
+        # 没声明的轴照旧从 0 起。
+        self.assertEqual(self.arm.turns_state.of("lift").pulses, 0)
+
+    def test_walking_back_to_the_origin_retracts_the_declared_angle(self) -> None:
+        report = self.arm.move_axis_to_motor_degrees("extension", 0)
+
+        self.assertEqual(report.pulses, 2400)
+        self.assertEqual(self.arm.turns_state.of("extension").pulses, 0)
+        self.assertEqual(len(self.serial.writes), 1)
+
+    def test_the_declared_angle_itself_is_already_reached(self) -> None:
+        report = self.arm.move_axis_to_motor_degrees("extension", 270.0)
+
+        self.assertEqual(report.pulses, 0)
+        self.assertEqual(self.serial.writes, [])
+
+    def test_relative_moves_add_on_top_of_the_declared_reading(self) -> None:
+        self.arm.move_radial_mm(61.0)
+
+        self.assertEqual(
+            self.arm.turns_state.of("extension").pulses,
+            2400 + PULSES_PER_REVOLUTION,
+        )
+
+    def test_zeroing_the_axis_re_defines_the_origin(self) -> None:
+        """绝对归位把轴送回驱动器计数器 0，启程读数不该留在账上。"""
+        self.arm.move_axis_to_zero("extension")
+
+        self.assertEqual(self.arm.turns_state.of("extension").pulses, 0)
 
 
 class RobotArmAbsoluteMotorPositionTests(unittest.TestCase):

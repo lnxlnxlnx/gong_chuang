@@ -28,7 +28,6 @@
   "coarse_settle_tolerance_mm": 3.0,
   "settle_timeout_seconds": 4.0,
   "settle_poll_seconds": 0.01,
-  "diameter_change_limit_ratio": 0.25,
   "inter_frame_seconds": 0.03,
   "safe_lift_z_mm": 80.0,
   "safe_lift_step_pulses": 500,

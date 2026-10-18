@@ -1143,15 +1143,18 @@ class AlignXYTests(unittest.TestCase):
         self.assertIn("完成", text)
         self.assertIn("容差", text)
 
-    def test_occluded_material_is_reported_instead_of_chased(self) -> None:
-        """爪瓣挡住物块时必须**报出来**，而不是照着那个假观测继续解算。
+    def test_a_diameter_jump_does_not_abort_the_alignment(self) -> None:
+        """像素直径变了**不该**中断对准——真机上它总在误报。
 
-        实测：转 200 脉冲后爪瓣压在物块上，像素直径从 287 px 掉到 195 px。
-        测距公式按直径反推距离，于是把 105 mm 报成 155 mm——看起来完全像
-        "物块突然远了 50 mm"，其实与机械臂位置毫无关系。
+        实测一次对准里直径从 272 px 变成 397 px（1.46 倍）。按 f=1012 px、顶面 30 mm
+        换算，等价于 z 从 112 mm 报成 77 mm：看起来完全像"物块突然近了 35 mm"，其实
+        与机械臂位置毫无关系，那是检测自己在圆拟合上摆动。
+
+        本函数不需要靠它保正确性：x/y 由像素**圆心**直接决定，尺度错了只影响每一步
+        走多远，下一步重新测量就纠正回来。所以要断言的是"照旧收敛"，而不是"报错"。
         """
 
-        class OccludingLink:
+        class JumpyDiameterLink:
             error = None
 
             def __init__(self, arm) -> None:
@@ -1160,8 +1163,8 @@ class AlignXYTests(unittest.TestCase):
 
             def frame(self, **_kwargs):
                 self.calls += 1
-                # 前两次测量正常（287 px），之后被挡住（195 px）。
-                diameter = 287 if self.calls <= 4 else 195
+                # 前两次测量正常（272 px），之后变成 397 px——真机上的那一次。
+                diameter = 272 if self.calls <= 4 else 397
                 x, y = self.arm.offset
                 return (
                     parse_sighting(
@@ -1171,15 +1174,15 @@ class AlignXYTests(unittest.TestCase):
                     ),
                 )
 
-        arm = FakeArm(self.TRUTH, gain=0.6)  # 让它多走几轮，才有机会看到遮挡
-        with self.assertRaisesRegex(ServoError, "挡住"):
-            align_x_y(
-                arm, OccludingLink(arm), ObjectSelector(), self.TARGET, self.TRUTH,
-                ServoConfig(tolerance_mm=0.5, max_pulses_per_step=2000, min_step_mm=0.1),
-            )
+        arm = FakeArm(self.TRUTH, gain=0.7)
+        result = align_x_y(
+            arm, JumpyDiameterLink(arm), ObjectSelector(), self.TARGET, self.TRUTH,
+            ServoConfig(tolerance_mm=0.5, max_pulses_per_step=2000, min_step_mm=0.1),
+        )
+        self.assertTrue(result.aligned, result)
 
-    def test_diameter_change_within_the_limit_is_not_treated_as_occlusion(self) -> None:
-        """直径正常的小幅波动（检测噪声）不该误报遮挡。"""
+    def test_a_small_diameter_wobble_still_converges(self) -> None:
+        """直径正常的小幅波动（检测噪声）同样只是小步走完。"""
 
         class WobblyLink(BufferedLink):
             def __init__(self, arm) -> None:
