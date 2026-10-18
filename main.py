@@ -71,36 +71,13 @@ def pick_ready(*, grasp_config_path=None, vision_config_path=None) -> None:
 def pick_manual() -> None:
     with Robot.open(grasp=True, gripper=True) as robot:
         robot.gripper.set_position(280)
-        robot.arm.move_up(pulses=6000)
+        # robot.arm.move_up(pulses=6000)          # 675度
+        robot.arm.move_axis_to_motor_degrees("lift", 675)
         robot.arm.move_forward(3200)
         
-        try:
-            report = robot.vision.locate()
-        except Exception as e:
-            print("视觉识别失败", e)
-            robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-            return
-            
-        if report.best is None:
-            print("画面里没有通过校验的物料")
-            robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-            return
-        material = report.best
-        print(
-            f"物料：{material.name or '未知'}，"
-            f"相机系 xyz=({material.x_mm:.1f}, {material.y_mm:.1f}, "
-            f"{material.z_mm:.1f}) mm"
-        )
-
-        # # x/y 对准 → 下降 → 后缩；一次都不动高度（除了这一次开环下降）。
-        try:
-            robot.grasp.align_xy()
-        except Exception as e:
-            print("对准失败", e)
-            robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-            return
-        robot.arm.move_axis_to_motor_degrees("lift", 563)
         # grab_box(robot)
+        place_box(robot)
+        place_box(robot)
         place_box(robot)
         robot.arm.move_axis_to_motor_degrees("extension", 270.0)
 
@@ -112,11 +89,43 @@ def grab_box(robot):
         robot.gripper.set_position(280)
         
 def place_box(robot: Robot):
+    try:
+        report = robot.vision.locate()
+    except Exception as e:
+        print("视觉识别失败", e)
+        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+        return
+        
+    if report.best is None:
+        print("画面里没有通过校验的物料")
+        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+        return
+    material = report.best
+    print(
+        f"物料：{material.name or '未知'}，"
+        f"相机系 xyz=({material.x_mm:.1f}, {material.y_mm:.1f}, "
+        f"{material.z_mm:.1f}) mm"
+    )
+
+    try:
+        robot.grasp.align_xy()
+    except Exception as e:
+        print("对准失败", e)
+        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+        return
+    # 下降进行抓取
+    robot.arm.move_axis_to_motor_degrees("lift", 563)
     robot.gripper.set_position(40)
+    # 抬起物料，放进仓库
     robot.arm.move_axis_to_motor_degrees("lift", 900)
     robot.arm.move_axis_to_motor_degrees("extension", 10)
     robot.arm.move_axis_to_motor_degrees("base", 1048)
     robot.gripper.set_position(280)
+    # 回到初始位置
+    robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+    robot.arm.move_axis_to_motor_degrees("base", 0)
+    robot.arm.move_axis_to_motor_degrees("lift", 675)
+    robot.arm.move_forward(3200)
 
 def adjust_arm_align():
     with Robot.open(grasp=True, gripper=True) as robot:
