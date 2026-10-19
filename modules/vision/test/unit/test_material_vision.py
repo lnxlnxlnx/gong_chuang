@@ -53,9 +53,28 @@ class FakeDetector:
 
 class MaterialClassTableTests(unittest.TestCase):
     def test_material_class_names_match_the_deployed_model(self) -> None:
-        # 四分类物料模型：四类都是物料，中文标签一一对应。
+        # 四分类物料模型：四类都是物料。
         self.assertEqual(MATERIAL_CLASS_NAMES, ("red", "yellow", "blue", "green"))
-        self.assertEqual(set(DEFAULT_MATERIAL_LABELS), set(MATERIAL_CLASS_NAMES))
+
+    def test_every_material_class_has_a_chinese_label(self) -> None:
+        """模型每一类都必须有中文标签——少一条就会在画面上打成"未知物料"。
+
+        标签表**允许比模型多**：辅助路径（颜色块）按 ``targets.material_palette`` 分割，
+        那里配了六色（含 black / light_blue），比模型的两类多。多出来的标签是为了让
+        "辅助路径认出黑料"也能打印中文，而不是落到"未知物料"。所以这里查的是
+        **包含**关系，不是相等。
+        """
+        missing = set(MATERIAL_CLASS_NAMES) - set(DEFAULT_MATERIAL_LABELS)
+        self.assertEqual(missing, set(), "这些物料类别没有中文标签")
+        self.assertLessEqual(set(MATERIAL_CLASS_NAMES), set(DEFAULT_MATERIAL_LABELS))
+
+    def test_the_auxiliary_palette_colours_have_labels_too(self) -> None:
+        """调色板里配了的颜色也得有标签，否则辅助路径认出来也报不出名字。"""
+        from modules.vision.config import load_vision_config
+
+        palette = load_vision_config().targets.material_palette
+        unlabelled = [name for name in palette if name not in DEFAULT_MATERIAL_LABELS]
+        self.assertEqual(unlabelled, [], "这些调色板颜色没有中文标签")
 
     def test_is_material(self) -> None:
         self.assertTrue(is_material("red"))

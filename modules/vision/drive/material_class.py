@@ -20,15 +20,22 @@ from typing import Iterable, Mapping, Sequence
 
 from modules.vision.drive.material_yolo import MATERIAL_CLASS_NAMES
 
-#: 四种物料的中文标签，用于打印 / 画在画面上。
+#: 物料的中文标签，用于打印 / 画在画面上。
 #:
 #: 键必须和模型输出的类别名一致（当前四分类模型是 ``red`` / ``yellow`` / ``blue`` / ``green``）；
 #: 换模型时改 ``modules/vision/config.json`` 的 ``model.class_names``，再在这里补对应的中文。
+#:
+#: **这里比模型多两类**：``black`` 与 ``light_blue`` 是给**辅助路径**（颜色块）用的。
+#: 主算走模型，模型只有四类；辅助路径按 ``targets.material_palette`` 分割，而那个调色板
+#: 已经配了六色。多出来的两条标签让"辅助路径认出黑料/浅蓝料"时也能打印中文，
+#: 而不是落到"未知物料"——现场多一块黑料只加一行调色板，不必重训模型。
 DEFAULT_MATERIAL_LABELS: dict[str, str] = {
     "red": "红色物料",
     "yellow": "黄色物料",
     "blue": "蓝色物料",
     "green": "绿色物料",
+    "black": "黑色物料",
+    "light_blue": "浅蓝色物料",
 }
 
 #: 类别不在标签表里时用的中文名。

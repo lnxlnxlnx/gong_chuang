@@ -441,6 +441,59 @@ with locator, USBCamera(1, width=1280, height=720).initialize() as camera:
 取距离请用 `report.best`（没有通过校验的顶面时是 `None`），不要取 `report.regions[0]`。
 详见 [modules/vision/docs/视觉物料定位.md](modules/vision/docs/视觉物料定位.md)。
 
+### 工位识别：三圆环、叠放位、两点测量
+
+物料定位回答"料在哪"，这几项回答**别的**问题：工位摆正了没有、画面上两点多远、
+转盘到底转过没有。它们共用同一个 `Vision` 会话与同一份 `config.json`，但判据与
+物料定位**没有一处共用**，所以是独立检测器。完整说明见
+[modules/vision/docs/工位识别.md](modules/vision/docs/工位识别.md)。
+
+| 能力 | 会话入口 | 真机菜单 | 离线自测 |
+|---|---|---|---|
+| 三圆环工位识别 | `vision.detect_ring_station()` | 22 | `python -m modules.vision.drive.ring_station` |
+| 叠放位识别 | `vision.detect_stacked_ring()` | 23 | `python -m modules.vision.drive.stacked_ring` |
+| 两点像素测量 | `vision.pixel_distance()` / `pixel_distance_mm()` | 24 | `python -m modules.vision.drive.pixel_measure` |
+| 停稳门控 | `vision.measure_settled(require_motion=True)` | — | `python -m modules.vision.drive.motion_gate` |
+| 焦距 / 台面深度标定 | — | 25 | — |
+
+```python
+with Vision.open() as vision:
+    station = vision.detect_ring_station()      # 圆心、偏角、毫米偏差
+    print(station.summary())
+    stacked = vision.detect_stacked_ring()      # 中环 + 上下基准线
+    print(stacked.summary())
+    print(vision.pixel_distance((100, 200), (400, 600)).summary())
+```
+
+**和 `locate()` 的语义差异是有意的**：`locate()` 读不到画面就抛 `RuntimeError`（业务失败）；
+工位识别**画面里没有工位是正常结果**（`detected is False`，`detail` 说明原因），
+而读不到画面仍然抛 `RuntimeError`——两种情况不该用同一个返回值表达。
+
+三件值得知道的取舍：
+
+- **没配比例尺时不编毫米**。`station.mm_per_px` 与 `station.image_to_station_affine`
+  都空时只报像素，毫米字段是 `None` 而**不是 0**（0 看起来像"完全对准了"），
+  而且 `within_tolerance` 恒为 `False`。
+- **静止 ≠ 停稳**。`measure_settled(require_motion=True)` 要求先**看见它真的动过**，
+  否则转盘还没转，上一轮的残留状态就会被当成这一轮的结果上报。
+- **叠放位的尺度可以不可信**。没有标定时会用中环半径临时反推，结果的
+  `scale_source` 会写成 `"ring"`、`scale_trustworthy` 为 `False`。
+
+### 标定：先把 calibration.json 填上（菜单 25）
+
+`modules/vision/calibration.json` 里 `focal_px`、`table_depth_mm`、`plane` 默认全是 `null`，
+所以**所有毫米读数用的都是粗标定兜底值，不是真实距离**（物料定位那节的
+"框比顶面大"也是同一个根源）。菜单 25 补前两项：把已知直径的圆片放在已知距离处，
+按 `f` 点它的左右边缘，输入真实直径与距离即可；按 `c` 看还缺什么，按 `s` 保存焦距平均值，
+按 `d` 直接设置台面深度。它**只写 `calibration.json`，不碰 `config.json`**。
+
+### 辅助路径的六色调色板
+
+主算的 YOLO 模型是四分类（红/黄/蓝/绿），而 `targets.material_palette` 配了**六色**
+（多出 `black` 与 `light_blue`）：主算认不出来的料，辅助路径按颜色块还能认。
+换一块料只加一行调色板，不必重训模型——`material_class.DEFAULT_MATERIAL_LABELS`
+里补上对应中文即可（缺标签会落到"未知物料"）。
+
 ### 预览帧率：慢的是经典 CV，不是 YOLO 也不是摄像头
 
 本机实测（1280×720）：摄像头 27–30 fps、YOLO 推理 17–20 ms、`imshow` 3.5–7 ms，

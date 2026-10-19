@@ -67,8 +67,12 @@ DEFAULT_SETTLE_TIMEOUT_SECONDS = 4.0
 if TYPE_CHECKING:
     from modules.vision.drive.camera import USBCamera as Camera
     from modules.vision.drive.material_locate import MaterialLocator
+    from modules.vision.drive.motion_gate import MotionGate
+    from modules.vision.drive.pixel_measure import MillimetreMeasurement, PixelMeasurement
+    from modules.vision.drive.ring_station import RingStationDetector, RingStationDetection
     from modules.vision.drive.sequence import Fusion, TimedPoint
     from modules.vision.drive.sighting import MaterialSighting
+    from modules.vision.drive.stacked_ring import StackedRingDetector, StackedRingDetection
     from modules.vision.reports import MaterialReport, RegionReport
 
 
@@ -339,6 +343,36 @@ def _timed_point_from_report(
     )
 
 
+def _motion_position(fusion: "Fusion") -> "Tuple[float, float]":
+    """一次融合结果 → 门控用的位置，**单位毫米**（取 x/y，忽略深度）。
+
+    这里刻意只用 x/y：深度对"动没动"没有发言权，而且它是最不可靠的那个读数
+    （README 明确写了"由框反推的深度偏近"）。
+
+    **单位说明**：:class:`~modules.vision.drive.motion_gate.MotionGate` 的阈值默认按
+    像素/秒给（它本来就是为画面位移设计的）。走会话这条路径时喂进去的是**毫米**，
+    所以要么传一个按毫米标定的门控，要么用
+    :data:`DEFAULT_SETTLED_MOTION_MM_S` 这两个默认值——它们就是按毫米/秒定的。
+    刻意**不做**毫米↔像素的自动换算：那需要焦距，而焦距标定目前还是粗标定值，
+    拿它去换单位等于把一个不确定的数引进"动没动"这个判断里。
+    """
+    point = fusion.point
+    return (point.x_mm, point.y_mm)
+
+
+#: 会话路径上"确实在动 / 已经停下"的速度阈值（毫米/秒），见 :func:`_motion_position`。
+#: 数值取 30 / 25 mm/s：与门控模块的像素阈值同量级，在 0.5 mm/px 的画幅上大致相当。
+DEFAULT_SETTLED_MOTION_MM_S = (30.0, 25.0)
+
+
+def _settled_motion_gate() -> "MotionGate":
+    """建一个按**毫米/秒**标定的门控，供 :meth:`Vision.measure_settled` 使用。"""
+    from modules.vision.drive.motion_gate import MotionGate
+
+    moving, near_stop = DEFAULT_SETTLED_MOTION_MM_S
+    return MotionGate(moving_speed_px_s=moving, near_stop_speed_px_s=near_stop)
+
+
 class Vision:
     """一次视觉会话：拥有相机与定位器（含模型），可重复定位。
 
@@ -351,6 +385,11 @@ class Vision:
         #: :meth:`_require_resources` 缩窄成非空，动作里只用那个局部变量。
         self._camera: Optional[Camera] = None
         self._locator: Optional[MaterialLocator] = None
+        #: 工位识别的两个检测器。它们在 ``open`` 之后**懒建**（第一次调用才构造），
+        #: 因为纯经典 CV 的检测器不需要模型，也不该在"只做物料定位"的会话里被建出来。
+        #: 建好就缓存：配置在 ``open`` 时已定死，检测器内部的跨帧稳定窗口要连续。
+        self._station: Optional["RingStationDetector"] = None
+        self._stacked: Optional["StackedRingDetector"] = None
         self._closed = False
         self._clock: Callable[[], float] = time.monotonic
         #: 读帧前丢掉几帧缓冲。摄像头没有队列，这是既有的启发式新鲜度处理。
@@ -558,6 +597,8 @@ class Vision:
         still_mm: float = DEFAULT_STILL_MM,
         settle_mm: float = DEFAULT_SETTLE_MM,
         min_samples: int = DEFAULT_MIN_SAMPLES,
+        require_motion: bool = False,
+        motion: "Optional[MotionGate]" = None,
     ) -> "Optional[Fusion]":
         """反复连拍，直到拿到一次"已停稳"的融合（或者超时，返回最后一次）。
 
@@ -568,7 +609,21 @@ class Vision:
 
         读不到画面（相机掉线）不算"还在动"：连续读失败会一直重试到超时，
         与 :func:`modules.grasp.drive.servo_observation.measure_settled` 的取舍一致。
+
+        ``require_motion`` / ``motion`` 补的是**另一件事**：:attr:`Fusion.confident`
+        只说明"这一批读数内部一致"，它答不了"转盘到底转过没有"。画面本来就静止时，
+        读数连续几批都一样，看起来和"转完停稳了"完全一致——于是上一轮的残留状态会被
+        当成这一轮的结果。给 ``require_motion=True`` 就要求**先看见它真的动过**
+        （判据见 :mod:`modules.vision.drive.motion_gate`），没动过就一直等到超时。
+
+        ``motion`` 可以传一个自己的门控进来跨调用累积状态（转盘一个完整周期跨多次
+        ``measure_settled`` 时用得上）；不给就现建一个。**只有 ``require_motion``
+        为真时才会用到它。**
         """
+        gate = motion
+        if require_motion and gate is None:
+            gate = _settled_motion_gate()
+
         deadline = self._clock() + max(0.0, timeout)
         last = None
         while True:
@@ -579,9 +634,168 @@ class Vision:
             if current is not None:
                 last = current
                 if current.confident:
-                    return current
+                    if not require_motion:
+                        return current
+                    # 门控喂的是**毫米**位置（见 _motion_position 的单位说明）。
+                    verdict = gate.observe(
+                        _motion_position(current),
+                        current.point.stamp,
+                        key=current.point.color,
+                    )
+                    if verdict.report_now:
+                        return current
             if self._clock() >= deadline:
                 return last
+
+    # ------------------------------------------------------------- 两点像素测量
+    def pixel_distance(self, start, end) -> "PixelMeasurement":
+        """量画面上两点之间的 ΔX / ΔY（有符号）与直线距离，单位像素。
+
+        **不读帧、不开设备**：只是算术，所以会话没开相机也能用（``open`` 之前就可用）。
+        画面尺寸取自配置里本平台的相机画幅，用来判断端点是否落在画外。
+
+        想连毫米一起要，见 :meth:`pixel_distance_mm`；点从鼠标来还是从别的检测器来，
+        由调用方决定——本方法不猜。
+
+        :raises ValueError: 端点写法不合法（不是两元素数字坐标）。
+        """
+        from modules.vision.config import current_platform
+        from modules.vision.drive.pixel_measure import pixel_distance
+
+        return pixel_distance(start, end, image_size=self._frame_size())
+
+    def pixel_distance_mm(
+        self,
+        start,
+        end,
+        *,
+        working_distance_mm: Optional[float] = None,
+        focal_px: Optional[float] = None,
+    ) -> "MillimetreMeasurement":
+        """同 :meth:`pixel_distance`，再按针孔模型换算成毫米。
+
+        ``working_distance_mm`` 是**被测平面**到镜头的距离；不给就用
+        ``calibration.json`` 的 ``table_depth_mm``。两者都没有时**报错**而不是猜一个数——
+        比例尺错一个倍数，量出来的毫米就是错的，而它看起来完全正常。
+
+        ``focal_px`` 不给就用本会话的焦距（``calibration.json`` 的标定值，或粗标定兜底）。
+
+        :raises ValueError: 焦距或工作距离没标定、或取值不合法。
+        """
+        from modules.vision.config import current_platform
+        from modules.vision.drive.pixel_measure import to_millimetres
+
+        measured = self.pixel_distance(start, end)
+        distance = (
+            self._settings.table_depth_mm
+            if working_distance_mm is None
+            else float(working_distance_mm)
+        )
+        if distance is None:
+            raise ValueError(
+                "没有工作距离，量不出毫米：传 working_distance_mm，"
+                "或先用 python -m modules.vision.test.manual.calibrate_vision 写入 "
+                "calibration.json 的 table_depth_mm"
+            )
+        return to_millimetres(
+            measured,
+            focal_px=self._effective_focal_px(focal_px),
+            working_distance_mm=distance,
+        )
+
+    def _frame_size(self) -> "Tuple[int, int]":
+        """本平台相机的画幅 ``(宽, 高)``。相机没开时也能答（配置里就写着）。"""
+        camera = self._camera
+        if camera is not None:
+            width = getattr(camera, "width", None)
+            height = getattr(camera, "height", None)
+            if width and height:
+                return (int(width), int(height))
+        return (1280, 720)
+
+    def _effective_focal_px(self, override: Optional[float] = None) -> float:
+        """本会话实际用的像素焦距：显式覆盖 > 标定值 > 粗标定兜底。"""
+        from modules.vision.drive.pinhole import resolve_focal_px
+
+        if override is not None:
+            if override <= 0:
+                raise ValueError("focal_px must be positive")
+            return float(override)
+        return float(resolve_focal_px(self._settings.focal_px))
+
+    # ------------------------------------------------------------- 工位识别
+    def detect_ring_station(self, *, timeout: Optional[float] = None) -> "RingStationDetection":
+        """读一帧，找三圆环工位，返回圆心、偏角与偏差。
+
+        **与 :meth:`locate` 的语义差异是有意的**：``locate`` 读不到画面就抛
+        ``RuntimeError``（那是业务失败）；这里**画面里没有工位是正常结果**
+        （``detection.detected is False``，``detail`` 说明原因），而读不到画面仍然抛
+        ``RuntimeError``——两种情况不该用同一个返回值表达。
+
+        检测器按会话缓存（配置在 ``open`` 时就定死了），所以跨帧的稳定窗口是连续的。
+
+        :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
+        """
+        frame = self._read_frame(timeout=timeout)
+        return self._ring_station_detector().detect(frame)
+
+    def detect_stacked_ring(self, *, timeout: Optional[float] = None) -> "StackedRingDetection":
+        """读一帧，找叠放位（中环 + 上下基准线），返回圆心、偏角与偏差。
+
+        语义与 :meth:`detect_ring_station` 一致：没识别到是正常结果，
+        读不到画面才抛 ``RuntimeError``。
+
+        :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
+        """
+        frame = self._read_frame(timeout=timeout)
+        return self._stacked_ring_detector().detect(frame)
+
+    def _read_frame(self, *, timeout: Optional[float] = None):
+        """丢缓冲、读一帧 BGR；读不到抛 ``RuntimeError``（与 :meth:`locate` 一致）。
+
+        与 :meth:`_read_report` 的区别是**只读帧、不推理**：工位识别用的是经典 CV，
+        不该为了它把 YOLO 也叫起来。
+        """
+        camera, _locator = self._require_resources()
+        for _ in range(max(1, self._drain_frames)):
+            camera.read()
+        deadline = None if timeout is None else self._clock() + max(0.0, timeout)
+        while True:
+            frame = camera.read()
+            if frame is not None:
+                self.frames += 1
+                return frame
+            self.misses += 1
+            if deadline is None or self._clock() >= deadline:
+                raise RuntimeError("读不到摄像头画面")
+
+    def _ring_station_detector(self) -> "RingStationDetector":
+        """懒建并缓存三圆环检测器：配置在 ``open`` 时就定死了，中途不会回读文件。"""
+        from modules.vision.drive.ring_station import RingStationDetector
+
+        if self._station is None:
+            self._station = RingStationDetector(
+                geometry=self._settings.station_geometry,
+                detection=self._settings.station_detection,
+                reference=self._settings.station_reference,
+            )
+        return self._station
+
+    def _stacked_ring_detector(self) -> "StackedRingDetector":
+        """懒建并缓存叠放位检测器。
+
+        中环参考圆心取 ``station.ring_centers_px`` 的**中间那个**：叠放位的中环和
+        三圆环的中间环是同一个工位位置，配两份只会让它们漂移。
+        """
+        from modules.vision.drive.stacked_ring import StackedRingDetector
+
+        if self._stacked is None:
+            self._stacked = StackedRingDetector(
+                stacked=self._settings.stacked_ring,
+                geometry=self._settings.station_geometry,
+                middle_reference_px=self._settings.station_reference.ring_centers_px[1],
+            )
+        return self._stacked
 
     # ------------------------------------------------------------- 收尾
     def close(self) -> None:
