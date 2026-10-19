@@ -57,16 +57,19 @@ class RobotTestCase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.calls: list = []
-        # 共享总线也用同一套假件：它的 close 要参与"最后关"的顺序断言。
+        # 两条共享总线也用同一套假件：它们的 close 要参与"最后关"的顺序断言。
         self.bus = FakeModule("bus", self.calls)
+        self.servo_bus = FakeModule("servo_bus", self.calls)
         self.arm = FakeModule("arm", self.calls)
         self.chassis = FakeModule("chassis", self.calls)
         self.gripper = FakeModule("gripper", self.calls)
+        self.turntable = FakeModule("turntable", self.calls)
         self.vision = FakeModule("vision", self.calls)
         self.grasp = FakeModule("grasp", self.calls)
 
         self.patchers = [
             patch("robot.Robot._open_shared_bus", side_effect=lambda port: self.bus),
+            patch("robot.Robot._open_servo_bus", side_effect=lambda port: self.servo_bus),
             patch("modules.arm.config.load_arm_config", return_value=healthy_arm_config()),
             patch("modules.motor.config.load_bus_config",
                   return_value=SimpleNamespace(port="FAKE_BUS")),
@@ -77,9 +80,13 @@ class RobotTestCase(unittest.TestCase):
                   return_value=self.chassis),
             patch("modules.servo.config.load_gripper_config",
                   return_value=SimpleNamespace(servo_id=1)),
+            patch("modules.servo.config.load_turntable_config",
+                  return_value=SimpleNamespace(servo_id=2)),
             patch("modules.servo.drive.bus_servo.load_bus_config",
                   return_value=SimpleNamespace(port="SERVO", baudrate=115200)),
             patch("modules.servo.runtime.GripperServo.open", return_value=self.gripper),
+            patch("modules.servo.drive.turntable.TurntableServo.open",
+                  return_value=self.turntable),
             patch("modules.vision.runtime._load_settings", return_value=Mock()),
             patch("modules.vision.runtime.Vision._open_config", return_value=self.vision),
             patch("modules.grasp.runtime.Grasp._from_modules_settings",
@@ -98,19 +105,23 @@ class RobotTestCase(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def test_open_requires_an_explicit_choice(self) -> None:
-        """四个设备模块与 grasp 都默认 False：至少明确选一个。"""
+        """六个设备模块与 grasp 都默认 False：至少明确选一个。"""
         with self.assertRaises(ValueError) as caught:
             Robot.open()
         self.assertIn("至少", str(caught.exception))
 
-    def test_open_all_uses_the_same_assembly_as_the_five_flags(self) -> None:
-        """``open_all`` 与五项全选的 ``open`` 取得相同模块集合。"""
+    def test_open_all_uses_the_same_assembly_as_the_six_flags(self) -> None:
+        """``open_all`` 与六项全选的 ``open`` 取得相同模块集合。"""
         with Robot.open_all() as everything:
             by_all = everything.modules
-        with Robot.open(arm=True, gripper=True, vision=True, chassis=True, grasp=True) as five:
-            by_flags = five.modules
+        with Robot.open(
+            arm=True, gripper=True, turntable=True, vision=True, chassis=True, grasp=True
+        ) as six:
+            by_flags = six.modules
         self.assertEqual(by_all, by_flags)
-        self.assertEqual(by_all, ("arm", "gripper", "vision", "chassis", "grasp"))
+        self.assertEqual(
+            by_all, ("arm", "gripper", "turntable", "vision", "chassis", "grasp")
+        )
 
     def test_grasp_implies_arm_and_vision_and_shares_them(self) -> None:
         """``grasp=True`` 包含 arm / vision 两项依赖，而且**共用**同一批对象。"""
@@ -129,10 +140,20 @@ class RobotTestCase(unittest.TestCase):
         """未启用的模块**立刻**报错，不在动作时偷偷打开设备。"""
         with Robot.open(arm=True) as robot:
             self.assertEqual(robot.modules, ("arm",))
-            for name in ("gripper", "vision", "chassis", "grasp"):
+            for name in ("gripper", "turntable", "vision", "chassis", "grasp"):
                 with self.subTest(module=name):
                     with self.assertRaises(RuntimeError):
                         getattr(robot, name)
+
+    def test_the_motion_entry_point_is_always_available_and_survives_close(self) -> None:
+        """动作组不持有设备，所以它不在模块清单里，也不该随 ``close`` 失效。"""
+        with Robot.open(arm=True) as robot:
+            self.assertNotIn("motion", robot.modules)
+            self.assertIs(robot.motion, robot.motion)
+            batch = robot.motion.begin()
+            self.assertEqual(len(batch), 0)
+
+        self.assertIsNotNone(robot.motion.begin())
 
     def test_arm_and_chassis_share_one_stepper_connection(self) -> None:
         """arm+chassis 只打开**一条**步进连接，两边都借用它。"""
@@ -155,30 +176,35 @@ class RobotTestCase(unittest.TestCase):
         self.assertFalse(make_chassis.call_args.kwargs["owns_bus"])
 
     def test_close_releases_everything_once_in_the_documented_order(self) -> None:
-        """一次 ``close`` 释放全部；借用的 grasp 最先失效，共享总线最后关。"""
+        """一次 ``close`` 释放全部；借用的 grasp 最先失效，两条共享总线最后关。"""
         robot = Robot.open_all()
         robot.close()
         robot.close()  # 幂等：不再发命令
 
         self.assertEqual(
             self.calls,
-            ["grasp.close", "vision.close", "gripper.close", "chassis.close",
-             "arm.close", "bus.close"],
+            ["grasp.close", "vision.close", "turntable.close", "gripper.close",
+             "chassis.close", "arm.close", "servo_bus.close", "bus.close"],
         )
-        for module in (self.arm, self.chassis, self.gripper, self.vision, self.grasp):
+        for module in (
+            self.arm, self.chassis, self.gripper, self.turntable,
+            self.vision, self.grasp,
+        ):
             self.assertEqual(module.close_calls, 1, f"{module.name} 应只关一次")
         self.assertEqual(self.bus.close_calls, 1)
+        self.assertEqual(self.servo_bus.close_calls, 1)
 
     def test_context_exit_closes_everything(self) -> None:
         with Robot.open_all() as robot:
             self.assertFalse(robot.closed)
         self.assertTrue(robot.closed)
         self.assertEqual(self.bus.close_calls, 1)
+        self.assertEqual(self.servo_bus.close_calls, 1)
 
     def test_every_module_access_fails_after_close(self) -> None:
         robot = Robot.open_all()
         robot.close()
-        for name in ("arm", "gripper", "vision", "chassis", "grasp"):
+        for name in ("arm", "gripper", "turntable", "vision", "chassis", "grasp"):
             with self.subTest(module=name):
                 with self.assertRaises(RuntimeError):
                     getattr(robot, name)
@@ -211,10 +237,11 @@ class RobotTestCase(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("arm.close", message)
         self.assertIn("arm close broke", message)
-        # 其余四项仍然尝试过。
-        for module in (self.vision, self.gripper, self.chassis):
+        # 其余几项仍然尝试过。
+        for module in (self.vision, self.gripper, self.turntable, self.chassis):
             self.assertEqual(module.close_calls, 1, f"{module.name} 仍要被收尾")
         self.assertEqual(self.bus.close_calls, 1)
+        self.assertEqual(self.servo_bus.close_calls, 1)
 
     def test_business_error_wins_over_cleanup_error(self) -> None:
         """``with`` 里出业务错、收尾也失败：业务异常是主异常，清理错误是 cause。"""
@@ -278,6 +305,7 @@ class SharedBusOpenerTests(unittest.TestCase):
     def test_the_decorated_factory_is_callable(self) -> None:
         for name in (
             "_open_shared_bus",
+            "_open_servo_bus",
             "_load_grasp_settings",
             "_require_distinct_motor_addresses",
             "_attempt",
@@ -301,6 +329,17 @@ class SharedBusOpenerTests(unittest.TestCase):
         self.assertEqual(make.call_args.kwargs["baudrate"], Emm42Driver.BAUDRATE)
         # 满足协议形状：位置参数写入，且允许返回 None。
         self.assertEqual(bus.write(b"abc"), 3)
+
+    def test_the_servo_bus_factory_opens_at_the_bus_servo_baud(self) -> None:
+        from modules.servo.drive.bus_servo import BusServo
+
+        opened = FakeSerialPort()
+        with patch("serial.Serial", return_value=opened) as make:
+            bus = Robot._open_servo_bus("COM_SERVO")
+
+        self.assertIs(bus, opened)
+        self.assertEqual(make.call_args.args[0], "COM_SERVO")
+        self.assertEqual(make.call_args.kwargs["baudrate"], BusServo.BAUDRATE)
 
     def test_missing_pyserial_is_reported_with_the_install_hint(self) -> None:
         with patch.dict("sys.modules", {"serial": None}):
@@ -333,6 +372,33 @@ class SharedBusOpenerTests(unittest.TestCase):
         self.assertIs(make_arm.call_args.kwargs["bus"], opened)
         self.assertIs(make_chassis.call_args.kwargs["bus"], opened)
         self.assertFalse(make_arm.call_args.kwargs["owns_bus"])
+
+    def test_gripper_and_turntable_share_one_servo_connection(self) -> None:
+        """夹爪与转盘挂在同一条半双工总线上：只开一条连接，两个舵机都借用它。"""
+        opened = FakeSerialPort()
+        gripper = FakeModule("gripper", [])
+        turntable = FakeModule("turntable", [])
+        with patch.object(Robot, "_open_servo_bus", return_value=opened) as make_bus, patch(
+            "modules.servo.config.load_gripper_config",
+            return_value=SimpleNamespace(servo_id=1),
+        ), patch(
+            "modules.servo.config.load_turntable_config",
+            return_value=SimpleNamespace(servo_id=2),
+        ), patch(
+            "modules.servo.drive.bus_servo.load_bus_config",
+            return_value=SimpleNamespace(port="COM_SERVO", baudrate=115200),
+        ), patch(
+            "modules.servo.runtime.GripperServo.open", return_value=gripper
+        ) as make_gripper, patch(
+            "modules.servo.drive.turntable.TurntableServo.open", return_value=turntable
+        ) as make_turntable:
+            with Robot.open(gripper=True, turntable=True):
+                pass
+
+        # 端口只开一次；两个模块拿到的是**同一个**连接对象。
+        make_bus.assert_called_once_with("COM_SERVO")
+        self.assertIs(make_gripper.call_args.kwargs["bus"], opened)
+        self.assertIs(make_turntable.call_args.kwargs["bus"], opened)
 
 
 class FakeSerialPort:

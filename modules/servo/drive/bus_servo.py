@@ -117,6 +117,7 @@ class BusServo:
         baudrate: int = BAUDRATE,
         timeout: float = 0.1,
         serial_port: SerialPort | None = None,
+        owns_serial: bool | None = None,
     ) -> None:
         # 地址为 0 时代表广播(所有舵机)，因此允许 0..253
         if not 0 <= servo_id <= 253:
@@ -129,6 +130,9 @@ class BusServo:
         self.timeout = timeout
         # 测试时可注入一个 FakeSerial，避免真正打开串口
         self._serial = serial_port
+        # 借来的连接（同一个会话里夹爪与转盘共用一条舵机总线）不归本对象关闭：
+        # 擅自关掉会切断另一个舵机的通路。默认按"是不是自己开的"判断。
+        self._owns_serial = (serial_port is None) if owns_serial is None else bool(owns_serial)
 
     def initialize(self) -> "BusServo":
         """Open the configured serial port at the protocol baud rate."""
@@ -137,10 +141,22 @@ class BusServo:
         return self
 
     def close(self) -> None:
-        """Close the serial port if it has been initialized."""
-        if self._serial is not None:
-            self._serial.close()
-            self._serial = None
+        """Detach the serial port; only close it physically when this object owns it.
+
+        借来的连接（``owns_serial=False``）只让自身失效，**不物理关闭**——夹爪与转盘
+        挂的是同一条半双工总线，谁先关谁的都会让另一个哑掉。
+        """
+        serial_port, self._serial = self._serial, None
+        if serial_port is None:
+            return
+        if not self._owns_serial:
+            return
+        serial_port.close()
+
+    @property
+    def owns_serial(self) -> bool:
+        """这条总线是不是本对象打开的；借来的不归它关。"""
+        return self._owns_serial
 
     def set_position(self, position: int, duration_ms: int) -> None:
         """Move to ``position`` (0..1000) within ``duration_ms`` (0..30000)."""

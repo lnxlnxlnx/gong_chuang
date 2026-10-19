@@ -129,6 +129,20 @@ class ArmPose:
         self.pose = pose
         self.source = DEAD_RECKONED
 
+    def record_dead_reckoning(self, pose: CylindricalPose) -> None:
+        """从一个**已知起点**走完一串已经下发的脉冲之后，把落点记下来。
+
+        与 :meth:`record_move` 只差一处：那个要求"此刻位姿是已知的"，用于**连续同步**
+        动作；而异步动作在途时位姿会被刻意置成未知（不知道走到哪了），收尾时能拿到的
+        只有**发帧之前**那一份位姿——所以回写必须能无条件进行。
+
+        可信度与 ``record_move`` 完全相同，仍是 :data:`DEAD_RECKONED`：它记的是
+        下发的脉冲，丢步和打滑不会体现在这里。调用方负责保证"起点 + 脉冲"这件事成立
+        （例如动作中途被打断时应该改用 :meth:`mark_unknown`，而不是硬写一个落点）。
+        """
+        self.pose = pose
+        self.source = DEAD_RECKONED
+
 
 @dataclass(frozen=True)
 class MotorTurns:

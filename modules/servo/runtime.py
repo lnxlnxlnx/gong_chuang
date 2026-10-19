@@ -18,6 +18,19 @@
 
 两者不是一回事，统一生命周期只改 ``close`` 的语义（幂等、置 ``closed``），不动开合。
 
+## ``wait=False`` 返回票据，不返回报告
+
+报告的含义是"这次开合的结论"，而 ``wait=False`` 的时候**还没有结论**——尤其
+``reached=False`` 正是"夹到物料了"的信号，不能在没有读回之前就把它当成结论报出去。
+所以 ``wait=False`` 返回 :class:`modules.motion.MotionTicket`：
+
+```python
+ticket = gripper.close_jaws(wait=False)   # 命令已经发出去了
+report = ticket.wait()                     # 到点读回位置 → 给结论
+```
+
+票据到点前**不读串口**（读回是结论的一部分，提前读只会读到命令前的位置）。
+
 ## 生命周期
 
 ```python
@@ -27,6 +40,10 @@ with GripperServo.open() as gripper:
 
 ``open`` 读同一份 servo 配置（夹爪参数与总线参数都在里面）、开一次舵机总线并使能扭矩；
 ``__enter__`` **不**再次初始化。上层不再需要自己 ``initialize()``。
+
+夹爪与转盘挂的是**同一条**舵机总线（见 :mod:`modules.servo.drive.turntable`），所以
+:meth:`GripperServo.open` 也接受一条**已经打开**的 ``bus``：给了就借用，不再自己开第二条、
+也不会在 ``close`` 里关掉它（谁开的谁关）。
 """
 
 from __future__ import annotations
@@ -34,10 +51,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
+from modules.motion import MotionTicket
 from modules.servo.config import DEFAULT_CONFIG_PATH, GripperConfig, load_gripper_config
-from modules.servo.drive.bus_servo import BusServo, BusServoConfig, load_bus_config
+from modules.servo.drive.bus_servo import BusServo, BusServoConfig, SerialPort, load_bus_config
 
 #: 读回位置与目标位置相差在这个范围内就算到位（舵机位置量程 0..1000）。
 DEFAULT_POSITION_TOLERANCE = 30
@@ -80,13 +98,14 @@ class GripperServo:
         baudrate: int = 115200,
         servo: Optional[BusServo] = None,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
         position_tolerance: int = DEFAULT_POSITION_TOLERANCE,
         settle_seconds: float = DEFAULT_SETTLE_SECONDS,
     ) -> None:
         """只保存**已经读好的**配置；本构造器不做任何设备 I/O。
 
-        上层代码用 :meth:`open` 创建；``servo`` / ``sleep`` 是模块内部的装配接缝，
-        供 :meth:`open` 与假设备测试使用。注入了 ``servo`` 时 ``port`` 可以不传——
+        上层代码用 :meth:`open` 创建；``servo`` / ``sleep`` / ``clock`` 是模块内部的装配
+        接缝，供 :meth:`open` 与假设备测试使用。注入了 ``servo`` 时 ``port`` 可以不传——
         那个假件不需要串口名。
 
         :param servo: 已经建好的 :class:`BusServo`；给了就借用，本实例不接管它的生命周期
@@ -102,6 +121,7 @@ class GripperServo:
         self.position_tolerance = position_tolerance
         self.settle_seconds = settle_seconds
         self._sleep = sleep
+        self._clock = clock
         # 直接判断**参数**本身，而不是先算一个布尔字段再据它分支：类型检查器不会因为
         # ``self._borrowed`` 为真就推断出 ``_servo`` 非空，两个分支各自赋值才能确定。
         if servo is not None:
@@ -116,17 +136,43 @@ class GripperServo:
 
     # ------------------------------------------------------------- 生命周期
     @classmethod
-    def open(cls, *, config_path: Optional[Path] = None) -> "GripperServo":
+    def open(
+        cls,
+        *,
+        config_path: Optional[Path] = None,
+        bus: Optional[SerialPort] = None,
+        owns_bus: Optional[bool] = None,
+    ) -> "GripperServo":
         """读 servo 配置（夹爪参数 + 舵机总线参数），开总线并使能扭矩。
 
         两个加载器读的是**同一份**文件与同一个 ``config_path``：不再分别传 ``port``
         与 ``bus_config``。
+
+        :param bus: 由调用方**已经打开**的舵机总线（``Robot`` 装配夹爪+转盘时用，
+            两个舵机挂的是同一条半双工总线）。给了就借用，不再自己开第二条、
+            也不会在 ``close`` 里关掉它。``owns_bus`` 显式声明这条连接归不归本夹爪，
+            默认"借来的不归"。
         """
         path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
         config = load_gripper_config(path)
         # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
-        bus = load_bus_config(config_path=path)
-        session = cls(config=config, port=bus.port, baudrate=bus.baudrate)
+        bus_config = load_bus_config(config_path=path)
+        if bus is None:
+            session = cls(config=config, port=bus_config.port, baudrate=bus_config.baudrate)
+        else:
+            # 借来的连接由总线所有者关闭，所以这里把它包成"借用的 BusServo"。
+            session = cls(
+                config=config,
+                port=bus_config.port,
+                baudrate=bus_config.baudrate,
+                servo=BusServo(
+                    bus_config.port,
+                    config.servo_id,
+                    baudrate=bus_config.baudrate,
+                    serial_port=bus,
+                    owns_serial=bool(owns_bus),
+                ),
+            )
         try:
             session._servo.initialize()
             session._servo.set_torque(True)
@@ -183,21 +229,24 @@ class GripperServo:
         return self
 
     # ------------------------------------------------------------- 开合
-    def open_jaws(self, *, wait: bool = True) -> GripperReport:
+    def open_jaws(self, *, wait: bool = True) -> Union[GripperReport, MotionTicket]:
         """走到配置的张开位置。"""
         self._require_open()
         return self._go_to(OPEN_COMMAND, self.config.open_position, wait=wait)
 
-    def close_jaws(self, *, wait: bool = True) -> GripperReport:
+    def close_jaws(self, *, wait: bool = True) -> Union[GripperReport, MotionTicket]:
         """走到配置的闭合位置。
 
         ``reached`` 为 ``False`` 说明爪口没走到闭合位，**通常是夹到了物料**；
         但也可能是卡料或位置没标定，所以它不单独构成"夹住了"的承诺。
+
+        ``wait=False`` 返回票据：``reached`` 这个结论要等读回之后才有
+        （票据到点前**不读串口**），``ticket.wait()`` 给出与 ``wait=True`` 同样的报告。
         """
         self._require_open()
         return self._go_to(CLOSE_COMMAND, self.config.closed_position, wait=wait)
 
-    def set_position(self, position: int, *, wait: bool = True) -> GripperReport:
+    def set_position(self, position: int, *, wait: bool = True) -> Union[GripperReport, MotionTicket]:
         """驱动一个裸舵机位置；标定开合值时用。"""
         self._require_open()
         return self._go_to("set", position, wait=wait)
@@ -217,17 +266,34 @@ class GripperServo:
         self._require_open()
         self._servo.set_torque(enabled)
 
-    def _go_to(self, command: str, target: int, *, wait: bool) -> GripperReport:
+    def _go_to(
+        self, command: str, target: int, *, wait: bool
+    ) -> Union[GripperReport, MotionTicket]:
+        """发一条定点命令；``wait=True`` 等到点读回给报告，``wait=False`` 给票据。
+
+        两条路都**先发命令再决定怎么等**：``wait=False`` 时一帧都不多读——读回是结论的
+        一部分，提前读只会读到命令前的位置。
+        """
         self._servo.set_position(target, self.config.duration_ms)
+        seconds = self._duration_seconds()
         if not wait:
-            # 只发命令：读回的是"命令前"的位置，所以不声称到位，如实标 False。
-            return GripperReport(
-                command=command,
-                target=target,
-                position=self._servo.read_position(),
-                reached=False,
+            return MotionTicket(
+                f"gripper:{command}",
+                seconds,
+                finalize=lambda: self._report(command, target),
+                cancel=self._stop_if_open,
+                clock=self._clock,
+                sleep=self._sleep,
             )
-        self._sleep(self.config.duration_ms / 1000.0 + self.settle_seconds)
+        self._sleep(seconds)
+        return self._report(command, target)
+
+    def _duration_seconds(self) -> float:
+        """这条命令从发出到可以读回结果要等多久：转动时长 + 停稳余量。"""
+        return self.config.duration_ms / 1000.0 + self.settle_seconds
+
+    def _report(self, command: str, target: int) -> GripperReport:
+        """读回位置并给出结论；``wait=True`` 与票据收尾走的是同一处。"""
         position = self._servo.read_position()
         return GripperReport(
             command=command,
@@ -235,3 +301,9 @@ class GripperServo:
             position=position,
             reached=abs(position - target) <= self.position_tolerance,
         )
+
+    def _stop_if_open(self) -> None:
+        """尽力停住爪口；会话已经关掉时什么都不做（那时没什么可停的）。"""
+        if self._closed:
+            return
+        self._servo.stop()

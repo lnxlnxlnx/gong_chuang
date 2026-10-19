@@ -41,6 +41,41 @@ with RobotArm.open() as arm:          # 读配置 + 开（或借）一条串口
 ``move_by`` 的 x/y：X-Y 到 (底座角, 半径) 的换算随所在方位变化，所以那一对增量需要
 当前位姿才能分解，详见那里的说明。
 
+## 一次让多根轴动：``move_axes``
+
+``move_cylindrical_by`` 是**串行**的（抬升 → 伸缩 → 底座，每段等完再发下一段）；
+:meth:`RobotArm.move_axes` 是**并行**的那一个，默认走 Emm42 的多机同步三步法：
+
+```
+逐轴发 0xFD（多机同步标志 = 01）缓存住 → 帧间留 DEFAULT_INTER_FRAME_SECONDS
+→ 最后一条广播 00 FF 66 6B 让它们一起起步
+```
+
+于是三根轴是**真的同时起步**（轮子早就是这么走的，见 ``MecanumDrive``），
+而不是"发完第一条再发第二条"那种差几十毫秒的伪并行。代价是它们**各自到位**：
+谁走的路短谁先停。想让它们同时停要按轴改 rpm（联动/插补），那是另一件事，
+本模块刻意不做——``motion_plan`` 也写着"不增加多轴插补"。
+
+并行**不是无条件的**：底座要转的角度超过
+:data:`modules.motor.drive.motion.DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES` 时不许和
+伸缩并行（伸出状态下横扫会把整条臂扫过工作区），要显式改用
+:data:`AXES_SERIAL`——它按 抬升 → 伸缩 → 底座 → 下降 的安全顺序串行走完。
+
+## ``wait=False`` 返回票据，不返回报告
+
+报告的含义是"这次动作的结论"，而 ``wait=False`` 的时候**还没有结论**。所以从
+:meth:`RobotArm.move_axes` 起，所有 ``wait=False`` 的动作方法返回
+:class:`modules.motion.MotionTicket`（票据）：
+
+```python
+ticket = arm.move_up(pulses=800, wait=False)   # 帧已经发出去了
+ticket.wait()                                   # 到点 → 推进位姿 → 返回 MotionReport
+```
+
+票据的 ``estimated_seconds`` 就是过去那份报告里同名字段，"还要等多久"因此在这条路上
+一样看得见；而位姿从"永远未知"变成"等完就对上"——**不调用 ``wait`` 的话和以前完全一样**。
+多轴的那一份票据会把三根轴的位姿一起推进，并返回一个报告元组。
+
 ## 等一次动作走完：两种策略
 
 ``wait=True`` 必须知道"这次动作什么时候结束"，有两种做法：
@@ -92,9 +127,9 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, List, Mapping, Optional, Tuple
+from typing import Callable, List, Mapping, Optional, Tuple, Union
 
 from modules.arm.arm_state import ArmPose, MotorTurns, MotorTurnsState
 from modules.arm.config import AXIS_NAMES, ArmConfig, load_arm_config
@@ -114,10 +149,13 @@ from modules.arm.drive.kinematics import (
 from modules.arm.motion_plan import PlanError, plan_absolute, plan_xyz
 from modules.motor.drive.emm42 import Direction, Emm42Driver, MotorStatus, SerialPort
 from modules.motor.drive.motion import (
+    DEFAULT_INTER_FRAME_SECONDS,
+    DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES,
     DEFAULT_SETTLE_SECONDS,
     estimate_move_seconds,
     in_position_timeout_seconds,
 )
+from modules.motion import MotionTicket
 
 #: 等待策略：按曲线加减速公式估算耗时后 ``sleep``。当前默认，已在真机上跑通。
 WAIT_ESTIMATE = "estimate"
@@ -129,11 +167,48 @@ WAIT_IN_POSITION = "in_position"
 #: 允许的等待策略，见模块文档字符串的"等一次动作走完"一节。
 WAIT_MODES = (WAIT_ESTIMATE, WAIT_IN_POSITION)
 
+#: 多轴模式：各轴先缓存、再一条广播让它们**同时起步**（默认）。
+AXES_SAME_START = "same_start"
+
+#: 多轴模式：按安全顺序**逐轴**走完再走下一轴（与 :meth:`RobotArm.move_cylindrical_by` 同序）。
+AXES_SERIAL = "serial"
+
+#: 允许的多轴模式，见模块文档字符串的"一次让多根轴动"一节。
+AXES_MODES = (AXES_SAME_START, AXES_SERIAL)
+
 
 def _require_wait_mode(value: str) -> str:
     if value not in WAIT_MODES:
         raise ValueError(f"wait_mode must be one of {WAIT_MODES}, got {value!r}")
     return value
+
+
+def _require_axes_mode(value: str) -> str:
+    if value not in AXES_MODES:
+        raise ValueError(f"mode must be one of {AXES_MODES}, got {value!r}")
+    return value
+
+
+def _serial_order(moves: "List[Tuple[str, int]]") -> "List[Tuple[str, int]]":
+    """按``AXES_SERIAL`` 的安全顺序重排：抬升 → 伸缩 → 底座 → 下降。
+
+    与 :meth:`RobotArm.move_cylindrical_by` 同一条规矩：要抬升就先抬，要下降就放到最后
+    （免得在低位转动底座或前伸），只走平面时先伸缩、再转底座。
+    """
+    by_axis = dict(moves)
+    ordered: List[Tuple[str, int]] = []
+    lift = by_axis.get(LIFT_AXIS, 0)
+    if lift > 0:
+        ordered.append((LIFT_AXIS, lift))
+    radial = by_axis.get(EXTENSION_AXIS, 0)
+    if radial != 0:
+        ordered.append((EXTENSION_AXIS, radial))
+    base = by_axis.get(BASE_AXIS, 0)
+    if base != 0:
+        ordered.append((BASE_AXIS, base))
+    if lift < 0:
+        ordered.append((LIFT_AXIS, lift))
+    return ordered
 
 
 @dataclass(frozen=True)
@@ -198,6 +273,8 @@ class RobotArm:
         settle_seconds: float = DEFAULT_SETTLE_SECONDS,
         wait_mode: str = WAIT_ESTIMATE,
         clock: Callable[[], float] = time.monotonic,
+        inter_frame_seconds: float = DEFAULT_INTER_FRAME_SECONDS,
+        parallel_rotation_limit_pulses: int = DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES,
     ) -> None:
         """只保存**已经装配好的**依赖：本构造器不做任何设备 I/O。
 
@@ -210,11 +287,21 @@ class RobotArm:
             取值见 :data:`WAIT_MODES`。
         :param clock: 单调时钟；轮询模式下由它和 ``sleep`` 一起判定超时，
             测试注入假实现。
+        :param inter_frame_seconds: :meth:`move_axes` 连发多条缓存帧时的帧间隔；
+            见 :data:`modules.motor.drive.motion.DEFAULT_INTER_FRAME_SECONDS`。
+        :param parallel_rotation_limit_pulses: 底座旋转与伸缩可并行的脉冲上限；
+            见 :data:`modules.motor.drive.motion.DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`。
         """
+        if inter_frame_seconds < 0:
+            raise ValueError("inter_frame_seconds must not be negative")
+        if parallel_rotation_limit_pulses < 0:
+            raise ValueError("parallel_rotation_limit_pulses must not be negative")
         self.config = config
         self.pulses_per_revolution = config.pulses_per_revolution
         self.settle_seconds = settle_seconds
         self.wait_mode = _require_wait_mode(wait_mode)
+        self.inter_frame_seconds = inter_frame_seconds
+        self.parallel_rotation_limit_pulses = parallel_rotation_limit_pulses
         self._sleep = sleep
         self._clock = clock
         self._motors = dict(motors)
@@ -246,6 +333,8 @@ class RobotArm:
         bus: Optional[SerialPort] = None,
         owns_bus: Optional[bool] = None,
         wait_mode: str = WAIT_ESTIMATE,
+        inter_frame_seconds: Optional[float] = None,
+        parallel_rotation_limit_pulses: Optional[int] = None,
     ) -> "RobotArm":
         """按配置开一条步进连接并返回就绪实例。
 
@@ -257,6 +346,11 @@ class RobotArm:
             传 ``bus`` 时默认 ``False``（借来的）。
         :param wait_mode: ``wait=True`` 时怎么知道动作走完了，
             取值见 :data:`WAIT_MODES`。
+        :param inter_frame_seconds: :meth:`move_axes` 连发缓存帧时的帧间隔；
+            ``None`` 用 :data:`modules.motor.drive.motion.DEFAULT_INTER_FRAME_SECONDS`。
+            这是**USB-TTL 转接板的脾气**，换板子才需要动它。
+        :param parallel_rotation_limit_pulses: 底座旋转与伸缩可并行的脉冲上限；
+            ``None`` 用 :data:`modules.motor.drive.motion.DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`。
         """
         from modules.motor.config import DEFAULT_CONFIG_PATH as motor_default
         from modules.motor.config import load_bus_config
@@ -265,6 +359,11 @@ class RobotArm:
         config = load_arm_config(**({} if arm_path is None else {"config_path": arm_path}))
         bus_path = Path(motor_config_path) if motor_config_path is not None else motor_default
         port = load_bus_config(config_path=bus_path).port
+        tuning = {}
+        if inter_frame_seconds is not None:
+            tuning["inter_frame_seconds"] = inter_frame_seconds
+        if parallel_rotation_limit_pulses is not None:
+            tuning["parallel_rotation_limit_pulses"] = parallel_rotation_limit_pulses
         session = cls._from_settings(
             config=config,
             port=port,
@@ -272,6 +371,7 @@ class RobotArm:
             owns_bus=owns_bus,
             sleep=time.sleep,
             wait_mode=wait_mode,
+            **tuning,
         )
         return session
 
@@ -287,6 +387,8 @@ class RobotArm:
         settle_seconds: float = DEFAULT_SETTLE_SECONDS,
         wait_mode: str = WAIT_ESTIMATE,
         clock: Callable[[], float] = time.monotonic,
+        inter_frame_seconds: float = DEFAULT_INTER_FRAME_SECONDS,
+        parallel_rotation_limit_pulses: int = DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES,
     ) -> "RobotArm":
         """按**已经读好的配置快照**装配：Robot 与独立 ``open`` 共用这一处。
 
@@ -330,6 +432,8 @@ class RobotArm:
             settle_seconds=settle_seconds,
             wait_mode=wait_mode,
             clock=clock,
+            inter_frame_seconds=inter_frame_seconds,
+            parallel_rotation_limit_pulses=parallel_rotation_limit_pulses,
         )
         try:
             # 使能属于会话生命周期（对齐旧菜单脚本的 initialize + enable_all），
@@ -695,7 +799,7 @@ class RobotArm:
         rpm: Optional[int] = None,
         acceleration: Optional[int] = None,
         wait: bool = True,
-    ) -> MotionReport:
+    ) -> Union[MotionReport, MotionTicket]:
         """把一根轴走到**相对原点**的绝对电机脉冲位置。
 
         ``pulses`` 是**目标**不是增量：增量由 :attr:`turns_state` 的当前累计量算出来，
@@ -724,7 +828,7 @@ class RobotArm:
         rpm: Optional[int] = None,
         acceleration: Optional[int] = None,
         wait: bool = True,
-    ) -> MotionReport:
+    ) -> Union[MotionReport, MotionTicket]:
         """同上，用**电机角度**给目标：``3200 脉冲 = 360°``，
         三个轴同一把尺，与机构无关。
 
@@ -756,7 +860,7 @@ class RobotArm:
         rpm: Optional[int],
         acceleration: Optional[int],
         wait: bool,
-    ) -> MotionReport:
+    ) -> Union[MotionReport, MotionTicket]:
         """发一段带符号增量；一次走不完就拆段，每段等完再发下一段。"""
         if delta == 0:
             # 已经在目标上：走 _signed_move 的空操作分支，一帧都不发。
@@ -773,13 +877,29 @@ class RobotArm:
         remaining = delta
         while remaining != 0:
             step = max(-cap, min(cap, remaining))
-            report = self._signed_move(axis_name, step, rpm, acceleration, wait)
+            report = self._signed_report(axis_name, step, rpm, acceleration)
             reports.append(report)
             remaining -= step
             # 轮询模式下这一段没到位就别再往下发了（估算模式没有状态可看，照旧走完）。
             if report.motor_status is not None and not report.motor_status.in_position:
                 break
         return self._merge_reports(axis_name, delta, reports)
+
+    def _signed_report(
+        self,
+        axis_name: str,
+        pulses: int,
+        rpm: Optional[int],
+        acceleration: Optional[int],
+    ) -> MotionReport:
+        """``_signed_move`` 的**同步**版本：等完才返回，所以拿到的必然是报告。
+
+        拆段和串行多轴都要"每段等完再发下一段"，这个窄化只在这里做一次。
+        """
+        report = self._signed_move(axis_name, pulses, rpm, acceleration, wait=True)
+        if not isinstance(report, MotionReport):  # pragma: no cover - wait=True 恒为报告
+            raise RuntimeError("内部错误：同步动作拿到了票据")
+        return report
 
     def _merge_reports(
         self, axis_name: str, delta: int, reports: List[MotionReport]
@@ -832,38 +952,38 @@ class RobotArm:
 
     # ------------------------------------------------------------- 方向原语
     def rotate_cw(self, pulses: int, *, rpm: Optional[int] = None,
-                  acceleration: Optional[int] = None, wait: bool = True) -> MotionReport:
+                  acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
         """底座顺时针走 ``pulses`` 个脉冲（相对）。"""
         return self._signed_move(BASE_AXIS, pulses, rpm, acceleration, wait)
 
     def rotate_ccw(self, pulses: int, *, rpm: Optional[int] = None,
-                   acceleration: Optional[int] = None, wait: bool = True) -> MotionReport:
+                   acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
         """底座逆时针走 ``pulses`` 个脉冲（相对）。"""
         return self._signed_move(BASE_AXIS, -pulses, rpm, acceleration, wait)
 
     def move_up(self, pulses: int, *, rpm: Optional[int] = None,
-                acceleration: Optional[int] = None, wait: bool = True) -> MotionReport:
+                acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
         """升降轴上升 ``pulses`` 个脉冲（CW 是实测的正方向）。"""
         return self._signed_move(LIFT_AXIS, pulses, rpm, acceleration, wait)
 
     def move_down(self, pulses: int, *, rpm: Optional[int] = None,
-                  acceleration: Optional[int] = None, wait: bool = True) -> MotionReport:
+                  acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
         """升降轴下降 ``pulses`` 个脉冲（CCW 是实测的负方向）。"""
         return self._signed_move(LIFT_AXIS, -pulses, rpm, acceleration, wait)
 
     def move_forward(self, pulses: int, *, rpm: Optional[int] = None,
-                     acceleration: Optional[int] = None, wait: bool = True) -> MotionReport:
+                     acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
         """伸缩轴前伸 ``pulses`` 个脉冲（CW 是实测的正方向）。"""
         return self._signed_move(EXTENSION_AXIS, pulses, rpm, acceleration, wait)
 
     def move_backward(self, pulses: int, *, rpm: Optional[int] = None,
-                      acceleration: Optional[int] = None, wait: bool = True) -> MotionReport:
+                      acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
         """伸缩轴后缩 ``pulses`` 个脉冲（CCW 是实测的负方向）。"""
         return self._signed_move(EXTENSION_AXIS, -pulses, rpm, acceleration, wait)
 
     # ------------------------------------------------- 单位制相对动作（带符号）
     def move_base_degrees(self, degrees: float, *, rpm: Optional[int] = None,
-                          acceleration: Optional[int] = None, wait: bool = True) -> MotionReport:
+                          acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
         """底座相对转 ``degrees`` 度；正数对应 CW，负数对应 CCW。"""
         pulses = base_pulses_for_degrees(
             degrees,
@@ -873,7 +993,7 @@ class RobotArm:
         return self._signed_move(BASE_AXIS, pulses, rpm, acceleration, wait)
 
     def move_lift_mm(self, millimeters: float, *, rpm: Optional[int] = None,
-                     acceleration: Optional[int] = None, wait: bool = True) -> MotionReport:
+                     acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
         """升降轴相对抬升（正）/ 下降（负）``millimeters`` 毫米。"""
         pulses = linear_pulses_for_mm(
             millimeters,
@@ -883,7 +1003,7 @@ class RobotArm:
         return self._signed_move(LIFT_AXIS, pulses, rpm, acceleration, wait)
 
     def move_radial_mm(self, millimeters: float, *, rpm: Optional[int] = None,
-                       acceleration: Optional[int] = None, wait: bool = True) -> MotionReport:
+                       acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
         """伸缩轴相对前伸（正）/ 后缩（负）``millimeters`` 毫米。"""
         pulses = linear_pulses_for_mm(
             millimeters,
@@ -941,13 +1061,16 @@ class RobotArm:
         reports: List[MotionReport] = []
         for axis_name, amount in steps:
             if axis_name == LIFT_AXIS:
-                report = self.move_lift_mm(amount, rpm=rpm, acceleration=acceleration)
+                result = self.move_lift_mm(amount, rpm=rpm, acceleration=acceleration)
             elif axis_name == EXTENSION_AXIS:
-                report = self.move_radial_mm(amount, rpm=rpm, acceleration=acceleration)
+                result = self.move_radial_mm(amount, rpm=rpm, acceleration=acceleration)
             else:
-                report = self.move_base_degrees(amount, rpm=rpm, acceleration=acceleration)
-            if report.pulses != 0:
-                reports.append(report)
+                result = self.move_base_degrees(amount, rpm=rpm, acceleration=acceleration)
+            # 这一段是**串行**的：每段都等完才走下一段，所以拿到的必然是报告。
+            if not isinstance(result, MotionReport):  # pragma: no cover - 同步调用恒为报告
+                raise RuntimeError("内部错误：串行多轴拿到了票据")
+            if result.pulses != 0:
+                reports.append(result)
         return tuple(reports)
 
     def move_by(
@@ -1013,6 +1136,229 @@ class RobotArm:
             acceleration=acceleration,
         )
 
+    # --------------------------------------------- 一次多轴（同时启动）
+    def move_axes(
+        self,
+        targets: Mapping[str, int],
+        *,
+        rpm: Optional[int] = None,
+        acceleration: Optional[int] = None,
+        wait: bool = True,
+        mode: str = AXES_SAME_START,
+    ) -> Union[Tuple[MotionReport, ...], MotionTicket]:
+        """一次给多根轴各下一个**相对增量**，默认让它们**同时起步**。
+
+        ```python
+        arm.move_axes({"lift": 4000, "extension": -8000})    # 一起动、一起等
+        ticket = arm.move_axes({...}, wait=False)             # 一起动、稍后再等
+        reports = ticket.wait()
+        ```
+
+        与 :meth:`move_cylindrical_by` 的分工：那个是**串行**的（按安全顺序逐段走完），
+        这个是**并行**的（默认 Emm42 多机同步三步法：逐轴缓存 → 广播触发一起起步）。
+        并行的代价是**各自到位**——谁走的路短谁先停；想让它们同时停要按轴改 rpm
+        （联动/插补），本模块刻意不做。
+
+        :param targets: ``{轴名: 带符号脉冲}``；取 0 的轴不下发（协议不允许 0 位移）。
+        :param mode: :data:`AXES_SAME_START`（默认，同时起步）或 :data:`AXES_SERIAL`
+            （按 抬升 → 伸缩 → 底座 → 下降 的安全顺序逐轴走完），见模块文档字符串。
+        :param wait: ``True`` 等整组走完，返回报告元组；``False`` 返回票据。
+        :returns: ``wait=True`` 时是按 :data:`modules.arm.config.AXIS_NAMES` 顺序的报告元组
+            （只含真发了帧的轴）；``wait=False`` 时是 :class:`~modules.motion.MotionTicket`，
+            它的 ``wait()`` 返回同样的元组并把这几根轴的位姿一起推进。
+        :raises ValueError: 轴名/脉冲非法、``mode`` 不认识、底座与伸缩的并行超限，
+            或者 ``mode=AXES_SERIAL`` 配 ``wait=False``（那两者互相矛盾）。
+        """
+        self._require_open()
+        mode = _require_axes_mode(mode)
+        if mode == AXES_SERIAL and not wait:
+            raise ValueError(
+                f'mode="{AXES_SERIAL}" 要逐轴等完再走下一轴，和 wait=False 互相矛盾'
+                f'（不等就等于让它们重叠）；要并发就用默认的 mode="{AXES_SAME_START}"'
+            )
+        moves = self._normalize_axes(targets)
+        if not moves:
+            # 全是 0 脉冲：调用方的意图是"已经到位"，一帧都不发。
+            return () if wait else self._instant_ticket("arm:move_axes", ())
+        if mode == AXES_SERIAL:
+            reports: List[MotionReport] = []
+            for axis_name, pulses in _serial_order(moves):
+                reports.append(
+                    self._signed_report(axis_name, pulses, rpm, acceleration)
+                )
+            return tuple(reports)
+        return self._move_axes_together(moves, rpm, acceleration, wait)
+
+    def _normalize_axes(self, targets: Mapping[str, int]) -> List[Tuple[str, int]]:
+        """把 ``{轴名: 脉冲}`` 收成 ``(轴名, 带符号脉冲)`` 列表：查轴名、查整数、丢掉 0。
+
+        顺序固定按 :data:`AXIS_NAMES`（而不是调用方写字典的顺序），这样同一组目标
+        永远发出同一串帧，测试与日志里看到的顺序也是稳定的。
+        """
+        try:
+            given = dict(targets.items())
+        except AttributeError:
+            raise ValueError("targets 必须是 {轴名: 带符号脉冲} 这样的映射") from None
+        unknown = sorted(name for name in given if name not in self._motors)
+        if unknown:
+            raise ValueError(
+                f"{'、'.join(unknown)} 不是已知的轴；已知的是 {list(AXIS_NAMES)}"
+            )
+        moves: List[Tuple[str, int]] = []
+        for axis_name in AXIS_NAMES:
+            if axis_name not in given:
+                continue
+            pulses = given[axis_name]
+            if isinstance(pulses, bool) or not isinstance(pulses, int):
+                raise ValueError(f"{axis_name} 的脉冲数必须是整数，收到 {pulses!r}")
+            if pulses == 0:
+                continue
+            self._require_safe_pulses(abs(pulses))
+            moves.append((axis_name, pulses))
+        return moves
+
+    def _move_axes_together(
+        self,
+        moves: List[Tuple[str, int]],
+        rpm: Optional[int],
+        acceleration: Optional[int],
+        wait: bool,
+    ) -> Union[Tuple[MotionReport, ...], MotionTicket]:
+        """多机同步三步法：逐轴缓存 → 广播触发 → 一起等。
+
+        **缓存与触发之间必须自成一段**：广播触发帧会点燃总线上所有缓存命令，
+        所以这一段里不许插入别人的缓存（本项目的调用都是"缓存完立刻触发"）。
+        """
+        self._require_axes_can_run_together(moves)
+        speed = self.config.rpm if rpm is None else rpm
+        accel = self.config.acceleration if acceleration is None else acceleration
+        # 位姿在动作在途时会变成未知，所以先把**发帧之前**那一份位姿收好：
+        # 收尾时必须从它起算，否则异步动作就再也算不回位置了。
+        started_pose = self.pose_state.pose
+        buffered: List[str] = []
+        sent: List[MotionReport] = []
+        try:
+            for index, (axis_name, pulses) in enumerate(moves):
+                direction = Direction.CW if pulses > 0 else Direction.CCW
+                sent.append(
+                    self._send(
+                        axis_name,
+                        direction,
+                        abs(pulses),
+                        rpm=rpm,
+                        acceleration=acceleration,
+                        wait=False,
+                        synchronized=True,
+                    )
+                )
+                buffered.append(axis_name)
+                if index + 1 < len(moves):
+                    # CH340 上背靠背两条位置帧会双双失效，所以帧间留间隔。
+                    self._sleep(self.inter_frame_seconds)
+            self._motors[moves[0][0]].trigger_sync_motion()
+        except BaseException:
+            # 缓存了却没触发是危险状态：下一次别人的广播会让这些轴突然动起来。
+            self._clear_buffered(buffered)
+            self.pose_state.mark_unknown()
+            raise
+        started = self._clock()
+        if wait:
+            try:
+                return self._finish_axes(
+                    moves, sent, speed, accel, started, started_pose, already_waited=False
+                )
+            except BaseException:
+                # 帧已经发出去了、结论却拿不到：位置不可信，宁可重新对账。
+                self.pose_state.mark_unknown()
+                raise
+        # 只发了帧：什么时候到位不知道，位置不可信——等票据收尾时才推进。
+        self.pose_state.mark_unknown()
+        return MotionTicket(
+            "arm:" + "+".join(axis_name for axis_name, _ in moves),
+            max(item.estimated_seconds for item in sent),
+            finalize=lambda: self._finish_axes(
+                moves, sent, speed, accel, started, started_pose, already_waited=True
+            ),
+            cancel=lambda: self._stop_axes_named([name for name, _ in moves]),
+            clock=self._clock,
+            sleep=self._sleep,
+        )
+
+    def _finish_axes(
+        self,
+        moves: List[Tuple[str, int]],
+        sent: List[MotionReport],
+        speed: int,
+        accel: int,
+        started: float,
+        started_pose: Optional[CylindricalPose],
+        *,
+        already_waited: bool,
+    ) -> Tuple[MotionReport, ...]:
+        """等一组已触发的多轴动作走完，把这一组的位移一起记进位姿，返回补全的报告。
+
+        ``already_waited=True`` 表示"估算那一段已经睡过了"（票据自己的 ``wait`` 睡的），
+        所以这里只补轮询；``False`` 表示还没等过（同步调用），按 :attr:`wait_mode` 等。
+
+        三根轴是同时走的，所以它们共用同一个"等了多久"和同一份最后状态：这一组什么时候
+        算走完由**最慢的那根**决定，逐轴报不同的时长只会让人以为它们是串行走的。
+        """
+        status: Optional[MotorStatus] = None
+        if self.wait_mode == WAIT_IN_POSITION:
+            for (axis_name, pulses) in moves:
+                status = self._poll_axis(axis_name, abs(pulses), speed, accel, started)
+        elif not already_waited:
+            self._sleep(max(item.estimated_seconds for item in sent))
+        waited = self._clock() - started
+        self._record_pose_after(started_pose, tuple(moves))
+        return tuple(
+            replace(item, waited_seconds=waited, motor_status=status) for item in sent
+        )
+
+    def _require_axes_can_run_together(self, moves: List[Tuple[str, int]]) -> None:
+        """底座大角度旋转不许和伸缩并行——伸出状态下横扫会把整条臂扫过工作区。
+
+        与 :mod:`modules.grasp.drive.servo_motion` 是同一条规矩，阈值见
+        :data:`modules.motor.drive.motion.DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`。
+        """
+        by_axis = dict(moves)
+        base = by_axis.get(BASE_AXIS)
+        if base is None or EXTENSION_AXIS not in by_axis:
+            return
+        if abs(base) <= self.parallel_rotation_limit_pulses:
+            return
+        raise ValueError(
+            f"底座这一次要转 {abs(base)} 脉冲，超过并行上限 "
+            f"{self.parallel_rotation_limit_pulses}：伸出状态下横扫会把整条臂扫过工作区。"
+            f'改用 mode="{AXES_SERIAL}"（先伸缩到位、再转底座），或把旋转拆成几次小角度。'
+        )
+
+    def _clear_buffered(self, axes: List[str]) -> None:
+        """清掉"缓存了却没触发"的危险状态：**先点火、再停住**。
+
+        广播触发帧会点燃总线上所有缓存命令，所以缓存与触发之间失败时不能就这么算了。
+        手册没写"立即停止能不能清掉待触发的缓存"，所以这里先补一条触发把缓存消费掉
+        （轴开始按原命令走），再对每根轴发停止——顺序反过来就可能留下一条待触发的缓存。
+
+        清理阶段的异常一律吞掉：**原始错误**才是要报给调用方的那一个。
+        """
+        if not axes:
+            return
+        try:
+            self._motors[axes[0]].trigger_sync_motion()
+        except Exception:
+            pass
+        for axis_name in axes:
+            try:
+                self._motors[axis_name].stop()
+            except Exception:
+                pass
+
+    def _stop_axes_named(self, axes: List[str]) -> None:
+        """尽力停住一组成员；停不下来的会抛出去，由票据记成失败。"""
+        for axis_name in axes:
+            self._stop_axis(axis_name)
+
     # ------------------------------------------------------------- 内部
     def _signed_move(
         self,
@@ -1021,17 +1367,21 @@ class RobotArm:
         rpm: Optional[int],
         acceleration: Optional[int],
         wait: bool,
-    ) -> MotionReport:
+    ) -> Union[MotionReport, MotionTicket]:
         """发一条带符号的相对动作，并按**实际下发的整数脉冲**推进位姿。
 
         位姿更新只有这一处：方向原语与单位制方法都走它，所以"相对毫米再调底层动作"
         不会把同一次位移累计两遍。
+
+        ``wait=True`` 返回 :class:`MotionReport`；``wait=False`` 返回
+        :class:`~modules.motion.MotionTicket`——那时动作**还没有结论**，
+        报告要等 ``ticket.wait()``（见模块文档字符串的"``wait=False`` 返回票据"一节）。
         """
         self._require_open()
         if pulses == 0:
             # 位移不足半个脉冲：调用方的意图是"已经到位"，既不发帧也不改位置。
             axis = self.config.axes[axis_name]
-            return MotionReport(
+            report = MotionReport(
                 motor_id=axis.motor_id,
                 pulses=0,
                 motor_degrees=0.0,
@@ -1039,16 +1389,72 @@ class RobotArm:
                 estimated_seconds=0.0,
                 turns=self.turns_state.of(axis_name),
             )
+            return report if wait else self._instant_ticket(f"arm:{axis_name}", report)
         direction = Direction.CW if pulses > 0 else Direction.CCW
         report = self._send(
             axis_name, direction, abs(pulses), rpm=rpm, acceleration=acceleration, wait=wait
         )
         if wait:
             self._advance_pose(axis_name, pulses)
-        else:
-            # 只发了帧、没等它走完：什么时候到位不知道，位置不可信。
-            self.pose_state.mark_unknown()
-        return report
+            return report
+        # 只发了帧、没等它走完：什么时候到位不知道，位置不可信——等票据收尾时才推进。
+        # 起点必须是**发帧之前**那一份位姿：下面这一句之后就再也读不到了。
+        started_pose = self.pose_state.pose
+        self.pose_state.mark_unknown()
+        return self._move_ticket(axis_name, pulses, rpm, acceleration, report, started_pose)
+
+    def _instant_ticket(self, subject: str, result: object) -> MotionTicket:
+        """给"没有东西可等"的动作建票据：``wait()`` 立刻给出结论，不发帧也不睡。"""
+        return MotionTicket(
+            subject, 0.0, finalize=lambda: result, clock=self._clock, sleep=self._sleep
+        )
+
+    def _move_ticket(
+        self,
+        axis_name: str,
+        signed_pulses: int,
+        rpm: Optional[int],
+        acceleration: Optional[int],
+        sent: MotionReport,
+        started_pose: Optional[CylindricalPose],
+    ) -> MotionTicket:
+        """给一条**已经发出**的单轴动作建票据。
+
+        到点之后：按 :attr:`wait_mode` 确认走完（轮询模式才需要，估算那一段票据自己
+        已经睡过了）→ 从 ``started_pose`` 起算推进位姿 → 返回补全了 ``waited_seconds``
+        与 ``motor_status`` 的报告。
+
+        ``cancel`` 只停这一根轴，而且**不收尾**：动作没走完就推进位姿会记错位置，
+        所以取消之后位姿保持未知。
+        """
+        speed = self.config.rpm if rpm is None else rpm
+        accel = self.config.acceleration if acceleration is None else acceleration
+        started = self._clock()
+
+        def finalize() -> MotionReport:
+            status: Optional[MotorStatus] = None
+            if self.wait_mode == WAIT_IN_POSITION:
+                status = self._poll_axis(
+                    axis_name, abs(signed_pulses), speed, accel, started
+                )
+            waited = self._clock() - started
+            self._record_pose_after(started_pose, ((axis_name, signed_pulses),))
+            return replace(sent, waited_seconds=waited, motor_status=status)
+
+        return MotionTicket(
+            f"arm:{axis_name}",
+            sent.estimated_seconds,
+            finalize=finalize,
+            cancel=lambda: self._stop_axis(axis_name),
+            clock=self._clock,
+            sleep=self._sleep,
+        )
+
+    def _stop_axis(self, axis_name: str) -> None:
+        """尽力停住一根轴；会话已经关掉时什么都不做（那时没什么可停的）。"""
+        if self._closed:
+            return
+        self._motors[axis_name].stop()
 
     def _send(
         self,
@@ -1059,8 +1465,17 @@ class RobotArm:
         rpm: Optional[int],
         acceleration: Optional[int],
         wait: bool,
+        synchronized: bool = False,
     ) -> MotionReport:
-        """真正发帧（并可选等待）。参数校验在发帧之前完成。"""
+        """真正发帧（并可选等待）。参数校验在发帧之前完成。
+
+        ``synchronized=True`` 时这一帧只是**缓存住**（多机同步标志 = 01），
+        要等一条广播 ``00 FF 66 6B`` 才会动——那是 :meth:`move_axes` 让多根轴
+        同时起步的办法，所以它必然配 ``wait=False``（缓存帧还没开始走，没什么可等的）。
+        """
+        if synchronized and wait:
+            # 缓存帧发出时轴还没动，睡一觉只是在浪费估算；等整组是调用方的事。
+            raise ValueError("缓存帧（synchronized=True）不能配 wait=True")
         self._require_safe_pulses(pulses)
         speed = self.config.rpm if rpm is None else rpm
         accel = self.config.acceleration if acceleration is None else acceleration
@@ -1069,7 +1484,9 @@ class RobotArm:
             pulses, speed, self.pulses_per_revolution, accel, self.settle_seconds
         )
         signed_pulses = pulses if direction is Direction.CW else -pulses
-        self._motors[axis_name].move_relative_pulses(signed_pulses, speed, accel)
+        self._motors[axis_name].move_relative_pulses(
+            signed_pulses, speed, accel, synchronized=synchronized
+        )
         # 累计里程就在这里推进，而且**只在这里**：所有相对帧——方向原语、单位制方法、
         # 以及绝对规划出来的 _execute_frame——都经过 _send，所以既不会漏也不会把同一次
         # 位移记两遍。放在发帧之后：发帧抛异常时不该记账。
@@ -1116,14 +1533,30 @@ class RobotArm:
             self._sleep(estimate)
             return estimate, None
         started = self._clock()
-        status = self._motors[axis_name].wait_until_in_position(
-            in_position_timeout_seconds(
-                pulses, speed, self.pulses_per_revolution, accel, self.settle_seconds
-            ),
+        status = self._poll_axis(axis_name, pulses, speed, accel, started)
+        return self._clock() - started, status
+
+    def _poll_axis(
+        self,
+        axis_name: str,
+        pulses: int,
+        speed: int,
+        accel: int,
+        started: float,
+    ) -> MotorStatus:
+        """轮询一根轴的 ``0x3A`` 到位位；``started`` 是**这一组动作起步的时刻**。
+
+        分给这根轴的是"它自己的超时预算减去已经花掉的时间"：多轴同时起步时，
+        后问的那根不该再从头等一遍，否则整组的等待会变成各轴预算之和。
+        """
+        budget = in_position_timeout_seconds(
+            pulses, speed, self.pulses_per_revolution, accel, self.settle_seconds
+        )
+        return self._motors[axis_name].wait_until_in_position(
+            max(0.0, budget - (self._clock() - started)),
             sleep=self._sleep,
             clock=self._clock,
         )
-        return self._clock() - started, status
 
     def _advance_pose(self, axis_name: str, signed_pulses: int) -> None:
         """按实际下发的带符号整数脉冲推进位姿。
@@ -1133,44 +1566,72 @@ class RobotArm:
         """
         # 直接对**局部**取值判空：``pose_state.is_known`` 是个布尔属性，类型检查器
         # 不会据此把 ``pose`` 缩窄成非空，而"未知时不推进"这条业务规则必须靠这个判断。
-        current = self.pose_state.pose
-        if current is None:
+        self._record_pose_after(self.pose_state.pose, ((axis_name, signed_pulses),))
+
+    def _record_pose_after(
+        self,
+        started_pose: Optional[CylindricalPose],
+        moves: Tuple[Tuple[str, int], ...],
+    ) -> None:
+        """把一组增量叠加到**发帧那一刻**的位姿上；只有全程算得出来才写回位姿。
+
+        为什么要传"那时"的位姿：动作在途时位姿一律是未知的（见
+        :meth:`modules.arm.arm_state.ArmPose.mark_unknown` 的调用点），所以收尾如果
+        从"当前读数"起算，读到的永远是 ``None``，异步动作就再也没有位姿了。
+        缺标定（毫米换算不出来）时保持未知——不猜一个位置出来。
+
+        位姿推进只有这一处：同步动作、单轴票据、多轴票据全走它。
+        """
+        if self._closed:
+            # 会话已经关了：连接没了，谁也不知道轴在哪，迟到的收尾不该把位姿"复活"。
             return
+        pose = started_pose
+        if pose is not None:
+            for axis_name, signed_pulses in moves:
+                pose = self._pose_after(pose, axis_name, signed_pulses)
+                if pose is None:
+                    break
+        if pose is None:
+            self.pose_state.mark_unknown()
+        else:
+            # 起点是**发帧之前**那一份，所以现在这一刻的"未知"不该挡住回写。
+            self.pose_state.record_dead_reckoning(pose)
+
+    def _pose_after(
+        self, current: CylindricalPose, axis_name: str, signed_pulses: int
+    ) -> Optional[CylindricalPose]:
+        """从 ``current`` 走一个增量之后的位姿；缺标定算不出来时返回 ``None``。"""
         if axis_name == BASE_AXIS:
             degrees = base_degrees_for_pulses(
                 signed_pulses,
                 pulses_per_revolution=self.pulses_per_revolution,
                 reduction_ratio=self.config.base_reduction,
             )
-            moved = CylindricalPose(
+            return CylindricalPose(
                 normalize_degrees(current.base_degrees + degrees),
                 current.radial_mm,
                 current.height_mm,
             )
-        else:
-            mm_per_rev = self.config.mm_per_motor_rev(axis_name)
-            if mm_per_rev is None:
-                # 没有毫米标定就算不出位移，只能承认不知道在哪。
-                self.pose_state.mark_unknown()
-                return
-            millimeters = mm_for_linear_pulses(
-                signed_pulses,
-                pulses_per_revolution=self.pulses_per_revolution,
-                mm_per_motor_rev=mm_per_rev,
+        mm_per_rev = self.config.mm_per_motor_rev(axis_name)
+        if mm_per_rev is None:
+            # 没有毫米标定就算不出位移，只能承认不知道在哪。
+            return None
+        millimeters = mm_for_linear_pulses(
+            signed_pulses,
+            pulses_per_revolution=self.pulses_per_revolution,
+            mm_per_motor_rev=mm_per_rev,
+        )
+        if axis_name == EXTENSION_AXIS:
+            return CylindricalPose(
+                current.base_degrees,
+                current.radial_mm + millimeters,
+                current.height_mm,
             )
-            if axis_name == EXTENSION_AXIS:
-                moved = CylindricalPose(
-                    current.base_degrees,
-                    current.radial_mm + millimeters,
-                    current.height_mm,
-                )
-            else:
-                moved = CylindricalPose(
-                    current.base_degrees,
-                    current.radial_mm,
-                    current.height_mm + millimeters,
-                )
-        self.pose_state.record_move(moved)
+        return CylindricalPose(
+            current.base_degrees,
+            current.radial_mm,
+            current.height_mm + millimeters,
+        )
 
     def _require_safe_pulses(self, pulses: int) -> None:
         if isinstance(pulses, bool) or not isinstance(pulses, int):

@@ -65,6 +65,17 @@ DEFAULT_SETTLE_SECONDS: Final = 0.15
 #: 位置模式一条命令能表达的最大脉冲数（协议为 4 字节大端无符号）。
 MAX_PULSES: Final = 0xFFFFFFFF
 
+#: 连续两条位置帧之间该留的间隔（秒）。CH340 这类 USB-TTL 上，**背靠背发两条位置帧会让
+#: 两条都失效**（现场实测，见 ``modules/grasp/drive/servo_motion.py`` 的同名参数）。
+#: 单轴动作本来就是一发一等，感觉不到它；而"多轴同时启动"要连发 2..4 条缓存帧，
+#: 所以帧间必须留这个间隔——90 ms 对秒级的动作可以忽略，丢一条帧却要整段重来。
+DEFAULT_INTER_FRAME_SECONDS: Final = 0.03
+
+#: 底座旋转与伸缩**可以并行**的脉冲上限：底座转得比它多时，伸出状态下横扫会把整条臂
+#: 扫过工作区（与 ``modules/grasp`` 的 ``parallel_rotation_limit_pulses`` 同一条规矩）。
+#: 并行只允许在这个量级内，超了就走串行顺序（先伸缩到位、再转底座）。
+DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES: Final = 600
+
 #: 轮询到位时，最长等待 = 估算耗时 × 本系数 + 下面的固定余量。
 #: 估算把减速段折进了固定余量、本身偏短，所以给足一倍半再超时，
 #: 才能把"估算偏短"和"真的走不动/堵住了"区分开。

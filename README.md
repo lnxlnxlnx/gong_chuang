@@ -79,10 +79,10 @@ car.close()
 | `duration` | 速度模式：一条速度命令持续多少秒 | 不支持（机械臂只有相对位置模式） | 可选；与 `pulses` 只能给一个 |
 | `rpm` | 目标转速，缺省用配置值 | 可选关键字 | 必填（第一个位置参数） |
 | `acceleration` | 曲线加减速档位 `0..255`，缺省用配置值 | 可选关键字 | 可选 |
-| `wait` | `True`（默认）等到动作走完再返回；`False` 只发命令 | 默认 `True` | 默认 `True`（位置模式用） |
+| `wait` | `True`（默认）等到动作走完再返回报告；`False` 只发命令、返回**票据** | 默认 `True` | 默认 `True`（位置模式用） |
 
-- **`wait` 为什么重要**：Emm42 位置命令"发完就返回"，驱动器不会告诉上位机什么时候停。机械臂 5/6/7 号驱动器是 `Response=None`（连 ACK 都不回），如果不等待，连续调用会让后一条位置帧覆盖前一条的目标，看起来就是"上一个动作被跳过"。`wait=True` 按说明书的曲线加减速公式估算耗时并等待（`modules.motor.drive.motion.estimate_move_seconds`），`MotionReport.estimated_seconds` 会把它带回来。
-- 需要毫秒级精确时不能用估算：那要用 `0x3A` 读运动状态标志（`&0x02` 到位位）轮询，当前没有实现。
+- **`wait=False` 返回的是票据不是报告**：报告的含义是"这次动作的结论"，而 `wait=False` 的时候还没有结论。票据（`modules.motion.MotionTicket`）的 `estimated_seconds` 就是过去那份报告里同名字段，`.wait()` 才给出报告：`ticket = arm.move_up(pulses=800, wait=False)` → `ticket.wait()`。不调用 `wait` 的话行为与以前完全一样（只发帧、位姿保持未知，`turns_state` 照旧记账）。
+- 需要毫秒级精确时不能用估算：那要用 `0x3A` 读运动状态标志（`&0x02` 到位位）轮询（`RobotArm.open(wait_mode=WAIT_IN_POSITION)`；默认仍走估算，理由见模块文档）。
 - 轮子位置模式默认走 Emm42 多机同步：四条 `0xFD` 帧缓存后发 `00 FF 66 6B` 同时启动；0 脉冲的轮子不下发。
 - 上层整车 API：`MecanumChassis` 的 `forward` / `backward` / `left` / `right` / `rotate_cw` / `rotate_ccw` / `forward_left` / `forward_right` / `backward_left` / `backward_right`，都可带 `duration`（速度模式）、`pulses`（位置模式）或都不带（持续运动）。
 - 四轮位置 API：`move_wheels_relative(fl, fr, rl, rr, rpm)` 按角度、`move_wheels_relative_pulses(fl, fr, rl, rr, rpm)` 按脉冲数（同样默认同步启动），以及对应的一组 `*_absolute*`。
@@ -90,6 +90,42 @@ car.close()
 - 整车低层：`drive(vx, vy, omega, rpm)`（麦轮逆运动学，可斜向移动）、`drive_pulses(vx, vy, omega, pulses, rpm)`（同矩阵，位移用脉冲数给）、`set_speeds(fl, fr, rl, rr)`。
 - 当前实车使用标定后的麦轮坐标变换 `motion_transform="calibrated"`，四轮横移都会参与运动。
 - 若装配后方向反了：整车方向反 → 把 `drive()` 的 `vx`/`vy` 取反；辊子排布不同 → 换 `pattern="O"`；单轮转向反 → 在 `wheel_signs` 给该轮 `-1`。
+
+### 多轴同时启动：`move_axes` 与动作组
+
+机械臂三根轴可以**真的同时起步**（轮子早就是这么走的）。用的是 Emm42 的多机同步三步法：
+逐轴发 `0xFD`（多机同步标志 = 01）缓存住 → 帧间留 `DEFAULT_INTER_FRAME_SECONDS`（30 ms，
+CH340 上背靠背两条位置帧会双双失效）→ 最后一条广播 `00 FF 66 6B` 让它们一起起步。
+
+```python
+with Robot.open(arm=True) as robot:
+    robot.arm.move_axes({"lift": 4000, "extension": -8000})                 # 同时起步，一起等
+    robot.arm.move_axes({"base": 600, "extension": 200})                    # 底座小角度可与伸缩并行
+    robot.arm.move_axes({"base": 5000, "extension": 200}, mode="serial")    # 不许并行时按安全顺序走
+```
+
+- `mode="same_start"`（默认）：一起起步，**各自到位**（谁走的路短谁先停）。想让它们同时停要按轴改 rpm（联动/插补），本模块刻意不做。
+- `mode="serial"`：按 抬升 → 伸缩 → 底座 → 下降 的安全顺序逐轴走完，等价于 `move_cylindrical_by`；它只接受 `wait=True`。
+- **并行有安全上限**：底座旋转超过 `DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`（600 脉冲）时不许和伸缩并行——伸出状态下横扫会把整条臂扫过工作区（与 `modules/grasp/drive/servo_motion.py` 同一条规矩）。超了会**在发帧之前**抛错，并提示改用 `mode="serial"`。
+- 发帧中途失败时会先补一条广播触发、再逐轴停止：广播触发帧会点燃总线上所有缓存命令，"缓存了却没触发"是个危险状态，不能留着。
+- 三根轴是 `Response=None` 的驱动器，连 ACK 都不回，所以缓存帧发完不需要读回包——这也是"同时启动"能做得这么轻的原因。
+
+不同模块之间也可以"各自发出、一起等"：Emm42 与舵机的命令都是发完就自己走，**不需要线程**。
+`robot.motion.begin()` 拿一个动作组，`batch.wait()` 是唯一的 join 点：
+
+```python
+with Robot.open_all() as robot:
+    batch = robot.motion.begin()
+    batch.add(robot.arm.move_axes({"lift": 4000, "extension": -8000}, wait=False))
+    batch.add(robot.gripper.set_position(40, wait=False))
+    batch.add(robot.turntable.go_to_station("station_2", wait=False))
+    report = batch.wait()          # 一项失败不阻断其它项；失败时异常上挂着完整报告
+```
+
+- 动作组只收**票据**，或带 `estimated_seconds` 的结果对象；两者都没有时用 `batch.add(结果, seconds=预计秒数)` 声明耗时（底盘那类只返回脉冲数的动作走这条）。
+- 每张票据都可以单独 `.wait()`，也可以 `.cancel()`（尽力停住、**不收尾**：动作没走完就推进位姿会记错位置）。
+- 位姿在动作在途时是"未知"的；票据等完之后按**实际下发的脉冲**、从发帧前的位姿推算回写，所以异步不会让绝对定位永久失效。
+- 全程在调用线程上 join，**不建线程**（`modules.motion` 里没有后台线程，也没有锁）。真要"边动边看视觉"，再在 `MotionController` 上加后台 join，调用点不用改。
 
 ## 统一入口
 
@@ -132,10 +168,18 @@ python test.py
 ```python
 from modules.servo.drive.turntable import TurntableServo
 
-with TurntableServo("COM14") as turntable:      # 端口也可从总线配置取
+with TurntableServo.open() as turntable:        # 端口等参数取自 modules/servo/config.json
     turntable.go_home()                          # 回零：走到 home 工位
     turntable.go_to_station("station_3")         # 转到三号物料放取位
     print(turntable.at_station("station_3"))     # 读回判断，不是"我发过命令"
+```
+
+**转盘和夹爪共用一条舵机总线**（同一个 COM 口开两次会失败），所以由 `Robot` 开一次、
+两个模块各自借用：
+
+```python
+with Robot.open(gripper=True, turntable=True) as robot:
+    robot.turntable.go_to_station("station_2")
 ```
 
 **转盘的分度盘最怕累计误差，所以这一层只提供绝对位置命令**，没有"相对转多少下"的接口。
@@ -285,7 +329,7 @@ python -c "import test; test.run_offline_tests()"
 - `modules/<模块>/test/manual/`：该模块的真机脚本，从 `test.py` 菜单选择后运行。
 - `tests/`：入口测试（`test_main.py`、`test_entrypoints.py`）、跨模块守卫
   （`test_discovery_coverage.py`、`test_project_paths.py`、`test_vision_type_exports.py`、
-  `test_python38_compatibility.py`）与共享辅助 `scratch.py`。
+  `test_python38_compatibility.py`）、跨模块动作组验收（`test_motion_batch.py`）与共享辅助 `scratch.py`。
 
 ## 文档位置
 
