@@ -176,7 +176,7 @@ class FakeLocator:
         self.calls = 0
         self.closed = 0
 
-    def locate(self, _frame):
+    def locate(self, _frame, **_kwargs):
         self.calls += 1
         return self._reports.pop(0)
 

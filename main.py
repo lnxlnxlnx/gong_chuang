@@ -7,12 +7,6 @@
 from __future__ import annotations
 
 import time
-from logging import exception
-from math import e
-
-from exceptiongroup import catch
-
-from modules.arm.drive.kinematics import CylindricalPose
 
 # 预览演示的**模块级**导入：``demo_material`` 只定义函数、不开设备，真正的装配发生在
 # 它内部（读配置 + ``Vision._open_config``）；保持模块级也让既有入口用例能直接替换它。

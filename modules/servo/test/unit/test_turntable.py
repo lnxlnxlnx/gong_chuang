@@ -5,20 +5,21 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock
 
-from modules.servo.config import TurntableConfig
+from modules.servo.config import POSITION_UNITS, TurntableConfig
 from modules.servo.drive.bus_servo import BusServoConfig
-from modules.servo.drive.turntable import (
-    DEFAULT_POSITION_TOLERANCE,
-    DEGREES_PER_UNIT,
-    TurntableServo,
-)
+from modules.servo.drive.turntable import TurntableServo
+
+#: 与 ``modules/servo/hardware.json`` 的 turntable 段一致；测试夹具直接把这两个值写死，
+#: 免得每改一次配置就得改一遍夹具。
+DEFAULT_POSITION_TOLERANCE = 30
+DEGREES_PER_UNIT = 240.0 / POSITION_UNITS
 
 CONFIG = TurntableConfig(
     servo_id=2,
     duration_ms=1500,
     stations={"home": 0, "station_2": 500, "station_3": 1000},
 )
-BUS = BusServoConfig(port="FAKE", baudrate=115200, servo_id=1)
+BUS = BusServoConfig(port="FAKE", baudrate=115200, timeout_seconds=0.1)
 
 
 def make_turntable(positions, **overrides) -> tuple[TurntableServo, Mock, list]:

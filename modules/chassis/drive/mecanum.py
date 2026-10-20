@@ -101,6 +101,7 @@ class MecanumDrive:
         pattern: str = "X",
         rotation_gain: float = 1.0,
         motion_transform: str = "standard",
+        expect_ack: bool = True,
         timeout: float = 0.1,
         pulses_per_revolution: int = 3200,
         serial_port: SerialPort | None = None,
@@ -148,6 +149,7 @@ class MecanumDrive:
                     self.motor_ids[wheel],
                     timeout=timeout,
                     pulses_per_revolution=pulses_per_revolution,
+                    expect_ack=expect_ack,
                     serial_port=self._serial,
                 )
         except BaseException as primary:

@@ -6,6 +6,29 @@
 - `modules.motor.drive.emm42.Emm42Driver`：Emm42 V5.0 闭环步进驱动器，115200 bps TTL UART。
 - `modules.chassis.drive.mecanum.MecanumDrive`：四台 Emm42 驱动器组成的麦轮小车控制层，一组串口即可。
 
+## 配置在哪：硬件 vs 运动调参
+
+每个涉及硬件的模块都有**两份**配置，规则只有一句话：
+
+> **换机器、换接线、重新装机 → 改 `hardware.json`；调手感、调速度 → 改 `config.json`。**
+
+| 模块 | 硬件事实（`hardware.json`） | 运动调参（`config.json`） |
+|---|---|---|
+| motor | 串口（按平台）、波特率、**脉冲/圈（细分）**、串口超时 | — |
+| arm | 三轴电机地址、底座减速比、导程、`expect_ack`、行程限位、安全位、回零方式、初始机械角 | `rpm`、`acceleration`、`default_pulses`、`max_pulses` |
+| chassis | 四轮电机地址、轮向 `wheel_signs`、`expect_ack`、`pattern`、`motion_transform` | `acceleration`、`rotation_gain`、各平台演示 profile |
+| servo | 总线串口与波特率、两个舵机 ID、夹爪机械端位、转盘**输出行程 240°**、到位容差、工位表 | 夹爪/转盘的 `duration_ms`、转盘停稳余量 |
+
+`pulses_per_revolution` 只有**一份**（`modules/motor/hardware.json` 的 `bus` 段），arm 与 chassis 都读它。
+
+**没有隐藏默认值**：硬件键缺失会直接报出"哪个文件、哪个键"，而不是退回代码里的常量——
+那样"漏写一行"看起来会像"跑通了"。协议不变量（帧头、功能码、字段位宽、0..1000 位置域、
+3000 RPM 场上限、50 µs/RPM/档 的加减速斜率）仍然留在代码里，因为它们不随本机变化。
+
+`rpm` 与 `acceleration` 的物理含义：**加速度是斜坡速率**（越大越陡，`0` = 完全不加曲线），
+`estimate` 等待模型用的公式是 `加速段 = rpm × (256 − acceleration) × 50µs`。所以在
+`acceleration` 很低时，把 `rpm` 调高并不会让动作变快——只会让估算等待变长。
+
 ## 接线约束
 
 步进驱动器使用一个 USB-TTL 模块：模块 `TX -> R/A/H`、`RX -> T/B/L`、`GND -> GND`；驱动器电源独立接 `12-32 V`。
@@ -49,7 +72,7 @@ stepper.stop()
 ## 麦轮小车（MecanumDrive）
 
 软件逻辑层固定使用 `FL/FR/RL/RR` 四个轮位，标准默认地址顺序为 `1/2/3/4`。
-实际驱动器地址属于硬件配置，由 `modules/chassis/config.json` 注入；当前实车映射为
+实际驱动器地址属于硬件配置，由 `modules/chassis/hardware.json` 的 `vehicle.motor_ids` 注入；当前实车映射为
 `FL=3 FR=4 RL=2 RR=1`。更换轮子位置时只需修改配置，不需要修改运动 API 或上层代码。
 
 ```python
@@ -129,7 +152,7 @@ with Robot.open_all() as robot:
 
 ## 统一入口
 
-在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13 为夹爪测试（原来的 14「夹爪直连调试」已合并进来，编号 14 不再使用）；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集；17 为 COIN-D6 实时点云窗口（滑块或输入框调距离与角度窗口）；18 为物料顶部圆面定位（霍夫判断存在并测距，YOLO 补充类别，见 `modules/vision/docs/视觉物料定位.md`）；19 为**摄像头识别 + 机械臂抓取**（见 `modules/grasp/docs/抓取坐标链路.md`），它会在打开硬件前先列出还没做的标定项并拒绝运行，只想核对标定可以用 `--observe-only`；20 为**转盘测试**（三工位分度盘，见 `modules/servo/docs/转盘控制说明.md`）；21 为**x/y 对准物块 + z 下降**（抓取第一步：先让爪子正下方对准物块，再按固定脉冲数下降到位）。**本机的相机装在机械臂上、跟着爪子动**，所以菜单 21 走的是 eye-in-hand 视觉伺服：把画面里的物块调到固定的目标读数，全程**脉冲驱动**，不需要 `mm_per_motor_rev`、不需要行程标定、也不需要给爪子贴靶标。第一次用先 `--set-target` 记目标读数、再 `--calibrate` 实测雅可比，`--status` 只看不动。平面稳定之后 `--align-z` 走抓取前最后两步：升降（6 号）下降 `z_descend_pulses` 脉冲、伸缩（7 号）后缩 `extension_retract_pulses` 脉冲——两个数都写在 `modules/grasp/eye_in_hand.json` 里，现场直接改、不用重标（`--z-pulses` / `--retract-pulses` 可以只覆盖这一次）；想一次跑完就用 `--align-and-descend`（悬停高度 → 安全高度 → x/y 对准 → 下降 → 后缩，每一段都报耗时）；起始悬停高度也在同一个文件里（`hover_z_mm`，默认与 `safe_lift_z_mm` 同值），就位时会先把爪子伺服到那一层——它决定了开环下降的起点，改它就要重测 `z_descend_pulses`。第 19 项走的是另一套（相机固定 + 爪上靶标），其假设**不适用于本机**；两套做法的分流说明见 `modules/grasp/docs/抓取坐标链路.md` 第 0 节与第 10 节。步进总线端口读取 `modules/motor/config.json` 中当前平台的 `port`（底盘与机械臂共用这一处），舵机总线端口读取 `modules/servo/config.json`；激光测试使用独立的 `modules/laser_scan/config.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `modules/lidar/config.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
+在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13 为夹爪测试（原来的 14「夹爪直连调试」已合并进来，编号 14 不再使用）；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集；17 为 COIN-D6 实时点云窗口（滑块或输入框调距离与角度窗口）；18 为物料顶部圆面定位（霍夫判断存在并测距，YOLO 补充类别，见 `modules/vision/docs/视觉物料定位.md`）；19 已**归档**（原「摄像头识别 + 机械臂抓取」走的是"相机固定 + 爪上靶标"路线，**本机不适用**，代码与测试移到 `legacy/grasp_fixed_camera/`，菜单不再显示 19）；20 为**转盘测试**（三工位分度盘，见 `modules/servo/docs/转盘控制说明.md`）；21 为**x/y 对准物块 + z 下降**（抓取第一步：先让爪子正下方对准物块，再按固定脉冲数下降到位）。**本机的相机装在机械臂上、跟着爪子动**，所以菜单 21 走的是 eye-in-hand 视觉伺服：把画面里的物块调到固定的目标读数，全程**脉冲驱动**，不需要 `mm_per_motor_rev`、不需要行程标定、也不需要给爪子贴靶标。第一次用先 `--set-target` 记目标读数、再 `--calibrate` 实测雅可比，`--status` 只看不动。平面稳定之后 `--align-z` 走抓取前最后两步：升降（6 号）下降 `z_descend_pulses` 脉冲、伸缩（7 号）后缩 `extension_retract_pulses` 脉冲——两个数都写在 `modules/grasp/eye_in_hand.json` 里，现场直接改、不用重标（`--z-pulses` / `--retract-pulses` 可以只覆盖这一次）；想一次跑完就用 `--align-and-descend`（悬停高度 → 安全高度 → x/y 对准 → 下降 → 后缩，每一段都报耗时）；起始悬停高度也在同一个文件里（`hover_z_mm`，默认与 `safe_lift_z_mm` 同值），就位时会先把爪子伺服到那一层——它决定了开环下降的起点，改它就要重测 `z_descend_pulses`。第 19 项走的是另一套（相机固定 + 爪上靶标），其假设**不适用于本机**；两套做法的分流说明见 `modules/grasp/docs/抓取坐标链路.md` 第 0 节与第 10 节。步进总线端口读取 `modules/motor/config.json` 中当前平台的 `port`（底盘与机械臂共用这一处），舵机总线端口读取 `modules/servo/config.json`；激光测试使用独立的 `modules/laser_scan/config.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `modules/lidar/config.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
 
 ```powershell
 python test.py
@@ -139,18 +162,18 @@ python test.py
 
 菜单自动发现各模块 `modules/<模块>/test/manual/` 下声明 `MENU_ENTRY = (编号, "菜单名称")` 且提供 `main()` 的脚本（目录清单见 `test.py` 的 `MANUAL_TEST_DIRS`，编号全局唯一由 `tests/test_discovery_coverage.py` 守住）。新增真机测试时，只需在新脚本中声明未占用的编号和名称，无需修改 `test.py`；展示菜单不会导入真机模块，选择后才导入并运行。
 
-菜单 `12. 总线舵机测试` 走 PDF 中的 **115200 bps 直连总线舵机协议**，直接使用 `modules.servo.drive.bus_servo.BusServo`。端口、波特率和舵机 ID 从 `modules/servo/config.json` 读取：平台串口取 `windows.port` / `jetson.port`，舵机参数取 `bus.baudrate` 和 `bus.servo_id`，菜单里不再要求输入 ID。测试先只读当前位置；只有查询成功、输入目标脉冲位置和时长，并输入大写 `YES`，才会发送一次运动指令，随后读回实际位置。当前 Windows 端口填 `COM14`，舵机 ID 为 `1`；Jetson 串口需按实际接线填写。
+菜单 `12. 总线舵机测试` 走 PDF 中的 **115200 bps 直连总线舵机协议**，直接使用 `modules.servo.drive.bus_servo.BusServo`。端口与波特率从 `modules/servo/hardware.json` 读取（平台串口取 `windows.port` / `jetson.port`，波特率取 `bus.baudrate`），舵机 ID 取 `gripper.servo_id`。测试先只读当前位置；只有查询成功、输入目标脉冲位置和时长，并输入大写 `YES`，才会发送一次运动指令，随后读回实际位置。当前 Windows 端口填 `COM35`；Jetson 串口需按实际接线填写。
 
 ### 夹爪测试
 
-菜单 `13. 夹爪测试` 走**同一条 115200 bps 直连通路**，使用 `BusServo`：串口与波特率取 `modules/servo/config.json` 的平台 `port` 与 `bus.baudrate`（也可用 `--port` 临时覆盖），舵机 ID 取 `gripper.servo_id`，位置和耗时取 `gripper` 下的 `open_position` / `closed_position` / `duration_ms`。它先读位置，再对张开、闭合分别要求确认（**按回车执行，输入 `q` 结束**），每次动作后读回实际位置。**300/500 只是随意选定的试动值，后续必须按真实夹爪行程修改，不能视为最终张开与夹紧位置。** 旧工程那套 9600 bps 多舵机控制板协议（`ServoController` 与 `Gripper` 类）已随本次重构删除，当前硬件只走直连通路。
+菜单 `13. 夹爪测试` 走**同一条 115200 bps 直连通路**，使用 `BusServo`：串口与波特率取 `modules/servo/hardware.json` 的平台 `port` 与 `bus.baudrate`（也可用 `--port` 临时覆盖），舵机 ID 与两个机械端位取同一份文件的 `gripper.servo_id` / `open_position` / `closed_position`，耗时取 `modules/servo/config.json` 的 `gripper.duration_ms`。它先读位置，再对张开、闭合分别要求确认（**按回车执行，输入 `q` 结束**），每次动作后读回实际位置。**当前 200/0 是现场给出的端位，换爪或改装后必须重新确认。** 旧工程那套 9600 bps 多舵机控制板协议（`ServoController` 与 `Gripper` 类）已随本次重构删除，当前硬件只走直连通路。
 
 完整说明、Jetson 迁移步骤及直连调试记录见 `夹爪控制板使用说明.md`。
 
 ### 转盘测试
 
 菜单 `20. 转盘测试` 走**同一条舵机总线**，驱动的是三工位分度转盘（舵机 ID **2**，与夹爪 ID 1
-区分）。位置、耗时和工位表取 `modules/servo/config.json` 的 `turntable` 段：
+区分）。位置与工位表取 `modules/servo/hardware.json` 的 `turntable` 段，耗时取 `modules/servo/config.json`：
 
 ```json
 "turntable": {
@@ -351,7 +374,7 @@ python test.py
 
 预期：选择 3 依次测试四轮正反转；选择 4 测试底盘各方向。两项均按当前平台配置取端口和速度。
 
-所有常用硬件参数集中在 `modules/chassis/config.json`：
+所有**运动调参**集中在 `modules/chassis/config.json`（`vehicle.acceleration` / `rotation_gain` 与各平台演示 profile）；四轮地址、轮向、`expect_ack`、辊子排布与标定矩阵选择器在 `modules/chassis/hardware.json`：
 
 - `vehicle.motor_ids`：硬件实际地址到软件轮位的映射；软件 API 始终按 `FL/FR/RL/RR` 逻辑轮位工作。
 - `vehicle`：单轮方向修正、加速度、麦轮 X/O 排布和旋转增益；两套平台共用。
@@ -359,7 +382,7 @@ python test.py
 - `profiles.jetson`：两类测试的默认速度、时长。
 - `profiles.windows`：两类测试的默认速度、时长。
 
-串口不在这里：`modules/chassis/config.json` 已不含 `port`，底盘与机械臂共用 `modules/motor/config.json` 的 `windows.port` / `jetson.port`（步进总线唯一来源）。Jetson 上核对 `modules/motor/config.json` 与 `modules/servo/config.json` 里的设备名。无论正常结束、异常或 `Ctrl+C`，麦轮脚本都会发送停止命令、失能扭矩并关闭串口。
+串口不在这里：`modules/chassis/hardware.json` 不含 `port`，底盘与机械臂共用 `modules/motor/hardware.json` 的 `windows.port` / `jetson.port`（步进总线唯一来源）。Jetson 上核对 `modules/motor/hardware.json` 与 `modules/servo/hardware.json` 里的设备名。无论正常结束、异常或 `Ctrl+C`，麦轮脚本都会发送停止命令、失能扭矩并关闭串口。
 ## 视觉外设（vision）
 
 USB 摄像头 + YOLOv8 检测，封装为 `modules.vision` 包，供主程序和示例复用：
@@ -656,7 +679,7 @@ python -m unittest modules.vision.test.unit.test_vision -v
   顺序固定为**伸缩 → 升降 → 底座**。
 - **失败一律不张爪**：中途异常只停轴和失能，松开爪子会把已经抓住的物料掉下去。
 
-配置分成四份：机械常数（含回零模式）在 `modules/arm/config.json`，相机标定结果在
+配置分成四份：机械常数（含回零模式、三轴地址、行程与安全位）在 `modules/arm/hardware.json`，相机标定结果在
 `modules/vision/calibration.json`，目标尺寸颜色在 `modules/vision/config.json`，
 **策略参数**（余量、夹持比例、闭环次数与容差）在 `modules/grasp/config.json`。
 换一台机器只重标，不改策略。

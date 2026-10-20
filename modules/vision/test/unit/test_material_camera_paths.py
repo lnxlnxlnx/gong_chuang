@@ -241,7 +241,7 @@ class MaterialLocateCameraTests(CameraTestCase):
         def __exit__(self, *_exc) -> bool:
             return False
 
-        def locate(self, _frame):
+        def locate(self, _frame, **_kwargs):
             return type(self).report
 
         def draw(self, frame, _report):
@@ -255,6 +255,7 @@ class MaterialLocateCameraTests(CameraTestCase):
         settings = dict(
             model=None, camera=1, conf=0.25, focal=None, depth_range=None,
             material_bgr=None, material_palette=None, tolerance=60.0, diameter=None,
+            want=None,
         )
         settings.update(overrides)
         return argparse.Namespace(**settings)

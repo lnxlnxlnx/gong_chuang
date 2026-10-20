@@ -21,9 +21,9 @@ from typing import Callable, List, Optional
 from modules.arm.config import ArmConfig, load_arm_config
 from modules.arm.drive.kinematics import CylindricalPose
 from modules.arm.runtime import RobotArm
-from modules.grasp.config import GraspConfig, load_grasp_config
-from modules.grasp.drive.perception import CellPerception
-from modules.grasp.drive.pipeline import GraspError, GraspPipeline
+from legacy.grasp_fixed_camera.config import GraspConfig, load_grasp_config
+from legacy.grasp_fixed_camera.perception import CellPerception
+from legacy.grasp_fixed_camera.pipeline import GraspError, GraspPipeline
 from modules.motor.config import load_bus_config as load_motor_bus_config
 from modules.servo.config import GripperConfig, load_gripper_config
 from modules.servo.drive.bus_servo import load_bus_config as load_servo_bus_config

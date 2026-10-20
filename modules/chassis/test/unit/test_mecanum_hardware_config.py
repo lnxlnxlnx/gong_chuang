@@ -24,8 +24,10 @@ def write_config(path: Path) -> None:
                 "vehicle": {
                     "motor_ids": {"FL": 1, "FR": 2, "RL": 3, "RR": 4},
                     "wheel_signs": {"FL": 1, "FR": -1, "RL": 1, "RR": 1},
+                    "expect_ack": True,
                     "acceleration": 5,
                     "pattern": "X",
+                    "motion_transform": "standard",
                     "rotation_gain": 1.25,
                 },
                 "profiles": {
@@ -51,7 +53,7 @@ class MecanumHardwareConfigTests(unittest.TestCase):
             config_path = Path(temporary_directory) / "mecanum_hardware.json"
             write_config(config_path)
 
-            profile = load_profile("windows", config_path)
+            profile = load_profile("windows", config_path, hardware_path=config_path)
 
         self.assertEqual(profile.motor_ids[WheelPosition.FL], 1)
         self.assertEqual(profile.wheel_signs[WheelPosition.FR], -1)
@@ -68,7 +70,7 @@ class MecanumHardwareConfigTests(unittest.TestCase):
             write_config(config_path)
 
             with self.assertRaisesRegex(ValueError, "unknown profile"):
-                load_profile("laboratory", config_path)
+                load_profile("laboratory", config_path, hardware_path=config_path)
 
     def test_rejects_duplicate_motor_addresses(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -79,20 +81,22 @@ class MecanumHardwareConfigTests(unittest.TestCase):
             config_path.write_text(json.dumps(document), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "must be unique"):
-                load_profile("jetson", config_path)
+                load_profile("jetson", config_path, hardware_path=config_path)
 
     def test_open_assembles_the_profile_drive_and_takes_the_shared_bus_port(self) -> None:
         """装配只有一处：``MecanumChassis.open`` 读 profile、从 motor 配置取端口、建驱动。"""
         with tempfile.TemporaryDirectory() as temporary_directory:
             config_path = Path(temporary_directory) / "mecanum_hardware.json"
             write_config(config_path)
-            expected = load_profile("windows", config_path)
+            expected = load_profile("windows", config_path, hardware_path=config_path)
 
             with patch(
                 "modules.chassis.runtime.load_bus_config",
-                return_value=SimpleNamespace(port="COM42"),
+                return_value=SimpleNamespace(port="COM42", baudrate=115200),
             ), patch("modules.chassis.runtime.MecanumDrive") as drive:
-                chassis = MecanumChassis.open(config_path=config_path)
+                chassis = MecanumChassis.open(
+                    config_path=config_path, hardware_path=config_path
+                )
 
         self.assertIsInstance(chassis, MecanumChassis)
         self.assertIs(chassis.drive, drive.return_value)
@@ -112,13 +116,13 @@ class MecanumHardwareConfigTests(unittest.TestCase):
 
             with patch(
                 "modules.chassis.runtime.load_bus_config",
-                return_value=SimpleNamespace(port="COM42"),
+                return_value=SimpleNamespace(port="COM42", baudrate=115200),
             ) as load_bus, patch("modules.chassis.runtime.MecanumDrive") as drive:
                 MecanumChassis.open(
                     config_path=config_path, motor_config_path=motor_path
                 )
 
-        self.assertEqual(load_bus.call_args.kwargs["config_path"], motor_path)
+        self.assertEqual(load_bus.call_args.kwargs["hardware_path"], motor_path)
         self.assertEqual(drive.call_args.args[0], "COM42")
 
     def test_installed_profiles_use_calibrated_motion_transform(self) -> None:
@@ -130,7 +134,7 @@ class MecanumHardwareConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             config_path = Path(temporary_directory) / "mecanum_hardware.json"
             write_config(config_path)
-            profile = load_profile("windows", config_path)
+            profile = load_profile("windows", config_path, hardware_path=config_path)
 
         with patch("modules.chassis.runtime.MecanumDrive") as drive:
             MecanumChassis._from_settings(

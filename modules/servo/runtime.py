@@ -54,10 +54,16 @@ from pathlib import Path
 from typing import Callable, Optional, Union
 
 from modules.motion import MotionTicket
-from modules.servo.config import DEFAULT_CONFIG_PATH, GripperConfig, load_gripper_config
+from modules.servo.config import (
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_HARDWARE_PATH,
+    GripperConfig,
+    load_gripper_config,
+)
 from modules.servo.drive.bus_servo import BusServo, BusServoConfig, SerialPort, load_bus_config
 
 #: 读回位置与目标位置相差在这个范围内就算到位（舵机位置量程 0..1000）。
+#: 夹爪行程只有 0..200（≈48°），所以这是一个**判据**而不是硬件事实，留在代码里。
 DEFAULT_POSITION_TOLERANCE = 30
 
 #: 动作时长之外额外等待的余量（秒），让舵机真正停稳后再读回。
@@ -95,7 +101,7 @@ class GripperServo:
         *,
         config: GripperConfig,
         port: str = "",
-        baudrate: int = 115200,
+        baudrate: Optional[int] = None,
         servo: Optional[BusServo] = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
@@ -131,6 +137,11 @@ class GripperServo:
             self._borrowed = False
             if not port:
                 raise ValueError("建真实夹爪会话需要串口名（port）")
+            if baudrate is None:
+                raise ValueError(
+                    "建真实夹爪会话需要波特率；由 open() 从 modules/servo/hardware.json 传入"
+                )
+            self.baudrate = baudrate
             self._servo = BusServo(port, config.servo_id, baudrate=baudrate)
         self._closed = False
 
@@ -140,13 +151,14 @@ class GripperServo:
         cls,
         *,
         config_path: Optional[Path] = None,
+        hardware_path: Optional[Path] = None,
         bus: Optional[SerialPort] = None,
         owns_bus: Optional[bool] = None,
     ) -> "GripperServo":
-        """读 servo 配置（夹爪参数 + 舵机总线参数），开总线并使能扭矩。
+        """读夹爪配置（运动调参 + 硬件事实），开总线并使能扭矩。
 
-        两个加载器读的是**同一份**文件与同一个 ``config_path``：不再分别传 ``port``
-        与 ``bus_config``。
+        ``config_path`` 是 ``config.json``（``duration_ms`` 等调参），
+        ``hardware_path`` 是 ``hardware.json``（舵机 ID、两个机械端位、总线端口/波特率）。
 
         :param bus: 由调用方**已经打开**的舵机总线（``Robot`` 装配夹爪+转盘时用，
             两个舵机挂的是同一条半双工总线）。给了就借用，不再自己开第二条、
@@ -154,9 +166,10 @@ class GripperServo:
             默认"借来的不归"。
         """
         path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
-        config = load_gripper_config(path)
+        hardware = DEFAULT_HARDWARE_PATH if hardware_path is None else Path(hardware_path)
+        config = load_gripper_config(path, hardware)
         # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
-        bus_config = load_bus_config(config_path=path)
+        bus_config = load_bus_config(hardware_path=hardware)
         if bus is None:
             session = cls(config=config, port=bus_config.port, baudrate=bus_config.baudrate)
         else:

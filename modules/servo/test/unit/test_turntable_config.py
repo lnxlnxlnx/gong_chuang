@@ -30,6 +30,8 @@ def turntable_document(**turntable_overrides) -> dict:
     turntable = {
         "servo_id": 2,
         "duration_ms": 1500,
+        "travel_degrees": 240.0,
+        "position_tolerance_units": 30,
         "stations": {"home": 0, "station_2": 500, "station_3": 1000},
     }
     turntable.update(turntable_overrides)
@@ -87,7 +89,7 @@ class TurntableConfigRejectionTests(unittest.TestCase):
     def assert_rejected(self, document: object, pattern: str) -> None:
         with config_file(document) as path:
             with self.assertRaisesRegex(ValueError, pattern):
-                load_turntable_config(path)
+                load_turntable_config(path, hardware_path=path)
 
     def test_a_missing_turntable_section_is_rejected(self) -> None:
         document = turntable_document()
@@ -160,20 +162,20 @@ class TurntableConfigRejectionTests(unittest.TestCase):
         document = turntable_document()
         del document["gripper"]
         with config_file(document) as path:
-            self.assertEqual(load_turntable_config(path).servo_id, 2)
+            self.assertEqual(load_turntable_config(path, hardware_path=path).servo_id, 2)
 
     def test_an_unreadable_file_is_reported_with_its_path(self) -> None:
         with scratch_directory() as root:
             missing = root / "config.json"
-            with self.assertRaisesRegex(ValueError, "无法读取舵机配置"):
-                load_turntable_config(missing)
+            with self.assertRaisesRegex(ValueError, "舵机配置"):
+                load_turntable_config(missing, hardware_path=missing)
 
     def test_broken_json_is_reported(self) -> None:
         with scratch_directory() as root:
             path = root / "config.json"
             path.write_text("{ not json", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "无法读取舵机配置"):
-                load_turntable_config(path)
+            with self.assertRaisesRegex(ValueError, "舵机配置"):
+                load_turntable_config(path, hardware_path=path)
 
 
 if __name__ == "__main__":

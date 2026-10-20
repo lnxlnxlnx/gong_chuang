@@ -7,9 +7,9 @@ from unittest.mock import Mock
 
 from modules.arm.config import ArmConfig, AxisConfig
 from modules.arm.drive.kinematics import CylindricalPose, TravelLimit
-from modules.grasp.config import GraspConfig
-from modules.grasp.drive.perception import CellObservation
-from modules.grasp.test.manual.grasp import (
+from legacy.grasp_fixed_camera.config import GraspConfig
+from legacy.grasp_fixed_camera.perception import CellObservation
+from legacy.grasp_fixed_camera.grasp_menu import (
     MENU_ENTRY,
     calibration_report,
     run_grasp_once,
@@ -68,7 +68,7 @@ class CalibrationReportTests(unittest.TestCase):
         会让人分不清"真缺"和"清单没跟着更新"。
         """
         from modules.arm.config import load_arm_config
-        from modules.grasp.config import load_grasp_config
+        from legacy.grasp_fixed_camera.config import load_grasp_config
         from modules.vision.config import load_vision_config
 
         missing = calibration_report(

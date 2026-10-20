@@ -43,13 +43,18 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from modules.chassis.config import DEFAULT_CONFIG_PATH, HardwareProfile, load_profile
+from modules.chassis.config import (
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_HARDWARE_PATH,
+    HardwareProfile,
+    load_profile,
+)
 from modules.chassis.drive.mecanum import (
     MecanumDrive,
     SerialPort,
     WheelPosition,
 )
-from modules.motor.config import DEFAULT_CONFIG_PATH as MOTOR_CONFIG_PATH
+from modules.motor.config import DEFAULT_HARDWARE_PATH as MOTOR_HARDWARE_PATH
 from modules.motor.config import load_bus_config
 
 
@@ -67,6 +72,7 @@ class MecanumChassis:
         cls,
         *,
         config_path: Optional[Path] = None,
+        hardware_path: Optional[Path] = None,
         motor_config_path: Optional[Path] = None,
         bus: Optional[SerialPort] = None,
         owns_bus: Optional[bool] = None,
@@ -75,27 +81,34 @@ class MecanumChassis:
     ) -> "MecanumChassis":
         """读 chassis 配置 + 总线配置，建驱动并使能四轮。
 
-        :param config_path: chassis 的硬件 profile 配置；``None`` 用模块默认路径。
-        :param motor_config_path: 步进总线配置；``None`` 用 motor 模块的默认路径。
+        :param config_path: 运动调参（``config.json``）；``None`` 用模块默认路径。
+        :param hardware_path: 硬件事实（``hardware.json``）；``None`` 用模块默认路径。
+        :param motor_config_path: 步进总线硬件配置；``None`` 用 motor 模块的默认路径。
         :param bus: 由调用方**已经打开**的共享连接（``Robot`` 装配 arm+chassis 时用）。
             给了就借用，不再自己开第二条、也不会在 ``close`` 里关掉它。
         :param owns_bus: 显式声明这条 ``bus`` 归不归本底盘；默认"不是自己开的就是借的"。
         """
-        profile = cls.load_hardware_profile(config_path)
-        path = MOTOR_CONFIG_PATH if motor_config_path is None else Path(motor_config_path)
+        profile = cls.load_hardware_profile(config_path, hardware_path)
+        path = MOTOR_HARDWARE_PATH if motor_config_path is None else Path(motor_config_path)
         # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
-        port = load_bus_config(config_path=path).port
+        port = load_bus_config(hardware_path=path).port
         return cls._from_settings(
             profile=profile, port=port, bus=bus, owns_bus=owns_bus,
             sleep=sleep, settle_seconds=settle_seconds,
         )
 
     @classmethod
-    def load_hardware_profile(cls, config_path: Optional[Path] = None) -> HardwareProfile:
+    def load_hardware_profile(
+        cls,
+        config_path: Optional[Path] = None,
+        hardware_path: Optional[Path] = None,
+    ) -> HardwareProfile:
         """按当前平台读并校验 chassis 配置；``Robot`` 在开设备前用它做预校验。"""
         platform = "windows" if os.name == "nt" else "jetson"
         return load_profile(
-            platform, DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
+            platform,
+            DEFAULT_CONFIG_PATH if config_path is None else Path(config_path),
+            DEFAULT_HARDWARE_PATH if hardware_path is None else Path(hardware_path),
         )
 
     @classmethod
@@ -126,6 +139,8 @@ class MecanumChassis:
             pattern=profile.pattern,
             rotation_gain=profile.rotation_gain,
             motion_transform=profile.motion_transform,
+            expect_ack=profile.expect_ack,
+            pulses_per_revolution=profile.pulses_per_revolution,
             serial_port=bus,
             sleep=sleep,
             **kwargs,

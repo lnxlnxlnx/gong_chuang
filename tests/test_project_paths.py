@@ -20,29 +20,43 @@ from pathlib import Path
 from project_paths import PROJECT_ROOT, models_path, output_path
 
 
-#: (模块, 该模块的配置文件, 加载器源文件)。配置必须与模块同目录且存在。
+#: (模块, 路径常量名, 该常量应指向的文件, 加载器源文件)。文件必须与模块同目录且存在。
+#: 硬件参数独立成 ``hardware.json`` 之后，同一个加载器可能有两个默认路径，所以
+#: 常量名也写进表里，别让"哪个常量"靠猜。
 LOADER_CONFIGS = (
-    ("modules.chassis.config", "modules/chassis/config.json", "modules/chassis/config.py"),
-    ("modules.arm.config", "modules/arm/config.json", "modules/arm/config.py"),
-    ("modules.motor.config", "modules/motor/config.json", "modules/motor/config.py"),
-    ("modules.lidar.config", "modules/lidar/config.json", "modules/lidar/config.py"),
+    ("modules.chassis.config", "DEFAULT_CONFIG_PATH", "modules/chassis/config.json", "modules/chassis/config.py"),
+    ("modules.chassis.config", "DEFAULT_HARDWARE_PATH", "modules/chassis/hardware.json", "modules/chassis/config.py"),
+    ("modules.arm.config", "DEFAULT_CONFIG_PATH", "modules/arm/config.json", "modules/arm/config.py"),
+    ("modules.arm.config", "DEFAULT_HARDWARE_PATH", "modules/arm/hardware.json", "modules/arm/config.py"),
+    ("modules.motor.config", "DEFAULT_HARDWARE_PATH", "modules/motor/hardware.json", "modules/motor/config.py"),
+    ("modules.lidar.config", "DEFAULT_CONFIG_PATH", "modules/lidar/config.json", "modules/lidar/config.py"),
     (
         "modules.laser_scan.drive.laser_scanner",
+        "DEFAULT_CONFIG_PATH",
         "modules/laser_scan/config.json",
         "modules/laser_scan/drive/laser_scanner.py",
     ),
     (
         "modules.servo.config",
+        "DEFAULT_CONFIG_PATH",
         "modules/servo/config.json",
         "modules/servo/config.py",
     ),
     (
+        "modules.servo.config",
+        "DEFAULT_HARDWARE_PATH",
+        "modules/servo/hardware.json",
+        "modules/servo/config.py",
+    ),
+    (
         "modules.servo.drive.bus_servo",
-        "modules/servo/config.json",
+        "DEFAULT_HARDWARE_PATH",
+        "modules/servo/hardware.json",
         "modules/servo/drive/bus_servo.py",
     ),
     (
         "modules.vision.drive.camera",
+        "DEFAULT_CONFIG_PATH",
         "modules/vision/config.json",
         "modules/vision/drive/camera.py",
     ),
@@ -72,10 +86,10 @@ class ProjectPathTests(unittest.TestCase):
         self.assertEqual(Path(result.stdout.strip()), PROJECT_ROOT)
 
     def test_each_module_reads_the_config_next_to_it(self) -> None:
-        for module_name, expected, _ in LOADER_CONFIGS:
-            with self.subTest(module=module_name):
+        for module_name, constant, expected, _ in LOADER_CONFIGS:
+            with self.subTest(module=module_name, constant=constant):
                 module = importlib.import_module(module_name)
-                resolved = Path(module.DEFAULT_CONFIG_PATH).resolve()
+                resolved = Path(getattr(module, constant)).resolve()
                 self.assertEqual(resolved, (PROJECT_ROOT / expected).resolve())
                 self.assertTrue(resolved.is_file(), f"配置缺失：{expected}")
 
@@ -83,7 +97,7 @@ class ProjectPathTests(unittest.TestCase):
         """A module's own config must not be named via project_paths."""
         offenders = [
             relative
-            for _, _, relative in LOADER_CONFIGS
+            for _, _, _, relative in LOADER_CONFIGS
             if "from project_paths import" in (PROJECT_ROOT / relative).read_text(encoding="utf-8")
         ]
         self.assertEqual(offenders, [], "模块自己的配置不应通过仓库根定位")
@@ -91,7 +105,7 @@ class ProjectPathTests(unittest.TestCase):
     def test_loaders_do_not_guess_the_repository_root(self) -> None:
         """``parents[2]`` or deeper is a root guess that only breaks after a move."""
         offenders = []
-        for _, _, relative in LOADER_CONFIGS:
+        for _, _, _, relative in LOADER_CONFIGS:
             source = (PROJECT_ROOT / relative).read_text(encoding="utf-8")
             for match in ROOT_GUESS.finditer(source):
                 if int(match.group(1)) >= 2:

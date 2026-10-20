@@ -352,13 +352,13 @@ class RobotArm:
         :param parallel_rotation_limit_pulses: 底座旋转与伸缩可并行的脉冲上限；
             ``None`` 用 :data:`modules.motor.drive.motion.DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`。
         """
-        from modules.motor.config import DEFAULT_CONFIG_PATH as motor_default
+        from modules.motor.config import DEFAULT_HARDWARE_PATH as motor_default
         from modules.motor.config import load_bus_config
 
         arm_path = Path(config_path) if config_path is not None else None
         config = load_arm_config(**({} if arm_path is None else {"config_path": arm_path}))
         bus_path = Path(motor_config_path) if motor_config_path is not None else motor_default
-        port = load_bus_config(config_path=bus_path).port
+        port = load_bus_config(hardware_path=bus_path).port
         tuning = {}
         if inter_frame_seconds is not None:
             tuning["inter_frame_seconds"] = inter_frame_seconds
@@ -409,8 +409,8 @@ class RobotArm:
                     port,
                     config.motor_id(axis_name),
                     pulses_per_revolution=config.pulses_per_revolution,
-                    # 已读取的 5/6/7 配置均为 Response=None，控制帧不回 ACK。
-                    expect_ack=False,
+                    # 每台驱动器的 Response 菜单状态，来自 hardware.json 的 axes.<name>.expect_ack。
+                    expect_ack=config.axes[axis_name].expect_ack,
                     serial_port=opened,
                 )
                 for axis_name in AXIS_NAMES

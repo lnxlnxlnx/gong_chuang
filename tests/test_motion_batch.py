@@ -51,7 +51,7 @@ TURNTABLE_CONFIG = TurntableConfig(
     duration_ms=1500,
     stations={"home": 0, "station_2": 500, "station_3": 1000},
 )
-SERVO_BUS = BusServoConfig(port="FAKE_SERVO", baudrate=115200, servo_id=1)
+SERVO_BUS = BusServoConfig(port="FAKE_SERVO", baudrate=115200, timeout_seconds=0.1)
 
 
 class FakeClock:

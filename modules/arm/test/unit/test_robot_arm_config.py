@@ -38,7 +38,7 @@ class RobotArmConfigTests(unittest.TestCase):
             config_path = Path(temporary_directory) / "robot_arm.json"
             write_config(config_path, default_pulses=1200, max_pulses=5000)
 
-            config = load_arm_config(config_path)
+            config = load_arm_config(config_path, hardware_path=config_path)
 
         self.assertEqual(config.default_pulses, 1200)
         self.assertEqual(config.max_pulses, 5000)
@@ -55,7 +55,7 @@ class RobotArmConfigTests(unittest.TestCase):
             write_config(config_path, default_pulses=5001, max_pulses=5000)
 
             with self.assertRaisesRegex(ValueError, "default_pulses"):
-                load_arm_config(config_path)
+                load_arm_config(config_path, hardware_path=config_path)
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@ from typing import Callable, Mapping, Optional, Union
 from modules.motion import MotionTicket
 from modules.servo.config import (
     DEFAULT_CONFIG_PATH,
+    DEFAULT_HARDWARE_PATH,
     HOME_STATION,
     TurntableConfig,
     load_turntable_config,
@@ -71,18 +72,12 @@ from modules.servo.drive.bus_servo import (
     load_bus_config,
 )
 
-#: 读回位置与目标位置相差在这个范围内就算到位（舵机位置量程 0..1000）。
-#: 30 个位置单位 = 7.2°，比工位间距（120°）小得多，既不会把"差一点"当到位，
-#: 也不会因为舵机的静止抖动反复判不到。
-DEFAULT_POSITION_TOLERANCE = 30
-
-#: 转动时长之外额外等待的余量（秒），让舵机真正停稳后再读回。
-DEFAULT_SETTLE_SECONDS = 0.2
-
-#: 舵机位置量程：0..1000 对应输出轴 0..240°，步距 0.24°。
-#: 转盘是直连（无减速器），所以这也是转盘的名义转角。
+#: 舵机位置量程：0..1000。一个单位对应多少度由 ``turntable.travel_degrees`` 给出
+#: （本机 240°），那是装机事实，所以不再写死在代码里。
 POSITION_UNITS = 1000
-DEGREES_PER_UNIT = 240.0 / POSITION_UNITS
+
+#: ``TurntableReport`` 单独构造时（测试、离线打印）用的兜底换算，运行时一律用配置值。
+_FALLBACK_DEGREES_PER_UNIT = 240.0 / POSITION_UNITS
 
 
 @dataclass(frozen=True)
@@ -95,6 +90,8 @@ class TurntableReport:
     #: 动作结束后读回的实际位置。
     position: int
     reached: bool
+    #: 一个位置单位对应多少度；由配置的 ``turntable.travel_degrees`` 决定。
+    degrees_per_unit: float = _FALLBACK_DEGREES_PER_UNIT
 
     @property
     def error(self) -> int:
@@ -104,13 +101,13 @@ class TurntableReport:
     @property
     def degrees(self) -> float:
         """读回位置对应的名义转角（度）。直连时可当作转盘转角。"""
-        return self.position * DEGREES_PER_UNIT
+        return self.position * self.degrees_per_unit
 
     def summary(self) -> str:
         state = "到位" if self.reached else f"未到位（差 {self.error:+d}）"
         return (
             f"转盘{self.command}：目标 {self.target}"
-            f"（{self.target * DEGREES_PER_UNIT:.1f}°），"
+            f"（{self.target * self.degrees_per_unit:.1f}°），"
             f"读回 {self.position}（{self.degrees:.1f}°），{state}"
         )
 
@@ -127,18 +124,26 @@ class TurntableServo:
         servo: Optional[BusServo] = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
-        position_tolerance: int = DEFAULT_POSITION_TOLERANCE,
-        settle_seconds: float = DEFAULT_SETTLE_SECONDS,
+        position_tolerance: Optional[int] = None,
+        settle_seconds: Optional[float] = None,
     ) -> None:
         self.config = config if config is not None else load_turntable_config()
         bus = bus_config if bus_config is not None else load_bus_config()
         self.port = port or bus.port
+        # 到位容差与停稳余量都来自配置；显式传参只用于测试或单次覆盖。
+        position_tolerance = (
+            self.config.position_tolerance if position_tolerance is None else position_tolerance
+        )
+        settle_seconds = (
+            self.config.settle_seconds if settle_seconds is None else settle_seconds
+        )
         if position_tolerance < 0:
             raise ValueError("position_tolerance must not be negative")
         if settle_seconds < 0:
             raise ValueError("settle_seconds must not be negative")
         self.position_tolerance = position_tolerance
         self.settle_seconds = settle_seconds
+        self.degrees_per_unit = self.config.degrees_per_unit
         self._sleep = sleep
         self._clock = clock
         self._servo = (
@@ -158,20 +163,23 @@ class TurntableServo:
         cls,
         *,
         config_path: Optional[Path] = None,
+        hardware_path: Optional[Path] = None,
         bus: Optional[SerialPort] = None,
         owns_bus: Optional[bool] = None,
     ) -> "TurntableServo":
         """读转盘配置 + 舵机总线配置，开总线并使能扭矩。
 
-        :param config_path: servo 配置；``None`` 用模块默认路径。
+        :param config_path: 运动调参（``config.json``）；``None`` 用模块默认路径。
+        :param hardware_path: 硬件事实（``hardware.json``）；``None`` 用模块默认路径。
         :param bus: 由调用方**已经打开**的舵机总线（``Robot`` 装配夹爪+转盘时用）。
             给了就借用，不再自己开第二条、也不会在 ``close`` 里关掉它。
         :param owns_bus: 显式声明这条 ``bus`` 归不归本转盘；默认"借来的不归"。
         """
         path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
-        config = load_turntable_config(path)
+        hardware = DEFAULT_HARDWARE_PATH if hardware_path is None else Path(hardware_path)
+        config = load_turntable_config(path, hardware)
         # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
-        bus_config = load_bus_config(config_path=path)
+        bus_config = load_bus_config(hardware_path=hardware)
         if bus is None:
             session = cls(bus_config.port, config=config, bus_config=bus_config)
         else:
@@ -332,6 +340,7 @@ class TurntableServo:
             target=target,
             position=position,
             reached=abs(position - target) <= self.position_tolerance,
+            degrees_per_unit=self.degrees_per_unit,
         )
 
     def _stop_if_open(self) -> None:
@@ -384,7 +393,7 @@ def _self_test() -> int:
         stations={"home": 0, "station_2": 500, "station_3": 1000},
     )
     # 显式给出总线参数，自测不去读 modules/servo/config.json，避免依赖本机端口配置。
-    bus = BusServoConfig(port="FAKE", baudrate=115200, servo_id=1)
+    bus = BusServoConfig(port="FAKE", baudrate=115200, timeout_seconds=0.1)
     slept: list = []
 
     # 场景一：回零走到 home 工位，读回到位。

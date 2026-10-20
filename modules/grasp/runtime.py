@@ -177,7 +177,7 @@ class Grasp:
             load_servo_config,
             load_target,
         )
-        from modules.motor.config import DEFAULT_CONFIG_PATH as motor_default
+        from modules.motor.config import DEFAULT_HARDWARE_PATH as motor_default
         from modules.motor.config import load_bus_config
         from modules.vision.runtime import Vision, _load_settings
 
@@ -195,7 +195,7 @@ class Grasp:
         target, jacobian = cls._require_action_ready(target=target, jacobian=jacobian)
         arm_config = load_arm_config(config_path=arm_path)
         # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
-        port: str = load_bus_config(config_path=motor_path).port
+        port: str = load_bus_config(hardware_path=motor_path).port
         # 视觉快照在**打开任何设备之前**读好；真正开设备由 source_factory 负责。
         vision_settings = _load_settings(vision_config_path, vision_calibration_path)
         return cls._open_settings(

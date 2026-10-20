@@ -17,33 +17,42 @@ class BusServoConfigTests(unittest.TestCase):
         path.write_text(json.dumps(document), encoding="utf-8")
         return path
 
-    def test_loads_port_baudrate_and_servo_id(self) -> None:
+    def test_loads_port_baudrate_and_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self._write(
                 directory,
-                {"windows": {"port": "COM14"}, "bus": {"baudrate": 115200, "servo_id": 2}},
+                {
+                    "windows": {"port": "COM14"},
+                    "bus": {"baudrate": 115200, "timeout_seconds": 0.1},
+                },
             )
             config = load_bus_config("windows", path)
-        self.assertEqual((config.port, config.baudrate, config.servo_id), ("COM14", 115200, 2))
+        self.assertEqual(
+            (config.port, config.baudrate, config.timeout_seconds), ("COM14", 115200, 0.1)
+        )
 
     def test_port_must_be_configured_before_opening_serial(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = self._write(directory, {"jetson": {"port": ""}, "bus": {}})
+            path = self._write(
+                directory,
+                {"jetson": {"port": ""}, "bus": {"baudrate": 115200, "timeout_seconds": 0.1}},
+            )
             with self.assertRaisesRegex(ValueError, "jetson.port"):
                 load_bus_config("jetson", path)
 
-    def test_bus_section_and_servo_id_are_required(self) -> None:
+    def test_bus_section_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self._write(directory, {"windows": {"port": "COM14"}})
             with self.assertRaisesRegex(ValueError, "bus"):
                 load_bus_config("windows", path)
 
+    def test_serial_timeout_must_be_positive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self._write(
                 directory,
-                {"windows": {"port": "COM14"}, "bus": {"baudrate": 115200, "servo_id": 0}},
+                {"windows": {"port": "COM14"}, "bus": {"baudrate": 115200, "timeout_seconds": 0}},
             )
-            with self.assertRaisesRegex(ValueError, "bus.servo_id"):
+            with self.assertRaisesRegex(ValueError, "timeout_seconds"):
                 load_bus_config("windows", path)
 
     def test_project_file_configures_the_verified_direct_bus(self) -> None:
@@ -51,7 +60,7 @@ class BusServoConfigTests(unittest.TestCase):
         config = load_bus_config("windows")
         self.assertEqual(config.baudrate, 115200)
         self.assertTrue(config.port.strip())
-        self.assertTrue(1 <= config.servo_id <= 253)
+        self.assertGreater(config.timeout_seconds, 0)
 
 
 class ServoManualTests(unittest.TestCase):

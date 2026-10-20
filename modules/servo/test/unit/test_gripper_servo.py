@@ -55,15 +55,14 @@ class GripperLifecycleTests(unittest.TestCase):
         ) as load_bus, patch(
             "modules.servo.runtime.BusServo", return_value=servo
         ) as bus_servo:
-            load_bus.return_value = Mock(port="COM7", baudrate=115200, servo_id=1)
+            load_bus.return_value = Mock(port="COM7", baudrate=115200, timeout_seconds=0.1)
             gripper = GripperServo.open()
 
-        # 两个加载器读的是同一份配置路径。
+        # 两个加载器各自读自己那份文件：调参读 config.json，端口/ID 读 hardware.json。
         load_gripper.assert_called_once()
         load_bus.assert_called_once()
-        self.assertEqual(
-            load_gripper.call_args.args[0], load_bus.call_args.kwargs["config_path"]
-        )
+        hardware = load_bus.call_args.kwargs["hardware_path"]
+        self.assertEqual(load_gripper.call_args.args[1], hardware)
         bus_servo.assert_called_once_with("COM7", CONFIG.servo_id, baudrate=115200)
         servo.initialize.assert_called_once_with()
         servo.set_torque.assert_called_once_with(True)

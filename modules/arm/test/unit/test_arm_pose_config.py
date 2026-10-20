@@ -35,7 +35,7 @@ class ArmPoseConfigTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "arm.json"
             write_config(path, **overrides)
-            return load_arm_config(path)
+            return load_arm_config(path, hardware_path=path)
 
 
 class ArmLimitConfigTests(ArmPoseConfigTestCase):

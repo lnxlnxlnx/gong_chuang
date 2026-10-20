@@ -68,11 +68,11 @@ class RobotTestCase(unittest.TestCase):
         self.grasp = FakeModule("grasp", self.calls)
 
         self.patchers = [
-            patch("robot.Robot._open_shared_bus", side_effect=lambda port: self.bus),
-            patch("robot.Robot._open_servo_bus", side_effect=lambda port: self.servo_bus),
+            patch("robot.Robot._open_shared_bus", side_effect=lambda port, **_: self.bus),
+            patch("robot.Robot._open_servo_bus", side_effect=lambda port, **_: self.servo_bus),
             patch("modules.arm.config.load_arm_config", return_value=healthy_arm_config()),
             patch("modules.motor.config.load_bus_config",
-                  return_value=SimpleNamespace(port="FAKE_BUS")),
+                  return_value=SimpleNamespace(port="FAKE_BUS", baudrate=115200)),
             patch("modules.arm.runtime.RobotArm._from_settings", return_value=self.arm),
             patch("modules.chassis.runtime.MecanumChassis.load_hardware_profile",
                   return_value=healthy_chassis_profile()),
@@ -168,7 +168,7 @@ class RobotTestCase(unittest.TestCase):
             with Robot.open(arm=True, chassis=True):
                 pass
 
-        open_bus.assert_called_once_with("FAKE_BUS")
+        open_bus.assert_called_once_with("FAKE_BUS", baudrate=115200)
         self.assertIs(make_arm.call_args.kwargs["bus"], self.bus)
         self.assertIs(make_chassis.call_args.kwargs["bus"], self.bus)
         # 两个借用者都不拥有这条连接。
@@ -356,7 +356,7 @@ class SharedBusOpenerTests(unittest.TestCase):
             "modules.arm.config.load_arm_config", return_value=healthy_arm_config()
         ), patch(
             "modules.motor.config.load_bus_config",
-            return_value=SimpleNamespace(port="COM_TEST"),
+            return_value=SimpleNamespace(port="COM_TEST", baudrate=115200),
         ), patch(
             "modules.arm.runtime.RobotArm._from_settings", return_value=arm
         ) as make_arm, patch(
@@ -368,7 +368,7 @@ class SharedBusOpenerTests(unittest.TestCase):
             with Robot.open(arm=True, chassis=True):
                 pass
 
-        make_bus.assert_called_once_with("COM_TEST")
+        make_bus.assert_called_once_with("COM_TEST", baudrate=115200)
         self.assertIs(make_arm.call_args.kwargs["bus"], opened)
         self.assertIs(make_chassis.call_args.kwargs["bus"], opened)
         self.assertFalse(make_arm.call_args.kwargs["owns_bus"])
@@ -396,7 +396,7 @@ class SharedBusOpenerTests(unittest.TestCase):
                 pass
 
         # 端口只开一次；两个模块拿到的是**同一个**连接对象。
-        make_bus.assert_called_once_with("COM_SERVO")
+        make_bus.assert_called_once_with("COM_SERVO", baudrate=115200)
         self.assertIs(make_gripper.call_args.kwargs["bus"], opened)
         self.assertIs(make_turntable.call_args.kwargs["bus"], opened)
 

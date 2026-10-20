@@ -40,9 +40,15 @@ from modules.arm.drive.kinematics import (
     TravelLimit,
     motor_pulses_for_degrees,
 )
+from modules.motor.config import DEFAULT_HARDWARE_PATH as DEFAULT_BUS_HARDWARE_PATH
+from modules.motor.config import load_pulses_per_revolution
 from modules.motor.drive.emm42 import Emm42Driver, HomeMode
 
+#: 运动调参（rpm / acceleration / 脉冲上限）：手改。
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
+
+#: 硬件事实（轴地址、减速比、导程、行程、安全位、回零方式）：换机器/换接线时改。
+DEFAULT_HARDWARE_PATH = Path(__file__).resolve().parent / "hardware.json"
 AXIS_NAMES = ("base", "lift", "extension")
 
 #: ``limits`` / ``safe_pose`` 里三个量的名字，对应 ``CylindricalPose`` 的字段。
@@ -94,6 +100,10 @@ class AxisConfig:
     motor_id: int
     reduction_ratio: Optional[int] = None
     mm_per_motor_rev: Optional[float] = None
+    #: 这台驱动器的 ``Response`` 菜单是否会回 4 字节 ACK。``False`` 就是"发完不管"。
+    #: 它是**每台驱动器的菜单状态**，不是协议事实，所以必须在 hardware.json 里如实声明；
+    #: 这个默认值只服务于手工构造的夹具，加载器在没有该键时会直接报错。
+    expect_ack: bool = False
 
 
 @dataclass(frozen=True)
@@ -358,31 +368,40 @@ class ArmConfig:
         return tuple(problems)
 
 
-def load_arm_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ArmConfig:
-    """Load one JSON file and reject settings outside the supported protocol range."""
-    try:
-        document = json.loads(config_path.read_text(encoding="utf-8"))
-    except OSError as error:
-        raise ValueError(f"cannot read configuration: {config_path}") from error
-    except json.JSONDecodeError as error:
-        raise ValueError(f"invalid JSON configuration: {config_path}") from error
+def load_arm_config(
+    config_path: Path = DEFAULT_CONFIG_PATH,
+    hardware_path: Path = DEFAULT_HARDWARE_PATH,
+    bus_hardware_path: Optional[Path] = None,
+) -> ArmConfig:
+    """Read **tuning** from ``config.json`` and **hardware** from ``hardware.json``.
 
-    root = _mapping(document, "root")
-    motion = _mapping(root.get("motion"), "motion")
-    axes_document = _mapping(root.get("axes"), "axes")
+    - ``rpm`` / ``acceleration`` / ``default_pulses`` / ``max_pulses`` 是调参，留在
+      ``config.json`` 的 ``motion`` 段；
+    - 轴地址、减速比、导程、行程、安全位、回零方式是**硬件事实**，全在 ``hardware.json``；
+    - 脉冲/圈是驱动器细分，只有一份，读 ``modules/motor/hardware.json``（``bus`` 段）。
+
+    返回值仍然是**合并后的** :class:`ArmConfig` 快照：``motion_plan`` / ``runtime`` /
+    测试都不需要知道它来自两个文件，只有写配置的人需要。
+
+    任何一项缺失都报出具体的**文件与键名**，不退回代码默认值——默认值会让"漏写"看起来
+    像"跑通了"。
+    """
+    tuning = _read_json(config_path)
+    hardware = _read_json(hardware_path)
+    pulses_per_revolution = load_pulses_per_revolution(
+        DEFAULT_BUS_HARDWARE_PATH if bus_hardware_path is None else bus_hardware_path
+    )
+
+    motion = _mapping(tuning.get("motion"), "motion")
+    axes_document = _mapping(hardware.get("axes"), "axes")
     if set(axes_document) != set(AXIS_NAMES):
         raise ValueError(f"axes must define exactly: {', '.join(AXIS_NAMES)}")
 
-    limits = root.get("limits")
+    limits = hardware.get("limits")
     limits = {} if limits is None else _mapping(limits, "limits")
 
     config = ArmConfig(
-        pulses_per_revolution=_integer(
-            motion.get("pulses_per_revolution"),
-            "modules.motor.drive.motion.pulses_per_revolution",
-            minimum=1,
-            maximum=0xFFFFFFFF,
-        ),
+        pulses_per_revolution=pulses_per_revolution,
         rpm=_integer(motion.get("rpm"), "modules.motor.drive.motion.rpm", minimum=0, maximum=Emm42Driver.MAX_RPM),
         acceleration=_integer(
             motion.get("acceleration"), "modules.motor.drive.motion.acceleration", minimum=0, maximum=255),
@@ -408,9 +427,11 @@ def load_arm_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ArmConfig:
         base_limit=_optional_limit(limits, "base_degrees"),
         radial_limit=_optional_limit(limits, "radial_mm"),
         height_limit=_optional_limit(limits, "height_mm"),
-        safe_pose=_optional_safe_pose(root.get("safe_pose")),
-        homing=_optional_homing(root.get("homing")),
-        initial_motor_degrees=_initial_motor_degrees(root.get("initial_motor_degrees")),
+        safe_pose=_optional_safe_pose(hardware.get("safe_pose")),
+        homing=_optional_homing(hardware.get("homing")),
+        initial_motor_degrees=_initial_motor_degrees(
+            hardware.get("initial_motor_degrees")
+        ),
     )
     if config.default_pulses > config.max_pulses:
         raise ValueError("modules.motor.drive.motion.default_pulses must not exceed modules.motor.drive.motion.max_pulses")
@@ -422,6 +443,17 @@ def load_arm_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ArmConfig:
             "initial_motor_degrees 与行程不自洽：" + "；".join(problems)
         )
     return config
+
+
+def _read_json(path: Path) -> Mapping[str, object]:
+    """读一个配置文件并保证顶层是对象；错误信息带上文件名。"""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ValueError(f"无法读取配置：{path}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"配置不是合法 JSON：{path}") from error
+    return _mapping(document, str(path))
 
 
 def _axis_config(document: Mapping[str, object], axis_name: str) -> AxisConfig:
@@ -446,7 +478,16 @@ def _axis_config(document: Mapping[str, object], axis_name: str) -> AxisConfig:
         motor_id=_integer(document.get("motor_id"), f"axes.{axis_name}.motor_id", minimum=1, maximum=255),
         reduction_ratio=reduction_ratio,
         mm_per_motor_rev=mm_per_motor_rev,
+        expect_ack=_boolean(
+            document.get("expect_ack", False), f"axes.{axis_name}.expect_ack"
+        ),
     )
+
+
+def _boolean(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} 必须是 true 或 false，实际 {value!r}")
+    return value
 
 
 def _optional_homing(value: object) -> Optional[HomingConfig]:

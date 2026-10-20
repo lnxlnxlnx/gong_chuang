@@ -14,9 +14,9 @@ import unittest
 
 from modules.arm.config import ArmConfig, AxisConfig
 from modules.arm.drive.kinematics import CylindricalPose, TravelLimit, normalize_degrees
-from modules.grasp.config import CorrectionSettings, GraspConfig
-from modules.grasp.drive.perception import CellObservation
-from modules.grasp.drive.pipeline import (
+from legacy.grasp_fixed_camera.config import CorrectionSettings, GraspConfig
+from legacy.grasp_fixed_camera.perception import CellObservation
+from legacy.grasp_fixed_camera.pipeline import (
     GraspError,
     GraspPipeline,
     GripperState,

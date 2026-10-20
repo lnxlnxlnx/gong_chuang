@@ -252,7 +252,7 @@ class Robot:
         """
         from modules.arm.config import DEFAULT_CONFIG_PATH as arm_default
         from modules.arm.config import load_arm_config
-        from modules.motor.config import DEFAULT_CONFIG_PATH as motor_default
+        from modules.motor.config import DEFAULT_HARDWARE_PATH as motor_default
         from modules.motor.config import load_bus_config
 
         if not any((arm, gripper, turntable, vision, chassis, grasp)):
@@ -270,8 +270,10 @@ class Robot:
         # 用**实际值**判空缩窄，不靠另一个布尔变量替它们担保。
         arm_config: Optional[ArmConfig] = None
         port: Optional[str] = None
+        bus_baudrate: Optional[int] = None
         chassis_profile: Optional[HardwareProfile] = None
         servo_port: Optional[str] = None
+        servo_baudrate: Optional[int] = None
         vision_settings: Optional[VisionConfig] = None
         grasp_settings: Optional[GraspSettings] = None
 
@@ -281,7 +283,9 @@ class Robot:
         if arm or chassis:
             motor_path = motor_default if motor_config_path is None else Path(motor_config_path)
             # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
-            port = load_bus_config(config_path=motor_path).port
+            bus_settings = load_bus_config(hardware_path=motor_path)
+            port = bus_settings.port
+            bus_baudrate = bus_settings.baudrate
 
         if chassis:
             from modules.chassis.runtime import MecanumChassis
@@ -302,7 +306,10 @@ class Robot:
                 load_gripper_config(servo_path)
             if turntable:
                 load_turntable_config(servo_path)
-            servo_port = load_servo_bus(config_path=servo_path).port
+            # 端口、波特率、两个舵机 ID 与行程都在 hardware.json 里；这里只读那一份。
+            servo_settings = load_servo_bus()
+            servo_port = servo_settings.port
+            servo_baudrate = servo_settings.baudrate
 
         vision_settings = None
         if vision:
@@ -322,9 +329,14 @@ class Robot:
                 if port is None:
                     raise RuntimeError(
                         "选了 arm/chassis 却没有可用的步进总线端口；"
-                        "请检查 modules/motor/config.json 的端口配置"
+                        "请检查 modules/motor/hardware.json 的端口配置"
                     )
-                session._bus = session._open_shared_bus(port)
+                if bus_baudrate is None:
+                    raise RuntimeError(
+                        "选了 arm/chassis 却没有读到步进总线波特率；"
+                        "请检查 modules/motor/hardware.json 的 bus.baudrate"
+                    )
+                session._bus = session._open_shared_bus(port, baudrate=bus_baudrate)
                 # 这条连接是**本会话开的**，所以由本会话最后关闭。
                 session._owns_bus = True
 
@@ -363,9 +375,16 @@ class Robot:
                 if servo_port is None:
                     raise RuntimeError(
                         "选了 gripper/turntable 却没有可用的舵机总线端口；"
-                        "请检查 modules/servo/config.json 的端口配置"
+                        "请检查 modules/servo/hardware.json 的端口配置"
                     )
-                session._servo_bus = session._open_servo_bus(servo_port)
+                if servo_baudrate is None:
+                    raise RuntimeError(
+                        "选了 gripper/turntable 却没有读到舵机总线波特率；"
+                        "请检查 modules/servo/hardware.json 的 bus.baudrate"
+                    )
+                session._servo_bus = session._open_servo_bus(
+                    servo_port, baudrate=servo_baudrate
+                )
                 session._owns_servo_bus = True
 
             if gripper:
@@ -465,8 +484,11 @@ class Robot:
             )
 
     @staticmethod
-    def _open_shared_bus(port: str) -> "SerialPort":
+    def _open_shared_bus(port: str, *, baudrate: Optional[int] = None) -> "SerialPort":
         """打开那条共享的 Emm42 连接（arm 与 chassis 时序复用同一条）。
+
+        波特率来自 ``modules/motor/hardware.json`` 的 ``bus.baudrate``；没给时退回
+        驱动器族的常见值，只用于直接调用本方法的测试。
 
         返回值标成 :class:`~modules.motor.drive.emm42.SerialPort`：上层只依赖这个窄协议，
         真实实现仍是 pyserial 的 ``Serial``（它的 ``write`` 与协议声明一致，见那里的说明）。
@@ -480,16 +502,18 @@ class Robot:
                 "pyserial is required on Jetson. Install it in the target Python environment first."
             ) from error
         opened: _SerialPort = serial.Serial(
-            port, baudrate=Emm42Driver.BAUDRATE, timeout=0.1
+            port,
+            baudrate=Emm42Driver.BAUDRATE if baudrate is None else baudrate,
+            timeout=0.1,
         )
         return opened
 
     @staticmethod
-    def _open_servo_bus(port: str) -> "ServoSerialPort":
+    def _open_servo_bus(port: str, *, baudrate: Optional[int] = None) -> "ServoSerialPort":
         """打开那条共享的舵机总线（gripper 与 turntable 时序复用同一条）。
 
-        与 :meth:`_open_shared_bus` 是同一件事、不同波特率来源：半双工舵机总线固定
-        115200，且**同一个串口不能被打开两次**，所以夹爪与转盘必须共用这一条。
+        波特率来自 ``modules/servo/hardware.json`` 的 ``bus.baudrate``。半双工舵机总线
+        **同一个串口不能被打开两次**，所以夹爪与转盘必须共用这一条。
         """
         from modules.servo.drive.bus_servo import BusServo
 
@@ -500,7 +524,9 @@ class Robot:
                 "pyserial is required on Jetson. Install it in the target Python environment first."
             ) from error
         opened: "ServoSerialPort" = serial.Serial(
-            port, baudrate=BusServo.BAUDRATE, timeout=0.1
+            port,
+            baudrate=BusServo.BAUDRATE if baudrate is None else baudrate,
+            timeout=0.1,
         )
         return opened
 

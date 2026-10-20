@@ -26,16 +26,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.json"
+DEFAULT_HARDWARE_PATH = Path(__file__).resolve().parents[1] / "hardware.json"
 
 
 @dataclass(frozen=True)
 class BusServoConfig:
-    """Port and servo identity read from ``modules/servo/config.json``."""
+    """Port, baud rate and serial timeout read from ``modules/servo/hardware.json``.
+
+    ``servo_id`` **不在这里**：总线上没有"总线级身份"，每个舵机用自己的 ID
+    （``gripper.servo_id`` / ``turntable.servo_id``）。旧的 ``bus.servo_id`` 是个死键，
+    已随这次拆分删除。
+    """
 
     port: str
     baudrate: int
-    servo_id: int
+    timeout_seconds: float = 0.1
 
 
 def _config_integer(section: dict, name: str, minimum: int, maximum: int) -> int:
@@ -47,27 +52,30 @@ def _config_integer(section: dict, name: str, minimum: int, maximum: int) -> int
 
 def load_bus_config(
     platform: str | None = None,
-    config_path: Path = DEFAULT_CONFIG_PATH,
+    hardware_path: Path = DEFAULT_HARDWARE_PATH,
 ) -> BusServoConfig:
-    """Read the bus servo port, baud rate and ID from the shared servo file."""
+    """Read the bus servo port, baud rate and serial timeout from the hardware file."""
     platform = platform or ("windows" if os.name == "nt" else "jetson")
     try:
-        document = json.loads(config_path.read_text(encoding="utf-8"))
+        document = json.loads(hardware_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"无法读取舵机配置：{config_path}") from error
+        raise ValueError(f"无法读取舵机硬件配置：{hardware_path}") from error
     if not isinstance(document, dict):
-        raise ValueError("舵机配置必须是 JSON 对象")
+        raise ValueError("舵机硬件配置必须是 JSON 对象")
     profile = document.get(platform)
     if not isinstance(profile, dict) or not isinstance(profile.get("port"), str) or not profile["port"].strip():
-        raise ValueError(f"请先填写 {config_path} 中的 {platform}.port")
+        raise ValueError(f"请先填写 {hardware_path} 中的 {platform}.port")
     bus = document.get("bus")
     if not isinstance(bus, dict):
-        raise ValueError("bus 必须是 JSON 对象")
+        raise ValueError(f"{hardware_path} 缺少 bus 段（波特率与串口超时）")
+    timeout = bus.get("timeout_seconds")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not float(timeout) > 0:
+        raise ValueError(f"{hardware_path} 的 bus.timeout_seconds 必须是正数")
     return BusServoConfig(
         port=profile["port"].strip(),
-        # 协议固定 115200；允许配置覆盖，便于换用其它半双工转接板
+        # 协议默认 115200；允许配置覆盖，便于换用其它半双工转接板
         baudrate=_config_integer(bus, "baudrate", 1, 4000000),
-        servo_id=_config_integer(bus, "servo_id", 1, 253),
+        timeout_seconds=float(timeout),
     )
 
 

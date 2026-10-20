@@ -26,7 +26,9 @@ from tests.scratch import scratch_directory
 ROOT = PROJECT_ROOT
 
 #: 数据、生成产物和随仓库附带的厂商例程都不是源码，扫描必须跳过它们。
-SKIPPED_DIRECTORIES = frozenset({"__pycache__", "docs", "models", "output"})
+#: ``legacy`` 是**归档**：那里的代码与测试已经不在本机路线里，保留是为了以后换装法时
+#: 有据可查。它被跳过是**明示的**（这条注释就是那份明示），而不是"忘记加根目录"。
+SKIPPED_DIRECTORIES = frozenset({"__pycache__", "docs", "models", "output", "legacy"})
 
 #: 根目录下以 ``test_`` 开头的**交互入口**：它们不是 unittest 模块（跑起来要开摄像头 /
 #: 串口），所以不进离线发现。``test.py`` 本身没有下划线，不会落进下面那个 glob；
