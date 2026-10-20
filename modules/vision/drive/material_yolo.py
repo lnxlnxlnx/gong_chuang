@@ -32,10 +32,10 @@ if TYPE_CHECKING:
     from modules.vision.config import ModelSettings
     from modules.vision.drive.hough_lock import LockedRegion
 
-#: 算作物料的类别名。当前物料模型是专用的四分类（``red`` / ``yellow`` / ``blue`` /
-#: ``green``），四类都是物料，所以这里就是模型的类别表本身；换模型改
-#: ``modules/vision/config.json`` 的 ``model.class_names``（和可选的 ``model.materials``），
-#: 这里是没配置时的兜底。
+#: 算作物料的类别名。随包模型是七类（``red`` / ``yellow`` / ``blue`` / ``green`` /
+#: ``tg1`` / ``tg2`` / ``tg3``），但**只有这四个颜色算物料**——``tg*`` 是带数字的靶标，
+#: 混进物料会让抓取链路去抓靶标。正常部署由 ``config.json`` 的 ``model.materials``
+#: 指定（这里也有同样的四个名字）；这里是没配置时的兜底。
 MATERIAL_CLASS_NAMES: tuple[str, ...] = tuple(DEFAULT_CLASS_NAMES)
 
 

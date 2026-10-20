@@ -163,6 +163,19 @@ class TestONNXDetector(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "320"):
                 YOLOv8ONNXDetector("best.onnx", input_size=640)
 
+    def test_class_table_that_disagrees_with_the_model_is_refused(self):
+        """七类模型配上四类的旧表：框还是准的，但类名会整体错位——必须在推理时拦下。"""
+        raw = np.zeros((1, 11, 1), dtype=np.float32)     # 4 + 7 类
+        raw[0, :4, 0] = [160, 160, 100, 100]
+        raw[0, 4, 0] = 0.95
+        with patch("cv2.dnn.readNetFromONNX") as load_model, \
+                patch("modules.vision.drive.yolov8.resolve_onnx_metadata",
+                      return_value=(320, None)):
+            load_model.return_value.forward.return_value = raw
+            with YOLOv8ONNXDetector("best.onnx") as detector:
+                with self.assertRaisesRegex(ValueError, "build_engine"):
+                    detector.detect(np.zeros((640, 640, 3), dtype=np.uint8))
+
 
 if __name__ == "__main__":
     unittest.main()

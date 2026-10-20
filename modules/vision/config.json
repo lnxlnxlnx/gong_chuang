@@ -9,8 +9,8 @@
     "backend": "auto",
     "onnx": "models/best.onnx",
     "engine": "models/best.engine",
-    "class_names": ["red", "yellow", "blue", "green"],
-    "materials": null,
+    "class_names": ["red", "yellow", "blue", "green", "tg1", "tg2", "tg3"],
+    "materials": ["red", "yellow", "blue", "green"],
     "input_size": 320,
     "conf_thresh": 0.25,
     "iou_thresh": 0.45
@@ -83,14 +83,11 @@
     "stable_frame_count": 3,
     "maximum_center_jitter_px": 1.5
   },
-  "ring_digits": {
-    "order": [1, 2, 3],
-    "inner_ratio": 0.55,
-    "threshold": 100.0,
-    "ink_ratio_range": [0.02, 0.40],
-    "min_glyph_ratio": 0.25
-  },
   "ring_target": {
-    "diameter_mm": 53.0
+    "classes": {
+      "tg1": 1,
+      "tg2": 2,
+      "tg3": 3
+    }
   }
 }

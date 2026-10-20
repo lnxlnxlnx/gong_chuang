@@ -89,6 +89,10 @@ def place_box_to_repo(robot: Robot, *, verbose: bool = False):
 
     # ② 三轴都到位之后才松爪。open_jaws 默认 wait=True，自己等到舵机走完并读回。
     robot.gripper.open_jaws()
+    
+    report = _move_axes_to(robot, {"lift": 980, "extension": 220.0}).wait()
+    if verbose:
+        _print_report("回位到安全位置", report)
 
     # ③ 回初始姿态：同样三轴一起走、一起等。
     report = _move_axes_to(robot, {"lift": 675, "extension": 270.0, "base": 0}).wait()

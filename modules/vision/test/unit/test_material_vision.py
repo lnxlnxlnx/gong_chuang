@@ -52,9 +52,11 @@ class FakeDetector:
 
 
 class MaterialClassTableTests(unittest.TestCase):
-    def test_material_class_names_match_the_deployed_model(self) -> None:
-        # 四分类物料模型：四类都是物料。
+    def test_material_class_names_are_the_four_colours(self) -> None:
+        # 随包模型是七类（四色 + tg1/tg2/tg3），但**只有这四色算物料**：
+        # 靶标混进物料会让抓取链路去抓靶标，所以这条是安全性断言，不是文字游戏。
         self.assertEqual(MATERIAL_CLASS_NAMES, ("red", "yellow", "blue", "green"))
+        self.assertNotIn("tg1", MATERIAL_CLASS_NAMES)
 
     def test_every_material_class_has_a_chinese_label(self) -> None:
         """模型每一类都必须有中文标签——少一条就会在画面上打成"未知物料"。

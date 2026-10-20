@@ -117,22 +117,18 @@ def material_report() -> MaterialReport:
 
 
 def ring_target() -> RingTarget:
-    """视野里那一个环：中心在光轴上、有数字、可对准。"""
+    """视野里那一个环：中心在光轴上、整框可见、可对准（环号与置信度来自模型）。"""
     return RingTarget(
         center_px=(480.0, 120.0),
         radius_px=96.0,
-        reference_diameter_px=196.0,
+        digit=2,
+        score=0.93,
+        clipped=False,
         x_mm=0.0,
         y_mm=0.0,
-        digit_present=True,
-        ink_ratio=0.12,
-        glyph_ratio=0.55,
-        support=12,
-        diameter_bands=3,
-        partial=False,
         scale_mm_per_px=0.27,
-        scale_source="ring diameter",
-        detail="1 个候选环",
+        scale_source="depth/focal",
+        detail="模型给了 1 个环框",
     )
 
 

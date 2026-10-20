@@ -1,23 +1,24 @@
-"""视野里那个环：环心在哪、能不能直接拿去对准。
+"""视野里那个环：环心在哪、它是几号。
 
     python test.py   # 选 26
 
-相机装在臂上、镜头离纸很近时，画面里通常**只有一个环**——"同时看到三个"那种检测
-（菜单 22 / ``Vision.detect_numbered_rings``）在这个取景下必然失败，而"只看到一个环"
-本来就不是错误。本入口就是为这种取景准备的：
+相机装在臂上、镜头离纸很近时，画面里通常**只有一个环**——"同时看到三个"那种工位识别
+（菜单 22）在这个取景下必然失败，而"只看到一个环"本来就不是错误。本入口就是为这种
+取景准备的：
 
-- 找出画面里最像环的那一个（圆心在画面内 > 支撑观测数 > 直径带数 > 离光轴近）；
+- 环心与**环号**都由模型给（``models/best.onnx`` 的 ``tg1`` / ``tg2`` / ``tg3`` 三类）；
 - 环心换算成**相机系毫米**（原点在光轴、x 右、y 下），可以直接喂
   ``grasp.align_xy(reading=...)``；
-- 比例尺优先用**已知的环外圈直径**（``ring_target.diameter_mm``）：
-  ``毫米/像素 = 直径 / 实测外圈直径像素``，与镜头距离无关；
-- 顺带核验环里有没有数字（墨迹占比 + 字形高度），但**不影响**环心读数。
+- 比例尺优先用针孔标定（``table_depth_mm / focal_px``），没有就退回
+  ``station.mm_per_px``；两者都没有时只报像素；
+- 框被画面裁掉时**不给**可对准读数：那时框心不是环心（见
+  :mod:`modules.vision.drive.numbered_ring`）。
 
 画面里只画 ASCII（``cv2.putText`` 画不出中文），中文结论打印在终端：**每
 ``--print-every`` 帧打一行**（不用按键也有数据），按 ``p`` 打完整结论，
 按 ``q`` 退出。
 
-也可以直接跑一张图（不需要摄像头、不加载模型）::
+也可以直接跑一张图::
 
     python -m modules.vision.test.manual.numbered_ring --image models/data/ring_pic/x.jpg
 """
@@ -39,8 +40,8 @@ PRINT_EVERY = 30
 
 
 def parse_args() -> argparse.Namespace:
-    """只解析命令行：**不读配置、不打开设备**。"""
-    parser = argparse.ArgumentParser(description="视野里那个环：环心相机坐标（可对准读数）")
+    """只解析命令行：**不读配置、不打开设备、不加载模型**。"""
+    parser = argparse.ArgumentParser(description="视野里那个环：环心与环号（可对准读数）")
     parser.add_argument("--camera", type=int, default=None,
                         help="摄像头序号（默认读 config.json 对应平台的 camera_id）")
     parser.add_argument("--image", default=None,
@@ -61,7 +62,7 @@ def _unpack(result):
 
 
 def _draw(frame, result):
-    """画环、环心十字与相机坐标。没有环时原样返回（``overlay`` 会写一行提示）。"""
+    """画框、环心十字与相机坐标。没有环时原样返回（``overlay`` 会写一行提示）。"""
     import cv2
 
     target = _unpack(result)
@@ -70,16 +71,17 @@ def _draw(frame, result):
         return canvas
     centre = (int(round(target.center_px[0])), int(round(target.center_px[1])))
     radius = max(3, int(round(target.radius_px)))
-    # 有数字画绿、空环画橙：颜色只表达"这个环里有没有数字"，不表达准不准。
-    colour = (0, 255, 0) if target.digit_present else (0, 165, 255)
+    # 能拿去对准画绿，贴边/没比例尺画橙：颜色只表达"这个读数能不能直接用"。
+    colour = (0, 255, 0) if target.usable else (0, 165, 255)
     cv2.circle(canvas, centre, radius, colour, 3)
     cv2.drawMarker(canvas, centre, (255, 255, 0), cv2.MARKER_CROSS, 18, 2)
-    if target.usable:
-        label = f"centre x={target.x_mm:+.1f} y={target.y_mm:+.1f} mm"
+    label = f"ring {target.digit} ({target.score:.2f})"
+    if target.x_mm is not None and target.y_mm is not None:
+        label += f" x={target.x_mm:+.1f} y={target.y_mm:+.1f} mm"
     else:
-        label = "centre: no mm"
-    if not target.digit_present:
-        label += " | no digit"
+        label += " | no mm"
+    if target.clipped:
+        label += " | clipped"
     origin = (max(4, centre[0] - radius), max(18, centre[1] - radius - 10))
     cv2.putText(canvas, label, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
     cv2.putText(canvas, label, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
@@ -97,21 +99,21 @@ def _overlay(canvas, result, _stats) -> None:
 
 
 def _status(target, locator) -> str:
-    """一行结论：有环就写环心与比例尺，没环就写"走到了哪一步"。"""
+    """一行结论：有环就写环号、环心与比例尺，没环就写"走到了哪一步"。"""
     if target is None:
         return f"  没有环：{locator.last_diagnosis or '检测还没跑过'}"
     reading = target.reading()
     where = "无毫米" if reading is None else f"x={reading[0]:+.1f} y={reading[1]:+.1f} mm"
-    digit = "有数字" if target.digit_present else "空环"
+    state = "贴边（不可对准）" if target.clipped else "可对准"
     scale = (
         f"{target.scale_mm_per_px:.4f} mm/px({target.scale_source})"
         if target.scale_mm_per_px is not None
         else "无比例尺"
     )
     return (
-        f"  环心 @({target.center_px[0]:.0f},{target.center_px[1]:.0f}) "
-        f"r={target.radius_px:.0f}px 基准圈 {target.reference_diameter_px:.0f}px "
-        f"{where}，{digit}，{scale}"
+        f"  环 {target.digit}（{target.score:.2f}）"
+        f"@({target.center_px[0]:.0f},{target.center_px[1]:.0f}) "
+        f"r={target.radius_px:.0f}px {where}，{state}，{scale}"
     )
 
 
@@ -119,8 +121,8 @@ def _report(target, locator) -> None:
     """终端里把结论连同对准读数一起打出来（按 p）。"""
     if target is None:
         print("画面里没有环：" + (locator.last_diagnosis or "检测还没跑过"))
-        print("  排查：环是否在画面里、光照是否够（Canny 找不到边缘时不成环）、"
-              "环的直径是否超过画面短边")
+        print("  排查：环是否在画面里、光照是否够、模型类别表里有没有这三个 tg 类"
+              "（config.json 的 model.class_names）")
         return
     print(target.summary())
     print(f"  对准读数（相机系）: {target.reading()}")
@@ -128,24 +130,39 @@ def _report(target, locator) -> None:
     print(f"  {target.detail}")
 
 
-def run_image(path: str, settings) -> int:
-    """在一张图片上跑一次：不建会话（会话会加载模型），环检测是纯经典 CV。"""
-    from modules.vision.drive.material_locate import read_image
+def _locator_for(settings, frame):
+    """按一份配置快照给"单张图片"建定位器（顺带返回检测器，好让调用方关掉）。"""
+    from modules.vision.detector_factory import create_configured_detector
     from modules.vision.drive.numbered_ring import RingTargetLocator
+    from modules.vision.drive.pinhole import resolve_focal_px
+
+    height, width = frame.shape[:2]
+    detector = create_configured_detector(settings=settings.model)
+    locator = RingTargetLocator(
+        detector,
+        settings=settings.ring_target,
+        geometry=settings.station_geometry,
+        focal_px=resolve_focal_px(width, height, settings.focal_px),
+        table_depth_mm=settings.table_depth_mm,
+    )
+    return detector, locator
+
+
+def run_image(path: str, settings) -> int:
+    """在一张图片上跑一次：要模型（环心与环号都是模型给的），但不开摄像头。"""
+    from modules.vision.drive.material_locate import read_image
 
     frame = read_image(path)
     if frame is None:
         print(f"读不出图片：{path}")
         return 1
-    locator = RingTargetLocator(
-        geometry=settings.station_geometry,
-        digits=settings.ring_digits,
-        detection=settings.station_detection,
-        diameter_mm=settings.ring_target.diameter_mm,
-    )
-    target = locator.detect(frame)
-    _report(target, locator)
-    return 0 if target is not None else 1
+    detector, locator = _locator_for(settings, frame)
+    try:
+        target = locator.detect(frame)
+        _report(target, locator)
+        return 0 if target is not None else 1
+    finally:
+        detector.close()
 
 
 def run(settings, *, print_every: int = PRINT_EVERY) -> int:
@@ -156,12 +173,12 @@ def run(settings, *, print_every: int = PRINT_EVERY) -> int:
     try:
         with Vision._open_config(settings) as vision:
             print(f"摄像头 {camera_id}，窗口 {window!r}；按 p 打完整结论，按 q 退出")
-            diameter = settings.ring_target.diameter_mm
-            if diameter is not None:
-                print(f"比例尺用环外圈直径 {diameter:.1f} mm 自标定："
-                      "毫米/像素 = 直径 / 实测外圈像素（与镜头距离无关）")
+            print(f"环类别 {list(settings.ring_target.names)}"
+                  f" → 环号 {dict(settings.ring_target.classes)}（来自 config.json）")
+            if settings.table_depth_mm is not None:
+                print("比例尺用针孔标定 table_depth_mm / focal_px（与物料读数同一套单位）")
             else:
-                print("没有配 ring_target.diameter_mm：退回 depth/focal 或 station.mm_per_px")
+                print("没有 table_depth_mm：比例尺退回 station.mm_per_px")
             locator = vision._ring_target_locator()
 
             def pipeline(frame):

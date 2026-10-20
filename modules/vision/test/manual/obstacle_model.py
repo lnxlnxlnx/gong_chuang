@@ -19,7 +19,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from modules.vision.config import default_model_path
+from modules.vision.config import default_model_path, load_model_settings
 from modules.vision.detector_factory import create_detector
 from modules.vision.drive.camera import USBCamera, load_camera_id
 from modules.vision.drive.stream import run_preview
@@ -92,11 +92,16 @@ def _ask_float(prompt: Callable[[str], str], question: str, default: float) -> f
 def choose_plan(prompt: Callable[[str], str]):
     """Return ``(model_path, class_names)`` for the chosen plan, or ``None``."""
     competition = default_model_path()
+    # 类别表以配置为准（随包模型是七类：四色 + 三个靶标）；配置读不出来才用内置兜底。
+    try:
+        names = tuple(load_model_settings().class_names)
+    except Exception:  # 配置写坏了不该让这个调试入口连菜单都进不去
+        names = tuple(DEFAULT_CLASS_NAMES)
     new_state = "" if NEW_MODEL.is_file() else "（未找到）"
     print("\n请选择要测试的模型：")
     print(f"  1. 新训练的障碍物模型  {_relative(NEW_MODEL)}  单类 obstacle {new_state}")
     print(f"  2. 比赛模型            {_relative(competition)}  "
-          f"内置 {len(DEFAULT_CLASS_NAMES)} 类")
+          f"{len(names)} 类：{'、'.join(names)}")
     print("  0. 返回菜单")
     choice = _ask(prompt, "请选择 [1]：", "1")
 
@@ -313,7 +318,7 @@ def run_manual(prompt: Callable[[str], str]) -> None:
     conf = _ask_float(prompt, "置信度阈值 0..1 [0.25]：", 0.25)
 
     print(f"\n加载模型：{_relative(model_path)}（类别表："
-          f"{'、'.join(class_names) if class_names else f'内置 {len(DEFAULT_CLASS_NAMES)} 类'}）")
+          f"{'、'.join(class_names) if class_names else '按模型/配置自带'}）")
     with create_detector(model_path, class_names=class_names,
                          conf_thresh=conf) as detector:
         if mode == "1":

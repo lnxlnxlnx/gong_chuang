@@ -512,7 +512,8 @@ with Vision.open() as vision:
 
 ### 辅助路径的六色调色板
 
-主算的 YOLO 模型是四分类（红/黄/蓝/绿），而 `targets.material_palette` 配了**六色**
+主算的 YOLO 模型是七类（四色物料红/黄/蓝/绿 + 三个靶标 `tg1`/`tg2`/`tg3`），
+其中**只有四种颜色算物料**；而 `targets.material_palette` 配了**六色**
 （多出 `black` 与 `light_blue`）：主算认不出来的料，辅助路径按颜色块还能认。
 换一块料只加一行调色板，不必重训模型——`material_class.DEFAULT_MATERIAL_LABELS`
 里补上对应中文即可（缺标签会落到"未知物料"）。
@@ -548,8 +549,8 @@ Windows 使用 OpenCV ONNX 推理，需要 `opencv-python`、`numpy`。Jetson �
   "backend": "auto",
   "onnx": "models/best.onnx",
   "engine": "models/best.engine",
-  "class_names": ["red", "yellow", "blue", "green"],
-  "materials": null,
+  "class_names": ["red", "yellow", "blue", "green", "tg1", "tg2", "tg3"],
+  "materials": ["red", "yellow", "blue", "green"],
   "input_size": 320,
   "conf_thresh": 0.25,
   "iou_thresh": 0.45
@@ -558,11 +559,14 @@ Windows 使用 OpenCV ONNX 推理，需要 `opencv-python`、`numpy`。Jetson �
 
 - `backend`：`auto`（默认）按平台选——Windows 走 OpenCV ONNX，Jetson 走 TensorRT；也可以写死 `"onnx"` / `"tensorrt"` 强制一条通道。
 - `class_names`：**顺序必须等于训练时的类别顺序**（也就是 ONNX 元数据里的 `names`）。框的坐标由模型给出、类名按这张表查，表错了框还是准的、类名会整体错位。
-- `materials`：这张表里哪些算物料；`null` 表示全部算（当前四分类模型四类都是物料）。写进来的名字必须在 `class_names` 里，否则启动就报错。
+- `materials`：这张表里哪些算物料；`null` 表示全部算。**七类模型必须显式写这四个颜色**：`tg*` 是带数字的靶标，混进物料会让抓取链路去抓靶标。写进来的名字必须在 `class_names` 里，否则启动就报错。
 - `input_size`：方形输入边长；`null` 表示让代码去问模型/引擎自己。**TensorRT 引擎问得到，ONNX 只有装了 `onnx` 才问得到**，所以这里建议显式写。
 - 相对路径按**项目根**解析，不按当前工作目录。
 
-模型文件放 `models/`（已 gitignore，不入库）。当前物料模型是四分类：ONNX 输入 `1×3×320×320`，输出 `1×8×2100`（4 个坐标 + 4 类），类别 `{0:red, 1:yellow, 2:blue, 3:green}`，即 1 红 2 黄 3 蓝 4 绿。
+模型文件放 `models/`（已 gitignore，不入库）。当前模型是**七类**（2026-10-20 训练，"四色 + 三个靶标"）：ONNX 输入 `1×3×320×320`，输出 `1×11×2100`（4 个坐标 + 7 类），类别 `{0:red, 1:yellow, 2:blue, 3:green, 4:tg1, 5:tg2, 6:tg3}`。`tg1`/`tg2`/`tg3` 是环纸上的三个靶标，菜单 26「环内数字环心」就是靠它们直接读出环心与环号。
+
+> 旧的四类模型留了一份备份：`models/best_4color_20261013.onnx`。换回它在配置里把 `class_names` 改回四个颜色、`materials` 写成 `null` 即可。
+
 
 `models/best.engine` 是 TensorRT 引擎，**只能在 Jetson 本机生成**（它跟板子的 GPU 架构和 TensorRT 版本绑定，从 PC 拷过去反序列化会失败）。在板上：
 

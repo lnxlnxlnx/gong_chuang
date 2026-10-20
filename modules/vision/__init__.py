@@ -39,8 +39,8 @@
 - 模型路径与设置 → :mod:`modules.vision.config`；检测器工厂 → :mod:`modules.vision.detector_factory`
 - 帧级定位算法 → :mod:`modules.vision.drive.material_locate` 等 ``drive`` 子模块
 - 工位识别（三圆环 / 叠放位） → :mod:`modules.vision.drive.ring_station`、:mod:`modules.vision.drive.stacked_ring`
-- 环心（机械臂对准用）：单环 → :mod:`modules.vision.drive.numbered_ring` 的 ``RingTargetLocator``；
-  三环 → 同模块的 ``NumberedRingLocator``
+- 环心与环号（机械臂对准用） → :mod:`modules.vision.drive.numbered_ring` 的 ``RingTargetLocator``：
+  环心与"是几号环"都由模型（``tg1`` / ``tg2`` / ``tg3`` 三类）给出
 - 圆心 / 半径拟合 → :mod:`modules.vision.drive.circle_fit`；多帧融合 → :mod:`modules.vision.drive.sequence`
 - 单目测距 → :mod:`modules.vision.drive.distance`；默认类别表 → :mod:`modules.vision.drive.yolov8`
 

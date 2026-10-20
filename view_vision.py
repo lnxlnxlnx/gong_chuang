@@ -460,7 +460,7 @@ class Viewer:
         return canvas
 
     def _draw_ring(self, frame: np.ndarray, target) -> np.ndarray:
-        """视野里那个环：画圆、环心十字与相机坐标（有数字画绿，空环画橙）。"""
+        """视野里那个环：画框、环心十字与相机坐标（可对准画绿，贴边/无毫米画橙）。"""
         import cv2
 
         canvas = frame.copy()
@@ -470,15 +470,16 @@ class Viewer:
         for item in (target,):
             centre = (int(round(item.center_px[0])), int(round(item.center_px[1])))
             radius = max(3, int(round(item.radius_px)))
-            colour = (0, 255, 0) if item.digit_present else (0, 165, 255)
+            colour = (0, 255, 0) if item.usable else (0, 165, 255)
             cv2.circle(canvas, centre, radius, colour, 3)
             cv2.drawMarker(canvas, centre, (255, 255, 0), cv2.MARKER_CROSS, 16, 2)
+            label = f"ring {item.digit} ({item.score:.2f})"
             if item.x_mm is None or item.y_mm is None:
-                label = f"{item.digit}: no mm"
+                label += ": no mm"
             else:
-                label = f"{item.digit}: x={item.x_mm:+.1f} y={item.y_mm:+.1f}mm"
-            if not item.digit_present:
-                label += " | no digit"
+                label += f": x={item.x_mm:+.1f} y={item.y_mm:+.1f}mm"
+            if item.clipped:
+                label += " | clipped"
             origin = (max(4, centre[0] - radius), max(18, centre[1] - radius - 10))
             cv2.putText(canvas, label, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
             cv2.putText(canvas, label, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
@@ -652,15 +653,18 @@ class Viewer:
         )
         if target.usable:
             state = "ok"
-        elif not target.digit_present:
-            state = "no-digit"
+        elif target.clipped:
+            state = "clipped"
         else:
             state = "no-mm"
+        scale = (
+            f"{target.scale_mm_per_px:.4f} mm/px {target.scale_source}"
+            if target.scale_mm_per_px is not None
+            else "no scale"
+        )
         return [
-            f"  centre {where} r={target.radius_px:.0f}px {state} "
-            f"support={target.support}/{target.diameter_bands}",
-            f"  ink={target.ink_ratio:.1%} glyph={target.glyph_ratio:.1%} "
-            f"partial={target.partial}",
+            f"  ring {target.digit} centre {where} r={target.radius_px:.0f}px {state}",
+            f"  score={target.score:.2f} {scale}",
         ]
 
     def _measure_lines(self) -> "list[str]":

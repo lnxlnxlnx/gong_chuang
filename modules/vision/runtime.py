@@ -68,12 +68,7 @@ if TYPE_CHECKING:
     from modules.vision.drive.camera import USBCamera as Camera
     from modules.vision.drive.material_locate import MaterialLocator
     from modules.vision.drive.motion_gate import MotionGate
-    from modules.vision.drive.numbered_ring import (
-        NumberedRingLocator,
-        NumberedRings,
-        RingTarget,
-        RingTargetLocator,
-    )
+    from modules.vision.drive.numbered_ring import RingTarget, RingTargetLocator
     from modules.vision.drive.pixel_measure import MillimetreMeasurement, PixelMeasurement
     from modules.vision.drive.ring_station import RingStationDetector, RingStationDetection
     from modules.vision.drive.sequence import Fusion, TimedPoint
@@ -813,69 +808,24 @@ class Vision:
             )
         return self._stacked
 
-    # ------------------------------------------------------------- 带数字的环
-    def detect_numbered_rings(self, *, timeout: Optional[float] = None) -> "NumberedRings":
-        """读一帧，给出"左边是 1、中间是 2、右边是 3"三个环各自的**相机系**环心。
-
-        与 :meth:`detect_ring_station` 的分工：那个回答"工位摆正了没有"（像素 + 偏差），
-        这个回答"几号环在哪、能不能直接对准"（相机系毫米 + 环里有没有数字）。
-
-        三条语义：
-
-        - **没识别到三个环**是正常结果（``detected is False``，``detail`` 说明原因），
-          读不到画面才抛 ``RuntimeError``；
-        - 环里**没有印数字**时那个环照样列出来（``digit_present=False``），但
-          :meth:`NumberedRings.reading` 返回 ``None``——不按顺序硬报一个号；
-        - 没有比例尺（``station.mm_per_px``）时毫米是 ``None``，不拿焦距凑。
-
-        :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
-        """
-        frame = self._read_frame(timeout=timeout)
-        return self._numbered_ring_locator().detect(frame)
-
-    def ring_reading(
-        self, digit: int, *, timeout: Optional[float] = None
-    ) -> "Optional[Tuple[float, float]]":
-        """取"几号环"的相机系 ``(x_mm, y_mm)``，可直接喂给 ``align_xy(reading=...)``。
-
-        取不到（没识别到 / 那个环里没有数字 / 没有比例尺）返回 ``None``，
-        **不回退**到别的环：拿错一个环去对准，机械臂会朝 95 mm 外的位置动，
-        而动作看起来完全正常。
-
-        :raises ValueError: ``digit`` 写错（不是从 1 开始的整数）。
-        :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
-        """
-        return self.detect_numbered_rings(timeout=timeout).reading(digit)
-
-    def _numbered_ring_locator(self) -> "NumberedRingLocator":
-        """懒建并缓存"带数字的环"定位器：与工位识别共用同一个三圆环检测器。"""
-        from modules.vision.drive.numbered_ring import NumberedRingLocator
-
-        if self._numbered is None:
-            self._numbered = NumberedRingLocator(
-                station=self._ring_station_detector(),
-                geometry=self._settings.station_geometry,
-                digits=self._settings.ring_digits,
-            )
-        return self._numbered
-
     # ------------------------------------------------------------- 视野里的那一个环
     def locate_ring(self, *, timeout: Optional[float] = None) -> "Optional[RingTarget]":
-        """读一帧，找出**视野里那一个环**的环心（像素 + 相机系毫米）。
+        """读一帧，找出**视野里那一个环**的环心（像素 + 相机系毫米 + 环号）。
 
         为"相机视野装不下整排环"的场合准备：相机装在臂上、镜头离纸很近时，画面里
-        通常只有一个环。这时 :meth:`detect_numbered_rings` 的"同时看到三个"必然失败，
-        而"只看到一个环"是**正常取景**，不是错误。
+        通常只有一个环，而"只看到一个环"是**正常取景**，不是错误。
+
+        环心与环号都来自模型（``models/best.onnx`` 的 ``tg1`` / ``tg2`` / ``tg3``
+        三类），所以这条路径**看不到模型就什么也给不出**——它不再是一套独立的经典 CV。
 
         与 :meth:`locate` 相同的取舍：
 
         - 读不到画面抛 ``RuntimeError``（设备问题）；
         - 画面里**没有环**是正常结果，返回 ``None``（不是异常）；
-        - 有环但没有比例尺时照样返回，毫米字段是 ``None``，
-          :meth:`RingTarget.reading` 也就拿不到可对准的读数。
+        - 框被画面裁掉、或没有比例尺时照样返回，但
+          :meth:`RingTarget.reading` 返回 ``None``——不拿偏过的框心冒充环心。
 
-        选哪个环：支撑观测最多的那个（最完整地落在画面里）；条数相同比直径带数量，
-        还相同取离画面中心最近的。
+        选哪个框：优先"整框都在画面里"的那个（只有它才可能给出真环心），再比置信度。
 
         :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
         """
@@ -885,8 +835,8 @@ class Vision:
     def ring_center(self, *, timeout: Optional[float] = None) -> "Optional[Tuple[float, float]]":
         """视野里那个环的**相机系中心** ``(x_mm, y_mm)``，可直接喂 ``align_xy(reading=...)``。
 
-        画面里没有环、或没有比例尺时返回 ``None``——与 :meth:`locate_ring` 一致，
-        不拿像素坐标冒充毫米。
+        画面里没有环、没有比例尺、或检测框被画面裁掉时返回 ``None``——与
+        :meth:`locate_ring` 一致，不拿像素坐标冒充毫米，也不拿偏过的框心冒充环心。
 
         :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
         """
@@ -894,20 +844,24 @@ class Vision:
         return None if target is None else target.reading()
 
     def _ring_target_locator(self) -> "RingTargetLocator":
-        """懒建并缓存单环定位器：配置在 ``open`` 时就定死了。"""
+        """懒建并缓存单环定位器：配置在 ``open`` 时就定死了。
+
+        检测器**借**物料定位器那一个（``locator.yolo.detector``）：同一个会话只该加载
+        一次模型，靶标与物料跑的是同一份权重。单环定位器自己不持有、也不关闭它——
+        关闭由会话统一收尾。
+        """
         from modules.vision.drive.numbered_ring import RingTargetLocator
 
         if self._ring_target is None:
+            _, locator = self._require_resources()
             self._ring_target = RingTargetLocator(
+                locator.yolo.detector,
+                settings=self._settings.ring_target,
                 geometry=self._settings.station_geometry,
-                digits=self._settings.ring_digits,
-                detection=self._settings.station_detection,
                 # 针孔标定优先：环心读数必须与 RegionReport 的毫米同一套单位，
                 # align_xy 的目标点（tx, ty）才对得上。
                 focal_px=self._effective_focal_px(),
                 table_depth_mm=self._settings.table_depth_mm,
-                # 已知直径优先：毫米/像素 = 直径 / 实测外圈直径像素，与距离无关。
-                diameter_mm=self._settings.ring_target.diameter_mm,
             )
         return self._ring_target
 
