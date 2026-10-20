@@ -3,6 +3,6 @@
     "rpm": 30,
     "acceleration": 5,
     "default_pulses": 800,
-    "max_pulses": 9000
+    "max_pulses": 11000
   }
 }

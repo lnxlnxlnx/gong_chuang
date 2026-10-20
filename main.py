@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import time
 
-from app.gripper import align_box, grab_box_from_floor, place_box_to_repo
+from app.gripper import (
+    align_box,
+    grab_box_from_floor,
+    grab_box_from_turntable,
+    place_box_to_repo,
+)
 
 # 预览演示的**模块级**导入：``demo_material`` 只定义函数、不开设备，真正的装配发生在
 # 它内部（读配置 + ``Vision._open_config``）；保持模块级也让既有入口用例能直接替换它。
@@ -49,16 +54,22 @@ def locate_material(*, config_path=None) -> None:
 
 
 def pick_manual() -> None:
-    with Robot.open(grasp=True, gripper=True) as robot:
+    with Robot.open(grasp=True, gripper=True, turntable=True) as robot:
         robot.gripper.set_position(280)
+        robot.turntable.go_home()
         # robot.arm.move_up(pulses=6000)          # 675度
         robot.arm.move_axis_to_motor_degrees("lift", 675)
         robot.arm.move_forward(3200)
         
         # grab_box(robot)
-        for _ in range(3):
-            grab_box_from_floor(robot)
-            place_box_to_repo(robot)
+        try:
+            for _ in range(3):
+                grab_box_from_turntable(robot)
+                place_box_to_repo(robot, verbose=True)
+        except Exception as e:
+            print(f"Error occurred during pick and place operation: {e}")
+            robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+            return
 
         robot.arm.move_axis_to_motor_degrees("extension", 270.0)
 

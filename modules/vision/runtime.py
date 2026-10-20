@@ -396,9 +396,9 @@ class Vision:
         #: 建好就缓存：配置在 ``open`` 时已定死，检测器内部的跨帧稳定窗口要连续。
         self._station: Optional["RingStationDetector"] = None
         self._stacked: Optional["StackedRingDetector"] = None
-        #: 带数字的环（环心 → 相机系毫米）。同样懒建：纯经典 CV，不需要模型。
-        self._numbered: Optional["NumberedRingLocator"] = None
         #: 视野里那**一个**环（窄视野，相机装臂上时的常用入口）。
+        #: 它**不拥有**模型：检测器由物料定位器持有，这里只借同一个实例（见
+        #: :meth:`_ring_target_locator`）。
         self._ring_target: Optional["RingTargetLocator"] = None
         self._closed = False
         self._clock: Callable[[], float] = time.monotonic
