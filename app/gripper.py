@@ -61,11 +61,11 @@ def grab_box_from_floor(robot: Robot):
     robot.arm.move_axis_to_motor_degrees("lift", 75)
     robot.gripper.close_jaws()
 
-def grab_box_from_turntable(robot: Robot):
+def grab_box_from_turntable(robot: Robot, want_color = None):
     robot.gripper.set_position(280)
     try:
         # position = robot.vision.locate()
-        robot.grasp.align_xy()
+        robot.grasp.align_xy(want = want_color)
     except Exception as e:
         print(f"Error occurred while aligning the gripper: {e}")
         robot.arm.move_axis_to_motor_degrees("extension", 270.0)
@@ -73,6 +73,29 @@ def grab_box_from_turntable(robot: Robot):
 
     robot.arm.move_axis_to_motor_degrees("lift", 530)
     robot.gripper.close_jaws()
+    
+def grab_box_from_car(robot: Robot):
+    # 移动到转盘
+    global current_position_index
+    batch = robot.motion.begin()
+    batch.add(robot.arm.move_axis_to_motor_degrees("lift", 675))
+    batch.add(robot.gripper.set_position(150, wait=False))
+    batch.wait()
+    report = _move_axes_to(robot, {"lift": 980, "extension": 5, "base": 1048}).wait()
+    robot.gripper.set_position(100)
+    robot.arm.move_axis_to_motor_degrees("lift", 830)
+    
+    robot.gripper.close_jaws()
+    robot.arm.move_axis_to_motor_degrees("lift", 980)
+    _move_axes_to(robot, {"extension": 400.0, "base": 500}).wait()
+    current_position_index = (current_position_index + 1) % len(TURN_TABLE_POSITIONS)
+    batch = robot.motion.begin()
+    batch.add(
+        robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False)
+    )
+    batch.add(_move_axes_to(robot, {"lift": 95, "extension": 400.0, "base": 0}))
+    batch.wait()
+    robot.gripper.open_jaws()
 
 def place_box_to_repo(robot: Robot, *, verbose: bool = False):
     '''当爪子上有物体时，将物体放置在指定位置。'''
@@ -90,12 +113,12 @@ def place_box_to_repo(robot: Robot, *, verbose: bool = False):
     # ② 三轴都到位之后才松爪。open_jaws 默认 wait=True，自己等到舵机走完并读回。
     robot.gripper.open_jaws()
     
-    report = _move_axes_to(robot, {"lift": 980, "extension": 220.0}).wait()
+    report = _move_axes_to(robot, {"lift": 980, "extension": 270.0}).wait()
     if verbose:
         _print_report("回位到安全位置", report)
 
     # ③ 回初始姿态：同样三轴一起走、一起等。
-    report = _move_axes_to(robot, {"lift": 675, "extension": 270.0, "base": 0}).wait()
+    report = _move_axes_to(robot, {"lift": 675, "base": 0}).wait()
     if verbose:
         _print_report("回位", report)
 

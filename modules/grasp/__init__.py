@@ -13,6 +13,7 @@ with Grasp.open(
 ```
 
 - :class:`~modules.grasp.runtime.Grasp` —— 拥有机械臂与视觉源的会话；
+- :class:`~modules.grasp.drive.ring_plan.RingBasePlan` —— "环心 → 底座绝对角度"的解算结果；
 - :class:`~modules.grasp.drive.servo_model.ServoResult` / ``GraspReadyResult`` —— 动作结果；
 - :class:`~modules.grasp.drive.servo_model.ServoError` —— 伺服无法继续。
 
@@ -29,12 +30,14 @@ with Grasp.open(
 
 from __future__ import annotations
 
+from .drive.ring_plan import RingBasePlan
 from .drive.servo_model import GraspReadyResult, ServoError, ServoResult
 from .runtime import Grasp
 
 __all__ = [
     "Grasp",
     "GraspReadyResult",
+    "RingBasePlan",
     "ServoError",
     "ServoResult",
 ]

@@ -10,6 +10,7 @@ import time
 
 from app.gripper import (
     align_box,
+    grab_box_from_car,
     grab_box_from_floor,
     grab_box_from_turntable,
     place_box_to_repo,
@@ -30,7 +31,12 @@ def main() -> None:
     **上层调用的样子**见 :func:`locate_material`、:func:`pick_ready` 与
     :func:`pick_manual`：一条 ``with`` 完成装配，动作一行一个，收尾交给 ``Robot``。
     """
-    demo_material()
+    # demo_material()
+    with Robot.open(grasp=True, gripper=True, turntable=True) as robot:
+        robot.gripper.set_position(150)
+        grab_box_from_car(robot)
+        grab_box_from_car(robot)
+        grab_box_from_car(robot)
 
 
 def locate_material(*, config_path=None) -> None:
@@ -63,8 +69,8 @@ def pick_manual() -> None:
         
         # grab_box(robot)
         try:
-            for _ in range(3):
-                grab_box_from_turntable(robot)
+            for color in ("red", "green", "blue"):
+                grab_box_from_turntable(robot, want_color=color)
                 place_box_to_repo(robot, verbose=True)
         except Exception as e:
             print(f"Error occurred during pick and place operation: {e}")
@@ -115,8 +121,8 @@ def _place_box(robot: Robot):
 
 
 if __name__ == "__main__":
-    # main()
-    pick_manual()
+    main()
+    # pick_manual()
     # test_place_box()
     # test_vision()
     # adjust_arm_align()
