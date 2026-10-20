@@ -78,6 +78,10 @@ def pick_manual() -> None:
             return
 
         robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+        robot.gripper.set_position(150)
+        grab_box_from_car(robot)
+        grab_box_from_car(robot)
+        grab_box_from_car(robot)
 
 def _place_box(robot: Robot):
     try:
@@ -121,8 +125,8 @@ def _place_box(robot: Robot):
 
 
 if __name__ == "__main__":
-    main()
-    # pick_manual()
+    # main()
+    pick_manual()
     # test_place_box()
     # test_vision()
     # adjust_arm_align()
