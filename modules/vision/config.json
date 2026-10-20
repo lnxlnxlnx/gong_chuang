@@ -82,5 +82,15 @@
     "minimum_confidence": 0.5,
     "stable_frame_count": 3,
     "maximum_center_jitter_px": 1.5
+  },
+  "ring_digits": {
+    "order": [1, 2, 3],
+    "inner_ratio": 0.55,
+    "threshold": 100.0,
+    "ink_ratio_range": [0.02, 0.40],
+    "min_glyph_ratio": 0.25
+  },
+  "ring_target": {
+    "diameter_mm": 53.0
   }
 }

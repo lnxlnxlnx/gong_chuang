@@ -102,6 +102,25 @@ DEFAULT_STACKED_MAX_LINE_ANGLE_DEG = 8.0
 #: 叠放位：两条基准线的夹角超过它就不配对（度）。它们本该平行。
 DEFAULT_STACKED_MAX_LINE_DISAGREEMENT_DEG = 2.0
 
+#: 环纸上的数字从左到右的顺序。数字位置固定时**不需要认字**：环的左右顺序就是数字。
+DEFAULT_RING_DIGIT_ORDER = (1, 2, 3)
+
+#: 取环心内圆时用的半径比例（相对环半径）。取太大就会把环的虚线算成"数字"。
+DEFAULT_RING_DIGIT_INNER_RATIO = 0.55
+
+#: 灰度阈值：低于它算墨迹（白纸黑字默认 100）。
+DEFAULT_RING_DIGIT_THRESHOLD = 100.0
+
+#: 内圆里墨迹占比的合理区间。低于下限是空白，高于上限是整片阴影而不是一个字形。
+DEFAULT_RING_DIGIT_INK_RANGE = (0.02, 0.40)
+
+#: 字形高度（有墨迹的行数占内圆直径）的下限：够高才算"印了一个数字"。
+DEFAULT_RING_DIGIT_MIN_GLYPH_RATIO = 0.25
+
+#: 环纸**最里面那一圈**圆的直径（毫米）。现场 2026-10-20 实测：53 mm。
+#: 已知直径是最好的比例尺——毫米/像素 = 直径 / 那一圈的像素直径，与镜头距离无关。
+DEFAULT_RING_TARGET_DIAMETER_MM = 53.0
+
 #: 推理后端名。``auto`` 按平台选：Windows 走 OpenCV ONNX，Jetson 走 TensorRT。
 BACKEND_AUTO = "auto"
 BACKEND_TENSORRT = "tensorrt"
@@ -241,6 +260,50 @@ class StackedRingSettings:
     stable_frame_count: int = DEFAULT_STATION_STABLE_FRAME_COUNT
     #: 稳定窗口内允许的最大圆心抖动（像素）。
     maximum_center_jitter_px: float = DEFAULT_STATION_MAX_CENTER_JITTER_PX
+
+
+@dataclass(frozen=True)
+class RingDigitSettings:
+    """``config.json`` 的 ``ring_digits`` 块：环上数字的顺序与"环里有没有数字"的判据。
+
+    两件事必须分开看：
+
+    - **顺序**（``order``）是纸上的物理约定（现场：左 1、中 2、右 3）。它决定"第几个环
+      算几号"，不需要认字；换纸、翻面摆放只改这一个字段。
+    - **墨迹判据**（其余字段）回答的是另一个问题：那个环里到底有没有印数字。空环如果
+      被当成"按顺序肯定是 N 号"，机械臂就会朝一个什么都对不准的位置动，而动作本身
+      看起来完全正常——这类错误没有任何现场表现，只有事后对账才发现。
+    """
+
+    #: 左→右的数字顺序。
+    order: Tuple[int, ...] = DEFAULT_RING_DIGIT_ORDER
+    #: 取环心内圆时用的半径比例（相对环半径）。
+    inner_ratio: float = DEFAULT_RING_DIGIT_INNER_RATIO
+    #: 灰度阈值：低于它算墨迹。
+    threshold: float = DEFAULT_RING_DIGIT_THRESHOLD
+    #: 内圆里墨迹占比的合理区间。
+    ink_ratio_range: Tuple[float, float] = DEFAULT_RING_DIGIT_INK_RANGE
+    #: 字形高度占内圆直径的比例下限。
+    min_glyph_ratio: float = DEFAULT_RING_DIGIT_MIN_GLYPH_RATIO
+
+
+@dataclass(frozen=True)
+class RingTargetSettings:
+    """``config.json`` 的 ``ring_target`` 块：视野里那个环的真实直径。
+
+    已知直径是**最好用的比例尺**：``毫米/像素 = 直径 / 像素直径``，与镜头到环的距离
+    无关，也不需要另做标定。
+
+    这里填的是**最里面那一圈**（环纸上一圈圈同心圆里最内的那个）的直径：代码按
+    "同一直径带上至少有两条观测（一圈的两道边）"把真实圆圈和数字轮廓区分开，
+    取**最内**的那个带当基准。要换成别的圈，就填那个圈的真实直径。
+
+    ``None`` 表示不配——那时退回 ``table_depth_mm / focal_px``，再退回
+    ``station.mm_per_px``；三者都没有就不报毫米。
+    """
+
+    #: 最内圈的真实直径（毫米）。
+    diameter_mm: Optional[float] = DEFAULT_RING_TARGET_DIAMETER_MM
 
 
 @dataclass(frozen=True)
@@ -508,6 +571,11 @@ class VisionConfig:
     station_reference: StationReferenceSettings = field(default_factory=StationReferenceSettings)
     #: ``config.json`` 的 ``stacked_ring`` 块：叠放位（中环 + 上下基准线）的检测参数。
     stacked_ring: StackedRingSettings = field(default_factory=StackedRingSettings)
+    #: ``config.json`` 的 ``ring_digits`` 块：环纸上的数字顺序与"环里有没有数字"的判据。
+    ring_digits: RingDigitSettings = field(default_factory=RingDigitSettings)
+    #: ``config.json`` 的 ``ring_target`` 块：视野里那一个环的真实直径（毫米）。
+    #: 已知直径是最可靠的比例尺，缺标定时靠它给毫米。
+    ring_target: RingTargetSettings = field(default_factory=RingTargetSettings)
     #: ``config.json`` 的 ``model`` 块：用哪个模型、哪些类别算物料、输入边长和阈值。
     #: 放在**字段尾部**，已有的位置参数顺序不变。
     model: ModelSettings = field(default_factory=ModelSettings)
@@ -576,6 +644,8 @@ def load_vision_config(
         station_detection=_station_detection(root.get("station")),
         station_reference=_station_reference(root.get("station")),
         stacked_ring=_stacked_ring(root.get("stacked_ring")),
+        ring_digits=_ring_digits(root.get("ring_digits")),
+        ring_target=_ring_target(root.get("ring_target")),
         # 同一份 root 里取 model：一个会话只读一次这个文件，绝不回读默认路径。
         model=_model_from_root(root, Path(config_path)),
     )
@@ -894,6 +964,79 @@ def _stacked_ring(value: object) -> StackedRingSettings:
             "stacked_ring.maximum_center_jitter_px",
         ),
     )
+
+
+def _ring_digits(value: object) -> RingDigitSettings:
+    """读 ``ring_digits`` 块；整块缺失时全部走默认值。"""
+    if value is None:
+        return RingDigitSettings()
+    document = _mapping(value, "ring_digits")
+    defaults = RingDigitSettings()
+    return RingDigitSettings(
+        order=_ring_digit_order(document.get("order", defaults.order)),
+        inner_ratio=_fraction(
+            document.get("inner_ratio", defaults.inner_ratio), "ring_digits.inner_ratio"
+        ),
+        threshold=_grey_level(
+            document.get("threshold", defaults.threshold), "ring_digits.threshold"
+        ),
+        ink_ratio_range=_ratio_range(
+            document.get("ink_ratio_range", defaults.ink_ratio_range),
+            "ring_digits.ink_ratio_range",
+        ),
+        min_glyph_ratio=_probability(
+            document.get("min_glyph_ratio", defaults.min_glyph_ratio),
+            defaults.min_glyph_ratio,
+            "ring_digits.min_glyph_ratio",
+        ),
+    )
+
+
+def _ring_target(value: object) -> RingTargetSettings:
+    """读 ``ring_target`` 块；整块缺失时用现场实测的默认直径。"""
+    if value is None:
+        return RingTargetSettings()
+    document = _mapping(value, "ring_target")
+    defaults = RingTargetSettings()
+    return RingTargetSettings(
+        diameter_mm=_optional_positive_number(
+            document.get("diameter_mm", defaults.diameter_mm),
+            "ring_target.diameter_mm",
+        ),
+    )
+
+
+def _ring_digit_order(value: object) -> Tuple[int, ...]:
+    """读"左→右的数字顺序"：每个都是从 1 开始的整数，且不能重复。
+
+    重复是写得出来的错（``[1, 1, 3]``），后果却很难看：两个环都叫 1 号，
+    ``ring(1)`` 只能返回其中一个，另一个永远取不到。
+    """
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError("ring_digits.order 必须是非空的整数数组，例如 [1, 2, 3]")
+    order = []
+    for index, item in enumerate(value):
+        number = _positive_int(item, f"ring_digits.order[{index}]")
+        order.append(number)
+    if len(set(order)) != len(order):
+        raise ValueError(f"ring_digits.order 里的数字不能重复，实际是 {list(order)}")
+    return tuple(order)
+
+
+def _fraction(value: object, name: str) -> float:
+    """读一个 ``(0, 1)`` 之间的比例；``1.0`` 与 ``0`` 都不算。"""
+    number = _positive_number(value, name)
+    if number >= 1.0:
+        raise ValueError(f"{name} 必须小于 1（它是比例），实际是 {number}")
+    return number
+
+
+def _grey_level(value: object, name: str) -> float:
+    """读一个 0–255 的灰度阈值。"""
+    number = _number(value, name)
+    if not 0.0 <= number <= 255.0:
+        raise ValueError(f"{name} 必须在 0–255 之间，实际是 {number}")
+    return number
 
 
 def _ring1_side(value: object) -> str:

@@ -4,7 +4,7 @@
 本文件补的是另一半：把视觉模块**其余的识别能力**也摆到同一个窗口里，用数字键切换，
 不用为了看工位识别再开一个脚本、再等一次模型加载。
 
-## 六个模式（对应 ``modules/vision`` 的六类能力）
+## 七个模式（对应 ``modules/vision`` 的七类能力）
 
 ============  ==============================================  ==========================
 键            模式                                            背后的 API
@@ -15,11 +15,12 @@
 ``4``         叠放位（中环 + 上下基准线）                      ``Vision.detect_stacked_ring``
 ``5``         同帧多目标拆分（marker / material）              ``CellTargetDetector.detect``
 ``6``         两点像素测量（鼠标点两个点，毫米可选）           ``Vision.pixel_distance*``
+``7``         视野里那一个环（环心 → 相机系毫米）              ``Vision.locate_ring``
 ============  ==============================================  ==========================
 
 ## 按键
 
-- ``1``–``6``：切换模式（切换会清掉上一次的融合结论，避免看着旧值做判断）；
+- ``1``–``7``：切换模式（切换会清掉上一次的融合结论，避免看着旧值做判断）；
 - ``m``：把**最近 N 次定位**做一次稳健融合（N 由 ``--frames`` 决定），结论留在画面上；
 - ``t``：把这一帧翻成闭环观测（``frame()`` 那种 ``MaterialSighting``）打到终端；
 - ``p``：把当前模式的结果完整打到终端；
@@ -128,6 +129,7 @@ MODE_RINGS = "rings"
 MODE_STACKED = "stacked"
 MODE_CELLS = "cells"
 MODE_MEASURE = "measure"
+MODE_RING = "ring"
 
 #: 模式顺序就是数字键的顺序。
 MODES: tuple[str, ...] = (
@@ -137,6 +139,7 @@ MODES: tuple[str, ...] = (
     MODE_STACKED,
     MODE_CELLS,
     MODE_MEASURE,
+    MODE_RING,
 )
 
 #: 画面上用的短标题（ASCII）。
@@ -147,6 +150,7 @@ MODE_TITLES = {
     MODE_STACKED: "stacked",
     MODE_CELLS: "cells",
     MODE_MEASURE: "measure",
+    MODE_RING: "ring",
 }
 
 #: 画面上那一行操作提示。
@@ -157,6 +161,7 @@ MODE_HINTS = {
     MODE_STACKED: "middle ring + top/bottom reference lines",
     MODE_CELLS: "marker / material split inside one frame",
     MODE_MEASURE: "click 2 points, 3rd click clears; frame freezes on 1st click",
+    MODE_RING: "one ring in view: x/y is the align_xy reading; p prints it",
 }
 
 #: 数字键 → 模式。
@@ -353,6 +358,8 @@ class Viewer:
             return self._stacked_detector().detect(frame)
         if mode == MODE_CELLS:
             return self._cell_detector().detect(frame)
+        if mode == MODE_RING:
+            return self.vision.locate_ring()
         # measure 模式不推理，但要给 run_preview 一个非 None 的结果，
         # 否则它走 ``current.copy()`` 分支，draw 根本不会被调用——画面就没有测点。
         return _MEASURE_PENDING
@@ -431,6 +438,8 @@ class Viewer:
             return self._stacked_detector().draw(frame, value)
         if page == MODE_CELLS:
             return self._cell_detector().draw(frame, value)
+        if page == MODE_RING:
+            return self._draw_ring(frame, value)
         return self._draw_measure(frame)
 
     def _waiting_card(self, frame: np.ndarray) -> np.ndarray:
@@ -448,6 +457,31 @@ class Viewer:
             ],
             color=(0, 200, 255),
         )
+        return canvas
+
+    def _draw_ring(self, frame: np.ndarray, target) -> np.ndarray:
+        """视野里那个环：画圆、环心十字与相机坐标（有数字画绿，空环画橙）。"""
+        import cv2
+
+        canvas = frame.copy()
+        if target is None:
+            _put_lines(canvas, ["no ring in view"])
+            return canvas
+        for item in (target,):
+            centre = (int(round(item.center_px[0])), int(round(item.center_px[1])))
+            radius = max(3, int(round(item.radius_px)))
+            colour = (0, 255, 0) if item.digit_present else (0, 165, 255)
+            cv2.circle(canvas, centre, radius, colour, 3)
+            cv2.drawMarker(canvas, centre, (255, 255, 0), cv2.MARKER_CROSS, 16, 2)
+            if item.x_mm is None or item.y_mm is None:
+                label = f"{item.digit}: no mm"
+            else:
+                label = f"{item.digit}: x={item.x_mm:+.1f} y={item.y_mm:+.1f}mm"
+            if not item.digit_present:
+                label += " | no digit"
+            origin = (max(4, centre[0] - radius), max(18, centre[1] - radius - 10))
+            cv2.putText(canvas, label, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
+            cv2.putText(canvas, label, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
         return canvas
 
     def _draw_measure(self, frame: np.ndarray) -> np.ndarray:
@@ -503,7 +537,7 @@ class Viewer:
             # 切模式的瞬间，工作线程可能还在算上一模式的帧：说清楚，别让人以为切错了。
             lines.append(f"  (last result: {MODE_TITLES.get(result.mode, result.mode)}, switching)")
         lines.extend(self._state_lines(result))
-        lines.append("1-6 mode | m fuse | t sighting | p print | r reset | s save | q quit")
+        lines.append("1-7 mode | m fuse | t sighting | p print | r reset | s save | q quit")
         return lines
 
     def _state_lines(self, result) -> "list[str]":
@@ -522,6 +556,8 @@ class Viewer:
             return self._stacked_lines(value)
         if result.mode == MODE_CELLS:
             return self._cells_lines(value)
+        if result.mode == MODE_RING:
+            return self._ring_lines(value)
         return self._measure_lines()
 
     def _fusion_lines(self) -> "list[str]":
@@ -606,6 +642,26 @@ class Viewer:
                 f"r={target.region.radius:.0f}px z={target.fix.depth_mm:.0f}mm"
             )
         return lines
+
+    def _ring_lines(self, target) -> "list[str]":
+        if target is None:
+            return ["  no ring in view"]
+        where = (
+            "--" if target.x_mm is None
+            else f"({target.x_mm:+.1f},{target.y_mm:+.1f})mm"
+        )
+        if target.usable:
+            state = "ok"
+        elif not target.digit_present:
+            state = "no-digit"
+        else:
+            state = "no-mm"
+        return [
+            f"  centre {where} r={target.radius_px:.0f}px {state} "
+            f"support={target.support}/{target.diameter_bands}",
+            f"  ink={target.ink_ratio:.1%} glyph={target.glyph_ratio:.1%} "
+            f"partial={target.partial}",
+        ]
 
     def _measure_lines(self) -> "list[str]":
         lines = [f"  points={len(self.measure.points)} frozen={self.measure.frozen is not None}"]
@@ -785,6 +841,10 @@ class Viewer:
                     f"{hit.width:.0f}x{hit.height:.0f}"
                 )
             return "\n".join(lines)
+        if mode == MODE_RING:
+            if value is None:
+                return "画面里没有环（把环放到视野中间一点，或者检查光照）"
+            return value.summary() + f"\n  对准读数（相机系）: {value.reading()}\n  {value.detail}"
         if mode in (MODE_RINGS, MODE_STACKED, MODE_CELLS):
             return value.summary()
         if self.measure.measured is None:

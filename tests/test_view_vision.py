@@ -26,6 +26,7 @@ from modules.vision.drive.cell_targets import CellTargets
 from modules.vision.drive.hough_lock import LockedRegion, RingLock
 from modules.vision.drive.material_class import ClassResult
 from modules.vision.drive.material_face import FaceQuality
+from modules.vision.drive.numbered_ring import RingTarget
 from modules.vision.drive.ring_station import RingStationDetection
 from modules.vision.drive.stacked_ring import StackedRingDetection
 from modules.vision.reports import MaterialReport, RegionReport
@@ -34,6 +35,7 @@ from view_vision import (
     MODE_KEYS,
     MODE_MEASURE,
     MODE_MATERIAL,
+    MODE_RING,
     MODE_RINGS,
     MODE_STACKED,
     MODE_YOLO,
@@ -114,6 +116,26 @@ def material_report() -> MaterialReport:
     return MaterialReport(lock=RingLock(regions=(region,)), hits=(), regions=(report_region,))
 
 
+def ring_target() -> RingTarget:
+    """视野里那一个环：中心在光轴上、有数字、可对准。"""
+    return RingTarget(
+        center_px=(480.0, 120.0),
+        radius_px=96.0,
+        reference_diameter_px=196.0,
+        x_mm=0.0,
+        y_mm=0.0,
+        digit_present=True,
+        ink_ratio=0.12,
+        glyph_ratio=0.55,
+        support=12,
+        diameter_bands=3,
+        partial=False,
+        scale_mm_per_px=0.27,
+        scale_source="ring diameter",
+        detail="1 个候选环",
+    )
+
+
 class FakeVision:
     """把 ``Viewer`` 用到的会话接口都换成假实现（一台设备也不开）。"""
 
@@ -133,6 +155,12 @@ class FakeVision:
         self.stacked_detector = FakeDetector(
             StackedRingDetection(detected=True, confidence=0.8, middle_radius_px=70.0)
         )
+        self.ring_target = ring_target()
+        self.ring_target_calls = 0
+
+    def locate_ring(self, *, timeout=None):
+        self.ring_target_calls += 1
+        return self.ring_target
 
     def _frame_size(self):
         return (self.frame.shape[1], self.frame.shape[0])
@@ -215,7 +243,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_each_mode_runs_its_own_detector(self) -> None:
         viewer, vision, frame = make_viewer()
-        for mode in (MODE_YOLO, MODE_RINGS, MODE_STACKED):
+        for mode in (MODE_YOLO, MODE_RINGS, MODE_STACKED, MODE_RING):
             with self.subTest(mode=mode):
                 viewer.mode = mode
                 result = viewer.pipeline(frame)
@@ -223,6 +251,7 @@ class PipelineTests(unittest.TestCase):
                 self.assertNotIsInstance(result.value, Failure)
         self.assertEqual(vision.ring_detector.calls, 1)
         self.assertEqual(vision.stacked_detector.calls, 1)
+        self.assertEqual(vision.ring_target_calls, 1)
 
     def test_measure_mode_returns_a_marker_so_draw_still_runs(self) -> None:
         """``run_preview`` 只在结果非 None 时调 draw；测量模式必须给一个非 None 的结果。"""
@@ -273,6 +302,7 @@ class DrawTests(unittest.TestCase):
             MODE_RINGS: RingStationDetection(detected=True),
             MODE_STACKED: StackedRingDetection(detected=True, middle_radius_px=70.0),
             MODE_CELLS: CellTargets(markers=(), materials=(), unmatched=()),
+            MODE_RING: ring_target(),
         }
         for mode, value in cases.items():
             with self.subTest(mode=mode):
@@ -297,6 +327,7 @@ class AsciiTests(unittest.TestCase):
             MODE_STACKED: StackedRingDetection(detected=True, confidence=0.9, middle_radius_px=70.0),
             MODE_CELLS: CellTargets(markers=(), materials=(), unmatched=()),
             MODE_MEASURE: object(),
+            MODE_RING: ring_target(),
         }
         for mode, value in results.items():
             viewer.mode = mode

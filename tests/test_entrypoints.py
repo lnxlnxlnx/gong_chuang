@@ -107,6 +107,11 @@ class EntryPointTests(unittest.TestCase):
             "25", "视觉标定（焦距/台面深度）", "modules.vision.test.manual.calibrate_vision"
         )
 
+    def test_menu_dispatches_numbered_ring(self) -> None:
+        self._assert_menu_dispatches(
+            "26", "环内数字环心", "modules.vision.test.manual.numbered_ring"
+        )
+
     def test_vision_demo_selects_the_local_model_format(self) -> None:
         """模型路径来自 config.json 的 model 块，不是代码里的 os.name 分支。"""
         model_path = default_model_path()
@@ -171,6 +176,8 @@ class EntryPointTests(unittest.TestCase):
             "modules.vision.drive.stacked_ring",
             "modules.vision.drive.pixel_measure",
             "modules.vision.drive.motion_gate",
+            # 环内数字也是"既能 import、又能 python -m"：它的自测在合成帧上跑。
+            "modules.vision.drive.numbered_ring",
         ):
             with self.subTest(module=module):
                 result = subprocess.run(

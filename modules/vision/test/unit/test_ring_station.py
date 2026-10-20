@@ -219,6 +219,19 @@ class SelectTripleTests(unittest.TestCase):
         ]
         self.assertIsNone(select_triple(candidates, self.settings, frame_width=1280))
 
+    def test_a_duplicate_center_is_skipped_not_passed_to_the_scorer(self) -> None:
+        """两个候选圆心重合时排不出"中间那个"：跳过这一组，不能把 None 丢给打分函数。
+
+        现场表现：画面里只认出一个环（它被并成两个候选）时，detect 会抛
+        ``TypeError: 'NoneType' object is not iterable``，而不是老实报"没识别到"。
+        """
+        candidates = [
+            candidate((100.0, 360.0)),
+            candidate((100.0, 360.0)),
+            candidate((900.0, 360.0)),
+        ]
+        self.assertIsNone(select_triple(candidates, self.settings, frame_width=1280))
+
     def test_a_different_diameter_is_penalised(self) -> None:
         """直径不一致要扣分：三个环本该一样大。
 

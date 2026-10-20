@@ -624,6 +624,10 @@ def select_triple(
                 triple = order_triple(
                     (candidates[first], candidates[second], candidates[third]), ring1_side
                 )
+                # 排不出"中间那个"时这一组直接作废：把 None 交给打分函数会在那里炸掉，
+                # 而"画面上只有一两个环"本来是**正常结果**（detected=False），不是异常。
+                if triple is None:
+                    continue
                 score = score_triple(triple, settings, span_floor)
                 if score is not None and score > best_score:
                     best_score = score
