@@ -469,7 +469,8 @@ class Viewer:
             return canvas
         for item in (target,):
             centre = (int(round(item.center_px[0])), int(round(item.center_px[1])))
-            radius = max(3, int(round(item.radius_px)))
+            # 精修过就画真正那一圈（外圈），否则只能按框画——框比图案大一圈。
+            radius = max(3, int(round(item.ring_radius_px or item.radius_px)))
             colour = (0, 255, 0) if item.usable else (0, 165, 255)
             cv2.circle(canvas, centre, radius, colour, 3)
             cv2.drawMarker(canvas, centre, (255, 255, 0), cv2.MARKER_CROSS, 16, 2)

@@ -281,6 +281,27 @@ class RingTargetSettings:
     #: 注意它的精度取决于模型框的松紧（实测 ±15%），不是测量级的数。
     outer_diameter_mm: Optional[float] = DEFAULT_RING_OUTER_DIAMETER_MM
 
+    # ------------------------------------------------------------ 环心精修
+    # 模型框是回归出来的，框心只在框正好套住图案时才等于环心（实测有一帧偏 82 px）。
+    # 框内一圈圈同心圆的圆心是同一个点，所以在框内做一次椭圆拟合、取圆心中位数，
+    # 就能把精度拉回 1–2 px。下面这几项就是那一步的开关与验收。
+
+    #: 要不要做框内精修；``False`` 表示直接用模型框心。
+    refine_center: bool = True
+    #: 至少找到几条椭圆观测才敢精修。
+    refine_min_observations: int = 3
+    #: 参与"同一圈"的圆心距离（像素）：以最大圆为种子，只收离它这么近的观测。
+    refine_cluster_radius_px: float = 4.0
+    #: 各观测圆心到中位数的距离中位数上限（像素）。同心圆本该重合，超了说明框里混了别的东西。
+    refine_max_spread_px: float = 6.0
+    #: 裁图比模型框大多少（相对框长边）：精修要把整圈环包进来。
+    refine_margin_ratio: float = 0.08
+    #: 只接受直径在 ``[min, max] × 框长边`` 的椭圆观测：滤掉数字笔画和隔壁环。
+    refine_min_diameter_ratio: float = 0.30
+    refine_max_diameter_ratio: float = 1.00
+    #: 精修结果离框心太远就说明框套错了东西，不要它（相对框长边）。
+    refine_max_offset_ratio: float = 0.25
+
     @property
     def names(self) -> Tuple[str, ...]:
         """模型里算"环"的类别名。"""
@@ -961,7 +982,54 @@ def _ring_target(value: object) -> RingTargetSettings:
             document.get("outer_diameter_mm", defaults.outer_diameter_mm),
             "ring_target.outer_diameter_mm",
         ),
+        refine_center=_boolean(
+            document.get("refine_center", defaults.refine_center),
+            "ring_target.refine_center",
+        ),
+        refine_min_observations=_positive_int(
+            document.get("refine_min_observations", defaults.refine_min_observations),
+            "ring_target.refine_min_observations",
+        ),
+        refine_cluster_radius_px=_positive_number(
+            document.get("refine_cluster_radius_px", defaults.refine_cluster_radius_px),
+            "ring_target.refine_cluster_radius_px",
+        ),
+        refine_max_spread_px=_positive_number(
+            document.get("refine_max_spread_px", defaults.refine_max_spread_px),
+            "ring_target.refine_max_spread_px",
+        ),
+        refine_margin_ratio=_fraction(
+            document.get("refine_margin_ratio", defaults.refine_margin_ratio),
+            "ring_target.refine_margin_ratio",
+        ),
+        refine_min_diameter_ratio=_fraction(
+            document.get("refine_min_diameter_ratio", defaults.refine_min_diameter_ratio),
+            "ring_target.refine_min_diameter_ratio",
+        ),
+        refine_max_diameter_ratio=_positive_number(
+            document.get("refine_max_diameter_ratio", defaults.refine_max_diameter_ratio),
+            "ring_target.refine_max_diameter_ratio",
+        ),
+        refine_max_offset_ratio=_fraction(
+            document.get("refine_max_offset_ratio", defaults.refine_max_offset_ratio),
+            "ring_target.refine_max_offset_ratio",
+        ),
     )
+
+
+def _boolean(value: object, name: str) -> bool:
+    """读一个开关；只接受真正的 ``true`` / ``false``，不把 ``"false"`` 当假。"""
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} 必须是 true 或 false，实际是 {value!r}")
+    return value
+
+
+def _fraction(value: object, name: str) -> float:
+    """读一个 ``(0, 1]`` 之间的比例。"""
+    number = _positive_number(value, name)
+    if number > 1.0:
+        raise ValueError(f"{name} 必须不超过 1（它是相对框长边的比例），实际是 {number}")
+    return number
 
 
 def _ring_classes(value: object, name: str) -> Mapping[str, int]:

@@ -127,6 +127,7 @@ def _settled_sighting(
     after: Optional[float] = None,
     tolerance: Optional[float] = None,
     include_depth: bool = True,
+    wait_for_first_target: bool = False,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> MaterialSighting:
     """等到画面不再变，返回那一刻的整条观测（不只是坐标）。
@@ -146,10 +147,41 @@ def _settled_sighting(
     1.7–2.7 mm（≤0.4 mm 的只占 13%），于是判据**永远不满足**，每次测量都要等满
     ``settle_timeout_seconds``（默认 4 s）才拿最后读数走人。这就是"对准有时要等好几秒"
     的全部来源。测 z 的步骤（抬升 / 悬停 / ``align_z``）保持三维判据不变。
+
+    ``wait_for_first_target`` 只改"一次都没测到物块"那一段的耐心：
+
+    - ``False``（默认）或 ``config.target_wait_seconds == 0``：保持旧语义，整次测量共用
+      一个 ``settle_timeout_seconds`` 截止时刻，"等物块出现"和"等它停稳"都算在里面；
+    - ``True`` 且 ``target_wait_seconds`` 为正数：最多等这么多秒让物块第一次出现；
+    - ``True`` 且 ``target_wait_seconds is None``：一直等它出现（Ctrl+C 可中断）。
+
+    后两种情况下，测到物块之后才从那一刻开始计 ``settle_timeout_seconds`` 等它停稳。
+    物块放在转盘上、调用时还没转进视野时用这个；**看见过又丢**的收工口不变
+    （仍按最后读数返回）。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     allowed = config.settle_tolerance_mm if tolerance is None else tolerance
-    deadline = time.monotonic() + config.settle_timeout_seconds
+    started = time.monotonic()
+    #: 等物块第一次出现的截止时刻；``None`` = 一直等。
+    target_deadline: Optional[float]
+    #: 等读数停稳的截止时刻；``None`` = 还没测到过物块，测到之后才开始计。
+    settle_deadline: Optional[float]
+    if wait_for_first_target:
+        target_wait = config.target_wait_seconds
+        # 0 = 保持旧语义；None = 一直等；正数 = 只等这么多秒。
+        use_target_wait = target_wait != 0
+    else:
+        target_wait = 0
+        use_target_wait = False
+    if use_target_wait:
+        target_deadline = None if target_wait is None else started + target_wait
+        settle_deadline = None
+    else:
+        # 旧语义：一个截止时刻同时管"等出现"与"等停稳"。
+        target_deadline = started + config.settle_timeout_seconds
+        settle_deadline = target_deadline
+    #: 一直等物块出现时每隔这么久提醒一次现场；这不是超时，只是别让人以为程序卡死。
+    next_target_notice = started + config.settle_timeout_seconds
     previous: Optional[Tuple[float, float]] = None
     last: Optional[MaterialSighting] = None
     #: 这段时间里**最后一次**"读不到"的原因。必须留着：最终那句"没能稳定看到物块"至少
@@ -165,6 +197,9 @@ def _settled_sighting(
             last_error = error
         else:
             last = current
+            if settle_deadline is None:
+                # 第一次看见物块：停稳计时从这一刻开始，等转盘转过来的时间不占它。
+                settle_deadline = time.monotonic() + config.settle_timeout_seconds
             point = (current.x_mm, current.y_mm, current.z_mm)
             if previous is not None:
                 # ``include_depth=False`` 时把 z 那一项**置零**而不是换一个判据：
@@ -177,20 +212,38 @@ def _settled_sighting(
                 ) <= allowed:
                     return current
             previous = point
-        if time.monotonic() >= deadline:
-            if last is None:
-                # 超时的**类型**跟着最后一次失败走：调用方要能区分"一个目标都没有"（可能是
-                # 爪子挡住了光，可以按最后一次读数收工）与"多个目标 / 链路超时"（必须报错）。
-                message = (
-                    f"等了 {config.settle_timeout_seconds:.1f} s 也没能稳定看到物块；"
-                    f"这一段的最后一次失败是：{last_error}\n"
-                    "  一个目标都没有时：确认物块在画面里，没有被人、线材或爪子挡住；"
-                    "提示多个目标时：在 modules/grasp/eye_in_hand.json 的 object 里"
-                    "填 material_id 或 color"
-                )
+        now = time.monotonic()
+        if last is None:
+            if target_deadline is not None and now >= target_deadline:
+                if use_target_wait:
+                    message = (
+                        f"等了 {config.target_wait_seconds:.1f} s 也没等到物块出现"
+                        "（转盘是不是还没转到？）；"
+                        f"这一段的最后一次失败是：{last_error}\n"
+                        "  物块不在视野里时：确认转盘会转到它，或先把转盘转到能看到它的位置；"
+                        "也可以把 modules/grasp/eye_in_hand.json 的 target_wait_seconds "
+                        "调大（null = 一直等）"
+                    )
+                else:
+                    # 超时的**类型**跟着最后一次失败走：调用方要能区分"一个目标都没有"（可能是
+                    # 爪子挡住了光，可以按最后一次读数收工）与"多个目标 / 链路超时"（必须报错）。
+                    message = (
+                        f"等了 {config.settle_timeout_seconds:.1f} s 也没能稳定看到物块；"
+                        f"这一段的最后一次失败是：{last_error}\n"
+                        "  一个目标都没有时：确认物块在画面里，没有被人、线材或爪子挡住；"
+                        "提示多个目标时：在 modules/grasp/eye_in_hand.json 的 object 里"
+                        "填 material_id 或 color"
+                    )
                 if isinstance(last_error, ObjectMissing):
                     raise ObjectMissing(message) from last_error
                 raise ServoError(message) from last_error
+            if use_target_wait and now >= next_target_notice:
+                say(
+                    f"  还在等物块出现（已等 {now - started:.0f} s）："
+                    "转盘可能还没转到，或物块不在视野里；按 Ctrl+C 可以中止"
+                )
+                next_target_notice = now + config.settle_timeout_seconds
+        elif settle_deadline is not None and now >= settle_deadline:
             say(
                 f"  等停稳超时（{config.settle_timeout_seconds:.1f} s）："
                 f"画面仍在变，先按最后读数 ({last.x_mm:+.2f}, {last.y_mm:+.2f}) mm 继续"

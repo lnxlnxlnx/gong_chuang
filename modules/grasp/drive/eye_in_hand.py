@@ -486,6 +486,14 @@ def align_x_y(
     所以这里传 ``include_depth=False``，只比平面内的 x/y。测 z 的那几条路
     （:func:`raise_before_rotating` / :func:`hover_above_object` / :func:`align_z`）
     照旧比三维——那里的 z 就是被控量，抖动必须等它停下来。
+
+    ## 物块还没转进视野时（转盘）
+
+    第一次测量把 ``config.target_wait_seconds`` 当作"等物块出现"的上限
+    （``null`` = 一直等，``0`` = 保持旧语义），而不是沿用 ``settle_timeout_seconds`` 的
+    4 s：转盘还没把物块转到镜头前时，本函数会一直看着画面等它出现，出现之后才按 4 s
+    等它停稳。之后的每一次测量仍按 4 s 收工——"看见过又丢"要能按最后读数收工
+    （``occluded=True``），不能被无限等待卡住。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     if reading is not None:
@@ -542,6 +550,10 @@ def align_x_y(
                 # "为什么停稳判据不看 z"）。z 那一路的抖动会把每次测量拖到
                 # settle_timeout_seconds 才收工，实测那是"对准要等好几秒"的唯一来源。
                 include_depth=False,
+                # 第一次测量：物块可能还在转盘上没转进视野，按 target_wait_seconds 等它出现
+                # （null = 一直等）。测到过之后不再无限等——"看见过又被爪子挡住"的收工口
+                # 要靠 settle_timeout_seconds 触发。
+                wait_for_first_target=not readings,
             )
         except ObjectMissing:
             # 只有"一个目标都没有"走这条路：可能只是爪子悬到物块上方把光挡住了。

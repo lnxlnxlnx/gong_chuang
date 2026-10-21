@@ -1,16 +1,18 @@
-"""把视野里的环心解算成**各电机的绝对位置**（只看不动）。
+"""把视野里的环心解算成**各电机的绝对位置**，或者直接闭环对准过去。
 
     python test.py   # 选 27
 
-这是 ``robot.grasp.plan_ring()`` 的真机入口：定位环心 → 用实测雅可比与命令里程表
-解算"底座/伸缩各该走到哪个绝对位置"，**一帧都不驱动电机**。打印出来的是：
+两种用法（进去按键选）：
 
-- 环号、模型分数、环心读数（相机系毫米）；
-- **各轴绝对角度**（电机轴口径，与 ``move_axis_to_motor_degrees`` 一致）与脉冲；
-- 预测残差，以及"存下这份 plan、晚点再走"的用法。
+- ``p``：**只算不动**——定位环心 → 用实测雅可比与命令里程表解算"底座/伸缩各该走到
+  哪个绝对位置"，一帧都不驱动电机。打印环号、各轴绝对角度/脉冲、预测残差。
+- ``a``：**闭环对准**——``grasp.align_ring()``：算一步、走一步、再看一帧，直到进容差。
+  每一步都会打印"实测挪了多少 / 按雅可比预测多少 / 响应比"。
 
-典型流程是"先算、后走"：在这个入口（或程序里）算出 plan → 中间去抓物料、摆料 →
-最后 ``plan.apply(arm)`` 或逐轴发 ``move_axis_to_motor_degrees``。
+**响应比**是这里最有用的一个数：``1`` 说明配置的雅可比与实际相符；接近 ``0.5`` 或
+``2`` 说明雅可比过期（换高度、换装法）或环心读数的比例尺与它不是同一把尺——那就是
+"转一次再算一次还是偏"的根源，闭环会在线折算过去，但该重标还得重标（菜单 21 的
+``--calibrate``）。
 
 ## 为什么这次可能要 ``--scale-mm-per-px``
 
@@ -39,7 +41,7 @@ from modules.grasp.drive.servo_model import ServoError
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="定位环心，解算各轴绝对位置（只看不动）"
+        description="定位环心：只算各轴绝对位置，或闭环对准过去"
     )
     parser.add_argument(
         "--scale-mm-per-px", type=float, default=None,
@@ -78,16 +80,36 @@ def _print_state(arm) -> None:
 
 
 def run(scale_mm_per_px=None, require_digit=None) -> int:
+    """真机循环：``p`` 只算、``a`` 闭环对准（会动）。"""
     from modules.grasp.runtime import Grasp
 
     with Grasp.open() as grasp:
         arm = grasp._require_resources()[0]
-        print("环心 → 各轴绝对位置（只看不动）；回车再测一次，q 退出")
+        print("环心 → 各轴绝对位置：p = 只算（不动），a = 闭环对准（会动），q 退出")
         _print_state(arm)
         while True:
-            choice = input("回车=再测一次，q=退出：").strip().lower()
+            choice = input("p=算一次  a=闭环对准  q=退出：").strip().lower()
             if choice in ("q", "quit"):
                 return 0
+            if choice == "a":
+                try:
+                    result = grasp.align_ring(
+                        require_digit=require_digit, scale_mm_per_px=scale_mm_per_px
+                    )
+                except ServoError as error:
+                    print(f"  对准不了：{error}")
+                    continue
+                for step in result.steps:
+                    print("  " + step.line())
+                print(result.summary())
+                if result.plan is not None:
+                    print(
+                        "  存下这份结果就能之后回来："
+                        f"result.pulses = {result.pulses}；"
+                        '恢复：result.apply(arm)'
+                    )
+                _print_state(arm)
+                continue
             try:
                 plan = grasp.plan_ring(
                     require_digit=require_digit, scale_mm_per_px=scale_mm_per_px

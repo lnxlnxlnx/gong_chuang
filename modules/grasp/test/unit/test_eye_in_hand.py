@@ -58,6 +58,7 @@ from modules.grasp.drive.servo_model import (
     GraspReadyResult,
     HoverResult,
     LiftScale,
+    ObjectMissing,
     ObjectSelector,
     ServoConfig,
     ServoError,
@@ -231,6 +232,8 @@ class ServoConfigTests(unittest.TestCase):
             {"extension_retract_pulses": -150},
             {"frame_timeout_seconds": 0.0},
             {"frame_margin_seconds": -1.0},
+            {"target_wait_seconds": -1.0},
+            {"target_wait_seconds": math.inf},
         ):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(ValueError):
@@ -260,6 +263,19 @@ class ConfigFileTests(unittest.TestCase):
         config = load_servo_config()
         self.assertGreater(config.z_descend_pulses, 0)
         self.assertGreater(config.extension_retract_pulses, 0)
+
+    def test_the_target_wait_is_written_in_the_project_config(self) -> None:
+        """转盘场景靠这个键等物块转进视野：现场必须能手改它，默认是 null（一直等）。"""
+        document = json.loads(model.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        self.assertIn("target_wait_seconds", document)
+        self.assertIsNone(document["target_wait_seconds"])
+        self.assertIsNone(load_servo_config().target_wait_seconds)
+
+    def test_target_wait_zero_keeps_the_old_semantics(self) -> None:
+        """``0`` 与 ``null`` 是两件事：0 = 不加额外等待，null = 一直等。"""
+        self.write({"target_wait_seconds": 0})
+        self.assertEqual(load_servo_config(self.path).target_wait_seconds, 0.0)
+        self.assertEqual(ServoConfig().target_wait_seconds, 0.0)
 
     def test_project_config_starts_uncalibrated(self) -> None:
         """出厂状态必须是"没标定"，而不是某个编出来的默认值。"""
@@ -296,6 +312,8 @@ class ConfigFileTests(unittest.TestCase):
             {"extension_retract_pulses": 1.5},
             {"hover_z_mm": 0},
             {"hover_z_mm": "110"},
+            {"target_wait_seconds": -5},
+            {"target_wait_seconds": "10"},
         ):
             with self.subTest(document=document):
                 self.write(document)
@@ -400,6 +418,28 @@ class EmptyLink:
 
     def frame(self, **_kwargs):
         return None
+
+
+class LateLink:
+    """前 ``misses`` 帧返回空，之后一直报同一个稳定读数。
+
+    模拟"物块还在转盘上、没转到镜头前"：调用 ``align_xy`` 的那一刻它不可见，过一会儿
+    才出现。``misses=0`` 就是普通的静止物块。
+    """
+
+    error = None
+
+    def __init__(self, misses: int, *, x: float = 7.0, y: float = -2.0) -> None:
+        self.misses = misses
+        self.x = x
+        self.y = y
+        self.reads = 0
+
+    def frame(self, **_kwargs):
+        self.reads += 1
+        if self.reads <= self.misses:
+            return ()
+        return (sighting(4, self.x, self.y, stamp=time.monotonic()),)
 
 
 class JumpyDepthLink:
@@ -515,7 +555,12 @@ class SettleTests(unittest.TestCase):
         with self.assertRaisesRegex(ServoError, "稳定看到物块"):
             measure_settled(
                 EmptyLink(), ObjectSelector(),
-                ServoConfig(settle_timeout_seconds=0.2, settle_poll_seconds=0.02),
+                ServoConfig(
+                    settle_timeout_seconds=0.2,
+                    # 这是"旧语义"的用例：默认不等第一次出现，整次测量共用一个截止时刻。
+                    target_wait_seconds=0.2,
+                    settle_poll_seconds=0.02,
+                ),
             )
 
     def test_a_jumping_depth_does_not_hold_the_planar_gate(self) -> None:
@@ -548,6 +593,144 @@ class SettleTests(unittest.TestCase):
         self.assertGreater(link.reads, 2, "z 一直跳，三维判据下不该两帧就收工")
         self.assertTrue(any("等停稳超时" in message for message in messages), messages)
         self.assertEqual((settled.x_mm, settled.y_mm), (0.4, -0.5))
+
+
+class FirstTargetWaitTests(unittest.TestCase):
+    """转盘场景：物块还没转进视野时，**第一次**测量按 ``target_wait_seconds`` 等它。
+
+    旧语义只有一个 ``settle_timeout_seconds`` 截止时刻，"等物块出现"也算在里面；
+    4 s 一到就报"没能稳定看到物块"。物块在转盘上时这是误伤：它不是丢了，只是还没转过来。
+    """
+
+    @staticmethod
+    def config(**overrides) -> ServoConfig:
+        values = dict(
+            settle_timeout_seconds=0.05,
+            settle_poll_seconds=0.005,
+            target_wait_seconds=1.0,
+        )
+        values.update(overrides)
+        return ServoConfig(**values)
+
+    def test_a_late_target_is_waited_for(self) -> None:
+        link = LateLink(3)
+        settled = observation._settled_sighting(
+            link, ObjectSelector(), self.config(), wait_for_first_target=True
+        )
+        self.assertEqual((settled.x_mm, settled.y_mm), (7.0, -2.0))
+        self.assertEqual(link.reads, 5, "3 次空 + 两帧一致；不该在 4 s 固定期限上放弃")
+
+    def test_the_wait_can_be_unbounded(self) -> None:
+        link = LateLink(4)
+        settled = observation._settled_sighting(
+            link,
+            ObjectSelector(),
+            self.config(target_wait_seconds=None),
+            wait_for_first_target=True,
+        )
+        self.assertEqual((settled.x_mm, settled.y_mm), (7.0, -2.0))
+        self.assertEqual(link.reads, 6)
+
+    def test_a_finite_wait_still_times_out_with_its_own_message(self) -> None:
+        with self.assertRaisesRegex(ServoError, "没等到物块出现"):
+            observation._settled_sighting(
+                EmptyLink(),
+                ObjectSelector(),
+                self.config(target_wait_seconds=0.02),
+                wait_for_first_target=True,
+            )
+
+    def test_the_settle_timer_starts_when_the_target_first_appears(self) -> None:
+        """先等转盘把物块转过来，再按 settle_timeout 等它停稳——两段计时不能混。"""
+
+        class LateThenMoving:
+            error = None
+
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def frame(self, **_kwargs):
+                self.reads += 1
+                if self.reads <= 3:
+                    return ()
+                return (
+                    sighting(4, float(self.reads) * 10.0, 0.0, stamp=time.monotonic()),
+                )
+
+        link = LateThenMoving()
+        settled = observation._settled_sighting(
+            link,
+            ObjectSelector(),
+            self.config(settle_timeout_seconds=0.2),
+            wait_for_first_target=True,
+        )
+        # 读数一直在变，最终按"等停稳超时"交出最后一次；不是"没等到物块出现"。
+        self.assertGreater(link.reads, 3)
+        self.assertGreater(settled.x_mm, 0.0)
+
+
+class AlignWaitsForLateTargetTests(unittest.TestCase):
+    """``align_x_y`` 的**第一次**测量才等物块出现；之后仍按原期限收工。"""
+
+    JACOBIAN = ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+
+    @staticmethod
+    def config(**overrides) -> ServoConfig:
+        values = dict(
+            tolerance_mm=4.0,
+            settle_tolerance_mm=0.4,
+            coarse_settle_tolerance_mm=3.0,
+            coarse_error_mm=10.0,
+            min_step_mm=1.0,
+            max_iterations=12,
+            settle_timeout_seconds=0.05,
+            settle_poll_seconds=0.005,
+            target_wait_seconds=1.0,
+        )
+        values.update(overrides)
+        return ServoConfig(**values)
+
+    def test_a_target_that_has_not_rotated_into_view_is_waited_for(self) -> None:
+        arm = FakeArm(self.JACOBIAN)
+        link = LateLink(4, x=0.0, y=0.0)
+        result = align_x_y(
+            arm,
+            link,
+            ObjectSelector(),
+            ServoTarget(x_mm=0.0, y_mm=0.0),
+            self.JACOBIAN,
+            self.config(),
+            ensure_safe_height=False,
+        )
+        self.assertEqual(result.iterations, 1)
+        self.assertEqual(arm.calls, [], "已经对准就不该再发动作")
+        self.assertEqual(link.reads, 6, "4 次空 + 两帧一致")
+
+    def test_losing_the_target_after_the_first_measurement_does_not_wait_forever(self) -> None:
+        """第一次测到过之后，物块再丢就按原期限报错——遮挡收工口不能被无限等卡死。"""
+
+        class DisappearsAfterFirstMeasurement:
+            error = None
+
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def frame(self, **_kwargs):
+                self.reads += 1
+                if self.reads <= 2:
+                    return (sighting(4, 12.0, -7.0, stamp=time.monotonic()),)
+                return ()
+
+        with self.assertRaises(ObjectMissing):
+            align_x_y(
+                FakeArm(self.JACOBIAN),
+                DisappearsAfterFirstMeasurement(),
+                ObjectSelector(),
+                ServoTarget(x_mm=0.0, y_mm=0.0),
+                self.JACOBIAN,
+                self.config(target_wait_seconds=None),
+                ensure_safe_height=False,
+            )
 
 
 class AlignDoesNotWaitForDepthTests(unittest.TestCase):

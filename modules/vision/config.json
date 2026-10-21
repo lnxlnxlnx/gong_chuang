@@ -89,6 +89,14 @@
       "tg2": 2,
       "tg3": 3
     },
-    "outer_diameter_mm": 95.0
+    "outer_diameter_mm": 95.0,
+    "refine_center": true,
+    "refine_min_observations": 3,
+    "refine_cluster_radius_px": 4.0,
+    "refine_max_spread_px": 6.0,
+    "refine_margin_ratio": 0.08,
+    "refine_min_diameter_ratio": 0.3,
+    "refine_max_diameter_ratio": 1.0,
+    "refine_max_offset_ratio": 0.25
   }
 }

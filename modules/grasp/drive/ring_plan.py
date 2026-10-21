@@ -267,6 +267,113 @@ def plan_ring_base(
     )
 
 
+# ---------------------------------------------------------------------- 闭环
+@dataclass(frozen=True)
+class RingAlignStep:
+    """闭环里的一步：看到了什么、走了多少、走完实测挪了多少。"""
+
+    attempt: int
+    reading: Tuple[float, float]
+    error_mm: float
+    base_pulses: int
+    extension_pulses: int
+    #: 这一段走完之后**实测**挪了多少（下一步的读数减这一步的读数）。
+    measured_mm: Optional[Tuple[float, float]] = None
+    #: 按配置的雅可比**预测**该挪多少。
+    predicted_mm: Optional[Tuple[float, float]] = None
+    #: 实测 / 预测 的投影比：``1`` 说明尺是对的，``0.5`` 说明实际灵敏度只有一半。
+    response: Optional[float] = None
+
+    def line(self) -> str:
+        moved = ""
+        if self.measured_mm is not None and self.predicted_mm is not None:
+            moved = (
+                f"，实测 ({self.measured_mm[0]:+.2f},{self.measured_mm[1]:+.2f}) mm / "
+                f"预测 ({self.predicted_mm[0]:+.2f},{self.predicted_mm[1]:+.2f}) mm"
+            )
+            if self.response is not None:
+                moved += f"，响应比 {self.response:.2f}"
+        return (
+            f"第 {self.attempt} 步：读数 ({self.reading[0]:+.2f},{self.reading[1]:+.2f}) mm，"
+            f"误差 {self.error_mm:.2f} mm → 底座 {self.base_pulses:+d}、"
+            f"伸缩 {self.extension_pulses:+d} 脉冲{moved}"
+        )
+
+
+@dataclass(frozen=True)
+class RingAlignResult:
+    """一次环心闭环的结论：每一步步长与实测响应，**以及最后那一份 plan**。
+
+    ``plan`` 是收敛时算出来的那份 :class:`RingBasePlan`——它和直接调
+    ``plan_ring()`` 得到的**是同一个东西**（同一套字段、同一个绝对位置口径），
+    所以"先闭环对准、再拿绝对位置去干别的"不需要再调一次 ``plan_ring``：
+    直接存 ``result.plan`` 就行。
+    """
+
+    steps: Tuple[RingAlignStep, ...] = ()
+    aligned: bool = False
+    final_reading: Optional[Tuple[float, float]] = None
+    final_error_mm: Optional[float] = None
+    tolerance_mm: float = 0.0
+    digit: Optional[int] = None
+    #: 最后一次估计出来的"实测/预测"比（``None`` = 一步都没走成）。
+    response: Optional[float] = None
+    #: 收敛时那一份计划：各轴绝对位置、残差、备注都在这上面。
+    plan: Optional[RingBasePlan] = None
+    note: str = ""
+
+    # ------------------------------------------------ 与 plan_ring 同一套读法
+    @property
+    def base(self) -> Optional[float]:
+        """底座应当停下的**绝对角度**（电机轴），与 ``plan_ring().base`` 同义。"""
+        return None if self.plan is None else self.plan.base
+
+    @property
+    def extension(self) -> Optional[float]:
+        """伸缩应当停下的**绝对角度**（电机轴）。"""
+        return None if self.plan is None else self.plan.extension
+
+    @property
+    def degrees(self) -> "dict[str, float]":
+        """``{"base": 角度, "extension": 角度}``，键就是轴名。"""
+        return {} if self.plan is None else self.plan.degrees
+
+    @property
+    def pulses(self) -> "dict[str, int]":
+        """``{"base": 脉冲, "extension": 脉冲}``（绝对，里程表口径）。"""
+        return {} if self.plan is None else self.plan.pulses
+
+    def apply(self, arm, **kwargs):
+        """把机械臂走到**收敛时那个绝对位置**（已经在那儿了，一般不用调）。"""
+        if self.plan is None:
+            raise ValueError("这次闭环没有算出计划（一步都没走成），没有位置可应用")
+        return self.plan.apply(arm, **kwargs)
+
+    def summary(self) -> str:
+        head = f"环 {self.digit}：" if self.digit is not None else "环："
+        if self.final_reading is None:
+            return head + "一步也没走成（" + self.note + "）"
+        state = "已到位" if self.aligned else "**没到位**"
+        text = (
+            f"{head}{state}，最终读数 ({self.final_reading[0]:+.2f},"
+            f"{self.final_reading[1]:+.2f}) mm，误差 "
+            f"{self.final_error_mm:.2f} mm（容差 {self.tolerance_mm:.2f} mm），"
+            f"用了 {len(self.steps)} 步"
+        )
+        if self.response is not None:
+            text += f"，实测/预测响应比 {self.response:.2f}"
+        if self.plan is not None:
+            text += (
+                f"；最终绝对位置：底座 {self.plan.base:+.1f}°"
+                f"（{self.plan.base_motor_pulses:+d} 脉冲）、"
+                f"伸缩 {self.plan.extension:+.1f}°"
+                f"（{self.plan.extension_motor_pulses:+d} 脉冲）"
+            )
+        if self.note:
+            text += "；" + self.note
+        return text
+
+
 # ---------------------------------------------------------------------- 内部
 def _residual(
     error: Tuple[float, float],

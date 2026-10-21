@@ -5,17 +5,22 @@
 相机装在臂上、镜头离纸很近时，画面里通常**只有一个环**——"同时看到三个"那种检测
 在这个取景下必然失败，而"只看到一个环"本来就不是错误。本模块只为这种取景服务。
 
-## 两件事都由模型给
+## 两件事都由模型给，但环心要再修一步
 
 随包的 ``models/best.onnx`` 有 7 类：四色物料 + ``tg1`` / ``tg2`` / ``tg3``。后三个就是
 带数字的靶标，所以一帧前向同时给出：
 
-- **环心** = 命中框的中心（模型把整个靶标图案框住，框心即环心）；
-- **环号** = 命中的类别，查 ``config.json`` 的 ``ring_target.classes``。
+- **是哪个环** = 命中的类别，查 ``config.json`` 的 ``ring_target.classes``；
+- **环大概在哪** = 框中心。
+
+框是回归出来的，框心只在框正好套住图案时才等于环心（实测中位偏 3.8 px，最坏一帧偏
+81 px）。所以还有一步**框内精修**：框内那一圈圈同心圆本来共圆心，用
+``Canny + fitEllipse`` 收它们的圆心投票，取中位数当环心（实测中位偏 2.2 px、最坏
+7.7 px）。三条验收不过就退回框心，见 :meth:`RingTargetLocator._refine_center`。
 
 因此这里**没有**整帧 Canny → 椭圆观测 → 聚类 → 按支撑数排序那一套，也**没有**
 "环里墨渍占比够不够"的墨迹判据：那些是已经训练进模型的能力，代码里再算一遍只会
-多出一套会和模型结论打架的规则。
+多出一套会和模型结论打架的规则。精修只在**框内**做，不是全画面搜索。
 
 ## 框贴边就**不是**环心
 
@@ -40,12 +45,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import numpy as np
 
-from modules.vision.config import RingTargetSettings, StationGeometrySettings
+from modules.vision.config import (
+    RingTargetSettings,
+    StationDetectionSettings,
+    StationGeometrySettings,
+)
 
 if TYPE_CHECKING:
     from modules.vision.drive.yolov8 import Detection
@@ -58,9 +68,9 @@ BORDER_TOLERANCE_PX = 1.0
 class RingTarget:
     """**视野里的那一个环**：环心在哪、几号、能不能直接拿去对准。"""
 
-    #: 环心（像素）：命中的检测框中心。
+    #: 环心（像素）：框内同心椭圆精修之后的位置；没精修时等于框心。
     center_px: Tuple[float, float]
-    #: 环的等效半径（像素）：框长边的一半，只用于画图。
+    #: 环的等效半径（像素）：框长边的一半。比例尺按它算，所以**不要**换成别的半径。
     radius_px: float
     #: 环号（来自 ``ring_target.classes``）。
     digit: int
@@ -71,6 +81,12 @@ class RingTarget:
     #: 环心在**相机系**的毫米坐标；没有比例尺时是 ``None``。
     x_mm: Optional[float]
     y_mm: Optional[float]
+    #: 模型框的中心（没精修时的环心；精修过时留着便于对比"修了多少"）。
+    box_center_px: Optional[Tuple[float, float]] = None
+    #: 真正那一圈的外半径（像素）：精修时量到的最大圆；没精修时 ``None``。只用于画图。
+    ring_radius_px: Optional[float] = None
+    #: 环心是否经过框内椭圆精修（``False`` 表示用的是框心）。
+    refined: bool = False
     #: 本帧实际用的比例尺（毫米/像素）与来源（``depth/focal`` / ``ring box`` /
     #: ``station.mm_per_px``）。
     scale_mm_per_px: Optional[float] = None
@@ -95,7 +111,16 @@ class RingTarget:
             if self.x_mm is not None and self.y_mm is not None
             else "无毫米（缺比例尺）"
         )
-        shape = "**框被画面裁掉，框心不是环心**" if self.clipped else "整框在画面里"
+        if self.clipped:
+            shape = "**框被画面裁掉，框心不是环心**"
+        elif self.refined and self.box_center_px is not None:
+            shift = math.hypot(
+                self.center_px[0] - self.box_center_px[0],
+                self.center_px[1] - self.box_center_px[1],
+            )
+            shape = f"环心已精修（相对框心修正 {shift:.1f} px）"
+        else:
+            shape = "整框在画面里（环心用框心）"
         scale = (
             f"{self.scale_mm_per_px:.4f} mm/px（{self.scale_source}）"
             if self.scale_mm_per_px is not None
@@ -119,8 +144,9 @@ class RingTargetLocator:
 
     Parameters:
         detector: 任何一个 ``detect(frame) -> list[Detection]`` 的检测器。
-        settings: ``config.json`` 的 ``ring_target`` 块（类别名 → 环号）。
+        settings: ``config.json`` 的 ``ring_target`` 块（类别名 → 环号、外径、精修开关）。
         geometry: 兜底比例尺（``station.mm_per_px``）。
+        detection: 精修用的 Canny / 椭圆阈值；``None`` 用 ``StationDetectionSettings`` 默认值。
         focal_px / table_depth_mm: 台面的针孔标定；两个都有时优先用它换算毫米。
     """
 
@@ -130,6 +156,7 @@ class RingTargetLocator:
         *,
         settings: Optional[RingTargetSettings] = None,
         geometry: Optional[StationGeometrySettings] = None,
+        detection: Optional[StationDetectionSettings] = None,
         focal_px: Optional[float] = None,
         table_depth_mm: Optional[float] = None,
     ) -> None:
@@ -138,6 +165,9 @@ class RingTargetLocator:
         self.detector = detector
         self.settings = settings if settings is not None else RingTargetSettings()
         self.geometry = geometry if geometry is not None else StationGeometrySettings()
+        self.detection = (
+            detection if detection is not None else StationDetectionSettings()
+        )
         self.focal_px = focal_px
         self.table_depth_mm = table_depth_mm
         #: 靶标图案的外径（毫米）；配了就**可以**用它当与距离无关的比例尺。
@@ -180,7 +210,7 @@ class RingTargetLocator:
             )
             return None
         chosen = max(hits, key=lambda hit: self._rank(hit, width, height))
-        return self._build(chosen, width, height, len(hits))
+        return self._build(chosen, width, height, len(hits), frame)
 
     # ------------------------------------------------------------- 内部
     @staticmethod
@@ -188,18 +218,131 @@ class RingTargetLocator:
         """先看框有没有被裁掉，再比置信度。"""
         return (0 if _touches_border(hit, width, height) else 1, float(hit.score))
 
+    def _refine_center(
+        self, frame: np.ndarray, hit: "Detection"
+    ) -> Tuple[Tuple[float, float], bool, str]:
+        """在框内做一次**局部椭圆拟合**，把"框心"换成"同心圆的中心"。
+
+        模型框是回归出来的，框心只在框正好套住图案时才等于环心——实测有一帧框偏了
+        82 px（框把图案左边切掉了）。而框内一圈圈同心圆的圆心是**同一个点**，取它们
+        的中位数当环心：精度 1–2 px，也不受框松紧的影响。
+
+        三条验收，任何一条不过就退回框心（``refined=False``），绝不硬凑：
+
+        - 至少 ``refine_min_observations`` 条椭圆观测；
+        - 各观测圆心到中位数的距离中位数 < ``refine_max_spread_px``（同心圆应当重合）；
+        - 精修结果离框心不超过框长边的 ``refine_max_offset_ratio``——再远就说明框套住的是
+          别的东西。
+
+        Returns:
+            ``(center, refined, note, outer_diameter_px)``：note 是给 ``detail`` 用的一句人话，\n            ``outer_diameter_px`` 是被当成"外圈"的那条椭圆观测的直径（没精修时 ``None``）。
+        """
+        from modules.vision.config import StationDetectionSettings
+        from modules.vision.drive.ring_station import extract_observations
+
+        size = max(float(hit.width), float(hit.height))
+        height, width = frame.shape[:2]
+        margin = self.settings.refine_margin_ratio * size
+        x0 = max(0, int(round(hit.x1 - margin)))
+        y0 = max(0, int(round(hit.y1 - margin)))
+        x3 = min(width, int(round(hit.x2 + margin)))
+        y3 = min(height, int(round(hit.y2 + margin)))
+        if x3 - x0 < 16 or y3 - y0 < 16:
+            return hit.center, False, "框太小，没做精修", None
+        crop = frame[y0:y3, x0:x3]
+        # 一帧里最大的那个环可能占满裁出来的画面，而 station 的 max_major_axis_px
+        # 是按"整排三个 95 mm 环"定的——不抬上限会把真圆当杂项丢掉（老路踩过）。
+        detection = replace(
+            self.detection,
+            max_major_axis_px=max(self.detection.max_major_axis_px, float(min(crop.shape[:2]))),
+        )
+        box_x, box_y = hit.center[0] - x0, hit.center[1] - y0
+        observations = [
+            item
+            for item in extract_observations(crop, detection)
+            if self.settings.refine_min_diameter_ratio * size
+            <= item.diameter_px
+            <= self.settings.refine_max_diameter_ratio * size
+            and math.hypot(item.center[0] - box_x, item.center[1] - box_y)
+            <= self.settings.refine_max_offset_ratio * size
+        ]
+        if len(observations) < self.settings.refine_min_observations:
+            return (
+                hit.center,
+                False,
+                f"只找到 {len(observations)} 条椭圆观测，环心用框心",
+                None,
+            )
+        # 以**直径最大的那条观测**为种子：外圈最长、点数最多，也最不容易被数字笔画带偏。
+        # 只收圆心离它足够近的观测——同心的那几圈；零碎的弧（数字、台面纹理）离得远，
+        # 自然被排除。这一步比"全体中位数"稳：实测内圈会被字形拽偏 10 px 以上。
+        ordered = sorted(observations, key=lambda item: item.diameter_px, reverse=True)
+        seed = ordered[0]
+        cluster = [
+            item
+            for item in ordered
+            if math.hypot(
+                item.center[0] - seed.center[0], item.center[1] - seed.center[1]
+            )
+            <= self.settings.refine_cluster_radius_px
+        ]
+        used = cluster if len(cluster) >= self.settings.refine_min_observations else observations
+        centre_x = float(np.median([item.center[0] for item in used]))
+        centre_y = float(np.median([item.center[1] for item in used]))
+        spread = float(
+            np.median(
+                [
+                    math.hypot(item.center[0] - centre_x, item.center[1] - centre_y)
+                    for item in used
+                ]
+            )
+        )
+        # 观测取够了还要**互相对得上**：同心圆的圆心本该重合，散布大说明框里混着别的东西。
+        if spread > self.settings.refine_max_spread_px:
+            return (
+                hit.center,
+                False,
+                f"{len(used)} 条椭圆观测的圆心散布 {spread:.1f} px，偏大，环心用框心",
+                None,
+            )
+        offset = math.hypot(centre_x - box_x, centre_y - box_y)
+        if offset > self.settings.refine_max_offset_ratio * size:  # pragma: no cover - 观测已被窗口限住
+            return hit.center, False, f"精修结果离框心 {offset:.0f} px，太远，环心用框心", None
+        note = (
+            f"环心由框内 {len(used)} 条同心椭圆精修（最大圆直径 "
+            f"{seed.diameter_px:.0f} px，散布 {spread:.1f} px，"
+            f"相对框心修正 {offset:.1f} px）"
+        )
+        return (x0 + centre_x, y0 + centre_y), True, note, float(seed.diameter_px)
+
     def _build(
-        self, hit: "Detection", width: int, height: int, count: int
+        self,
+        hit: "Detection",
+        width: int,
+        height: int,
+        count: int,
+        frame: np.ndarray,
     ) -> RingTarget:
         clipped = _touches_border(hit, width, height)
-        center_x, center_y = hit.center
+        box_center_x, box_center_y = hit.center
         radius = max(0.0, max(hit.width, hit.height) * 0.5)
+        refine_note = ""
+        refined = False
+        ring_diameter = None
+        center_x, center_y = box_center_x, box_center_y
+        # 贴边的框没有"整圈"，精修只看得到一段弧，圆心会被拽偏——那时干脆不精修。
+        if self.settings.refine_center and not clipped:
+            (center_x, center_y), refined, refine_note, ring_diameter = (
+                self._refine_center(frame, hit)
+            )
         scale, source = self._millimetres_per_pixel(radius)
         x_mm = y_mm = None
         if scale is not None:
             x_mm = (float(center_x) - width / 2.0) * float(scale)
             y_mm = (float(center_y) - height / 2.0) * float(scale)
         detail = f"模型给了 {count} 个环框"
+        if refine_note:
+            detail += "；" + refine_note
         if clipped:
             detail += "；选中的框贴画面边，框心不是环心，不给可对准读数"
         if scale is None:
@@ -210,14 +353,17 @@ class RingTargetLocator:
             f"{count} 个环框，选中环 {self.digits[hit.name]}"
             f"（{hit.name} {float(hit.score):.2f}，"
             f"框 ({hit.x1:.0f},{hit.y1:.0f})-({hit.x2:.0f},{hit.y2:.0f})）"
-            f"{'，贴边' if clipped else ''}"
+            f"{'，贴边' if clipped else ('，已精修' if refined else '')}"
         )
         return RingTarget(
             center_px=(float(center_x), float(center_y)),
+            box_center_px=(float(box_center_x), float(box_center_y)),
             radius_px=radius,
+            ring_radius_px=None if ring_diameter is None else float(ring_diameter) / 2.0,
             digit=int(self.digits[hit.name]),
             score=float(hit.score),
             clipped=clipped,
+            refined=refined,
             x_mm=x_mm,
             y_mm=y_mm,
             scale_mm_per_px=None if scale is None else float(scale),

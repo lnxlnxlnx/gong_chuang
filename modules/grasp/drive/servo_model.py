@@ -350,6 +350,19 @@ class ServoConfig:
     coarse_settle_tolerance_mm: float = 3.0
     #: 等画面停稳的最长时间（秒）；超时就拿最后一次读到的值，并让调用方知道。
     settle_timeout_seconds: float = 4.0
+    #: **等物块第一次出现**的最长时间（秒）；``None`` = 一直等下去，``0`` = 不做额外等待。
+    #:
+    #: 物块放在转盘上时，调用 ``align_xy`` 的那一刻它**可能还没转到视野里**：转盘要再走
+    #: 一会儿，物块才会出现。原来的做法是"等不到就在 ``settle_timeout_seconds`` 之后
+    #: 报错"（默认 4 s），在这种场景里是误伤——物块不是丢了，只是还没转过来。
+    #:
+    #: - ``0``（默认）：保持旧语义，整次测量共用一个 ``settle_timeout_seconds`` 截止时刻；
+    #: - 正数：最多等这么多秒让物块出现；
+    #: - ``None``：一直看着画面等（Ctrl+C 可以中断），转盘转过一整圈也等。
+    #:
+    #: 它只作用于 ``align_x_y`` 的**第一次**测量：一旦测到过物块，之后每一次测量仍按
+    #: ``settle_timeout_seconds`` 收工——"看见过又被爪子挡住"的收工口不能跟着变成无限等。
+    target_wait_seconds: Optional[float] = 0.0
     #: **转底盘前要抬到多高**：测到的 ``z``（镜头到物块顶面的距离）至少要有这么多毫米。
     #:
     #: 为什么用 z 而不是脉冲数：这台机器上**移动 x/y 就是旋转底盘**，而低位转过去会撞到
@@ -412,6 +425,12 @@ class ServoConfig:
         ):
             if not getattr(self, name) > 0:
                 raise ValueError(f"{name} 必须是正数")
+        if self.target_wait_seconds is not None:
+            if (
+                not math.isfinite(self.target_wait_seconds)
+                or self.target_wait_seconds < 0
+            ):
+                raise ValueError("target_wait_seconds 必须是非负数或 null")
         if self.frame_margin_seconds < 0:
             raise ValueError("frame_margin_seconds 不能是负数")
         if self.settle_tolerance_mm < 0:
@@ -727,6 +746,10 @@ def load_servo_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ServoConfig:
             document.get("settle_timeout_seconds", defaults.settle_timeout_seconds),
             "settle_timeout_seconds",
         ),
+        target_wait_seconds=_optional_non_negative(
+            document.get("target_wait_seconds", defaults.target_wait_seconds),
+            "target_wait_seconds",
+        ),
         settle_poll_seconds=_positive(
             document.get("settle_poll_seconds", defaults.settle_poll_seconds),
             "settle_poll_seconds",
@@ -961,3 +984,14 @@ def _optional_positive(value: object, name: str) -> Optional[float]:
     if value is None:
         return None
     return _positive(value, name)
+
+
+def _optional_non_negative(value: object, name: str) -> Optional[float]:
+    """非负数或 ``null``；``0`` 与 ``null`` 是两种不同的"不用"。
+
+    ``target_wait_seconds`` 用这个：``0`` = 保持旧语义（不加额外等待），
+    ``null`` = 一直等下去。两者混成一个值会让"转盘场景"和"普通场景"没法区分。
+    """
+    if value is None:
+        return None
+    return _non_negative(value, name)

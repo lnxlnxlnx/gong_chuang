@@ -8,6 +8,10 @@ from robot import Robot
 TURN_TABLE_POSITIONS = [0, 500, 1000]  # 转盘的目标位置，单位为度
 current_position_index = 0  # 当前转盘位置的索引
 
+#: 下降前等画面停稳的上限（秒）。转盘刚停下时画面还会抖一下；
+#: 超过这个时间仍在动就不下降——物块会顺着转盘走掉。
+SCENE_STABLE_TIMEOUT_SECONDS = 3.0
+
 
 def _move_axes_to(robot: Robot, targets: dict[str, float]) -> MotionBatch:
     """让多根轴各自走到**绝对电机角度**，同时起步；返回动作组（还没等）。
@@ -70,6 +74,15 @@ def grab_box_from_turntable(robot: Robot, want_color = None):
         print(f"Error occurred while aligning the gripper: {e}")
         robot.arm.move_axis_to_motor_degrees("extension", 270.0)
         return
+
+    # 下降前最后看一眼**整幅画面**，而不是只看物料坐标：物块在转盘上，对准的那一刻
+    # 它可能还在跟着转盘走。画面连续几帧都不动才允许往下走，否则等一会儿再看。
+    if not robot.vision.wait_scene_stable(timeout=SCENE_STABLE_TIMEOUT_SECONDS):
+        stability = robot.vision.scene_stability()
+        raise RuntimeError(
+            f"画面一直在动（{stability.summary()}），这次不下降："
+            "物块可能还在跟着转盘走，等转盘停稳后重试"
+        )
 
     robot.arm.move_axis_to_motor_degrees("lift", 530)
     robot.gripper.close_jaws()

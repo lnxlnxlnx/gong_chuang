@@ -35,23 +35,28 @@ def main() -> None:
     # demo_material()
     with Robot.open(grasp=True, gripper=True, turntable=True) as robot:
         robot.gripper.set_position(250)
-        _move_axes_to(robot, {"lift": 675, "extension": 720.0, "base": 0}).wait()
+        _move_axes_to(robot, {"lift": 675, "extension": 750.0, "base": 0}).wait()
+        time.sleep(1.0)
         # grab_box_from_car(robot)
         # grab_box_from_car(robot)
         # grab_box_from_car(robot)
         try:
             for _ in range(3):
-                plan = robot.grasp.plan_ring()      # 只算：环心 → 各轴绝对位置，不动电机
+                result = robot.grasp.align_ring()      # 只算：环心 → 各轴绝对位置，不动电机
+                base_deg     = robot.arm.turns_state.of("base").motor_degrees
+                extension_deg = robot.arm.turns_state.of("extension").motor_degrees
+                
+                input("回车抓料，q 跳过：").strip().lower()
                 grab_box_from_car(robot)
                 # 到这里已经抓着料了：转到 plan 里算好的**绝对位置**（环的正上方）。
                 # plan 是 robot.grasp.plan_ring() 的返回值；plan.degrees 就是 {"base": ...,
                 # "extension": ...} 两个绝对电机角度，正好喂 _move_axes_to。
-                if plan is not None:
-                    new_dir = dict({"lift": 95}, **plan.degrees)
+                if result.plan is not None:
+                    new_dir = dict({"lift": 95}, **{"base": base_deg, "extension": extension_deg})
                     _move_axes_to(robot, new_dir).wait()
                     
                     robot.gripper.open_jaws()
-                _move_axes_to(robot, {"lift": 675, "extension": 650.0, "base": 0}).wait()
+                _move_axes_to(robot, {"lift": 675, "extension": 750.0, "base": 0}).wait()
         except Exception as e:
             print(f"Error occurred during pick and place operation: {e}")
             robot.arm.move_axis_to_motor_degrees("extension", 270.0)
@@ -100,6 +105,7 @@ def pick_manual() -> None:
 
         robot.arm.move_axis_to_motor_degrees("extension", 270.0)
         robot.gripper.set_position(150)
+        return 
         
         try:
             for _ in range(3):

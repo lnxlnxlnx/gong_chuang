@@ -27,6 +27,7 @@
   "settle_tolerance_mm": 0.4,
   "coarse_settle_tolerance_mm": 3.0,
   "settle_timeout_seconds": 4.0,
+  "target_wait_seconds": null,
   "settle_poll_seconds": 0.01,
   "inter_frame_seconds": 0.03,
   "safe_lift_z_mm": 80.0,

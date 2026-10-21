@@ -197,6 +197,61 @@ class ScaleTests(unittest.TestCase):
         self.assertGreater(settings.ring_target.outer_diameter_mm, 0)
 
 
+class RefineTests(unittest.TestCase):
+    """框心 ≠ 环心：框内同心圆精修把环心拉回来（实测框心能偏到 80 px）。"""
+
+    TRUE = (640.0, 360.0)
+
+    def concentric(self, *, centre=None, radii=(120.0, 168.0, 228.0)) -> np.ndarray:
+        """白底黑同心圆：一圈圆给出好几条椭圆观测，圆心都该是同一个点。"""
+        import cv2
+
+        centre = self.TRUE if centre is None else centre
+        frame = np.full((SIZE[1], SIZE[0], 3), 255, dtype=np.uint8)
+        for radius in radii:
+            cv2.circle(frame, (int(centre[0]), int(centre[1])), int(radius),
+                       (0, 0, 0), 4)
+        return frame
+
+    def test_an_offset_box_is_corrected_to_the_ring_centre(self) -> None:
+        frame = self.concentric()
+        # 框偏 40 px / -25 px，半径比最外圈略大（真机上模型框就是这样，比图案大一点）
+        hit = centred("tg2", width=520.0, height=520.0,
+                      centre=(self.TRUE[0] + 40.0, self.TRUE[1] - 25.0))
+        target = make_locator([hit]).detect(frame)
+        self.assertTrue(target.refined)
+        self.assertAlmostEqual(target.center_px[0], self.TRUE[0], delta=2.0)
+        self.assertAlmostEqual(target.center_px[1], self.TRUE[1], delta=2.0)
+        # 原始框心留着，现场能看出"修了多少"
+        self.assertAlmostEqual(target.box_center_px[0], self.TRUE[0] + 40.0, delta=0.1)
+
+    def test_the_summary_says_the_centre_was_refined(self) -> None:
+        target = make_locator(
+            [centred("tg2", width=520.0, height=520.0, centre=(680.0, 335.0))]
+        ).detect(self.concentric())
+        self.assertIn("精修", target.summary())
+
+    def test_a_blank_frame_falls_back_to_the_box_centre(self) -> None:
+        frame = np.zeros((SIZE[1], SIZE[0], 3), dtype=np.uint8)
+        target = make_locator([centred("tg2")]).detect(frame)
+        self.assertFalse(target.refined, "什么也没画，精修应当退回去")
+        self.assertAlmostEqual(target.center_px[0], 640.0, delta=0.5)
+
+    def test_refinement_can_be_switched_off(self) -> None:
+        hit = centred("tg2", width=520.0, height=520.0, centre=(660.0, 350.0))
+        target = RingTargetLocator(
+            FakeDetector([hit]), settings=RingTargetSettings(refine_center=False)
+        ).detect(self.concentric())
+        self.assertFalse(target.refined)
+        self.assertAlmostEqual(target.center_px[0], 660.0, delta=0.5)
+
+    def test_clipped_boxes_are_not_refined(self) -> None:
+        """贴边的框只有一段弧，精修会把圆心拽偏——干脆不修。"""
+        hit = detection("tg1", 0.9, (-30.0, 100.0, 300.0, 620.0))
+        target = make_locator([hit]).detect(self.concentric(centre=(120.0, 360.0)))
+        self.assertFalse(target.refined)
+
+
 class ClassTableTests(unittest.TestCase):
     def test_ring_numbers_come_from_config_not_from_the_code(self) -> None:
         """换一遍编号只改配置：tg2 变成 5 号。"""
