@@ -1,6 +1,6 @@
 {
   "motion": {
-    "rpm": 50,
+    "rpm": 60,
     "acceleration": 20,
     "default_pulses": 800,
     "max_pulses": 11000

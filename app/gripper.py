@@ -87,17 +87,8 @@ def grab_box_from_turntable(
         robot.arm.move_axis_to_motor_degrees("extension", 270.0)
         return
 
-    # # 下降前最后看一眼**整幅画面**，而不是只看物料坐标：物块在转盘上，对准的那一刻
-    # # 它可能还在跟着转盘走。`wait_scene_stable` 不接受"当前这一眼稳定"——它要等下一次
-    # # 独立判断也稳定，才允许往下走。
-    # if not robot.vision.wait_scene_stable(timeout=scene_stable_timeout):
-    #     stability = robot.vision.scene_stability()
-    #     raise RuntimeError(
-    #         f"没等到下一次停稳的确认（最后一次判断：{stability.summary()}），这次不下降："
-    #         "物块可能还在跟着转盘走，等转盘停稳后重试"
-    #     )
 
-    robot.arm.move_axis_to_motor_degrees("lift", 530)
+    robot.arm.move_axis_to_motor_degrees("lift", 550)
     robot.gripper.close_jaws()
     
 def grab_box_from_car(robot: Robot):
@@ -126,7 +117,6 @@ def grab_box_from_car(robot: Robot):
     )
     batch.add(_move_axes_to(robot, {"lift": 500, "extension": 400.0, "base": 0}))
     batch.wait()
-    
 
 def place_box_to_repo(robot: Robot, *, verbose: bool = False):
     '''当爪子上有物体时，将物体放置在指定位置。'''
@@ -142,25 +132,17 @@ def place_box_to_repo(robot: Robot, *, verbose: bool = False):
         _print_report("放料前", report)
 
     # ② 三轴都到位之后才松爪。open_jaws 默认 wait=True，自己等到舵机走完并读回。
-    robot.gripper.open_jaws()
+    robot.gripper.set_position(100)
     
-    report = _move_axes_to(robot, {"lift": 990, "extension": 270.0}).wait()
-    if verbose:
-        _print_report("回位到安全位置", report)
-
-    # ③ 回初始姿态：同样三轴一起走、一起等。
-    report = _move_axes_to(robot, {"lift": 700, "base": 0}).wait()
-    if verbose:
-        _print_report("回位", report)
-
-    # ④ 转盘（舵机总线）与机械臂回位（步进总线）分属两条连接，可以真并发：
-    #    两边各自只发命令，一个 batch.wait() 收尾。
+    robot.arm.move_axis_to_motor_degrees("lift", 980)
+    _move_axes_to(robot, {"extension": 400.0, "base": 500}).wait()
     current_position_index = (current_position_index + 1) % len(TURN_TABLE_POSITIONS)
     batch = robot.motion.begin()
     batch.add(
         robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False)
     )
-    batch.add(arm.move_forward(3200, wait=False))
+    batch.add(robot.gripper.open_jaws(wait=False))
+    batch.add(_move_axes_to(robot, {"lift": 720, "extension": 620.0, "base": 0}))
     batch.wait()
 
 def align_box(robot: Robot):

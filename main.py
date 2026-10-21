@@ -100,6 +100,7 @@ def pick_manual() -> None:
             for color in ("red", "green", "blue"):
                 # wait_scene_stable 返回 True = 等到了"下一次停稳"，可以抓；
                 # False = 超时仍在动，这次不能下降。
+                time.sleep(3.0)  # 等转盘停稳，避免刚停下时画面还在抖
                 if not robot.vision.wait_scene_stable(timeout=SCENE_STABLE_TIMEOUT_SECONDS):
                     raise RuntimeError("画面一直在动，无法进行下一步操作")
                 grab_box_from_turntable(
