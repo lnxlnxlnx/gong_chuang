@@ -795,6 +795,69 @@ class AlignDoesNotWaitForDepthTests(unittest.TestCase):
         self.assertLess(elapsed, 1.0)
 
 
+class AlignFineSettleToleranceTests(unittest.TestCase):
+    """细档判停稳按 ``tolerance_mm / 4``，不是探针那个 0.4 mm。
+
+    真机上连续两帧的 Δxy 尾巴到 1 mm 以上；按 0.4 mm 判，每次测量都要等满
+    ``settle_timeout_seconds`` 才拿最后读数走人。对准的验收容差是 ``tolerance_mm``，
+    读数噪声只要比它小一大截就够——那个 0.4 mm 是给探针 / z 标定用的精度。
+    """
+
+    JACOBIAN = ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+
+    class JitterLink:
+        """第一帧给 0，之后一直给 ``value``：两帧之差正好是 ``value``。"""
+
+        error = None
+
+        def __init__(self, value: float) -> None:
+            self.value = value
+            self.reads = 0
+
+        def frame(self, **_kwargs):
+            self.reads += 1
+            x = 0.0 if self.reads == 1 else self.value
+            return (sighting_at(x, 0.0, 113.2),)
+
+    @staticmethod
+    def config(**overrides) -> ServoConfig:
+        values = dict(
+            tolerance_mm=6.0,
+            settle_tolerance_mm=0.4,
+            coarse_settle_tolerance_mm=3.0,
+            coarse_error_mm=10.0,
+            min_step_mm=1.0,
+            max_iterations=12,
+            settle_timeout_seconds=0.05,
+            settle_poll_seconds=0.005,
+        )
+        values.update(overrides)
+        return ServoConfig(**values)
+
+    def test_a_one_millimetre_frame_to_frame_jitter_still_settles_in_two_frames(self) -> None:
+        arm = FakeArm(self.JACOBIAN)
+        link = self.JitterLink(1.2)          # 0.4 < Δ ≤ 6/4：细档该放行
+        result = align_x_y(
+            arm, link, ObjectSelector(), ServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
+            self.config(), ensure_safe_height=False,
+        )
+
+        self.assertEqual(link.reads, 2, "Δ=1.2 mm 在细档（1.5 mm）之内，两帧就该收工")
+        self.assertGreater(result.error_mm, self.config().settle_tolerance_mm)
+        self.assertEqual(arm.calls, [], "1.2 mm 已在 6 mm 容差里，一步都不该动")
+
+    def test_a_tight_tolerance_still_waits_for_a_tighter_pair(self) -> None:
+        """容差收到 2 mm 时细档跟着收到 0.5 mm：同一个抖动读数不该一句"稳了"就收工。"""
+        arm = FakeArm(self.JACOBIAN)
+        link = self.JitterLink(1.2)          # > 2/4 = 0.5，要等到下一对相同读数
+        align_x_y(
+            arm, link, ObjectSelector(), ServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
+            self.config(tolerance_mm=2.0), ensure_safe_height=False,
+        )
+
+        self.assertGreaterEqual(link.reads, 3, "第三帧与第二帧一致才该放行")
+
+
 class SingleStepTests(unittest.TestCase):
     """**单帧一步**：最多取一帧、走一步、不验证——跟随循环的基础。
 

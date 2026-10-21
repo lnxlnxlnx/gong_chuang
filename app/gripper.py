@@ -10,7 +10,12 @@ current_position_index = 0  # 当前转盘位置的索引
 
 #: 下降前等画面停稳的上限（秒）。转盘刚停下时画面还会抖一下；
 #: 超过这个时间仍在动就不下降——物块会顺着转盘走掉。
-SCENE_STABLE_TIMEOUT_SECONDS = 3.0
+#:
+#: **不要太短。** 实测 3 s 会卡在边界上：大角度转底座（放料那一下 base 转 1000° 以上）
+#: 之后桌面要好几秒才真正静下来，等待窗口刚好在"还在动"的最后一点用光，于是判失败，
+#: 而紧跟其后的复测已经是 1.4 灰阶 / 0.001%（远低于上限）。8 s 给了这段余振衰减的时间；
+#: 真正的持续运动照旧会被拒绝，只是多等几秒才下结论。
+SCENE_STABLE_TIMEOUT_SECONDS = 8.0
 
 
 def _move_axes_to(robot: Robot, targets: dict[str, float]) -> MotionBatch:
@@ -65,6 +70,23 @@ def grab_box_from_floor(robot: Robot):
     robot.arm.move_axis_to_motor_degrees("lift", 75)
     robot.gripper.close_jaws()
 
+def _scene_stability_detail(robot: Robot) -> str:
+    """把"等待中最后一次判据"和"此刻复测"都带回报错里。
+
+    两个数要一起看：等待中只超一点点、事后复测已经很小 → 是**等得太短**（把
+    ``SCENE_STABLE_TIMEOUT_SECONDS`` 调大）；两次都超很多 → 才是判据太紧或画面真的在动。
+    """
+    parts = []
+    last = getattr(robot.vision, "last_scene_stability", None)
+    if last is not None:
+        parts.append(f"等待中最后一次：{last.summary()}")
+    try:
+        parts.append(f"此刻复测：{robot.vision.scene_stability().summary()}")
+    except Exception as problem:  # 相机掉线之类：别让报错信息变成另一条异常
+        parts.append(f"此刻复测失败（{problem}）")
+    return "；".join(parts)
+
+
 def grab_box_from_turntable(
     robot: Robot,
     want_colors=("red", "green", "blue")
@@ -75,7 +97,8 @@ def grab_box_from_turntable(
     物块在转盘上，x/y 对准成功不代表它已经停住；下降前用
     ``vision.wait_scene_stable`` 再确认一次——它**不接受**"当前这一眼稳定"，
     要等下一次独立判断也稳定才放行。一直等不到就报错，不落下去扑空
-    （``scene_stable_timeout`` 是这段等待的上限）。
+    （``SCENE_STABLE_TIMEOUT_SECONDS`` 是这段等待的上限，而且**不能设太短**：
+    大动作之后桌面余振要几秒才衰减完，窗口卡在边界上就会把"刚停稳"判成失败）。
     """
     robot.arm.move_axis_to_motor_degrees("lift", 600)
     _move_axes_to(robot, {"lift": 720, "extension": 620.0, "base": 0}).wait()
@@ -83,9 +106,12 @@ def grab_box_from_turntable(
         for color in want_colors :
             # wait_scene_stable 返回 True = 等到了"下一次停稳"，可以抓；
             # False = 超时仍在动，这次不能下降。
-            time.sleep(3.5)  # 等转盘停稳，避免刚停下时画面还在抖
+            time.sleep(0.5)  # 等转盘停稳，避免刚停下时画面还在抖
             if not robot.vision.wait_scene_stable(timeout=SCENE_STABLE_TIMEOUT_SECONDS):
-                raise RuntimeError("画面一直在动，无法进行下一步操作")
+                raise RuntimeError(
+                    "画面一直在动，无法进行下一步操作；最近一次判据："
+                    + _scene_stability_detail(robot)
+                )
             _grab_box_from_turntable(
                 robot,
                 want_color=color
@@ -104,13 +130,10 @@ def _grab_box_from_turntable(
     robot: Robot,
     want_color=None
 ):
-    """内部函数
-    从转盘上抓料：对准 → 确认下一次画面停稳 → 下降 → 合爪。
+    """内部函数：对准 → 下降 → 合爪（**不再**查停稳）。
 
-    物块在转盘上，x/y 对准成功不代表它已经停住；下降前用
-    ``vision.wait_scene_stable`` 再确认一次——它**不接受**"当前这一眼稳定"，
-    要等下一次独立判断也稳定才放行。一直等不到就报错，不落下去扑空
-    （``scene_stable_timeout`` 是这段等待的上限）。
+    停稳那一道闸在 :func:`grab_box_from_turntable` 的循环里、对准之前做；这里只把
+    已经对准的爪子落到物块上再合爪。
     """
     # robot.gripper.set_position(280)
 

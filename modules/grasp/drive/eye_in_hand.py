@@ -487,6 +487,11 @@ def align_x_y(
     （:func:`raise_before_rotating` / :func:`hover_above_object` / :func:`align_z`）
     照旧比三维——那里的 z 就是被控量，抖动必须等它停下来。
 
+    平面内的细档也不沿用 ``settle_tolerance_mm``（0.4 mm）：那个精度是给探针 / z 标定
+    用的，对准的验收容差是 ``tolerance_mm``，读数噪声只要比它小一大截就够。这里取
+    ``tolerance_mm / 4``（不低于 ``settle_tolerance_mm``、不高于粗档），于是"读数抖动
+    1 mm 就等满 4 s"的那一段被去掉，每次测量回到"两帧收工"。
+
     ## 物块还没转进视野时（转盘）
 
     第一次测量把 ``config.target_wait_seconds`` 当作"等物块出现"的上限
@@ -533,9 +538,21 @@ def align_x_y(
     previous_step: Optional[Tuple[int, int]] = None
     #: 连续几步方向相反。**一步不算**（物块被推动、检测跳目标都会这样）。
     contradictions = 0
+    #: 细档判"停稳"用的一致性门槛。**不直接用** ``settle_tolerance_mm``（0.4 mm）：
+    #: 那个数是给探针 / z 标定用的——那里的斜率就是被控量，0.4 mm 的读数噪声已经
+    #: 足够把雅可比算歪。x/y 对准不需要那么严：它的验收容差是 ``tolerance_mm``，
+    #: 读数噪声只要比它小一大截就够。而真机上连续两帧的 Δxy 尾巴会到 1 mm 以上
+    #: （中位数 0.02–0.26 mm），按 0.4 mm 判就会每步都等满 ``settle_timeout_seconds``
+    #: （默认 4 s）才拿最后读数走人——每多等一帧就是一次定位。
+    #: 所以取"验收容差的四分之一"，下限仍是标定过的 ``settle_tolerance_mm``，
+    #: 上限是粗档：细档不该比粗档更松。
+    fine_settle_tolerance = min(
+        config.coarse_settle_tolerance_mm,
+        max(config.settle_tolerance_mm, 0.25 * config.tolerance_mm),
+    )
     #: 这一轮判"停稳"用的一致性门槛。第一次用细档（要判"是不是已经对准了"），
-    #: 之后误差还大就换粗档——粗档少等几帧，而每帧都要跑一次 178 ms 的定位。
-    settle_tolerance = config.settle_tolerance_mm
+    #: 之后误差还大就换粗档——粗档少等几帧，而每帧都要跑一次定位。
+    settle_tolerance = fine_settle_tolerance
 
     for attempt in range(1, config.max_iterations + 1):
         started = time.monotonic()
@@ -588,7 +605,7 @@ def align_x_y(
         settle_tolerance = (
             config.coarse_settle_tolerance_mm
             if error > config.coarse_error_mm
-            else config.settle_tolerance_mm
+            else fine_settle_tolerance
         )
         say(
             f"第 {attempt} 次测量：物块 ({offset[0]:+.2f}, {offset[1]:+.2f}) mm，"

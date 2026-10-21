@@ -23,13 +23,18 @@
 
 默认值面向 1280×720 的 USB 摄像头（30 fps、室内常亮）：
 
-- ``pixel_threshold = 25``：低于 25 个灰阶的差多半是传感器噪声 / 自动曝光；
-- ``max_changed_ratio = 0.002``：0.2% ≈ 1800 像素。一个 30 mm 物料在画面里约
-  70 px 直径（≈3800 像素），所以它挪动十几像素就会越过这个比例；
-- ``max_mean_diff = 2.0``：兜住"整幅画面一起轻微变亮 / 变暗"，同时不让大块运动混过去。
+- ``pixel_threshold = 30``：低于 30 个灰阶的差多半是传感器噪声 / 自动曝光；
+- ``max_changed_ratio = 0.005``：0.5% ≈ 4600 像素。一个 30 mm 物料在画面里约
+  270–400 px 直径（6–12 万像素），所以它每秒挪十几毫米以上就会越过这个比例。
+  **不要再收紧到 0.2% 那一档**：桌面 / 相机只要轻轻抖一两个像素，边缘像素就足以
+  超限，于是转盘明明已经停了、判据却一直报"还在动"（现场遇到的就是这个误判）。
+- ``max_mean_diff = 4.0``：兜住"整幅画面一起轻微变亮 / 变暗"（自动曝光、反光），
+  同一个数也吸收整幅轻微晃动带来的平均灰度变化。
 
-现场光照很暗或相机噪声大时，先把 ``max_mean_diff`` 放宽，再看 ``summary()`` 里的
-两个实测值决定，而不是凭感觉改 ``pixel_threshold``。
+放宽的代价是**很慢的移动**会被放过：0.5% 粗算对应物块每帧挪七八个像素（十几 mm/s）。
+从"判稳定"到"夹爪合上"只有半秒左右，这个量级仍在爪瓣能兜住的范围内。要更严就把
+``max_changed_ratio`` 调回 0.002，并先看 ``summary()`` 里的两个实测值再决定，
+而不是凭感觉改 ``pixel_threshold``。
 
 ## 与 ``measure_settled`` 的分工
 
@@ -58,13 +63,13 @@ import numpy as np
 DEFAULT_STABLE_FRAMES = 4
 
 #: 逐像素灰度差超过它才算"这个像素变了"。低于它的差多是传感器噪声 / 自动曝光。
-DEFAULT_PIXEL_DIFF_THRESHOLD = 25
+DEFAULT_PIXEL_DIFF_THRESHOLD = 30
 
 #: 变化像素占全画面的比例上限。
-DEFAULT_MAX_CHANGED_RATIO = 0.002
+DEFAULT_MAX_CHANGED_RATIO = 0.005
 
 #: 整幅画面的平均灰度差上限。
-DEFAULT_MAX_MEAN_DIFF = 2.0
+DEFAULT_MAX_MEAN_DIFF = 4.0
 
 
 @dataclass(frozen=True)

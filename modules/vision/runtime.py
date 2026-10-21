@@ -423,6 +423,12 @@ class Vision:
         self.frames = 0
         #: 累计读失败次数；连续失败说明摄像头掉线。
         self.misses = 0
+        #: 最近一次 :meth:`scene_stability` 的结论（诊断用）。
+        #:
+        #: 等停稳超时之后，"是阈值太紧还是等得太短"只能靠**判据当时看到的实测值**判断；
+        #: 事后复测往往已经停了，两个数对不上就说明是等得不够长。只作观测记录，
+        #: 不影响任何判定。
+        self.last_scene_stability: Optional["SceneStability"] = None
 
     # ------------------------------------------------------------- 创建
     @classmethod
@@ -706,12 +712,15 @@ class Vision:
         from modules.vision.drive.scene_stability import evaluate_stability
 
         burst = self._read_burst(frames, timeout=timeout)
-        return evaluate_stability(
+        result = evaluate_stability(
             burst,
             pixel_threshold=pixel_threshold,
             max_mean_diff=max_mean_diff,
             max_changed_ratio=max_changed_ratio,
         )
+        # 留一份给诊断：等停稳超时后要能报出"判据当时差了多少"，而不是只报一句还在动。
+        self.last_scene_stability = result
+        return result
 
     def scene_stable(
         self,
@@ -761,6 +770,9 @@ class Vision:
                 raise RuntimeError("没等到下一次停稳，先别下降")
 
         参数与 :meth:`scene_stability` 相同（``timeout`` 是整段等待的上限）。
+        返回 ``False`` 时，:attr:`last_scene_stability` 留着**最后一次判断**的实测值：
+        "明明已经停了却报还在动"要先分清是阈值太紧（差值只超一点）还是等得太短
+        （事后复测已经很小）。
 
         :raises ValueError: ``timeout`` / ``interval`` 为负，或其他参数不合法。
         """

@@ -102,6 +102,18 @@ class SceneStabilityTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             vision.scene_stable()
 
+    def test_the_last_judgement_is_kept_for_diagnostics(self) -> None:
+        """超时失败时要能报出"判据当时差了多少"，所以每次判断都留最后一份。"""
+        vision, _camera = _vision(
+            [blank(), blank(), with_square(4), with_square(12), with_square(20)]
+        )
+        self.assertIsNone(vision.last_scene_stability)
+
+        result = vision.scene_stability()
+
+        self.assertFalse(result.stable)
+        self.assertIs(vision.last_scene_stability, result)
+
 
 class WaitSceneStableTests(unittest.TestCase):
     """``wait_scene_stable`` 只接受**下一次**稳定，不接受进来时的那一眼。"""
@@ -145,6 +157,18 @@ class WaitSceneStableTests(unittest.TestCase):
         self.assertFalse(vision.wait_scene_stable(timeout=0.0, interval=0.0))
         self.assertEqual(camera.read.call_count, 5)
 
+    def test_the_wait_leaves_the_judgement_it_timed_out_on(self) -> None:
+        """超时返回 ``False`` 之后，诊断要能拿到等待里最后一次判断的实测值。"""
+        vision, _camera = _vision(
+            [blank()] + [blank(), with_square(4), with_square(12), with_square(20)]
+        )
+
+        self.assertFalse(vision.wait_scene_stable(timeout=0.0, interval=0.0))
+        last = vision.last_scene_stability
+        self.assertIsNotNone(last)
+        self.assertFalse(last.stable)
+        self.assertIn("灰阶", last.summary())
+
     def test_negative_timeouts_are_rejected(self) -> None:
         vision, _camera = _vision([blank()] * 5)
         with self.assertRaises(ValueError):
@@ -162,6 +186,28 @@ class WaitSceneStableTests(unittest.TestCase):
         self.assertTrue(
             relaxed.scene_stable(max_mean_diff=255.0, max_changed_ratio=1.0)
         )
+
+    def test_a_mild_frame_wide_shake_is_not_reported_as_motion(self) -> None:
+        """桌面 / 相机轻抖一两个像素不该再判"还在动"——转盘可能已经停了。
+
+        旧的 0.2% 档对整幅轻微晃动太敏感：边缘像素一抖就超限。这里在 180×320 的画面里
+        放一个 60×60 的方块、每帧挪 2 px，变化像素约 0.42%，正好落在旧上限与新上限之间。
+        """
+
+        def shaken(step: int) -> np.ndarray:
+            frame = np.zeros((180, 320, 3), dtype=np.uint8)
+            left = 100 + step
+            frame[60:120, left:left + 60] = 220
+            return frame
+
+        vision, _camera = _vision(
+            [shaken(0), shaken(0), shaken(2), shaken(4), shaken(6)]
+        )
+        result = vision.scene_stability()
+
+        self.assertGreater(result.max_changed_ratio, 0.002, "这一档旧的 0.2% 上限会判它还在动")
+        self.assertLess(result.max_changed_ratio, 0.005)
+        self.assertTrue(result.stable, result.summary())
 
 
 if __name__ == "__main__":
