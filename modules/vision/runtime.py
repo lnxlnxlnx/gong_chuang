@@ -26,6 +26,14 @@ with Vision.open(config_path="modules/vision/config.json") as vision:
 
 两者共用一次 :meth:`Vision._read_report`，所以"一次调用只读一帧、只推理一次"只有一处实现。
 
+## 画面停稳（抓取前）
+
+:meth:`Vision.scene_stability` / :meth:`Vision.scene_stable` 连拍几帧、比**像素差**，
+回答"整幅画面这一刻静止没有"。它不依赖检测：画面里没有物料也能回答，所以适合在
+"爪子要往下走"之前做最后一道确认——物块在转盘上时，对准成功不等于它已经停稳。
+只想等一小会儿直到静止用 :meth:`Vision.wait_scene_stable`；判据与阈值见
+:mod:`modules.vision.drive.scene_stability`。
+
 ## 一次会话只装配一次
 
 ``open()`` 校验配置与相机编号、加载模型、打开相机；``locate()`` 只是读帧和推理。
@@ -41,6 +49,7 @@ with Vision.open(config_path="modules/vision/config.json") as vision:
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -50,6 +59,12 @@ from modules.vision.config import VisionConfig
 # 这两个默认值只定义一次，就住在 sequence 里（那里是判据的出处）；本模块转发它们，
 # 免得"停止判据"在两个地方各写一个数。
 from modules.vision.drive.sequence import DEFAULT_MIN_SAMPLES, DEFAULT_STILL_MM
+from modules.vision.drive.scene_stability import (
+    DEFAULT_MAX_CHANGED_RATIO,
+    DEFAULT_MAX_MEAN_DIFF,
+    DEFAULT_PIXEL_DIFF_THRESHOLD,
+    DEFAULT_STABLE_FRAMES,
+)
 
 #: 一次多帧融合连拍几帧。实测本机一帧定位约 178 ms，7 帧约 1.25 s——
 #: 短到转盘转过的那点角度可以用直线近似，长到够剔掉一两个野值。
@@ -64,6 +79,24 @@ DEFAULT_SETTLE_MM = 1.0
 #: 的耐心不该有两个数。
 DEFAULT_SETTLE_TIMEOUT_SECONDS = 4.0
 
+#: :meth:`Vision.wait_scene_stable` 默认最多等几秒。转盘停稳通常在一两秒内，
+#: 给到 5 s 是为了挡住"画面一直在动"时不至于无限等下去；"从头到尾没见它动过"
+#: 也由这个上限收尾。
+DEFAULT_SCENE_STABLE_WAIT_SECONDS = 5.0
+
+#: :meth:`Vision.wait_scene_stable` 两次判断之间的间隔（秒）。
+#:
+#: 判一次要连拍 4 帧（约 130 ms），所以 0.3 s 的间隔意味着大约每 0.3 s 看一次、
+#: 每次看 130 ms——采样密度够抓到"刚停下"，又不会把 CPU 全占在取帧上。
+DEFAULT_SCENE_STABLE_POLL_SECONDS = 0.3
+
+#: :meth:`Vision.wait_scene_stable` 至少看这么久（秒）才允许放行。
+#:
+#: 一次判断只连拍 4 帧（约 130 ms），"这一眼没动"太便宜：转盘刚接到转动指令、物块正要
+#: 被带走之前，画面也能看着是静的，照这一眼放行就会跑过去扑空。所以头几眼的静止一律
+#: 不作数，看满这段窗口——足够把"物块要被带走"那次运动等出来，再等它停下来。
+DEFAULT_SCENE_STABLE_MIN_SECONDS = 3.5
+
 if TYPE_CHECKING:
     from modules.vision.drive.camera import USBCamera as Camera
     from modules.vision.drive.material_locate import MaterialLocator
@@ -71,6 +104,7 @@ if TYPE_CHECKING:
     from modules.vision.drive.numbered_ring import RingTarget, RingTargetLocator
     from modules.vision.drive.pixel_measure import MillimetreMeasurement, PixelMeasurement
     from modules.vision.drive.ring_station import RingStationDetector, RingStationDetection
+    from modules.vision.drive.scene_stability import SceneStability
     from modules.vision.drive.sequence import Fusion, TimedPoint
     from modules.vision.drive.sighting import MaterialSighting
     from modules.vision.drive.stacked_ring import StackedRingDetector, StackedRingDetection
@@ -403,6 +437,12 @@ class Vision:
         self.frames = 0
         #: 累计读失败次数；连续失败说明摄像头掉线。
         self.misses = 0
+        #: 最近一次 :meth:`scene_stability` 的结论（诊断用）。
+        #:
+        #: 等停稳超时之后，"是阈值太紧还是等得太短"只能靠**判据当时看到的实测值**判断；
+        #: 事后复测往往已经停了，两个数对不上就说明是等得不够长。只作观测记录，
+        #: 不影响任何判定。
+        self.last_scene_stability: Optional["SceneStability"] = None
 
     # ------------------------------------------------------------- 创建
     @classmethod
@@ -652,6 +692,144 @@ class Vision:
             if self._clock() >= deadline:
                 return last
 
+    # ------------------------------------------------------------- 画面级停稳
+    def scene_stability(
+        self,
+        *,
+        frames: int = DEFAULT_STABLE_FRAMES,
+        pixel_threshold: int = DEFAULT_PIXEL_DIFF_THRESHOLD,
+        max_mean_diff: float = DEFAULT_MAX_MEAN_DIFF,
+        max_changed_ratio: float = DEFAULT_MAX_CHANGED_RATIO,
+        timeout: Optional[float] = None,
+    ) -> "SceneStability":
+        """连拍几帧，量**整幅画面**的像素差，回答"现在画面静止没有"。
+
+        与 :meth:`measure_settled` 的分工：那个看**检测到的物料位置**稳不稳（没有目标
+        就答不了），这个只看像素（画面里有没有物料都能回答）。抓取前"下降的那几百毫秒
+        里物块会不会跟着转盘走掉"就是后者要回答的问题::
+
+            if robot.vision.scene_stable():
+                robot.arm.move_axis_to_motor_degrees("lift", 530)
+                robot.gripper.close_jaws()
+
+        只比**相邻帧**：``frames`` 帧产生 ``frames - 1`` 组比较，每一组都要小于阈值。
+        只比首尾两帧会被"转过去又转回来"骗过去。
+
+        :param frames: 连拍几帧（至少 2）。
+        :param pixel_threshold: 逐像素灰度差超过它才算"变了"（0–255）。
+        :param max_mean_diff: 整幅图平均灰度差的允许上限。
+        :param max_changed_ratio: 变化像素占比的允许上限（0–1）。
+        :param timeout: 整段连拍的读取超时（秒）；``None`` = 不设总时限。
+        :raises RuntimeError: 会话未就绪 / 已关闭，或读不到摄像头画面。
+        :raises ValueError: 帧数或阈值不合法。
+        """
+        from modules.vision.drive.scene_stability import evaluate_stability
+
+        burst = self._read_burst(frames, timeout=timeout)
+        result = evaluate_stability(
+            burst,
+            pixel_threshold=pixel_threshold,
+            max_mean_diff=max_mean_diff,
+            max_changed_ratio=max_changed_ratio,
+        )
+        # 留一份给诊断：等停稳超时后要能报出"判据当时差了多少"，而不是只报一句还在动。
+        self.last_scene_stability = result
+        return result
+
+    def scene_stable(
+        self,
+        *,
+        frames: int = DEFAULT_STABLE_FRAMES,
+        pixel_threshold: int = DEFAULT_PIXEL_DIFF_THRESHOLD,
+        max_mean_diff: float = DEFAULT_MAX_MEAN_DIFF,
+        max_changed_ratio: float = DEFAULT_MAX_CHANGED_RATIO,
+        timeout: Optional[float] = None,
+    ) -> bool:
+        """布尔简写：**整幅画面静止**（可以下降）时返回 ``True``。
+
+        参数与 :meth:`scene_stability` 完全相同；要实测值（差多少灰阶、多少像素变了）
+        用那个，不要在这里改判据。
+        """
+        return self.scene_stability(
+            frames=frames,
+            pixel_threshold=pixel_threshold,
+            max_mean_diff=max_mean_diff,
+            max_changed_ratio=max_changed_ratio,
+            timeout=timeout,
+        ).stable
+
+    def wait_scene_stable(
+        self,
+        *,
+        timeout: float = DEFAULT_SCENE_STABLE_WAIT_SECONDS,
+        interval: float = DEFAULT_SCENE_STABLE_POLL_SECONDS,
+        min_seconds: float = DEFAULT_SCENE_STABLE_MIN_SECONDS,
+        frames: int = DEFAULT_STABLE_FRAMES,
+        pixel_threshold: int = DEFAULT_PIXEL_DIFF_THRESHOLD,
+        max_mean_diff: float = DEFAULT_MAX_MEAN_DIFF,
+        max_changed_ratio: float = DEFAULT_MAX_CHANGED_RATIO,
+    ) -> bool:
+        """等到画面**看满最小等待之后仍然静止**；返回是否等到了。
+
+        进来那一眼"静止"一律不作数：一次判断只连拍 4 帧（约 130 ms），"这一眼没动"
+        太便宜——转盘刚接到转动指令、物块正要被带走之前，画面也能看着是静的，
+        照这一眼放行就会"跑过去扑空"（现场遇到的就是这个）。
+
+        所以每隔 ``interval`` 秒看一眼，**两条同时满足**才放行：
+
+        - 从进来算起已经看了至少 ``min_seconds`` 秒（默认 3.5 s，头几眼的静止不作数）；
+        - 这一眼没有大变化（画面静止）。
+
+        最小等待之内、或哪一眼还在动，就接着看；到 ``timeout`` 还没等到返回 ``False``——
+        宁可让调用方不下降，也不要落下去扑空::
+
+            if not robot.vision.wait_scene_stable(timeout=8.0):
+                raise RuntimeError("还没停稳，先别下降")
+
+        ``min_seconds`` 只管"最早什么时候允许放行"，不改变判据；它比 ``timeout`` 大时
+        按 ``timeout`` 算（等待上限由调用方定，这个函数不擅自延长）。判一次要连拍几帧
+        （默认 4 帧，约 130 ms），所以 ``interval`` 是**两次判断开始之间**的间隔
+        （判一次比它久时，下一次立刻开始，不再叠加等待）。
+
+        返回 ``False`` 时，:attr:`last_scene_stability` 留着最后一次判断的实测值：
+        "明明已经停了却报还在动"要先分清是阈值太紧（只超一点）还是等得太短
+        （事后复测已经很小）。
+
+        :raises ValueError: ``timeout`` / ``interval`` / ``min_seconds`` 为负，
+            或其他参数不合法。
+        """
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError(f"timeout 必须是非负的有限数，收到 {timeout!r}")
+        if not math.isfinite(interval) or interval < 0:
+            raise ValueError(f"interval 必须是非负的有限数，收到 {interval!r}")
+        if not math.isfinite(min_seconds) or min_seconds < 0:
+            raise ValueError(f"min_seconds 必须是非负的有限数，收到 {min_seconds!r}")
+
+        started_at = self._clock()
+        deadline = started_at + timeout
+        # 头 min_seconds 秒内的"静止"不作数：那可能只是物块被带走前的一瞬间。
+        # 上限是 timeout——等多久由调用方定，这里不擅自延长。
+        hold_until = started_at + min(min_seconds, timeout)
+        while True:
+            started = self._clock()
+            if (
+                self.scene_stable(
+                    frames=frames,
+                    pixel_threshold=pixel_threshold,
+                    max_mean_diff=max_mean_diff,
+                    max_changed_ratio=max_changed_ratio,
+                    timeout=max(0.0, deadline - started),
+                )
+                and self._clock() >= hold_until
+            ):
+                return True
+            if self._clock() >= deadline:
+                return False
+            # 间隔按"上次开始判 → 下次开始判"算：判一次本身要连拍几帧，不再叠加。
+            pause = max(0.0, interval - (self._clock() - started))
+            # 别睡过 deadline：到点之后再判一眼就下结论，不白等。
+            time.sleep(min(pause, max(0.0, deadline - self._clock())))
+
     # ------------------------------------------------------------- 两点像素测量
     def pixel_distance(self, start, end) -> "PixelMeasurement":
         """量画面上两点之间的 ΔX / ΔY（有符号）与直线距离，单位像素。
@@ -780,6 +958,34 @@ class Vision:
             if deadline is None or self._clock() >= deadline:
                 raise RuntimeError("读不到摄像头画面")
 
+    def _read_burst(
+        self, count: int, *, timeout: Optional[float] = None
+    ) -> "Tuple[object, ...]":
+        """先丢一次缓冲，再**连续**读 ``count`` 帧（中间不再丢帧）。
+
+        :meth:`_read_frame` 每次只取一帧、每次都要丢缓冲，适合单帧定位；这里要的是
+        时间上相邻的几帧，所以只在开头丢一次。默认 4 帧约 130 ms（30 fps），正好是
+        "看一小段时间里画面动没动"的窗口。
+        """
+        camera, _locator = self._require_resources()
+        if type(count) is not int or count < 2:
+            raise ValueError(f"至少需要两帧才能比较（收到 {count!r}）")
+        for _ in range(max(1, self._drain_frames)):
+            camera.read()
+        deadline = None if timeout is None else self._clock() + max(0.0, timeout)
+        frames: list = []
+        while len(frames) < count:
+            frame = camera.read()
+            if frame is not None:
+                frames.append(frame)
+                self.frames += 1
+                continue
+            self.misses += 1
+            if deadline is not None and self._clock() >= deadline:
+                raise RuntimeError("读不到摄像头画面")
+            time.sleep(0.01)
+        return tuple(frames)
+
     def _ring_station_detector(self) -> "RingStationDetector":
         """懒建并缓存三圆环检测器：配置在 ``open`` 时就定死了，中途不会回读文件。"""
         from modules.vision.drive.ring_station import RingStationDetector
@@ -858,6 +1064,9 @@ class Vision:
                 locator.yolo.detector,
                 settings=self._settings.ring_target,
                 geometry=self._settings.station_geometry,
+                # 精修沿用 station 那一套 Canny/椭圆阈值：同一台相机、同一种图案，
+                # 另配一份只会在两处漂移。
+                detection=self._settings.station_detection,
                 # 针孔标定优先：环心读数必须与 RegionReport 的毫米同一套单位，
                 # align_xy 的目标点（tx, ty）才对得上。
                 focal_px=self._effective_focal_px(),

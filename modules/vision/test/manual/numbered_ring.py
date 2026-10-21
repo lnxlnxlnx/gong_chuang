@@ -70,7 +70,8 @@ def _draw(frame, result):
     if target is None:
         return canvas
     centre = (int(round(target.center_px[0])), int(round(target.center_px[1])))
-    radius = max(3, int(round(target.radius_px)))
+    # 精修过就画真正那一圈（外圈），否则只能按框画——框比图案大一圈。
+    radius = max(3, int(round(target.ring_radius_px or target.radius_px)))
     # 能拿去对准画绿，贴边/没比例尺画橙：颜色只表达"这个读数能不能直接用"。
     colour = (0, 255, 0) if target.usable else (0, 165, 255)
     cv2.circle(canvas, centre, radius, colour, 3)
@@ -142,6 +143,7 @@ def _locator_for(settings, frame):
         detector,
         settings=settings.ring_target,
         geometry=settings.station_geometry,
+        detection=settings.station_detection,
         focal_px=resolve_focal_px(width, height, settings.focal_px),
         table_depth_mm=settings.table_depth_mm,
     )

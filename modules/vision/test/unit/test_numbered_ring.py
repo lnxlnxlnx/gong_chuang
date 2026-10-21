@@ -90,8 +90,18 @@ class CentreTests(unittest.TestCase):
 
     def test_camera_millimetres_use_the_image_centre_as_optical_axis(self) -> None:
         """偏光轴 200 px、0.5 mm/px ⇒ x = -100 mm（与 RegionReport 同一套坐标）。"""
-        target = make_locator([centred(centre=(440.0, 360.0))]).detect(frame())
+        target = make_locator(
+            [centred(centre=(440.0, 360.0))], settings=RingTargetSettings(outer_diameter_mm=None)
+        ).detect(frame())
         self.assertAlmostEqual(target.reading()[0], -100.0, delta=0.5)
+
+    def test_the_known_outer_diameter_beats_the_fixed_scale(self) -> None:
+        """有已知外径时用"外径 / 模型框"：与距离无关，且压过给固定相机的 mm_per_px。"""
+        target = make_locator([centred(centre=(440.0, 360.0), width=520.0)]).detect(frame())
+        self.assertEqual(target.scale_source, "ring box")
+        # 520 px 框、95 mm 外径 ⇒ 0.1827 mm/px；偏 200 px ⇒ -36.5 mm
+        self.assertAlmostEqual(target.scale_mm_per_px, 95.0 / 520.0, places=6)
+        self.assertAlmostEqual(target.reading()[0], -200.0 * 95.0 / 520.0, delta=0.5)
 
     def test_radius_comes_from_the_box_so_it_can_be_drawn(self) -> None:
         target = make_locator([centred(width=520.0, height=400.0)]).detect(frame())
@@ -161,15 +171,85 @@ class ScaleTests(unittest.TestCase):
         self.assertAlmostEqual(target.reading()[0], -100.0, delta=0.5)
 
     def test_no_calibration_falls_back_to_the_configured_scale(self) -> None:
-        target = make_locator([centred(centre=(440.0, 360.0))], mm_per_px=0.5).detect(frame())
+        """针孔标定与已知外径都没有时，才退回 station.mm_per_px。"""
+        target = make_locator(
+            [centred(centre=(440.0, 360.0))],
+            mm_per_px=0.5,
+            settings=RingTargetSettings(outer_diameter_mm=None),
+        ).detect(frame())
         self.assertEqual(target.scale_source, "station.mm_per_px")
         self.assertAlmostEqual(target.reading()[0], -100.0, delta=0.5)
 
     def test_no_scale_means_no_readable_centre(self) -> None:
-        target = make_locator([centred()], mm_per_px=None).detect(frame())
+        target = make_locator(
+            [centred()],
+            mm_per_px=None,
+            settings=RingTargetSettings(outer_diameter_mm=None),
+        ).detect(frame())
         self.assertIsNotNone(target, "环还是认得的，只是没有毫米")
         self.assertIsNone(target.reading())
         self.assertIn("没有比例尺", target.detail)
+
+    def test_the_shipped_config_carries_the_measured_outer_diameter(self) -> None:
+        """随包配置里必须填上靶标外径，否则相机装臂上时读数会退回固定比例尺。"""
+        settings = load_vision_config()
+        self.assertIsNotNone(settings.ring_target.outer_diameter_mm)
+        self.assertGreater(settings.ring_target.outer_diameter_mm, 0)
+
+
+class RefineTests(unittest.TestCase):
+    """框心 ≠ 环心：框内同心圆精修把环心拉回来（实测框心能偏到 80 px）。"""
+
+    TRUE = (640.0, 360.0)
+
+    def concentric(self, *, centre=None, radii=(120.0, 168.0, 228.0)) -> np.ndarray:
+        """白底黑同心圆：一圈圆给出好几条椭圆观测，圆心都该是同一个点。"""
+        import cv2
+
+        centre = self.TRUE if centre is None else centre
+        frame = np.full((SIZE[1], SIZE[0], 3), 255, dtype=np.uint8)
+        for radius in radii:
+            cv2.circle(frame, (int(centre[0]), int(centre[1])), int(radius),
+                       (0, 0, 0), 4)
+        return frame
+
+    def test_an_offset_box_is_corrected_to_the_ring_centre(self) -> None:
+        frame = self.concentric()
+        # 框偏 40 px / -25 px，半径比最外圈略大（真机上模型框就是这样，比图案大一点）
+        hit = centred("tg2", width=520.0, height=520.0,
+                      centre=(self.TRUE[0] + 40.0, self.TRUE[1] - 25.0))
+        target = make_locator([hit]).detect(frame)
+        self.assertTrue(target.refined)
+        self.assertAlmostEqual(target.center_px[0], self.TRUE[0], delta=2.0)
+        self.assertAlmostEqual(target.center_px[1], self.TRUE[1], delta=2.0)
+        # 原始框心留着，现场能看出"修了多少"
+        self.assertAlmostEqual(target.box_center_px[0], self.TRUE[0] + 40.0, delta=0.1)
+
+    def test_the_summary_says_the_centre_was_refined(self) -> None:
+        target = make_locator(
+            [centred("tg2", width=520.0, height=520.0, centre=(680.0, 335.0))]
+        ).detect(self.concentric())
+        self.assertIn("精修", target.summary())
+
+    def test_a_blank_frame_falls_back_to_the_box_centre(self) -> None:
+        frame = np.zeros((SIZE[1], SIZE[0], 3), dtype=np.uint8)
+        target = make_locator([centred("tg2")]).detect(frame)
+        self.assertFalse(target.refined, "什么也没画，精修应当退回去")
+        self.assertAlmostEqual(target.center_px[0], 640.0, delta=0.5)
+
+    def test_refinement_can_be_switched_off(self) -> None:
+        hit = centred("tg2", width=520.0, height=520.0, centre=(660.0, 350.0))
+        target = RingTargetLocator(
+            FakeDetector([hit]), settings=RingTargetSettings(refine_center=False)
+        ).detect(self.concentric())
+        self.assertFalse(target.refined)
+        self.assertAlmostEqual(target.center_px[0], 660.0, delta=0.5)
+
+    def test_clipped_boxes_are_not_refined(self) -> None:
+        """贴边的框只有一段弧，精修会把圆心拽偏——干脆不修。"""
+        hit = detection("tg1", 0.9, (-30.0, 100.0, 300.0, 620.0))
+        target = make_locator([hit]).detect(self.concentric(centre=(120.0, 360.0)))
+        self.assertFalse(target.refined)
 
 
 class ClassTableTests(unittest.TestCase):

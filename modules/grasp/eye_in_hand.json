@@ -13,7 +13,7 @@
     "radial_dx": -0.0002735146342596506,
     "radial_dy": 0.01812172800295296
   },
-  "tolerance_mm": 4.0,
+  "tolerance_mm": 6.0,
   "max_iterations": 12,
   "max_pulses_per_step": 1200,
   "coarse_max_pulses_per_step": 4000,
@@ -27,6 +27,7 @@
   "settle_tolerance_mm": 0.4,
   "coarse_settle_tolerance_mm": 3.0,
   "settle_timeout_seconds": 4.0,
+  "target_wait_seconds": null,
   "settle_poll_seconds": 0.01,
   "inter_frame_seconds": 0.03,
   "safe_lift_z_mm": 80.0,

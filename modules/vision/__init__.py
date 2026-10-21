@@ -29,6 +29,10 @@
 "目标还在不在动"。判据与取舍在 :mod:`modules.vision.drive.sequence`；只想等到停稳
 就用 :meth:`~modules.vision.runtime.Vision.measure_settled`。
 
+``scene_stable()`` 回答的是**另一个**问题：整幅画面此刻静止没有。它只看像素差，
+不需要画面里有目标，用于抓取下降前的最后确认（物块在转盘上时尤其重要）。
+等待它变静止用 ``wait_scene_stable()``；判据在 :mod:`modules.vision.drive.scene_stability`。
+
 ## 其余能力去哪里找
 
 这里刻意**不再**维护"符号 → 模块"的惰性映射表。工具、算法和配置各有真实归属，

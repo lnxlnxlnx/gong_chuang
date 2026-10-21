@@ -9,12 +9,16 @@ from __future__ import annotations
 import time
 
 from app.gripper import (
+    _move_axes_to,
     align_box,
     grab_box_from_car,
     grab_box_from_floor,
-    grab_box_from_turntable,
+    grab_box_from_turntable,  # 圆盘->仓库
+    place_box_to_floor,  # 仓库->地面圆环
     place_box_to_repo,
 )
+
+SCENE_STABLE_TIMEOUT_SECONDS = 20.0
 
 # 预览演示的**模块级**导入：``demo_material`` 只定义函数、不开设备，真正的装配发生在
 # 它内部（读配置 + ``Vision._open_config``）；保持模块级也让既有入口用例能直接替换它。
@@ -33,10 +37,11 @@ def main() -> None:
     """
     # demo_material()
     with Robot.open(grasp=True, gripper=True, turntable=True) as robot:
-        robot.gripper.set_position(150)
-        grab_box_from_car(robot)
-        grab_box_from_car(robot)
-        grab_box_from_car(robot)
+        robot.gripper.set_position(280)
+        robot.turntable.go_home()
+        grab_box_from_turntable(robot, want_colors= ["red", "blue", "green"])
+        input("抓完了，回车继续：")
+        place_box_to_floor(robot, verbose=True)
 
 
 def locate_material(*, config_path=None) -> None:
@@ -66,22 +71,8 @@ def pick_manual() -> None:
         # robot.arm.move_up(pulses=6000)          # 675度
         robot.arm.move_axis_to_motor_degrees("lift", 675)
         robot.arm.move_forward(3200)
+        grab_box_from_turntable(robot)
         
-        # grab_box(robot)
-        try:
-            for color in ("red", "green", "blue"):
-                grab_box_from_turntable(robot, want_color=color)
-                place_box_to_repo(robot, verbose=True)
-        except Exception as e:
-            print(f"Error occurred during pick and place operation: {e}")
-            robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-            return
-
-        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-        robot.gripper.set_position(150)
-        grab_box_from_car(robot)
-        grab_box_from_car(robot)
-        grab_box_from_car(robot)
 
 def _place_box(robot: Robot):
     try:
@@ -125,8 +116,8 @@ def _place_box(robot: Robot):
 
 
 if __name__ == "__main__":
-    # main()
-    pick_manual()
+    main()
+    # pick_manual()
     # test_place_box()
     # test_vision()
     # adjust_arm_align()

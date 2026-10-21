@@ -35,14 +35,14 @@ PULSES_PER_REV = 3200
 REDUCTION = 5
 
 
-def plan(reading=(0.0, 0.0), target=(0.0, 0.0), *, base_pulses=0, radial_pulses=0,
+def plan(reading=(0.0, 0.0), target=(0.0, 0.0), *, base_pulses=0, extension_pulses=0,
          jacobian=JACOBIAN, tolerance_mm=4.0) -> RingBasePlan:
     return plan_ring_base(
         reading=reading,
         target=target,
         jacobian=jacobian,
         base_pulses=base_pulses,
-        radial_pulses=radial_pulses,
+        extension_pulses=extension_pulses,
         pulses_per_revolution=PULSES_PER_REV,
         reduction_ratio=REDUCTION,
         tolerance_mm=tolerance_mm,
@@ -53,7 +53,7 @@ class SolverTests(unittest.TestCase):
     def test_already_on_target_sends_nothing(self) -> None:
         result = plan(reading=(3.0, -2.0), target=(3.0, -2.0))
         self.assertEqual(result.base_pulses, 0)
-        self.assertEqual(result.radial_pulses, 0)
+        self.assertEqual(result.extension_pulses, 0)
         self.assertTrue(result.aligned)
 
     def test_absolute_angle_is_current_plus_step(self) -> None:
@@ -98,13 +98,13 @@ class SolverTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             plan_ring_base(
                 reading=(0.0, 0.0), target=(0.0, 0.0), jacobian=JACOBIAN,
-                base_pulses=0, radial_pulses=0,
+                base_pulses=0, extension_pulses=0,
                 pulses_per_revolution=0, reduction_ratio=REDUCTION,
             )
         with self.assertRaises(ValueError):
             plan_ring_base(
                 reading=(0.0, 0.0), target=(0.0, 0.0), jacobian=JACOBIAN,
-                base_pulses=0, radial_pulses=0,
+                base_pulses=0, extension_pulses=0,
                 pulses_per_revolution=PULSES_PER_REV, reduction_ratio=0,
             )
 
@@ -132,16 +132,21 @@ def ring_target(*, digit=2, score=0.93, clipped=False, reading=(10.0, 0.0),
 
 
 class FakeArm:
-    """只提供 ``plan_ring`` 用到的那几项：里程表、脉冲数、减速比。"""
+    """只提供 ``plan_ring`` 用到的那几项：里程表、脉冲数、减速比、绝对定位。"""
 
-    def __init__(self, *, base_pulses=2000, radial_pulses=-300) -> None:
+    def __init__(self, *, base_pulses=2000, extension_pulses=-300) -> None:
         self.turns_state = Mock()
         self.turns_state.of.side_effect = lambda name: Mock(
-            pulses=base_pulses if name == "base" else radial_pulses
+            pulses=base_pulses if name == "base" else extension_pulses
         )
         self.pulses_per_revolution = PULSES_PER_REV
         self.config = Mock()
         self.config.base_reduction = REDUCTION
+        self.moves: list[tuple[str, int]] = []
+
+    def move_axis_to_motor_pulses(self, axis_name, pulses, *, rpm=None, acceleration=None):
+        self.moves.append((axis_name, int(pulses)))
+        return f"report({axis_name})"
 
 
 class FakeSource:
@@ -211,6 +216,13 @@ class SessionPlanTests(unittest.TestCase):
         grasp, _arm, _source = make_grasp(ring_target(digit=3))
         self.assertEqual(grasp.plan_ring(require_digit=3).digit, 3)
 
+    def test_a_reading_in_physical_millimetres_is_accepted(self) -> None:
+        """``ring box``（已知外径 / 模型框）也是物理毫米，与 jacobian 同一把尺。"""
+        grasp, _arm, _source = make_grasp(
+            ring_target(scale_mm_per_px=95.0 / 520.0, scale_source="ring box")
+        )
+        self.assertIsNotNone(grasp.plan_ring())
+
     def test_a_scale_that_does_not_match_the_jacobian_is_refused(self) -> None:
         """环心用 station.mm_per_px、雅可比按针孔标定：角度会整体差一个倍数。"""
         grasp, _arm, _source = make_grasp(
@@ -245,6 +257,203 @@ class SessionPlanTests(unittest.TestCase):
         grasp._closed = True
         with self.assertRaises(RuntimeError):
             grasp.plan_ring()
+
+
+class AbsolutePositionTests(unittest.TestCase):
+    """"先算、后走"：把各电机的绝对位置存下来，中间干完别的再执行。"""
+
+    def test_absolute_positions_are_per_axis(self) -> None:
+        grasp, _arm, _source = make_grasp(ring_target(reading=(10.0, 0.0)))
+        plan = grasp.plan_ring()
+        self.assertEqual(plan.pulses["base"], 2000 + plan.base_pulses)
+        self.assertEqual(plan.pulses["extension"], -300 + plan.extension_pulses)
+        self.assertAlmostEqual(plan.degrees["base"], plan.base_motor_degrees)
+        self.assertAlmostEqual(plan.degrees["extension"], plan.extension_motor_degrees)
+
+    def test_apply_moves_every_axis_to_its_absolute_position(self) -> None:
+        grasp, arm, _source = make_grasp(ring_target(reading=(10.0, 0.0)))
+        plan = grasp.plan_ring()
+        plan.apply(arm)
+        self.assertEqual(
+            arm.moves,
+            [
+                ("base", plan.pulses["base"]),
+                ("extension", plan.pulses["extension"]),
+            ],
+        )
+
+    def test_apply_can_rotate_the_base_only(self) -> None:
+        grasp, arm, _source = make_grasp(ring_target(reading=(10.0, 0.0)))
+        plan = grasp.plan_ring()
+        plan.apply(arm, axes=("base",))
+        self.assertEqual(arm.moves, [("base", plan.pulses["base"])])
+
+    def test_apply_rejects_an_axis_that_is_not_planned(self) -> None:
+        grasp, arm, _source = make_grasp(ring_target())
+        with self.assertRaisesRegex(ValueError, "lift"):
+            grasp.plan_ring().apply(arm, axes=("lift",))
+
+
+class SimulatedPlantArm:
+    """假臂 + 假环境：增量脉冲按**真实的**雅可比作用到"环心读数"上。
+
+    用它就能离线验证 :meth:`Grasp.align_ring` 的闭环：把 ``plant`` 设成配置雅可比的
+    一半，等价于"配置过期/尺不对"，闭环应当在线学出响应比并两三步入位。
+    """
+
+    def __init__(self, plant: ServoJacobian, *, reading=(30.0, 20.0),
+                 base_pulses=0, extension_pulses=0) -> None:
+        self.plant = plant
+        self.reading = [float(reading[0]), float(reading[1])]
+        self.pulses = {"base": base_pulses, "extension": extension_pulses}
+        self.moves: list[tuple[str, int]] = []
+        self.turns_state = Mock()
+        self.turns_state.of.side_effect = lambda name: Mock(pulses=self.pulses[name])
+        self.pulses_per_revolution = PULSES_PER_REV
+        self.config = Mock(base_reduction=REDUCTION)
+
+    def _apply(self, axis: str, signed: int) -> None:
+        self.moves.append((axis, signed))
+        self.pulses[axis] += signed
+        moved = self.plant.displacement_for(
+            signed if axis == "base" else 0,
+            signed if axis == "extension" else 0,
+        )
+        self.reading[0] += moved[0]
+        self.reading[1] += moved[1]
+
+    # ``_move_axis`` 只会调这四个方向原语，且 ``wait=False``（不等，返回的耗时是 0）。
+    def rotate_cw(self, pulses, wait=False):
+        self._apply("base", int(pulses))
+        return Mock(estimated_seconds=0.0)
+
+    def rotate_ccw(self, pulses, wait=False):
+        self._apply("base", -int(pulses))
+        return Mock(estimated_seconds=0.0)
+
+    def move_forward(self, pulses, wait=False):
+        self._apply("extension", int(pulses))
+        return Mock(estimated_seconds=0.0)
+
+    def move_backward(self, pulses, wait=False):
+        self._apply("extension", -int(pulses))
+        return Mock(estimated_seconds=0.0)
+
+
+class LiveRingSource:
+    """回放"当前读数"的观测源：每次 ``locate_ring`` 都按假臂的最新状态造一条。"""
+
+    def __init__(self, arm: SimulatedPlantArm) -> None:
+        self.arm = arm
+        self.calls = 0
+
+    def locate_ring(self, *, timeout=None):
+        self.calls += 1
+        return RingTarget(
+            center_px=(640.0, 360.0),
+            radius_px=250.0,
+            digit=2,
+            score=0.95,
+            clipped=False,
+            # 比例尺 1.0、来源 depth/focal：读数原样进入解算，测试只看闭环本身
+            x_mm=self.arm.reading[0],
+            y_mm=self.arm.reading[1],
+            scale_mm_per_px=1.0,
+            scale_source="depth/focal",
+        )
+
+
+def make_closed_loop(plant_scale: float = 1.0):
+    """配置雅可比 = JACOBIAN；真实灵敏度 = ``plant_scale`` × JACOBIAN。"""
+    plant = ServoJacobian(
+        base_dx=JACOBIAN.base_dx * plant_scale,
+        base_dy=JACOBIAN.base_dy * plant_scale,
+        radial_dx=JACOBIAN.radial_dx * plant_scale,
+        radial_dy=JACOBIAN.radial_dy * plant_scale,
+    )
+    arm = SimulatedPlantArm(plant)
+    grasp = Grasp(
+        config=ServoConfig(),
+        selector=ObjectSelector(),
+        target=ServoTarget(x_mm=0.0, y_mm=0.0),
+        jacobian=JACOBIAN,
+        lift_scale=None,
+    )
+    grasp._arm = arm
+    grasp._source = LiveRingSource(arm)
+    return grasp, arm
+
+
+class ClosedLoopTests(unittest.TestCase):
+    """``align_ring``：一步不够时就靠"实测 / 预测"在线折算，两三步入位。"""
+
+    def test_a_matching_machine_lands_in_one_step(self) -> None:
+        grasp, arm = make_closed_loop(1.0)
+        result = grasp.align_ring(gain=1.0)   # 一步到位：gain=1 意味着全量修正
+        self.assertTrue(result.aligned, result.summary())
+        self.assertEqual(len(arm.moves), 2, arm.moves)   # 底座 + 伸缩，各一次
+        self.assertAlmostEqual(result.response or 0.0, 1.0, places=6)
+        self.assertLess(result.final_error_mm, 1.0)
+
+    def test_a_half_sensitive_machine_converges_by_learning_the_response(self) -> None:
+        """真机只有配置的一半灵敏：闭环按实测算出响应比 0.5，第二步就补上了。"""
+        grasp, arm = make_closed_loop(0.5)
+        result = grasp.align_ring(max_iterations=4, gain=1.0)
+        self.assertTrue(result.aligned, result.summary())
+        # 响应比是**机器本身**的性质（真实灵敏度 / 配置灵敏度），不随折算变化
+        self.assertAlmostEqual(result.response or 0.0, 0.5, places=2)
+        # 每一步都朝同一个方向走（不是来回摆）
+        bases = [pulses for axis, pulses in arm.moves if axis == "base"]
+        self.assertGreaterEqual(len(bases), 1)
+        self.assertTrue(all(pulse > 0 for pulse in bases), bases)
+
+    def test_a_double_sensitive_machine_also_converges(self) -> None:
+        grasp, _arm = make_closed_loop(2.0)
+        result = grasp.align_ring(max_iterations=4, gain=0.6)
+        self.assertTrue(result.aligned, result.summary())
+        self.assertGreater(result.response or 0.0, 0.5)
+
+    def test_a_reversed_axis_stops_instead_of_walking_away(self) -> None:
+        """方向反了（接线/标定问题）必须停下并说清楚，而不是继续发帧。"""
+        grasp, arm = make_closed_loop(-1.0)
+        result = grasp.align_ring(max_iterations=4)
+        self.assertFalse(result.aligned)
+        self.assertIn("方向相反", result.note)
+        self.assertLessEqual(len(arm.moves), 2, "只该走第一步，之后必须停")
+
+    def test_base_only_leaves_the_extension_alone(self) -> None:
+        grasp, arm = make_closed_loop(1.0)
+        result = grasp.align_ring(axes=("base",), max_iterations=4)
+        self.assertEqual({axis for axis, _ in arm.moves}, {"base"})
+        self.assertIsNotNone(result.final_error_mm)
+
+    def test_an_unknown_axis_is_rejected_before_any_motion(self) -> None:
+        grasp, arm = make_closed_loop(1.0)
+        with self.assertRaisesRegex(ValueError, "lift"):
+            grasp.align_ring(axes=("lift",))
+        self.assertEqual(arm.moves, [])
+
+    def test_the_result_carries_the_final_plan_like_plan_ring(self) -> None:
+        """闭环结果里的 ``plan`` 与 ``plan_ring()`` 是同一套字段，可直接存下来。"""
+        grasp, arm = make_closed_loop(0.5)
+        result = grasp.align_ring(max_iterations=4, gain=1.0)
+        self.assertIsNotNone(result.plan, "闭环必须把最后那一份计划交出来")
+        plan = result.plan
+        # 收敛之后"该走到的绝对位置"就是当前里程表（剩下的步长已经是 0）
+        self.assertEqual(plan.base_motor_pulses, arm.pulses["base"])
+        self.assertEqual(plan.extension_motor_pulses, arm.pulses["extension"])
+        # 转发属性与 plan 一致，用起来和 plan_ring() 一样
+        self.assertAlmostEqual(result.base, plan.base)
+        self.assertAlmostEqual(result.extension, plan.extension)
+        self.assertEqual(result.pulses, plan.pulses)
+        self.assertEqual(result.degrees, plan.degrees)
+        self.assertIn("最终绝对位置", result.summary())
+
+    def test_a_closed_loop_without_ring_vision_says_so(self) -> None:
+        grasp, _arm = make_closed_loop(1.0)
+        grasp._source = Mock(spec=["frame"])
+        with self.assertRaisesRegex(ServoError, "没有环心定位"):
+            grasp.align_ring()
 
 
 if __name__ == "__main__":

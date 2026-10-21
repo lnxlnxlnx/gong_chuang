@@ -1,4 +1,19 @@
-"""圆环中心 → 底座**绝对角度**：一次线性化解算，不动任何设备。
+"""圆环中心 → **各电机的绝对位置**：一次线性化解算，不动任何设备。
+
+## 用法：先算、后走
+
+```python
+plan = robot.grasp.plan_ring()          # 只算：一帧定位 + 一次解算，电机一帧都不动
+...                                     # 中间去抓料、摆料，随便走多少步
+
+robot.arm.move_axis_to_motor_degrees("base", plan.base)            # 底座绝对角度
+robot.arm.move_axis_to_motor_degrees("extension", plan.extension)   # 伸缩绝对角度
+# 或者一步走完：plan.apply(robot.arm)；只转底座：plan.apply(robot.arm, axes=("base",))
+```
+
+``plan.degrees`` / ``plan.pulses`` 是同一位置的字典，键就是轴名::
+
+    app.gripper._move_axes_to(robot, plan.degrees)      # {"base": 222.5, "extension": 5.7}
 
 ## 为什么是"里程表增量"而不是世界坐标
 
@@ -11,12 +26,8 @@
 ```
 
 所以这里返回的角度与 :meth:`modules.arm.runtime.RobotArm.move_axis_to_motor_degrees`
-是同一个口径（电机轴，3200 脉冲 = 360°，不取模）：
-
-```python
-plan = robot.grasp.plan_ring()                       # 一帧定位 + 解算
-robot.arm.move_axis_to_motor_degrees("base", plan.base_motor_degrees)
-```
+是同一个口径（电机轴，3200 脉冲 = 360°，不取模）。因为是绝对位置，算完隔多久再走都
+对得上——只要中间**没回零**（``home_all`` 会清零里程表）。
 
 ## 一次线性化：够用，但要复核
 
@@ -24,15 +35,15 @@ robot.arm.move_axis_to_motor_degrees("base", plan.base_motor_degrees)
 一次消掉的两个轴步长。真实关系在大角度下会弯（转 30° 之后雅可比已经变了），所以
 这是**一次**解算，不是"走到就一定对"：转完再看一帧，偏差大就再算一次——
 和 :meth:`modules.grasp.runtime.Grasp.align_xy` 的闭环是同一个道理，只是这里把
-"要转到哪个绝对角度"先算出来交给你。
+"要转到哪个绝对位置"先算出来交给你。
 
 ## 单位必须与雅可比一致
 
-``reading`` 与 ``jacobian`` 必须是**同一把尺**（同一套毫米/像素）。物料那条路线的读数
-按针孔标定 ``z/f`` 换算；环心读数如果退回 ``station.mm_per_px``（没有 ``table_depth_mm``
-与 ``focal_px`` 时就是这样），两者可以差好几倍——角度也会跟着整体差好几倍，而且看起来
-完全正常。所以 :meth:`modules.grasp.runtime.Grasp.plan_ring` 会先核对比例尺来源，
-对不上就报错，而不是给一个像样的错数。
+``reading`` 与 ``jacobian`` 必须是**同一把尺**（物理毫米）。物料那条路线的读数按针孔
+标定 ``z/f`` 换算；环心读数正常也走物理毫米（``depth/focal`` 或"已知外径 / 模型框"）。
+一旦退回 ``station.mm_per_px``（给固定相机标的值），两者可以差好几倍——角度也会跟着
+整体差好几倍，而且看起来完全正常。所以 :meth:`modules.grasp.runtime.Grasp.plan_ring`
+会先核对比例尺来源，对不上就报错，而不是给一个像样的错数。
 """
 
 from __future__ import annotations
@@ -82,9 +93,9 @@ class RingBasePlan:
     base_motor_degrees_per_pulse: float = 0.0
 
     #: 伸缩的增量与绝对目标；只转底座时用不到，但"爪子正对环心"需要它。
-    radial_pulses: int = 0
-    radial_motor_pulses: int = 0
-    radial_motor_degrees: float = 0.0
+    extension_pulses: int = 0
+    extension_motor_pulses: int = 0
+    extension_motor_degrees: float = 0.0
 
     #: 两轴都走之后的预测残差（毫米）与是否进容差。
     residual_mm: float = 0.0
@@ -94,9 +105,68 @@ class RingBasePlan:
     #: 人话说明：这一步是什么、还剩多少、下一步该做什么。
     note: str = ""
 
-    def base_command(self) -> Tuple[str, float]:
-        """可以直接交给 ``move_axis_to_motor_degrees`` 的一对 ``("base", 角度)``。"""
-        return ("base", self.base_motor_degrees)
+    # ---------------------------------------------------- 各电机的绝对位置
+    @property
+    def base(self) -> float:
+        """底座应当走到的**绝对角度**（电机轴口径，度）。
+
+        直接可喂 :meth:`modules.arm.runtime.RobotArm.move_axis_to_motor_degrees`::
+
+            robot.arm.move_axis_to_motor_degrees("base", plan.base)
+        """
+        return self.base_motor_degrees
+
+    @property
+    def extension(self) -> float:
+        """伸缩应当走到的**绝对角度**（电机轴口径，度），喂 ``"extension"`` 轴。"""
+        return self.extension_motor_degrees
+
+    @property
+    def degrees(self) -> "dict[str, float]":
+        """各轴绝对角度，键就是轴名（``base`` / ``extension``），方便循环发命令::
+
+            for axis, degrees in plan.degrees.items():
+                robot.arm.move_axis_to_motor_degrees(axis, degrees)
+        """
+        return {"base": self.base, "extension": self.extension}
+
+    @property
+    def pulses(self) -> "dict[str, int]":
+        """各轴应当走到的**绝对脉冲**（里程表口径），与 :attr:`degrees` 同一位置。"""
+        return {"base": self.base_motor_pulses, "extension": self.extension_motor_pulses}
+
+    def apply(
+        self,
+        arm,
+        *,
+        axes: Optional[Sequence[str]] = None,
+        rpm: Optional[int] = None,
+        acceleration: Optional[int] = None,
+    ):
+        """把机械臂走到这份计划的绝对位置；**不做安全高度检查**，由调用方负责。
+
+        逐轴发绝对帧（``move_axis_to_motor_pulses``：增量按当时的里程表算，所以中间
+        干了多少别的动作都对得上）。``axes`` 默认两根都走；只想转底座时传
+        ``axes=("base",)``。
+
+        计划记录的是**算的时候**那个姿态下的绝对角度，所以执行前不要回零
+        （``home_all`` 会把里程表清零，绝对值就不再指向同一个位置）。
+
+        :returns: 每根轴一份 ``MotionReport``（按 ``axes`` 顺序）。
+        """
+        wanted = self.pulses
+        names = tuple(wanted) if axes is None else tuple(axes)
+        unknown = [name for name in names if name not in wanted]
+        if unknown:
+            raise ValueError(
+                f"这份计划里没有 {unknown} 轴；可用的只有 {sorted(wanted)}"
+            )
+        return tuple(
+            arm.move_axis_to_motor_pulses(
+                name, wanted[name], rpm=rpm, acceleration=acceleration
+            )
+            for name in names
+        )
 
     def summary(self) -> str:
         where = (
@@ -105,10 +175,10 @@ class RingBasePlan:
         return (
             f"{where} 读数 ({self.reading[0]:+.1f}, {self.reading[1]:+.1f}) mm，"
             f"误差 {math.hypot(*self.error_mm):.1f} mm → "
-            f"底座绝对 {self.base_motor_degrees:+.1f}°（电机轴，"
-            f"{self.base_pulses:+d} 脉冲；输出轴 {self.base_output_degrees:+.1f}°）"
-            f"，伸缩 {self.radial_pulses:+d} 脉冲"
-            f"，预测残差 {self.residual_mm:.1f} mm"
+            f"底座绝对 {self.base:+.1f}°（电机轴，{self.base_pulses:+d} 脉冲；"
+            f"输出轴 {self.base_output_degrees:+.1f}°），"
+            f"伸缩绝对 {self.extension:+.1f}°（{self.extension_pulses:+d} 脉冲），"
+            f"预测残差 {self.residual_mm:.1f} mm"
             f"{'（进容差）' if self.aligned else '（还要再迭代一次）'}。"
         )
 
@@ -119,7 +189,7 @@ def plan_ring_base(
     target: Sequence[float],
     jacobian: ServoJacobian,
     base_pulses: int,
-    radial_pulses: int,
+    extension_pulses: int,
     pulses_per_revolution: int,
     reduction_ratio: float,
     tolerance_mm: float = 4.0,
@@ -130,7 +200,7 @@ def plan_ring_base(
         reading: 环心在**相机系**的毫米坐标（与 ``jacobian`` 同一把尺）。
         target: 爪口在相机系里的目标读数（``eye_in_hand.json`` 的 ``target``）。
         jacobian: 实测的两轴灵敏度（毫米/脉冲）。
-        base_pulses / radial_pulses: 两根轴**当前**的里程表读数（可以是负的）。
+        base_pulses / extension_pulses: 两根轴**当前**的里程表读数（可以是负的）。
         pulses_per_revolution: 电机一圈的脉冲数（``3200``）。
         reduction_ratio: 底座减速比（电机转几圈输出轴转一圈）。
         tolerance_mm: 判"已经够准"的门槛；只影响 :attr:`RingBasePlan.aligned`。
@@ -141,7 +211,7 @@ def plan_ring_base(
     first, second = _pair(reading, "reading")
     target_x, target_y = _pair(target, "target")
     _require_int(base_pulses, "base_pulses")
-    _require_int(radial_pulses, "radial_pulses")
+    _require_int(extension_pulses, "extension_pulses")
     _require_positive_int(pulses_per_revolution, "pulses_per_revolution")
     if not reduction_ratio > 0:
         raise ValueError("reduction_ratio 必须是正数（电机转几圈输出轴转一圈）")
@@ -150,21 +220,21 @@ def plan_ring_base(
 
     error = (first - target_x, second - target_y)
     # 一次线性化：走 p 脉冲让读数变化 J·p，要 e + J·p = 0，即 p = −J⁻¹·e。
-    base_step_float, radial_step_float = jacobian.pulses_for(*error)
+    base_step_float, extension_step_float = jacobian.pulses_for(*error)
     if jacobian.base_norm < MIN_BASE_SENSITIVITY_MM_PER_PULSE:  # pragma: no cover - 与奇异判据重叠
         raise ServoError(
             f"底座在画面里几乎推不动（{jacobian.base_norm:.2e} mm/脉冲），解不出角度；"
             "检查相机是不是离转轴太近、或雅可比标定把两个轴记反了"
         )
     base_step = _round(base_step_float)
-    radial_step = _round(radial_step_float)
+    extension_step = _round(extension_step_float)
 
-    residual = _residual(error, jacobian, base_step, radial_step)
+    residual = _residual(error, jacobian, base_step, extension_step)
     base_motor_pulses = base_pulses + base_step
-    radial_motor_pulses = radial_pulses + radial_step
+    extension_motor_pulses = extension_pulses + extension_step
     motor_degrees_per_pulse = 360.0 / float(pulses_per_revolution)
     base_motor_degrees = base_motor_pulses * motor_degrees_per_pulse
-    radial_motor_degrees = radial_motor_pulses * motor_degrees_per_pulse
+    extension_motor_degrees = extension_motor_pulses * motor_degrees_per_pulse
     base_output_degrees = base_motor_degrees / float(reduction_ratio)
     aligned = residual <= tolerance_mm
 
@@ -187,9 +257,9 @@ def plan_ring_base(
         base_output_degrees=base_output_degrees,
         base_output_degrees_per_pulse=motor_degrees_per_pulse / float(reduction_ratio),
         base_motor_degrees_per_pulse=motor_degrees_per_pulse,
-        radial_pulses=radial_step,
-        radial_motor_pulses=radial_motor_pulses,
-        radial_motor_degrees=radial_motor_degrees,
+        extension_pulses=extension_step,
+        extension_motor_pulses=extension_motor_pulses,
+        extension_motor_degrees=extension_motor_degrees,
         residual_mm=residual,
         tolerance_mm=float(tolerance_mm),
         aligned=aligned,
@@ -197,15 +267,122 @@ def plan_ring_base(
     )
 
 
+# ---------------------------------------------------------------------- 闭环
+@dataclass(frozen=True)
+class RingAlignStep:
+    """闭环里的一步：看到了什么、走了多少、走完实测挪了多少。"""
+
+    attempt: int
+    reading: Tuple[float, float]
+    error_mm: float
+    base_pulses: int
+    extension_pulses: int
+    #: 这一段走完之后**实测**挪了多少（下一步的读数减这一步的读数）。
+    measured_mm: Optional[Tuple[float, float]] = None
+    #: 按配置的雅可比**预测**该挪多少。
+    predicted_mm: Optional[Tuple[float, float]] = None
+    #: 实测 / 预测 的投影比：``1`` 说明尺是对的，``0.5`` 说明实际灵敏度只有一半。
+    response: Optional[float] = None
+
+    def line(self) -> str:
+        moved = ""
+        if self.measured_mm is not None and self.predicted_mm is not None:
+            moved = (
+                f"，实测 ({self.measured_mm[0]:+.2f},{self.measured_mm[1]:+.2f}) mm / "
+                f"预测 ({self.predicted_mm[0]:+.2f},{self.predicted_mm[1]:+.2f}) mm"
+            )
+            if self.response is not None:
+                moved += f"，响应比 {self.response:.2f}"
+        return (
+            f"第 {self.attempt} 步：读数 ({self.reading[0]:+.2f},{self.reading[1]:+.2f}) mm，"
+            f"误差 {self.error_mm:.2f} mm → 底座 {self.base_pulses:+d}、"
+            f"伸缩 {self.extension_pulses:+d} 脉冲{moved}"
+        )
+
+
+@dataclass(frozen=True)
+class RingAlignResult:
+    """一次环心闭环的结论：每一步步长与实测响应，**以及最后那一份 plan**。
+
+    ``plan`` 是收敛时算出来的那份 :class:`RingBasePlan`——它和直接调
+    ``plan_ring()`` 得到的**是同一个东西**（同一套字段、同一个绝对位置口径），
+    所以"先闭环对准、再拿绝对位置去干别的"不需要再调一次 ``plan_ring``：
+    直接存 ``result.plan`` 就行。
+    """
+
+    steps: Tuple[RingAlignStep, ...] = ()
+    aligned: bool = False
+    final_reading: Optional[Tuple[float, float]] = None
+    final_error_mm: Optional[float] = None
+    tolerance_mm: float = 0.0
+    digit: Optional[int] = None
+    #: 最后一次估计出来的"实测/预测"比（``None`` = 一步都没走成）。
+    response: Optional[float] = None
+    #: 收敛时那一份计划：各轴绝对位置、残差、备注都在这上面。
+    plan: Optional[RingBasePlan] = None
+    note: str = ""
+
+    # ------------------------------------------------ 与 plan_ring 同一套读法
+    @property
+    def base(self) -> Optional[float]:
+        """底座应当停下的**绝对角度**（电机轴），与 ``plan_ring().base`` 同义。"""
+        return None if self.plan is None else self.plan.base
+
+    @property
+    def extension(self) -> Optional[float]:
+        """伸缩应当停下的**绝对角度**（电机轴）。"""
+        return None if self.plan is None else self.plan.extension
+
+    @property
+    def degrees(self) -> "dict[str, float]":
+        """``{"base": 角度, "extension": 角度}``，键就是轴名。"""
+        return {} if self.plan is None else self.plan.degrees
+
+    @property
+    def pulses(self) -> "dict[str, int]":
+        """``{"base": 脉冲, "extension": 脉冲}``（绝对，里程表口径）。"""
+        return {} if self.plan is None else self.plan.pulses
+
+    def apply(self, arm, **kwargs):
+        """把机械臂走到**收敛时那个绝对位置**（已经在那儿了，一般不用调）。"""
+        if self.plan is None:
+            raise ValueError("这次闭环没有算出计划（一步都没走成），没有位置可应用")
+        return self.plan.apply(arm, **kwargs)
+
+    def summary(self) -> str:
+        head = f"环 {self.digit}：" if self.digit is not None else "环："
+        if self.final_reading is None:
+            return head + "一步也没走成（" + self.note + "）"
+        state = "已到位" if self.aligned else "**没到位**"
+        text = (
+            f"{head}{state}，最终读数 ({self.final_reading[0]:+.2f},"
+            f"{self.final_reading[1]:+.2f}) mm，误差 "
+            f"{self.final_error_mm:.2f} mm（容差 {self.tolerance_mm:.2f} mm），"
+            f"用了 {len(self.steps)} 步"
+        )
+        if self.response is not None:
+            text += f"，实测/预测响应比 {self.response:.2f}"
+        if self.plan is not None:
+            text += (
+                f"；最终绝对位置：底座 {self.plan.base:+.1f}°"
+                f"（{self.plan.base_motor_pulses:+d} 脉冲）、"
+                f"伸缩 {self.plan.extension:+.1f}°"
+                f"（{self.plan.extension_motor_pulses:+d} 脉冲）"
+            )
+        if self.note:
+            text += "；" + self.note
+        return text
+
+
 # ---------------------------------------------------------------------- 内部
 def _residual(
     error: Tuple[float, float],
     jacobian: ServoJacobian,
     base_step: int,
-    radial_step: int,
+    extension_step: int,
 ) -> float:
     """按**整数**脉冲推算走完之后的残差长度（四舍五入的余量也要算进去）。"""
-    moved_x, moved_y = jacobian.displacement_for(base_step, radial_step)
+    moved_x, moved_y = jacobian.displacement_for(base_step, extension_step)
     return math.hypot(error[0] + moved_x, error[1] + moved_y)
 
 
@@ -262,11 +439,11 @@ def _self_test() -> int:
     # 1) 已经在目标上：一帧都不该发
     plan = plan_ring_base(
         reading=(0.0, 0.0), target=(0.0, 0.0), jacobian=jacobian,
-        base_pulses=1000, radial_pulses=-500,
+        base_pulses=1000, extension_pulses=-500,
         pulses_per_revolution=pulses_per_revolution, reduction_ratio=reduction_ratio,
     )
-    if plan.base_pulses != 0 or plan.radial_pulses != 0:
-        problems.append(f"已在目标上却给了步长：{plan.base_pulses}/{plan.radial_pulses}")
+    if plan.base_pulses != 0 or plan.extension_pulses != 0:
+        problems.append(f"已在目标上却给了步长：{plan.base_pulses}/{plan.extension_pulses}")
     if plan.base_motor_pulses != 1000 or not plan.aligned:
         problems.append(f"绝对值应当是当前脉冲，实际 {plan.base_motor_pulses}")
 
@@ -274,7 +451,7 @@ def _self_test() -> int:
     #    Δ = −(e·j)/|j|² ；e=(10,0)、j=(−0.0817,−0.0076) ⇒ Δ ≈ +121.5 脉冲
     plan = plan_ring_base(
         reading=(10.0, 0.0), target=(0.0, 0.0), jacobian=jacobian,
-        base_pulses=0, radial_pulses=0,
+        base_pulses=0, extension_pulses=0,
         pulses_per_revolution=pulses_per_revolution, reduction_ratio=reduction_ratio,
     )
     if not 118 <= plan.base_pulses <= 125:
@@ -293,7 +470,7 @@ def _self_test() -> int:
     # 4) 两轴一起走：残差应当接近 0
     plan = plan_ring_base(
         reading=(3.0, -4.0), target=(0.0, 0.0), jacobian=jacobian,
-        base_pulses=0, radial_pulses=0,
+        base_pulses=0, extension_pulses=0,
         pulses_per_revolution=pulses_per_revolution, reduction_ratio=reduction_ratio,
         tolerance_mm=1.0,
     )
@@ -303,7 +480,7 @@ def _self_test() -> int:
     # 5) 只差目标读数里的那一点：target 本身就是爪口位置
     plan = plan_ring_base(
         reading=(2.0, 0.0), target=(2.0, 0.0), jacobian=jacobian,
-        base_pulses=0, radial_pulses=0,
+        base_pulses=0, extension_pulses=0,
         pulses_per_revolution=pulses_per_revolution, reduction_ratio=reduction_ratio,
     )
     if plan.base_pulses != 0:
@@ -314,7 +491,7 @@ def _self_test() -> int:
     try:
         plan_ring_base(
             reading=(1.0, 1.0), target=(0.0, 0.0), jacobian=singular,
-            base_pulses=0, radial_pulses=0,
+            base_pulses=0, extension_pulses=0,
             pulses_per_revolution=pulses_per_revolution, reduction_ratio=reduction_ratio,
         )
     except ServoError as error:
@@ -328,7 +505,7 @@ def _self_test() -> int:
         try:
             plan_ring_base(
                 reading=bad, target=(0.0, 0.0), jacobian=jacobian,
-                base_pulses=0, radial_pulses=0,
+                base_pulses=0, extension_pulses=0,
                 pulses_per_revolution=pulses_per_revolution, reduction_ratio=reduction_ratio,
             )
         except ValueError:

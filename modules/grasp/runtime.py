@@ -50,8 +50,9 @@ Grasp 实例
 
 from __future__ import annotations
 
+import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
@@ -100,6 +101,13 @@ def _new_arm(port: str, arm_config) -> RobotArm:
     from modules.arm.runtime import RobotArm
 
     return RobotArm._from_settings(config=arm_config, port=port)
+
+
+def _round_pulses(value: float) -> int:
+    """四舍五入到整数脉冲（``.5`` 远离零，与 ``ring_plan`` 的取整一致）。"""
+    if value >= 0:
+        return int(math.floor(value + 0.5))
+    return -int(math.floor(-value + 0.5))
 
 
 class Grasp:
@@ -416,6 +424,12 @@ class Grasp:
                     robot.grasp.align_xy(
                         reading=(report.best.x_mm, report.best.y_mm), want=colour
                     )
+
+        物块放在转盘上、调用时还没转进视野时，**第一次测量**会按
+        ``eye_in_hand.json`` 的 ``target_wait_seconds`` 等它出现（``null`` = 一直等，
+        ``0`` = 保持旧语义），而不是 4 s 就报"没能稳定看到物块"；物块出现之后才按
+        ``settle_timeout_seconds`` 等它停稳。之后的测量仍按 4 s 收工，爪子自己挡住物块时
+        照旧能按最后读数收工。
         """
         arm, source = self._require_resources()
         from modules.grasp.drive.eye_in_hand import align_x_y, hover_above_object
@@ -466,32 +480,38 @@ class Grasp:
         timeout: float | None = None,
         scale_mm_per_px: float | None = None,
     ) -> "RingBasePlan":
-        """读**一帧**、定位环心，解算底座的**绝对角度**；**不动任何设备**。
+        """读**一帧**、定位环心，解算各电机的**绝对位置**；**不动任何设备**。
 
-        这就是"先定位、再解算"的一条命令::
+        这就是"先定位、再解算"的一条命令。返回值里各轴的绝对位置按轴名存放，
+        可以直接存起来、**之后再执行**::
 
-            plan = robot.grasp.plan_ring()          # 一帧，不动电机
-            print(plan.base_motor_degrees)          # 该转到多少度（电机轴，绝对值）
-            print(plan.base_output_degrees)         # 同一个位置换成输出轴角度（÷减速比）
-            robot.arm.move_axis_to_motor_degrees("base", plan.base_motor_degrees)
+            plan = robot.grasp.plan_ring()          # 只算，一帧都不动
+            ...                                     # 中间去抓物料、摆料
+            robot.arm.move_axis_to_motor_degrees("base", plan.base)
+            robot.arm.move_axis_to_motor_degrees("extension", plan.extension)
+            # 或者一次走完：plan.apply(robot.arm)；只转底座：plan.apply(robot.arm, axes=("base",))
+
+        ``plan.base`` / ``plan.extension`` 是**绝对角度**（电机轴口径，3200 脉冲 = 360°，
+        不取模），``plan.degrees`` / ``plan.pulses`` 是同一位置的字典形式（键就是轴名），
+        与 :meth:`modules.arm.runtime.RobotArm.move_axis_to_motor_degrees`、
+        ``arm.turns_state`` 同一坐标。
 
         环心与环号来自模型（:meth:`modules.vision.runtime.Vision.locate_ring` 的
         ``tg1`` / ``tg2`` / ``tg3``），角度来自**实测雅可比 + 命令里程表**：
 
-        - ``base_motor_degrees`` 是**绝对值**（与 ``move_axis_to_motor_degrees``、
+        - 底座与伸缩各是一个**绝对值**（与 ``move_axis_to_motor_degrees``、
           ``arm.turns_state`` 同一口径：3200 脉冲 = 360°，不取模），不是增量；
-        - 同时给出伸缩的绝对目标 ``radial_motor_pulses``：只转底座时，爪子到了环的
-          **角度**却不一定在同一条**半径**上，那点差就是计划里的径向补偿；
+        - 只转底座时，爪子到了环的**角度**却不一定在同一条**半径**上，那点差就是计划里
+          的伸缩补偿（``extension_pulses``）；
         - ``residual_mm`` 是"两轴都走之后"的预测残差。大角度下雅可比会变，**走完再看
           一帧重算一次**就能收敛（与 :meth:`align_xy` 的闭环是同一个道理）。
 
         ## 比例尺必须与雅可比一致
 
-        读数用哪把尺，角度就按哪把尺结算：环心读数如果在用 ``station.mm_per_px``
-        （没标定 ``table_depth_mm`` / ``focal_px`` 时就是这样），而 ``jacobian`` 是按
-        针孔标定（``z/f``）标出来的，两者可以直接差好几倍——角度整体差那么多倍，而
-        计划看起来完全正常。所以这里**核对来源**，对不上就报错；确实知道两者关系时，
-        用 ``scale_mm_per_px`` 把环心读数换算到雅可比那把尺上。
+        读数用哪把尺，角度就按哪把尺结算：``jacobian`` 是"物理毫米/脉冲"，所以环心读数
+        也必须是物理毫米。``depth/focal``（针孔标定）和 ``ring box``（已知外径 / 模型框）
+        都满足；``station.mm_per_px`` 不满足（那是给固定相机标的值，装在臂上差好几倍）。
+        这一档会**核对并报错**；确实知道换算关系时用 ``scale_mm_per_px`` 直接给。
 
         :param require_digit: 只接受指定环号（1/2/3）；画面里是别的号就报错，
             **不回退**到另一个环（拿错环的角度去转，机械臂会朝 95 mm 外的位置动）。
@@ -502,6 +522,155 @@ class Grasp:
             比例尺对不上、雅可比奇异，或观测源不支持环心定位。
         """
         arm, source = self._require_resources()
+        target = self._locate_ring_for_plan(
+            source, timeout=timeout, require_digit=require_digit
+        )
+        return self._plan_for_ring(arm, target, scale_mm_per_px=scale_mm_per_px)
+
+    def align_ring(
+        self,
+        *,
+        require_digit: int | None = None,
+        timeout: float | None = None,
+        scale_mm_per_px: float | None = None,
+        axes: "Sequence[str]" = ("base", "extension"),
+        max_iterations: int = 4,
+        gain: float = 0.9,
+        tolerance_mm: float | None = None,
+    ) -> "RingAlignResult":
+        """闭环把环心推到目标读数：**测一帧 → 算 → 走 → 再测**，直到进容差。
+
+        一次 :meth:`plan_ring` 只做一次线性化解算，它同时依赖两件事：
+
+        - 雅可比是不是**现在这台机器、这个高度**的（``eye_in_hand.json`` 里那份是按
+          物料标定的，换高度/换装法就会过期）；
+        - 环心读数的比例尺与雅可比是不是同一把尺（``ring box`` 是估的，±10%）。
+
+        任一对不上，一步就走不准——这正是"转一次再算一次、偏差还是很大"的原因。
+        这里每走一步都用**实测位移 / 预测位移**把响应比在线学出来，下一步按它折算，
+        所以两三步就能收敛；而且把响应比打印出来：**它不是 1，就说明该重标了**。
+
+        与 :meth:`plan_ring` 相同的拒绝（没有环 / 读数不可用 / 环号不符 / 尺不对 /
+        雅可比奇异），另外：
+
+        :param axes: 只动哪些轴；``("base",)`` = 只转底座。
+        :param max_iterations: 最多走几步（默认 4）。
+        :param gain: 每步取解算值的多少（默认 0.9，留一点余量防过冲）。
+        :param tolerance_mm: 到位门槛；``None`` 用 ``eye_in_hand.json`` 的 ``tolerance_mm``。
+        :raises ServoError: 任何一步看不见环、解算失败；或响应比 ≤ 0（方向反了：
+            那是标定/接线问题，硬走只会越走越远）。
+        """
+        arm, source = self._require_resources()
+        from modules.grasp.drive.ring_plan import RingAlignResult, RingAlignStep
+        from modules.grasp.drive.servo_motion import _move_axis
+
+        wanted = tuple(axes)
+        unknown = [name for name in wanted if name not in ("base", "extension")]
+        if unknown:
+            raise ValueError(
+                f"align_ring 只认 base / extension，收到 {unknown}"
+            )
+        tolerance = float(
+            self._config.tolerance_mm if tolerance_mm is None else tolerance_mm
+        )
+        steps: list[RingAlignStep] = []
+        scale = 1.0  # 步长的在线折算：1/响应比
+        response: float | None = None
+        previous_reading: tuple[float, float] | None = None
+        previous_step: tuple[int, int] | None = None
+        note = ""
+        aligned = False
+        final_reading: tuple[float, float] | None = None
+        digit: int | None = None
+        final_plan = None
+        for attempt in range(1, max(1, int(max_iterations)) + 1):
+            target = self._locate_ring_for_plan(
+                source, timeout=timeout, require_digit=require_digit
+            )
+            plan = self._plan_for_ring(arm, target, scale_mm_per_px=scale_mm_per_px)
+            digit = plan.digit
+            final_reading = plan.reading
+            final_plan = plan
+            error = math.hypot(plan.error_mm[0], plan.error_mm[1])
+            step = RingAlignStep(
+                attempt=attempt,
+                reading=plan.reading,
+                error_mm=error,
+                base_pulses=0,
+                extension_pulses=0,
+            )
+            # 先结算**上一步**的账：实测挪了多少，按雅可比该挪多少。
+            if attempt > 1 and previous_step is not None and previous_reading is not None:
+                predicted = self._jacobian.displacement_for(*previous_step)
+                measured = (
+                    plan.reading[0] - previous_reading[0],
+                    plan.reading[1] - previous_reading[1],
+                )
+                denominator = predicted[0] ** 2 + predicted[1] ** 2
+                if denominator > 1e-12:
+                    response = (
+                        measured[0] * predicted[0] + measured[1] * predicted[1]
+                    ) / denominator
+                    step = replace(
+                        step, measured_mm=measured, predicted_mm=predicted, response=response
+                    )
+                    if response <= 0.05:
+                        steps.append(step)
+                        note = (
+                            "实测位移与雅可比预测**方向相反或几乎没有**，再走只会越走越远："
+                            "先重标雅可比（菜单 21 的 --calibrate），或检查底座/伸缩的接线方向"
+                        )
+                        break
+                    # 响应比 = 真实的灵敏度 / 配置的灵敏度；下一步按它折算。
+                    scale = min(5.0, max(0.2, 1.0 / response))
+            if error <= tolerance:
+                aligned = True
+                steps.append(step)
+                break
+            base_step = (
+                _round_pulses(plan.base_pulses * gain * scale) if "base" in wanted else 0
+            )
+            extension_step = (
+                _round_pulses(plan.extension_pulses * gain * scale)
+                if "extension" in wanted
+                else 0
+            )
+            if base_step == 0 and extension_step == 0:
+                steps.append(step)
+                note = "步长不足一个脉冲，停下：把增益调大或检查读数是不是抖"
+                break
+            _move_axis(arm, "base", base_step) if base_step else None
+            _move_axis(arm, "extension", extension_step) if extension_step else None
+            steps.append(
+                replace(step, base_pulses=base_step, extension_pulses=extension_step)
+            )
+            previous_reading = plan.reading
+            previous_step = (base_step, extension_step)
+        else:
+            note = note or f"走了 {max_iterations} 步还没进容差，先看响应比是不是一直不变"
+
+        final_error = None
+        if final_reading is not None and self._target is not None:
+            final_error = math.hypot(
+                final_reading[0] - self._target.x_mm,
+                final_reading[1] - self._target.y_mm,
+            )
+        return RingAlignResult(
+            steps=tuple(steps),
+            aligned=aligned,
+            final_reading=final_reading,
+            final_error_mm=final_error,
+            tolerance_mm=tolerance,
+            digit=digit,
+            response=response,
+            # 收敛时那一份计划：字段与 ``plan_ring()`` 完全同一套，可以直接存下来
+            # （"先对准、之后回到这个绝对位置"就靠它）。
+            plan=final_plan,
+            note=note,
+        )
+
+    def _locate_ring_for_plan(self, source, *, timeout, require_digit):
+        """读一帧并校验"这一个环能不能拿去算角度"；不能就说清楚为什么。"""
         locate = getattr(source, "locate_ring", None)
         if locate is None:
             raise ServoError(
@@ -514,25 +683,28 @@ class Grasp:
                 "画面里没有环：把靶标移到视野里、或确认模型类别表里有 tg1/tg2/tg3"
                 "（modules/vision/config.json 的 model.class_names）"
             )
-        reading = target.reading()
-        if reading is None:
+        if target.reading() is None:
             raise ServoError(self._unusable_ring_reason(target))
         if require_digit is not None and int(target.digit) != int(require_digit):
             raise ServoError(
                 f"画面里的环是 {target.digit} 号，不是要求的 {require_digit} 号；"
                 "拿另一个环的角度去转，机械臂会朝 95 mm 外的位置动，而动作看起来完全正常"
             )
-        reading = self._ring_reading_in_jacobian_units(
-            target, reading, scale_mm_per_px
-        )
+        return target
+
+    def _plan_for_ring(self, arm, target, *, scale_mm_per_px):
+        """一帧已定位的环 → 各轴绝对位置（闭环与单次计划共用这一处）。"""
         from modules.grasp.drive.ring_plan import plan_ring_base
 
+        reading = self._ring_reading_in_jacobian_units(
+            target, target.reading(), scale_mm_per_px
+        )
         plan = plan_ring_base(
             reading=reading,
             target=(self._target.x_mm, self._target.y_mm),
             jacobian=self._jacobian,
             base_pulses=arm.turns_state.of("base").pulses,
-            radial_pulses=arm.turns_state.of("extension").pulses,
+            extension_pulses=arm.turns_state.of("extension").pulses,
             pulses_per_revolution=arm.pulses_per_revolution,
             reduction_ratio=arm.config.base_reduction,
             tolerance_mm=self._config.tolerance_mm,
@@ -557,8 +729,9 @@ class Grasp:
     ) -> tuple[float, float]:
         """把环心读数换算到**标定雅可比时那把尺**上；对不上就拒绝。
 
-        换算只有一种情况需要：读数自己用的是 ``station.mm_per_px`` 之类的固定比例尺，
-        而雅可比是针孔标定（``z/f``）那条路标的。两把尺不同时，角度会整体差一个倍数。
+        雅可比是"物理毫米/脉冲"，所以环心读数只要也是**物理毫米**就能直接用——
+        ``depth/focal``（针孔标定）和 ``ring box``（模型框 + 已知外径）都是，
+        ``station.mm_per_px`` 不是（那是给固定相机标的值，装在臂上会差好几倍）。
         """
         current = target.scale_mm_per_px
         if scale_mm_per_px is not None:
@@ -570,18 +743,20 @@ class Grasp:
                 raise ServoError("环心读数没有比例尺，换不了单位")
             factor = float(scale_mm_per_px) / float(current)
             return (reading[0] * factor, reading[1] * factor)
-        if target.scale_source == "depth/focal":
-            # 与物料那条路同一个来源（针孔标定），雅可比就是按它标定的。
+        if target.scale_source in ("depth/focal", "ring box"):
+            # 两种都是物理毫米，与雅可比同一把尺：
+            # depth/focal 是针孔标定；ring box 是"外径 / 模型框像素"。
             return reading
         raise ServoError(
             f"环心读数的比例尺是 {target.scale_source}"
-            f"（{current:.4f} mm/px），而 jacobian 是按针孔标定（z/focal）标定的："
-            "两把尺不同，直接算角度会整体差一个倍数，而计划看起来完全正常。\n"
+            f"（{current:.4f} mm/px），不是物理毫米，而 jacobian 是按物理毫米标定的："
+            "直接算角度会整体差一个倍数，而计划看起来完全正常。\n"
             "  两种做法：\n"
-            "  1) 用菜单 25 标定 calibration.json 的 focal_px / table_depth_mm，"
-            "环心读数就会走 depth/focal；\n"
+            "  1) 给 modules/vision/config.json 的 ring_target 填 outer_diameter_mm"
+            "（靶标图案外径，现场 95 mm），环心读数就会用“外径 / 模型框”换算，"
+            "与镜头距离无关；\n"
             "  2) 知道与雅可比一致的毫米/像素时显式传进来："
-            "robot.grasp.plan_ring(scale_mm_per_px=0.111)"
+            "robot.grasp.plan_ring(scale_mm_per_px=0.183)"
         )
 
     def align_and_descend(
