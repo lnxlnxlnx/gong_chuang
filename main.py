@@ -13,7 +13,8 @@ from app.gripper import (
     align_box,
     grab_box_from_car,
     grab_box_from_floor,
-    grab_box_from_turntable,
+    grab_box_from_turntable,  # 圆盘->仓库
+    place_box_to_floor,  # 仓库->地面圆环
     place_box_to_repo,
 )
 
@@ -36,35 +37,10 @@ def main() -> None:
     """
     # demo_material()
     with Robot.open(grasp=True, gripper=True, turntable=True) as robot:
-        robot.gripper.set_position(250)
-        _move_axes_to(robot, {"lift": 375, "extension": 750.0, "base": 0}).wait()
-        time.sleep(1.0)
-        # grab_box_from_car(robot)
-        # grab_box_from_car(robot)
-        # grab_box_from_car(robot)
-        try:
-            for _ in range(3):
-                result = robot.grasp.align_ring()      # 只算：环心 → 各轴绝对位置，不动电机
-                base_deg     = robot.arm.turns_state.of("base").motor_degrees
-                extension_deg = robot.arm.turns_state.of("extension").motor_degrees
-                
-                input("回车抓料，q 跳过：").strip().lower()
-                grab_box_from_car(robot)
-                # 到这里已经抓着料了：转到 plan 里算好的**绝对位置**（环的正上方）。
-                # plan 是 robot.grasp.plan_ring() 的返回值；plan.degrees 就是 {"base": ...,
-                # "extension": ...} 两个绝对电机角度，正好喂 _move_axes_to。
-                if result.plan is not None:
-                    new_dir = dict({"lift": 95}, **{"base": base_deg, "extension": extension_deg})
-                    _move_axes_to(robot, new_dir).wait()
-                    
-                    robot.gripper.open_jaws()
-                _move_axes_to(robot, {"lift": 375, "extension": 750.0, "base": 0}).wait()
-        except Exception as e:
-            print(f"Error occurred during pick and place operation: {e}")
-            robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-            return
-        
-        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+        robot.gripper.set_position(280)
+        robot.turntable.go_home()
+        grab_box_from_turntable(robot, want_colors= ["red", "blue", "green"])
+        place_box_to_floor(robot, verbose=True)
 
 
 def locate_material(*, config_path=None) -> None:
@@ -94,47 +70,8 @@ def pick_manual() -> None:
         # robot.arm.move_up(pulses=6000)          # 675度
         robot.arm.move_axis_to_motor_degrees("lift", 675)
         robot.arm.move_forward(3200)
+        grab_box_from_turntable(robot)
         
-        # grab_box(robot)
-        try:
-            for color in ("red", "green", "blue"):
-                # wait_scene_stable 返回 True = 等到了"下一次停稳"，可以抓；
-                # False = 超时仍在动，这次不能下降。
-                time.sleep(3.0)  # 等转盘停稳，避免刚停下时画面还在抖
-                if not robot.vision.wait_scene_stable(timeout=SCENE_STABLE_TIMEOUT_SECONDS):
-                    raise RuntimeError("画面一直在动，无法进行下一步操作")
-                grab_box_from_turntable(
-                    robot,
-                    want_color=color,
-                    scene_stable_timeout=SCENE_STABLE_TIMEOUT_SECONDS,
-                )
-                place_box_to_repo(robot, verbose=True)
-        except Exception as e:
-            print(f"Error occurred during pick and place operation: {e}")
-            robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-            return
-
-        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-        robot.gripper.set_position(150)
-        return 
-        
-        try:
-            for _ in range(3):
-                plan = robot.grasp.plan_ring()      # 只算：环心 → 各轴绝对位置，不动电机
-                grab_box_from_car(robot)
-                # 到这里已经抓着料了：转到 plan 里算好的**绝对位置**（环的正上方）。
-                # plan 是 robot.grasp.plan_ring() 的返回值；plan.degrees 就是 {"base": ...,
-                # "extension": ...} 两个绝对电机角度，正好喂 _move_axes_to。
-                if plan is not None:
-                    new_dir = dict({"lift": 95}, **plan.degrees)
-                    _move_axes_to(robot, new_dir).wait()
-                    
-                    robot.gripper.open_jaws()
-                _move_axes_to(robot, {"lift": 675, "extension": 270.0, "base": 0}).wait()
-        except Exception as e:
-            print(f"Error occurred during pick and place operation: {e}")
-            robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-            return
 
 def _place_box(robot: Robot):
     try:
@@ -178,8 +115,8 @@ def _place_box(robot: Robot):
 
 
 if __name__ == "__main__":
-    # main()
-    pick_manual()
+    main()
+    # pick_manual()
     # test_place_box()
     # test_vision()
     # adjust_arm_align()

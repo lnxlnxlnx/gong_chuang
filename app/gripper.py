@@ -67,11 +67,45 @@ def grab_box_from_floor(robot: Robot):
 
 def grab_box_from_turntable(
     robot: Robot,
-    want_color=None,
-    *,
-    scene_stable_timeout: float = SCENE_STABLE_TIMEOUT_SECONDS,
+    want_colors=("red", "green", "blue")
 ):
-    """从转盘上抓料：对准 → 确认下一次画面停稳 → 下降 → 合爪。
+    """把物料从转盘上抓下来，放到仓库里。不需要处理初始状态
+    从转盘上抓料：对准 → 确认下一次画面停稳 → 下降 → 合爪。
+
+    物块在转盘上，x/y 对准成功不代表它已经停住；下降前用
+    ``vision.wait_scene_stable`` 再确认一次——它**不接受**"当前这一眼稳定"，
+    要等下一次独立判断也稳定才放行。一直等不到就报错，不落下去扑空
+    （``scene_stable_timeout`` 是这段等待的上限）。
+    """
+    robot.arm.move_axis_to_motor_degrees("lift", 600)
+    _move_axes_to(robot, {"lift": 720, "extension": 620.0, "base": 0}).wait()
+    try:
+        for color in want_colors :
+            # wait_scene_stable 返回 True = 等到了"下一次停稳"，可以抓；
+            # False = 超时仍在动，这次不能下降。
+            time.sleep(3.5)  # 等转盘停稳，避免刚停下时画面还在抖
+            if not robot.vision.wait_scene_stable(timeout=SCENE_STABLE_TIMEOUT_SECONDS):
+                raise RuntimeError("画面一直在动，无法进行下一步操作")
+            _grab_box_from_turntable(
+                robot,
+                want_color=color
+            )
+            place_box_to_repo(robot, verbose=True)
+    except Exception as e:
+        print(f"Error occurred during pick and place operation: {e}")
+        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+        return
+
+    robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+    robot.gripper.set_position(150)
+    return 
+
+def _grab_box_from_turntable(
+    robot: Robot,
+    want_color=None
+):
+    """内部函数
+    从转盘上抓料：对准 → 确认下一次画面停稳 → 下降 → 合爪。
 
     物块在转盘上，x/y 对准成功不代表它已经停住；下降前用
     ``vision.wait_scene_stable`` 再确认一次——它**不接受**"当前这一眼稳定"，
@@ -79,6 +113,7 @@ def grab_box_from_turntable(
     （``scene_stable_timeout`` 是这段等待的上限）。
     """
     # robot.gripper.set_position(280)
+
     try:
         # position = robot.vision.locate()
         robot.grasp.align_xy(want = want_color)
@@ -144,6 +179,36 @@ def place_box_to_repo(robot: Robot, *, verbose: bool = False):
     batch.add(robot.gripper.open_jaws(wait=False))
     batch.add(_move_axes_to(robot, {"lift": 720, "extension": 620.0, "base": 0}))
     batch.wait()
+
+def place_box_to_floor(robot: Robot, *, verbose: bool = False):
+    '''把物料放到地面的圆环内。不需要考虑初始状态。'''
+    robot.gripper.open_jaws()
+    _move_axes_to(robot, {"lift": 375, "extension": 750.0, "base": 0}).wait()
+    time.sleep(1.0)
+
+    try:
+        for _ in range(3):
+            result = robot.grasp.align_ring()      # 只算：环心 → 各轴绝对位置，不动电机
+            base_deg     = robot.arm.turns_state.of("base").motor_degrees
+            extension_deg = robot.arm.turns_state.of("extension").motor_degrees
+            
+            grab_box_from_car(robot)
+            # 到这里已经抓着料了：转到 plan 里算好的**绝对位置**（环的正上方）。
+            # plan 是 robot.grasp.plan_ring() 的返回值；plan.degrees 就是 {"base": ...,
+            # "extension": ...} 两个绝对电机角度，正好喂 _move_axes_to。
+            if result.plan is not None:
+                new_dir = dict({"lift": 95}, **{"base": base_deg, "extension": extension_deg})
+                _move_axes_to(robot, new_dir).wait()
+                
+                robot.gripper.open_jaws()
+            _move_axes_to(robot, {"lift": 375, "extension": 750.0, "base": 0}).wait()
+            input("放料完成，回车继续，输入 q 跳过：").strip().lower()
+    except Exception as e:
+        print(f"Error occurred during pick and place operation: {e}")
+        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+        return
+    
+    robot.arm.move_axis_to_motor_degrees("extension", 270.0)
 
 def align_box(robot: Robot):
     try:
