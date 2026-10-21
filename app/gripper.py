@@ -106,7 +106,7 @@ def grab_box_from_turntable(
         for color in want_colors :
             # wait_scene_stable 返回 True = 看满最小等待（3.5 s）之后画面仍然静止，可以抓；
             # False = 等满上限一直在动，这次不能下降。
-            time.sleep(0.5)  # 先让转盘停一下，别一进去就赶上它在转
+            time.sleep(1.5)  # 先让转盘停一下，别一进去就赶上它在转
             if not robot.vision.wait_scene_stable(timeout=SCENE_STABLE_TIMEOUT_SECONDS):
                 raise RuntimeError(
                     "画面迟迟没有停稳，无法进行下一步操作；最近一次判据："
@@ -205,8 +205,13 @@ def place_box_to_repo(robot: Robot, *, verbose: bool = False):
 
 def place_box_to_floor(robot: Robot, *, verbose: bool = False):
     '''把物料放到地面的圆环内。不需要考虑初始状态。'''
-    robot.gripper.open_jaws()
-    _move_axes_to(robot, {"lift": 375, "extension": 750.0, "base": 0}).wait()
+    batch = robot.motion.begin()
+    batch.add(robot.gripper.open_jaws(wait=False))
+    batch.add(robot.arm.move_axis_to_motor_degrees("lift", 375, wait=False))
+    print("移动到安全位置")
+    batch.wait()
+    time.sleep(1.0)
+    robot.arm.move_axis_to_motor_degrees("extension", 750.0)
     time.sleep(1.0)
 
     try:
@@ -232,6 +237,13 @@ def place_box_to_floor(robot: Robot, *, verbose: bool = False):
         return
     
     robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+
+def place_box_to_box(robot: Robot, *, _want: str):
+    robot.grasp.align_xy(want=_want)
+    extension_deg = robot.arm.turns_state.of("extension").motor_degrees
+    base_deg = robot.arm.turns_state.of("base").motor_degrees
+    grab_box_from_car(robot)
+    _move_axes_to(robot, {"lift": 95, "extension": extension_deg, "base": base_deg}).wait()
 
 def align_box(robot: Robot):
     try:
