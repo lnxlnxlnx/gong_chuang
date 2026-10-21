@@ -243,7 +243,10 @@ def place_box_to_box(robot: Robot, *, _want: str):
     extension_deg = robot.arm.turns_state.of("extension").motor_degrees
     base_deg = robot.arm.turns_state.of("base").motor_degrees
     grab_box_from_car(robot)
-    _move_axes_to(robot, {"lift": 95, "extension": extension_deg, "base": base_deg}).wait()
+    _move_axes_to(robot, {"lift": 520, "extension": extension_deg, "base": base_deg}).wait()
+    robot.gripper.open_jaws()
+    robot.arm.move_axis_to_motor_degrees("lift", 695)
+    _move_axes_to(robot, {"lift": 720, "extension": 550, "base": 0}).wait()
 
 def align_box(robot: Robot):
     try:

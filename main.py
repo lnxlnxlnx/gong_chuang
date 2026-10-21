@@ -14,6 +14,7 @@ from app.gripper import (
     grab_box_from_car,
     grab_box_from_floor,
     grab_box_from_turntable,  # 圆盘->仓库
+    place_box_to_box,  # 物料堆叠
     place_box_to_floor,  # 仓库->地面圆环
     place_box_to_repo,
 )
@@ -39,6 +40,11 @@ def main() -> None:
     with Robot.open(grasp=True, gripper=True, turntable=True) as robot:
         robot.gripper.set_position(280)
         robot.turntable.go_home()
+        _move_axes_to(robot, {"lift": 495, "extension": 550, "base": 0}).wait()
+        print("初始状态移动完毕")
+        
+        place_box_to_box(robot, _want = "green")
+        return
         grab_box_from_turntable(robot, want_colors= ["red", "blue", "green"])
         input("抓完了，回车继续：")
         place_box_to_floor(robot, verbose=True)
