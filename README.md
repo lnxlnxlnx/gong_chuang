@@ -431,13 +431,6 @@ robot.grasp.align_and_descend(want="red")     # 整轮就位（悬停 → x/y �
 没有按次传参的入口。两个都不给时，物块被定义成"画面里唯一的目标"；主算路径下这和
 "每一个物料框都是一条观测"放在一起，就意味着画面里多于一个目标会直接报错。
 
-**物块在转盘上时**，对准的那一刻它可能还没转到镜头前。`eye_in_hand.json` 的
-`target_wait_seconds` 控制"等物块出现"：`null` = 一直等（当前配置），正数 = 最多等
-这么多秒，`0` = 保持旧语义（整次测量共用 `settle_timeout_seconds`，默认 4 s）。
-它只作用于**第一次**测量——测到过之后再丢，仍按原期限收工，所以"爪子自己挡住物块"
-的收工口不会被无限等待卡死。对准成功也不等于能下降：下降前用
-`vision.wait_scene_stable()` 确认整幅画面已经静止（见工位识别那节）。
-
 ```python
 from modules.vision import Vision
 
@@ -487,7 +480,6 @@ with locator, USBCamera(1, width=1280, height=720).initialize() as camera:
 | 叠放位识别 | `vision.detect_stacked_ring()` | 23 | `python -m modules.vision.drive.stacked_ring` |
 | 两点像素测量 | `vision.pixel_distance()` / `pixel_distance_mm()` | 24 | `python -m modules.vision.drive.pixel_measure` |
 | 停稳门控 | `vision.measure_settled(require_motion=True)` | — | `python -m modules.vision.drive.motion_gate` |
-| 画面级停稳（抓取前） | `vision.scene_stable()` / `wait_scene_stable()` | — | `python -m modules.vision.drive.scene_stability` |
 | 焦距 / 台面深度标定 | — | 25 | — |
 
 ```python
@@ -503,17 +495,13 @@ with Vision.open() as vision:
 工位识别**画面里没有工位是正常结果**（`detected is False`，`detail` 说明原因），
 而读不到画面仍然抛 `RuntimeError`——两种情况不该用同一个返回值表达。
 
-四件值得知道的取舍：
+三件值得知道的取舍：
 
 - **没配比例尺时不编毫米**。`station.mm_per_px` 与 `station.image_to_station_affine`
   都空时只报像素，毫米字段是 `None` 而**不是 0**（0 看起来像"完全对准了"），
   而且 `within_tolerance` 恒为 `False`。
 - **静止 ≠ 停稳**。`measure_settled(require_motion=True)` 要求先**看见它真的动过**，
   否则转盘还没转，上一轮的残留状态就会被当成这一轮的结果上报。
-- **物料坐标停稳 ≠ 画面停稳**。物块被爪子挡住、或已经转出画面时，位置门控没有输入；
-  抓取下降前用 `vision.scene_stable()` 看**整幅画面的像素差**，它不需要检测到物料。
-  物块在转盘上时，对准成功也可能还在跟着转盘走——`app/gripper.py` 的
-  `grab_box_from_turntable` 已在对准之后、下降之前接了这个检查。
 - **叠放位的尺度可以不可信**。没有标定时会用中环半径临时反推，结果的
   `scale_source` 会写成 `"ring"`、`scale_trustworthy` 为 `False`。
 

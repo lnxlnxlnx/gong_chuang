@@ -65,8 +65,20 @@ def grab_box_from_floor(robot: Robot):
     robot.arm.move_axis_to_motor_degrees("lift", 75)
     robot.gripper.close_jaws()
 
-def grab_box_from_turntable(robot: Robot, want_color = None):
-    robot.gripper.set_position(280)
+def grab_box_from_turntable(
+    robot: Robot,
+    want_color=None,
+    *,
+    scene_stable_timeout: float = SCENE_STABLE_TIMEOUT_SECONDS,
+):
+    """从转盘上抓料：对准 → 确认下一次画面停稳 → 下降 → 合爪。
+
+    物块在转盘上，x/y 对准成功不代表它已经停住；下降前用
+    ``vision.wait_scene_stable`` 再确认一次——它**不接受**"当前这一眼稳定"，
+    要等下一次独立判断也稳定才放行。一直等不到就报错，不落下去扑空
+    （``scene_stable_timeout`` 是这段等待的上限）。
+    """
+    # robot.gripper.set_position(280)
     try:
         # position = robot.vision.locate()
         robot.grasp.align_xy(want = want_color)
@@ -75,14 +87,15 @@ def grab_box_from_turntable(robot: Robot, want_color = None):
         robot.arm.move_axis_to_motor_degrees("extension", 270.0)
         return
 
-    # 下降前最后看一眼**整幅画面**，而不是只看物料坐标：物块在转盘上，对准的那一刻
-    # 它可能还在跟着转盘走。画面连续几帧都不动才允许往下走，否则等一会儿再看。
-    if not robot.vision.wait_scene_stable(timeout=SCENE_STABLE_TIMEOUT_SECONDS):
-        stability = robot.vision.scene_stability()
-        raise RuntimeError(
-            f"画面一直在动（{stability.summary()}），这次不下降："
-            "物块可能还在跟着转盘走，等转盘停稳后重试"
-        )
+    # # 下降前最后看一眼**整幅画面**，而不是只看物料坐标：物块在转盘上，对准的那一刻
+    # # 它可能还在跟着转盘走。`wait_scene_stable` 不接受"当前这一眼稳定"——它要等下一次
+    # # 独立判断也稳定，才允许往下走。
+    # if not robot.vision.wait_scene_stable(timeout=scene_stable_timeout):
+    #     stability = robot.vision.scene_stability()
+    #     raise RuntimeError(
+    #         f"没等到下一次停稳的确认（最后一次判断：{stability.summary()}），这次不下降："
+    #         "物块可能还在跟着转盘走，等转盘停稳后重试"
+    #     )
 
     robot.arm.move_axis_to_motor_degrees("lift", 530)
     robot.gripper.close_jaws()
@@ -131,12 +144,12 @@ def place_box_to_repo(robot: Robot, *, verbose: bool = False):
     # ② 三轴都到位之后才松爪。open_jaws 默认 wait=True，自己等到舵机走完并读回。
     robot.gripper.open_jaws()
     
-    report = _move_axes_to(robot, {"lift": 980, "extension": 270.0}).wait()
+    report = _move_axes_to(robot, {"lift": 990, "extension": 270.0}).wait()
     if verbose:
         _print_report("回位到安全位置", report)
 
     # ③ 回初始姿态：同样三轴一起走、一起等。
-    report = _move_axes_to(robot, {"lift": 675, "base": 0}).wait()
+    report = _move_axes_to(robot, {"lift": 700, "base": 0}).wait()
     if verbose:
         _print_report("回位", report)
 

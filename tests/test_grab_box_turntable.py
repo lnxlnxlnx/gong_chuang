@@ -27,6 +27,14 @@ class GrabBoxFromTurntableTests(unittest.TestCase):
         self.robot.arm.move_axis_to_motor_degrees.assert_called_once_with("lift", 530)
         self.robot.gripper.close_jaws.assert_called_once_with()
 
+    def test_it_forwards_a_custom_scene_timeout(self) -> None:
+        app_gripper.grab_box_from_turntable(
+            self.robot, want_color="red", scene_stable_timeout=20.0
+        )
+
+        self.robot.vision.wait_scene_stable.assert_called_once_with(timeout=20.0)
+        self.robot.gripper.close_jaws.assert_called_once_with()
+
     def test_it_refuses_to_descend_while_the_scene_is_moving(self) -> None:
         self.robot.vision.wait_scene_stable.return_value = False
         self.robot.vision.scene_stability.return_value.summary.return_value = "还在动"

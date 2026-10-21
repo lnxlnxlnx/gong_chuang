@@ -745,12 +745,20 @@ class Vision:
         max_mean_diff: float = DEFAULT_MAX_MEAN_DIFF,
         max_changed_ratio: float = DEFAULT_MAX_CHANGED_RATIO,
     ) -> bool:
-        """反复检查，直到画面静止或超时；返回最后一次的结论。
+        """等到**下一次**画面停稳；返回是否等到了。
 
-        转盘刚停下来的那一瞬间画面可能还在抖，单次判断容易误判，所以抓取前用它等一小会儿::
+        **第一次检查只是一眼现状，不作为结论**：当前稳定很可能只是"马上又要动"的那一
+        瞬间。所以实际行为是：
+
+        - 当前不稳定：一直等，直到某一次判断稳定，返回 ``True``；
+        - 当前稳定：这一次判断不算数，等**下一次独立判断**也稳定才返回 ``True``；
+        - 超过 ``timeout`` 还没等到下一次稳定，返回 ``False``。
+
+        因此它至少会做两次判断；已经停稳的画面不会"秒返回"，而是再确认一个采样窗口
+        （默认 4 帧，约 130 ms）。抓取前用它等一小会儿::
 
             if not robot.vision.wait_scene_stable(timeout=3.0):
-                raise RuntimeError("画面一直在动，先别下降")
+                raise RuntimeError("没等到下一次停稳，先别下降")
 
         参数与 :meth:`scene_stability` 相同（``timeout`` 是整段等待的上限）。
 
@@ -760,16 +768,25 @@ class Vision:
             raise ValueError(f"timeout 必须是非负的有限数，收到 {timeout!r}")
         if not math.isfinite(interval) or interval < 0:
             raise ValueError(f"interval 必须是非负的有限数，收到 {interval!r}")
-        deadline = self._clock() + timeout
-        while True:
-            remaining = max(0.0, deadline - self._clock())
-            if self.scene_stable(
+
+        def sample(remaining: float) -> bool:
+            return self.scene_stable(
                 frames=frames,
                 pixel_threshold=pixel_threshold,
                 max_mean_diff=max_mean_diff,
                 max_changed_ratio=max_changed_ratio,
                 timeout=remaining,
-            ):
+            )
+
+        deadline = self._clock() + timeout
+        # 当前这一眼**不算数**：它可能是"马上又要动"的那一瞬间。当前不稳定时，下面
+        # 的循环会一直等到稳定；当前稳定时，下面会等下一次判断也稳定。
+        sample(max(0.0, deadline - self._clock()))
+        if self._clock() >= deadline:
+            return False
+        while True:
+            remaining = max(0.0, deadline - self._clock())
+            if sample(remaining):
                 return True
             if self._clock() >= deadline:
                 return False

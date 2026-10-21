@@ -54,8 +54,6 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
-from modules.vision.drive.material_face import to_grayscale
-
 #: 一次判断连拍几帧。3 帧只有两组比较，4 帧有三组，多一组冗余换来的时间约 33 ms。
 DEFAULT_STABLE_FRAMES = 4
 
@@ -149,6 +147,19 @@ def _check_thresholds(
         )
 
 
+def _grayscale(frame) -> np.ndarray:
+    """帧 → float64 灰度图；灰度换算只有 :func:`material_face.to_grayscale` 一份。
+
+    延迟导入是刻意的：``modules.vision.runtime`` 在包初始化时就要拿到本模块的默认值，
+    而 ``material_face`` 会连带加载 ``hough_lock``——那是 ``python -m`` 自测入口，
+    ``import modules.vision`` 不该预加载它（见 ``tests/test_vision_type_exports.py``）。
+    第一次调用之后模块已在 ``sys.modules`` 里，后续不再有导入开销。
+    """
+    from modules.vision.drive.material_face import to_grayscale
+
+    return to_grayscale(frame)
+
+
 def frame_difference(
     previous,
     current,
@@ -163,8 +174,8 @@ def frame_difference(
         raise ValueError(
             f"pixel_threshold 必须是 0–255 的整数，收到 {pixel_threshold!r}"
         )
-    previous_gray = to_grayscale(previous)
-    current_gray = to_grayscale(current)
+    previous_gray = _grayscale(previous)
+    current_gray = _grayscale(current)
     if previous_gray.shape != current_gray.shape:
         raise ValueError(
             f"两帧尺寸不一致：{previous_gray.shape} 对 {current_gray.shape}"

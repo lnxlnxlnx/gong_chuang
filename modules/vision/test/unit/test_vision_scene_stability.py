@@ -104,6 +104,8 @@ class SceneStabilityTests(unittest.TestCase):
 
 
 class WaitSceneStableTests(unittest.TestCase):
+    """``wait_scene_stable`` 只接受**下一次**稳定，不接受进来时的那一眼。"""
+
     def test_it_retries_until_the_scene_stops(self) -> None:
         moving = [blank(), with_square(4), with_square(12), with_square(20)]
         still = [blank()] * 4
@@ -112,12 +114,36 @@ class WaitSceneStableTests(unittest.TestCase):
         self.assertTrue(vision.wait_scene_stable(timeout=1.0, interval=0.0))
         self.assertEqual(camera.read.call_count, 10, "两轮判断，每轮 1 帧丢弃 + 4 帧连拍")
 
+    def test_a_currently_stable_scene_is_not_accepted_on_the_first_look(self) -> None:
+        """进来时已经稳定也要再看一次：当前稳定可能只是"马上又要动"的一瞬间。"""
+        frame = blank()
+        vision, camera = _vision([frame] * 10)
+
+        self.assertTrue(vision.wait_scene_stable(timeout=1.0, interval=0.0))
+        self.assertEqual(camera.read.call_count, 10, "第一眼不算数，必须看到下一次稳定")
+
+    def test_it_waits_for_a_new_stable_window_after_motion(self) -> None:
+        """稳定 -> 又在动 -> 再稳定：返回的是**最后一次**稳定，不是进来时那一眼。"""
+        still = [blank()] * 5
+        moving = [blank(), blank(), with_square(4), with_square(12), with_square(20)]
+        vision, camera = _vision(still + moving + still)
+
+        self.assertTrue(vision.wait_scene_stable(timeout=1.0, interval=0.0))
+        self.assertEqual(camera.read.call_count, 15, "三轮判断：当前稳定、还在动、下一次稳定")
+
     def test_it_gives_up_at_the_deadline(self) -> None:
         vision, camera = _vision(
             [blank()] + [blank(), with_square(4), with_square(12), with_square(20)]
         )
         self.assertFalse(vision.wait_scene_stable(timeout=0.0, interval=0.0))
-        self.assertEqual(camera.read.call_count, 5, "超时只做一轮判断")
+        self.assertEqual(camera.read.call_count, 5, "超时只做第一眼判断，不做第二次")
+
+    def test_a_stable_first_look_does_not_beat_the_deadline(self) -> None:
+        """第一眼稳定也不能直接放行：没有时间做第二次确认时返回 ``False``。"""
+        frame = blank()
+        vision, camera = _vision([frame] * 5)
+        self.assertFalse(vision.wait_scene_stable(timeout=0.0, interval=0.0))
+        self.assertEqual(camera.read.call_count, 5)
 
     def test_negative_timeouts_are_rejected(self) -> None:
         vision, _camera = _vision([blank()] * 5)

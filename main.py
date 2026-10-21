@@ -17,6 +17,8 @@ from app.gripper import (
     place_box_to_repo,
 )
 
+SCENE_STABLE_TIMEOUT_SECONDS = 20.0
+
 # 预览演示的**模块级**导入：``demo_material`` 只定义函数、不开设备，真正的装配发生在
 # 它内部（读配置 + ``Vision._open_config``）；保持模块级也让既有入口用例能直接替换它。
 from modules.vision.app.demo import demo_material
@@ -35,7 +37,7 @@ def main() -> None:
     # demo_material()
     with Robot.open(grasp=True, gripper=True, turntable=True) as robot:
         robot.gripper.set_position(250)
-        _move_axes_to(robot, {"lift": 675, "extension": 750.0, "base": 0}).wait()
+        _move_axes_to(robot, {"lift": 375, "extension": 750.0, "base": 0}).wait()
         time.sleep(1.0)
         # grab_box_from_car(robot)
         # grab_box_from_car(robot)
@@ -56,7 +58,7 @@ def main() -> None:
                     _move_axes_to(robot, new_dir).wait()
                     
                     robot.gripper.open_jaws()
-                _move_axes_to(robot, {"lift": 675, "extension": 750.0, "base": 0}).wait()
+                _move_axes_to(robot, {"lift": 375, "extension": 750.0, "base": 0}).wait()
         except Exception as e:
             print(f"Error occurred during pick and place operation: {e}")
             robot.arm.move_axis_to_motor_degrees("extension", 270.0)
@@ -96,7 +98,15 @@ def pick_manual() -> None:
         # grab_box(robot)
         try:
             for color in ("red", "green", "blue"):
-                grab_box_from_turntable(robot, want_color=color)
+                # wait_scene_stable 返回 True = 等到了"下一次停稳"，可以抓；
+                # False = 超时仍在动，这次不能下降。
+                if not robot.vision.wait_scene_stable(timeout=SCENE_STABLE_TIMEOUT_SECONDS):
+                    raise RuntimeError("画面一直在动，无法进行下一步操作")
+                grab_box_from_turntable(
+                    robot,
+                    want_color=color,
+                    scene_stable_timeout=SCENE_STABLE_TIMEOUT_SECONDS,
+                )
                 place_box_to_repo(robot, verbose=True)
         except Exception as e:
             print(f"Error occurred during pick and place operation: {e}")
@@ -167,8 +177,8 @@ def _place_box(robot: Robot):
 
 
 if __name__ == "__main__":
-    main()
-    # pick_manual()
+    # main()
+    pick_manual()
     # test_place_box()
     # test_vision()
     # adjust_arm_align()
