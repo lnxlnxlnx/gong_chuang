@@ -40,6 +40,7 @@ def main() -> None:
         robot.gripper.set_position(280)
         robot.turntable.go_home()
         grab_box_from_turntable(robot, want_colors= ["red", "blue", "green"])
+        input("抓完了，回车继续：")
         place_box_to_floor(robot, verbose=True)
 
 

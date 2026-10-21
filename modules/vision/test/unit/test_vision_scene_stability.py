@@ -4,14 +4,14 @@
 
 - 相同帧必须判静止，有东西在挪必须判还在动；
 - 所有相邻帧对都要通过，而不是只看首尾；
-- 等待接口会重试到静止或超时，不会无限转；
+- 等待接口只在"看满最小等待之后仍然静止"时放行，头几眼的静止、一直动都不作数；
 - 连拍只在开头丢一次缓冲（几帧要在时间上相邻）。
 """
 
 from __future__ import annotations
 
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -115,47 +115,101 @@ class SceneStabilityTests(unittest.TestCase):
         self.assertIs(vision.last_scene_stability, result)
 
 
-class WaitSceneStableTests(unittest.TestCase):
-    """``wait_scene_stable`` 只接受**下一次**稳定，不接受进来时的那一眼。"""
+class VirtualClock:
+    """假时钟：时间只由 ``sleep`` 推进，测试不必真等最小等待那几秒。
 
-    def test_it_retries_until_the_scene_stops(self) -> None:
+    装上它之后 ``time.sleep`` 也换成 :meth:`sleep`，整个等待循环按虚拟时间走——
+    看第几眼、睡多久都可预测。
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += max(0.0, seconds)
+
+
+class WaitSceneStableTests(unittest.TestCase):
+    """``wait_scene_stable``：**头一眼"静止"不算数**，看满最小等待才可能放行。
+
+    一次判断只连拍 4 帧（约 130 ms），"这一眼没动"太便宜：物块正要被带走之前画面
+    也是静的。所以判据是"看满 ``min_seconds`` 之后，这一眼仍然静止"；中间哪一眼还在动
+    就不放行，一直动就等满 ``timeout`` 返回 ``False``。
+
+    涉及最小等待的用例都用 :class:`VirtualClock`：虚拟时间按 ``interval`` 推进，
+    不必真的 sleep 3.5 s。
+    """
+
+    def _virtual(self, frames):
+        vision, camera = _vision(frames)
+        clock = VirtualClock()
+        vision._clock = clock
+        return vision, camera, clock
+
+    def test_it_returns_after_motion_settles(self) -> None:
+        """动过又停下——看满最小等待的第二眼放行。"""
         moving = [blank(), with_square(4), with_square(12), with_square(20)]
         still = [blank()] * 4
         vision, camera = _vision([blank()] + moving + [blank()] + still)
 
-        self.assertTrue(vision.wait_scene_stable(timeout=1.0, interval=0.0))
-        self.assertEqual(camera.read.call_count, 10, "两轮判断，每轮 1 帧丢弃 + 4 帧连拍")
+        self.assertTrue(
+            vision.wait_scene_stable(timeout=1.0, interval=0.0, min_seconds=0.0)
+        )
+        self.assertEqual(camera.read.call_count, 10, "判两次：第一次还在动，第二次稳定")
 
-    def test_a_currently_stable_scene_is_not_accepted_on_the_first_look(self) -> None:
-        """进来时已经稳定也要再看一次：当前稳定可能只是"马上又要动"的一瞬间。"""
+    def test_the_opening_still_looks_are_skipped_until_the_minimum_wait(self) -> None:
+        """全程静止也要看满 ``min_seconds``：0.0 / 0.3 s 的静止都不算，0.6 s 才放行。"""
         frame = blank()
-        vision, camera = _vision([frame] * 10)
+        vision, camera, clock = self._virtual([frame] * 20)
 
-        self.assertTrue(vision.wait_scene_stable(timeout=1.0, interval=0.0))
-        self.assertEqual(camera.read.call_count, 10, "第一眼不算数，必须看到下一次稳定")
+        with patch("time.sleep", clock.sleep):
+            self.assertTrue(
+                vision.wait_scene_stable(timeout=8.0, interval=0.3, min_seconds=0.6)
+            )
 
-    def test_it_waits_for_a_new_stable_window_after_motion(self) -> None:
-        """稳定 -> 又在动 -> 再稳定：返回的是**最后一次**稳定，不是进来时那一眼。"""
+        self.assertEqual(
+            camera.read.call_count, 15, "三眼判断：前两眼在最小等待内，不作数"
+        )
+
+    def test_a_motion_inside_the_minimum_wait_delays_the_verdict(self) -> None:
+        """最小等待之内还在动：那一轮不算，要等它之后的下一次静止。"""
         still = [blank()] * 5
         moving = [blank(), blank(), with_square(4), with_square(12), with_square(20)]
-        vision, camera = _vision(still + moving + still)
+        vision, camera, clock = self._virtual(still + still + moving + still)
 
-        self.assertTrue(vision.wait_scene_stable(timeout=1.0, interval=0.0))
-        self.assertEqual(camera.read.call_count, 15, "三轮判断：当前稳定、还在动、下一次稳定")
+        with patch("time.sleep", clock.sleep):
+            self.assertTrue(
+                vision.wait_scene_stable(timeout=8.0, interval=0.3, min_seconds=0.6)
+            )
 
-    def test_it_gives_up_at_the_deadline(self) -> None:
-        vision, camera = _vision(
-            [blank()] + [blank(), with_square(4), with_square(12), with_square(20)]
+        self.assertEqual(
+            camera.read.call_count, 20, "四眼：静止、静止、还在动、动完停稳"
         )
-        self.assertFalse(vision.wait_scene_stable(timeout=0.0, interval=0.0))
-        self.assertEqual(camera.read.call_count, 5, "超时只做第一眼判断，不做第二次")
 
-    def test_a_stable_first_look_does_not_beat_the_deadline(self) -> None:
-        """第一眼稳定也不能直接放行：没有时间做第二次确认时返回 ``False``。"""
+    def test_it_gives_up_while_the_scene_keeps_moving(self) -> None:
+        """一直在动：看满 ``timeout`` 也不放行。"""
+        moving = [blank(), blank(), with_square(4), with_square(12), with_square(20)]
+        vision, camera, clock = self._virtual([blank()] + moving * 3)
+
+        with patch("time.sleep", clock.sleep):
+            self.assertFalse(
+                vision.wait_scene_stable(timeout=0.6, interval=0.3, min_seconds=0.6)
+            )
+
+        self.assertEqual(
+            camera.read.call_count, 15, "0.0 / 0.3 / 0.6 s 各判一眼，都不放行"
+        )
+
+    def test_the_minimum_wait_never_exceeds_the_timeout(self) -> None:
+        """最小等待比 ``timeout`` 大时按 ``timeout`` 算：等待上限由调用方定。"""
         frame = blank()
         vision, camera = _vision([frame] * 5)
-        self.assertFalse(vision.wait_scene_stable(timeout=0.0, interval=0.0))
-        self.assertEqual(camera.read.call_count, 5)
+
+        self.assertTrue(vision.wait_scene_stable(timeout=0.0, min_seconds=3.5))
+        self.assertEqual(camera.read.call_count, 5, "预算为 0 时看一眼就下结论")
 
     def test_the_wait_leaves_the_judgement_it_timed_out_on(self) -> None:
         """超时返回 ``False`` 之后，诊断要能拿到等待里最后一次判断的实测值。"""
@@ -175,6 +229,8 @@ class WaitSceneStableTests(unittest.TestCase):
             vision.wait_scene_stable(timeout=-1.0)
         with self.assertRaises(ValueError):
             vision.wait_scene_stable(interval=-0.1)
+        with self.assertRaises(ValueError):
+            vision.wait_scene_stable(min_seconds=-0.1)
 
     def test_the_boolean_and_detail_interfaces_share_the_same_thresholds(self) -> None:
         """放宽阈值之后同一组运动帧也算静止：两个入口不能各有一套判据。"""

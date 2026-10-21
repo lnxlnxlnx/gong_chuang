@@ -15,7 +15,7 @@ current_position_index = 0  # 当前转盘位置的索引
 #: 之后桌面要好几秒才真正静下来，等待窗口刚好在"还在动"的最后一点用光，于是判失败，
 #: 而紧跟其后的复测已经是 1.4 灰阶 / 0.001%（远低于上限）。8 s 给了这段余振衰减的时间；
 #: 真正的持续运动照旧会被拒绝，只是多等几秒才下结论。
-SCENE_STABLE_TIMEOUT_SECONDS = 8.0
+SCENE_STABLE_TIMEOUT_SECONDS = 20.0
 
 
 def _move_axes_to(robot: Robot, targets: dict[str, float]) -> MotionBatch:
@@ -92,24 +92,24 @@ def grab_box_from_turntable(
     want_colors=("red", "green", "blue")
 ):
     """把物料从转盘上抓下来，放到仓库里。不需要处理初始状态
-    从转盘上抓料：对准 → 确认下一次画面停稳 → 下降 → 合爪。
+    从转盘上抓料：等它看满最小等待还静止 → 对准 → 下降 → 合爪。
 
     物块在转盘上，x/y 对准成功不代表它已经停住；下降前用
-    ``vision.wait_scene_stable`` 再确认一次——它**不接受**"当前这一眼稳定"，
-    要等下一次独立判断也稳定才放行。一直等不到就报错，不落下去扑空
-    （``SCENE_STABLE_TIMEOUT_SECONDS`` 是这段等待的上限，而且**不能设太短**：
-    大动作之后桌面余振要几秒才衰减完，窗口卡在边界上就会把"刚停稳"判成失败）。
+    ``vision.wait_scene_stable`` 等一次——头 3.5 s 的"静止"一律不作数（物块正要被
+    带走之前画面也是静的），看满这段窗口之后仍然静止才放行；等不到就报错、
+    不落下去扑空（``SCENE_STABLE_TIMEOUT_SECONDS`` 是这段等待的上限，**不能设太短**：
+    大动作之后桌面余振要好几秒才衰减完）。
     """
     robot.arm.move_axis_to_motor_degrees("lift", 600)
     _move_axes_to(robot, {"lift": 720, "extension": 620.0, "base": 0}).wait()
     try:
         for color in want_colors :
-            # wait_scene_stable 返回 True = 等到了"下一次停稳"，可以抓；
-            # False = 超时仍在动，这次不能下降。
-            time.sleep(0.5)  # 等转盘停稳，避免刚停下时画面还在抖
+            # wait_scene_stable 返回 True = 看满最小等待（3.5 s）之后画面仍然静止，可以抓；
+            # False = 等满上限一直在动，这次不能下降。
+            time.sleep(0.5)  # 先让转盘停一下，别一进去就赶上它在转
             if not robot.vision.wait_scene_stable(timeout=SCENE_STABLE_TIMEOUT_SECONDS):
                 raise RuntimeError(
-                    "画面一直在动，无法进行下一步操作；最近一次判据："
+                    "画面迟迟没有停稳，无法进行下一步操作；最近一次判据："
                     + _scene_stability_detail(robot)
                 )
             _grab_box_from_turntable(

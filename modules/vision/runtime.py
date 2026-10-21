@@ -80,8 +80,22 @@ DEFAULT_SETTLE_MM = 1.0
 DEFAULT_SETTLE_TIMEOUT_SECONDS = 4.0
 
 #: :meth:`Vision.wait_scene_stable` 默认最多等几秒。转盘停稳通常在一两秒内，
-#: 给到 5 s 是为了挡住"画面一直在动"时不至于无限等下去。
+#: 给到 5 s 是为了挡住"画面一直在动"时不至于无限等下去；"从头到尾没见它动过"
+#: 也由这个上限收尾。
 DEFAULT_SCENE_STABLE_WAIT_SECONDS = 5.0
+
+#: :meth:`Vision.wait_scene_stable` 两次判断之间的间隔（秒）。
+#:
+#: 判一次要连拍 4 帧（约 130 ms），所以 0.3 s 的间隔意味着大约每 0.3 s 看一次、
+#: 每次看 130 ms——采样密度够抓到"刚停下"，又不会把 CPU 全占在取帧上。
+DEFAULT_SCENE_STABLE_POLL_SECONDS = 0.3
+
+#: :meth:`Vision.wait_scene_stable` 至少看这么久（秒）才允许放行。
+#:
+#: 一次判断只连拍 4 帧（约 130 ms），"这一眼没动"太便宜：转盘刚接到转动指令、物块正要
+#: 被带走之前，画面也能看着是静的，照这一眼放行就会跑过去扑空。所以头几眼的静止一律
+#: 不作数，看满这段窗口——足够把"物块要被带走"那次运动等出来，再等它停下来。
+DEFAULT_SCENE_STABLE_MIN_SECONDS = 3.5
 
 if TYPE_CHECKING:
     from modules.vision.drive.camera import USBCamera as Camera
@@ -748,61 +762,73 @@ class Vision:
         self,
         *,
         timeout: float = DEFAULT_SCENE_STABLE_WAIT_SECONDS,
-        interval: float = 0.05,
+        interval: float = DEFAULT_SCENE_STABLE_POLL_SECONDS,
+        min_seconds: float = DEFAULT_SCENE_STABLE_MIN_SECONDS,
         frames: int = DEFAULT_STABLE_FRAMES,
         pixel_threshold: int = DEFAULT_PIXEL_DIFF_THRESHOLD,
         max_mean_diff: float = DEFAULT_MAX_MEAN_DIFF,
         max_changed_ratio: float = DEFAULT_MAX_CHANGED_RATIO,
     ) -> bool:
-        """等到**下一次**画面停稳；返回是否等到了。
+        """等到画面**看满最小等待之后仍然静止**；返回是否等到了。
 
-        **第一次检查只是一眼现状，不作为结论**：当前稳定很可能只是"马上又要动"的那一
-        瞬间。所以实际行为是：
+        进来那一眼"静止"一律不作数：一次判断只连拍 4 帧（约 130 ms），"这一眼没动"
+        太便宜——转盘刚接到转动指令、物块正要被带走之前，画面也能看着是静的，
+        照这一眼放行就会"跑过去扑空"（现场遇到的就是这个）。
 
-        - 当前不稳定：一直等，直到某一次判断稳定，返回 ``True``；
-        - 当前稳定：这一次判断不算数，等**下一次独立判断**也稳定才返回 ``True``；
-        - 超过 ``timeout`` 还没等到下一次稳定，返回 ``False``。
+        所以每隔 ``interval`` 秒看一眼，**两条同时满足**才放行：
 
-        因此它至少会做两次判断；已经停稳的画面不会"秒返回"，而是再确认一个采样窗口
-        （默认 4 帧，约 130 ms）。抓取前用它等一小会儿::
+        - 从进来算起已经看了至少 ``min_seconds`` 秒（默认 3.5 s，头几眼的静止不作数）；
+        - 这一眼没有大变化（画面静止）。
 
-            if not robot.vision.wait_scene_stable(timeout=3.0):
-                raise RuntimeError("没等到下一次停稳，先别下降")
+        最小等待之内、或哪一眼还在动，就接着看；到 ``timeout`` 还没等到返回 ``False``——
+        宁可让调用方不下降，也不要落下去扑空::
 
-        参数与 :meth:`scene_stability` 相同（``timeout`` 是整段等待的上限）。
-        返回 ``False`` 时，:attr:`last_scene_stability` 留着**最后一次判断**的实测值：
-        "明明已经停了却报还在动"要先分清是阈值太紧（差值只超一点）还是等得太短
+            if not robot.vision.wait_scene_stable(timeout=8.0):
+                raise RuntimeError("还没停稳，先别下降")
+
+        ``min_seconds`` 只管"最早什么时候允许放行"，不改变判据；它比 ``timeout`` 大时
+        按 ``timeout`` 算（等待上限由调用方定，这个函数不擅自延长）。判一次要连拍几帧
+        （默认 4 帧，约 130 ms），所以 ``interval`` 是**两次判断开始之间**的间隔
+        （判一次比它久时，下一次立刻开始，不再叠加等待）。
+
+        返回 ``False`` 时，:attr:`last_scene_stability` 留着最后一次判断的实测值：
+        "明明已经停了却报还在动"要先分清是阈值太紧（只超一点）还是等得太短
         （事后复测已经很小）。
 
-        :raises ValueError: ``timeout`` / ``interval`` 为负，或其他参数不合法。
+        :raises ValueError: ``timeout`` / ``interval`` / ``min_seconds`` 为负，
+            或其他参数不合法。
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError(f"timeout 必须是非负的有限数，收到 {timeout!r}")
         if not math.isfinite(interval) or interval < 0:
             raise ValueError(f"interval 必须是非负的有限数，收到 {interval!r}")
+        if not math.isfinite(min_seconds) or min_seconds < 0:
+            raise ValueError(f"min_seconds 必须是非负的有限数，收到 {min_seconds!r}")
 
-        def sample(remaining: float) -> bool:
-            return self.scene_stable(
-                frames=frames,
-                pixel_threshold=pixel_threshold,
-                max_mean_diff=max_mean_diff,
-                max_changed_ratio=max_changed_ratio,
-                timeout=remaining,
-            )
-
-        deadline = self._clock() + timeout
-        # 当前这一眼**不算数**：它可能是"马上又要动"的那一瞬间。当前不稳定时，下面
-        # 的循环会一直等到稳定；当前稳定时，下面会等下一次判断也稳定。
-        sample(max(0.0, deadline - self._clock()))
-        if self._clock() >= deadline:
-            return False
+        started_at = self._clock()
+        deadline = started_at + timeout
+        # 头 min_seconds 秒内的"静止"不作数：那可能只是物块被带走前的一瞬间。
+        # 上限是 timeout——等多久由调用方定，这里不擅自延长。
+        hold_until = started_at + min(min_seconds, timeout)
         while True:
-            remaining = max(0.0, deadline - self._clock())
-            if sample(remaining):
+            started = self._clock()
+            if (
+                self.scene_stable(
+                    frames=frames,
+                    pixel_threshold=pixel_threshold,
+                    max_mean_diff=max_mean_diff,
+                    max_changed_ratio=max_changed_ratio,
+                    timeout=max(0.0, deadline - started),
+                )
+                and self._clock() >= hold_until
+            ):
                 return True
             if self._clock() >= deadline:
                 return False
-            time.sleep(interval)
+            # 间隔按"上次开始判 → 下次开始判"算：判一次本身要连拍几帧，不再叠加。
+            pause = max(0.0, interval - (self._clock() - started))
+            # 别睡过 deadline：到点之后再判一眼就下结论，不白等。
+            time.sleep(min(pause, max(0.0, deadline - self._clock())))
 
     # ------------------------------------------------------------- 两点像素测量
     def pixel_distance(self, start, end) -> "PixelMeasurement":
