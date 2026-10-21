@@ -466,32 +466,38 @@ class Grasp:
         timeout: float | None = None,
         scale_mm_per_px: float | None = None,
     ) -> "RingBasePlan":
-        """读**一帧**、定位环心，解算底座的**绝对角度**；**不动任何设备**。
+        """读**一帧**、定位环心，解算各电机的**绝对位置**；**不动任何设备**。
 
-        这就是"先定位、再解算"的一条命令::
+        这就是"先定位、再解算"的一条命令。返回值里各轴的绝对位置按轴名存放，
+        可以直接存起来、**之后再执行**::
 
-            plan = robot.grasp.plan_ring()          # 一帧，不动电机
-            print(plan.base_motor_degrees)          # 该转到多少度（电机轴，绝对值）
-            print(plan.base_output_degrees)         # 同一个位置换成输出轴角度（÷减速比）
-            robot.arm.move_axis_to_motor_degrees("base", plan.base_motor_degrees)
+            plan = robot.grasp.plan_ring()          # 只算，一帧都不动
+            ...                                     # 中间去抓物料、摆料
+            robot.arm.move_axis_to_motor_degrees("base", plan.base)
+            robot.arm.move_axis_to_motor_degrees("extension", plan.extension)
+            # 或者一次走完：plan.apply(robot.arm)；只转底座：plan.apply(robot.arm, axes=("base",))
+
+        ``plan.base`` / ``plan.extension`` 是**绝对角度**（电机轴口径，3200 脉冲 = 360°，
+        不取模），``plan.degrees`` / ``plan.pulses`` 是同一位置的字典形式（键就是轴名），
+        与 :meth:`modules.arm.runtime.RobotArm.move_axis_to_motor_degrees`、
+        ``arm.turns_state`` 同一坐标。
 
         环心与环号来自模型（:meth:`modules.vision.runtime.Vision.locate_ring` 的
         ``tg1`` / ``tg2`` / ``tg3``），角度来自**实测雅可比 + 命令里程表**：
 
-        - ``base_motor_degrees`` 是**绝对值**（与 ``move_axis_to_motor_degrees``、
+        - 底座与伸缩各是一个**绝对值**（与 ``move_axis_to_motor_degrees``、
           ``arm.turns_state`` 同一口径：3200 脉冲 = 360°，不取模），不是增量；
-        - 同时给出伸缩的绝对目标 ``radial_motor_pulses``：只转底座时，爪子到了环的
-          **角度**却不一定在同一条**半径**上，那点差就是计划里的径向补偿；
+        - 只转底座时，爪子到了环的**角度**却不一定在同一条**半径**上，那点差就是计划里
+          的伸缩补偿（``extension_pulses``）；
         - ``residual_mm`` 是"两轴都走之后"的预测残差。大角度下雅可比会变，**走完再看
           一帧重算一次**就能收敛（与 :meth:`align_xy` 的闭环是同一个道理）。
 
         ## 比例尺必须与雅可比一致
 
-        读数用哪把尺，角度就按哪把尺结算：环心读数如果在用 ``station.mm_per_px``
-        （没标定 ``table_depth_mm`` / ``focal_px`` 时就是这样），而 ``jacobian`` 是按
-        针孔标定（``z/f``）标出来的，两者可以直接差好几倍——角度整体差那么多倍，而
-        计划看起来完全正常。所以这里**核对来源**，对不上就报错；确实知道两者关系时，
-        用 ``scale_mm_per_px`` 把环心读数换算到雅可比那把尺上。
+        读数用哪把尺，角度就按哪把尺结算：``jacobian`` 是"物理毫米/脉冲"，所以环心读数
+        也必须是物理毫米。``depth/focal``（针孔标定）和 ``ring box``（已知外径 / 模型框）
+        都满足；``station.mm_per_px`` 不满足（那是给固定相机标的值，装在臂上差好几倍）。
+        这一档会**核对并报错**；确实知道换算关系时用 ``scale_mm_per_px`` 直接给。
 
         :param require_digit: 只接受指定环号（1/2/3）；画面里是别的号就报错，
             **不回退**到另一个环（拿错环的角度去转，机械臂会朝 95 mm 外的位置动）。
@@ -532,7 +538,7 @@ class Grasp:
             target=(self._target.x_mm, self._target.y_mm),
             jacobian=self._jacobian,
             base_pulses=arm.turns_state.of("base").pulses,
-            radial_pulses=arm.turns_state.of("extension").pulses,
+            extension_pulses=arm.turns_state.of("extension").pulses,
             pulses_per_revolution=arm.pulses_per_revolution,
             reduction_ratio=arm.config.base_reduction,
             tolerance_mm=self._config.tolerance_mm,
@@ -557,8 +563,9 @@ class Grasp:
     ) -> tuple[float, float]:
         """把环心读数换算到**标定雅可比时那把尺**上；对不上就拒绝。
 
-        换算只有一种情况需要：读数自己用的是 ``station.mm_per_px`` 之类的固定比例尺，
-        而雅可比是针孔标定（``z/f``）那条路标的。两把尺不同时，角度会整体差一个倍数。
+        雅可比是"物理毫米/脉冲"，所以环心读数只要也是**物理毫米**就能直接用——
+        ``depth/focal``（针孔标定）和 ``ring box``（模型框 + 已知外径）都是，
+        ``station.mm_per_px`` 不是（那是给固定相机标的值，装在臂上会差好几倍）。
         """
         current = target.scale_mm_per_px
         if scale_mm_per_px is not None:
@@ -570,18 +577,20 @@ class Grasp:
                 raise ServoError("环心读数没有比例尺，换不了单位")
             factor = float(scale_mm_per_px) / float(current)
             return (reading[0] * factor, reading[1] * factor)
-        if target.scale_source == "depth/focal":
-            # 与物料那条路同一个来源（针孔标定），雅可比就是按它标定的。
+        if target.scale_source in ("depth/focal", "ring box"):
+            # 两种都是物理毫米，与雅可比同一把尺：
+            # depth/focal 是针孔标定；ring box 是"外径 / 模型框像素"。
             return reading
         raise ServoError(
             f"环心读数的比例尺是 {target.scale_source}"
-            f"（{current:.4f} mm/px），而 jacobian 是按针孔标定（z/focal）标定的："
-            "两把尺不同，直接算角度会整体差一个倍数，而计划看起来完全正常。\n"
+            f"（{current:.4f} mm/px），不是物理毫米，而 jacobian 是按物理毫米标定的："
+            "直接算角度会整体差一个倍数，而计划看起来完全正常。\n"
             "  两种做法：\n"
-            "  1) 用菜单 25 标定 calibration.json 的 focal_px / table_depth_mm，"
-            "环心读数就会走 depth/focal；\n"
+            "  1) 给 modules/vision/config.json 的 ring_target 填 outer_diameter_mm"
+            "（靶标图案外径，现场 95 mm），环心读数就会用“外径 / 模型框”换算，"
+            "与镜头距离无关；\n"
             "  2) 知道与雅可比一致的毫米/像素时显式传进来："
-            "robot.grasp.plan_ring(scale_mm_per_px=0.111)"
+            "robot.grasp.plan_ring(scale_mm_per_px=0.183)"
         )
 
     def align_and_descend(

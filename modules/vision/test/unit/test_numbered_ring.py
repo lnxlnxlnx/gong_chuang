@@ -90,8 +90,18 @@ class CentreTests(unittest.TestCase):
 
     def test_camera_millimetres_use_the_image_centre_as_optical_axis(self) -> None:
         """偏光轴 200 px、0.5 mm/px ⇒ x = -100 mm（与 RegionReport 同一套坐标）。"""
-        target = make_locator([centred(centre=(440.0, 360.0))]).detect(frame())
+        target = make_locator(
+            [centred(centre=(440.0, 360.0))], settings=RingTargetSettings(outer_diameter_mm=None)
+        ).detect(frame())
         self.assertAlmostEqual(target.reading()[0], -100.0, delta=0.5)
+
+    def test_the_known_outer_diameter_beats_the_fixed_scale(self) -> None:
+        """有已知外径时用"外径 / 模型框"：与距离无关，且压过给固定相机的 mm_per_px。"""
+        target = make_locator([centred(centre=(440.0, 360.0), width=520.0)]).detect(frame())
+        self.assertEqual(target.scale_source, "ring box")
+        # 520 px 框、95 mm 外径 ⇒ 0.1827 mm/px；偏 200 px ⇒ -36.5 mm
+        self.assertAlmostEqual(target.scale_mm_per_px, 95.0 / 520.0, places=6)
+        self.assertAlmostEqual(target.reading()[0], -200.0 * 95.0 / 520.0, delta=0.5)
 
     def test_radius_comes_from_the_box_so_it_can_be_drawn(self) -> None:
         target = make_locator([centred(width=520.0, height=400.0)]).detect(frame())
@@ -161,15 +171,30 @@ class ScaleTests(unittest.TestCase):
         self.assertAlmostEqual(target.reading()[0], -100.0, delta=0.5)
 
     def test_no_calibration_falls_back_to_the_configured_scale(self) -> None:
-        target = make_locator([centred(centre=(440.0, 360.0))], mm_per_px=0.5).detect(frame())
+        """针孔标定与已知外径都没有时，才退回 station.mm_per_px。"""
+        target = make_locator(
+            [centred(centre=(440.0, 360.0))],
+            mm_per_px=0.5,
+            settings=RingTargetSettings(outer_diameter_mm=None),
+        ).detect(frame())
         self.assertEqual(target.scale_source, "station.mm_per_px")
         self.assertAlmostEqual(target.reading()[0], -100.0, delta=0.5)
 
     def test_no_scale_means_no_readable_centre(self) -> None:
-        target = make_locator([centred()], mm_per_px=None).detect(frame())
+        target = make_locator(
+            [centred()],
+            mm_per_px=None,
+            settings=RingTargetSettings(outer_diameter_mm=None),
+        ).detect(frame())
         self.assertIsNotNone(target, "环还是认得的，只是没有毫米")
         self.assertIsNone(target.reading())
         self.assertIn("没有比例尺", target.detail)
+
+    def test_the_shipped_config_carries_the_measured_outer_diameter(self) -> None:
+        """随包配置里必须填上靶标外径，否则相机装臂上时读数会退回固定比例尺。"""
+        settings = load_vision_config()
+        self.assertIsNotNone(settings.ring_target.outer_diameter_mm)
+        self.assertGreater(settings.ring_target.outer_diameter_mm, 0)
 
 
 class ClassTableTests(unittest.TestCase):

@@ -75,7 +75,12 @@ def grab_box_from_turntable(robot: Robot, want_color = None):
     robot.gripper.close_jaws()
     
 def grab_box_from_car(robot: Robot):
-    # 移动到转盘
+    """从车上抓料，最后**转到 plan 里算好的绝对位置**（环正上方）。
+
+    ``plan`` 是 :meth:`modules.grasp.runtime.Grasp.plan_ring` 的返回值——它只算不动，
+    所以可以在抓料之前就算好（那时靶标在视野里），抓完再走。``None`` 表示这次不转
+    到环上（只抓料）。
+    """
     global current_position_index
     batch = robot.motion.begin()
     batch.add(robot.arm.move_axis_to_motor_degrees("lift", 675))
@@ -93,9 +98,9 @@ def grab_box_from_car(robot: Robot):
     batch.add(
         robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False)
     )
-    batch.add(_move_axes_to(robot, {"lift": 95, "extension": 400.0, "base": 0}))
+    batch.add(_move_axes_to(robot, {"lift": 500, "extension": 400.0, "base": 0}))
     batch.wait()
-    robot.gripper.open_jaws()
+    
 
 def place_box_to_repo(robot: Robot, *, verbose: bool = False):
     '''当爪子上有物体时，将物体放置在指定位置。'''

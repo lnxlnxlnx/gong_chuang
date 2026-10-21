@@ -362,6 +362,9 @@ python -c "import test; test.run_offline_tests()"
   例如 `modules/arm/docs/`、`modules/grasp/docs/抓取坐标链路.md`、
   `modules/motor/docs/Emm_V5.0步进闭环驱动说明书Rev1.3.pdf`。
 - `docs/`（仓库根）：只放**不属于任何单个模块**的材料（跨模块的方案参考等）。
+- **不新增文档，除非用户明确要求。** 能写进已有文档的就写进它对应的那一节，不要在
+  `docs/` 或 `modules/*/docs/` 下另起一个文件来"补充说明"；改了代码就同步更新受影响
+  的**已有**文档。新增文件（文档或说明）只有在用户明确要求时才做。
 
 代码和文档里引用其他文档时写**仓库根相对路径**（`modules/grasp/docs/抓取坐标链路.md`），
 这样从哪个文件点进去都指向同一个地方，也方便直接 grep。

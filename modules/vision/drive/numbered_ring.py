@@ -24,15 +24,18 @@
 但 :meth:`RingTarget.reading` 返回 ``None``——宁可说"这一帧不能对准"，也不给一个
 差十几毫米、却看起来完全正常的数。
 
-## 比例尺只有两种来源
+## 比例尺的顺序：针孔标定 > 靶标框（已知外径）> 配置固定值
 
-优先 ``table_depth_mm / focal_px``（台面的针孔标定，与 ``RegionReport`` 的毫米是同一套
-单位），没有就退回 ``station.mm_per_px``；两者都没有就**不报毫米**。刻意不拿"模型框的
-像素宽度"当已知直径去凑：框的大小由回归决定，实测同一条靶标能从 449 px 变到 580 px，
-拿它当比例尺等于把一个不稳定的数引进读数。
+1. ``table_depth_mm / focal_px``：做过菜单 25 的标定就用它，与 ``RegionReport`` 的毫米
+   是同一套单位；
+2. **靶标框**：``毫米/像素 = ring_target.outer_diameter_mm / 模型框像素长边``。相机装在
+   臂上、离纸很近时 ``station.mm_per_px``（给固定相机标的值）会差好几倍，而针孔标定
+   不一定做过——这一档与镜头距离无关，能先用起来。代价是模型框的松紧会抖（实测同一条
+   靶标 449~580 px），所以它只适合"先算出一个能用的角度"，不是测量级的读数；
+3. ``station.mm_per_px``：最后兜底；都没有就**不报毫米**。
 
-毫米只影响伺服每一步走多远，不影响"最后对准没对准"——``align_xy`` 每步都用新的一帧
-重算（见 ``modules/grasp/drive/eye_in_hand.py``），所以比例尺稍粗是可以接受的。
+毫米在这里还有一个用途：``grasp.plan_ring()`` 要用它和实测雅可比（毫米/脉冲）算出
+"底座该转到多少度"。比例尺与雅可比必须是同一把尺（都是物理毫米），这条链才成立。
 """
 
 from __future__ import annotations
@@ -68,7 +71,8 @@ class RingTarget:
     #: 环心在**相机系**的毫米坐标；没有比例尺时是 ``None``。
     x_mm: Optional[float]
     y_mm: Optional[float]
-    #: 本帧实际用的比例尺（毫米/像素）与来源（``depth/focal`` / ``station.mm_per_px``）。
+    #: 本帧实际用的比例尺（毫米/像素）与来源（``depth/focal`` / ``ring box`` /
+    #: ``station.mm_per_px``）。
     scale_mm_per_px: Optional[float] = None
     scale_source: str = ""
     #: 人话说明：这一帧为什么是它、比例尺从哪来。
@@ -136,6 +140,8 @@ class RingTargetLocator:
         self.geometry = geometry if geometry is not None else StationGeometrySettings()
         self.focal_px = focal_px
         self.table_depth_mm = table_depth_mm
+        #: 靶标图案的外径（毫米）；配了就**可以**用它当与距离无关的比例尺。
+        self.diameter_mm = self.settings.outer_diameter_mm
         #: 环号表（类别名 → 环号）；构造时定死，逐帧不再回读配置。
         self.digits: Dict[str, int] = dict(self.settings.classes)
         #: 最近一次 ``detect`` 走到了哪一步（给真机入口打印"为什么没找到"）。
@@ -188,7 +194,7 @@ class RingTargetLocator:
         clipped = _touches_border(hit, width, height)
         center_x, center_y = hit.center
         radius = max(0.0, max(hit.width, hit.height) * 0.5)
-        scale, source = self._millimetres_per_pixel()
+        scale, source = self._millimetres_per_pixel(radius)
         x_mm = y_mm = None
         if scale is not None:
             x_mm = (float(center_x) - width / 2.0) * float(scale)
@@ -219,12 +225,25 @@ class RingTargetLocator:
             detail=detail,
         )
 
-    def _millimetres_per_pixel(self) -> Tuple[Optional[float], str]:
-        """本帧的比例尺与来源，优先级：针孔标定 > 配置固定值。"""
+    def _millimetres_per_pixel(self, radius_px: float) -> Tuple[Optional[float], str]:
+        """本帧的比例尺与来源，优先级：针孔标定 > 靶标框（已知外径）> 配置固定值。
+
+        为什么中间那一档存在：相机装在臂上、镜头离纸很近时，``station.mm_per_px``（给
+        固定相机标的值）会差好几倍，而针孔标定不一定做过。靶标外径是**已知的物理尺寸**
+        （``ring_target.outer_diameter_mm``），``毫米/像素 = 外径 / 框像素长边`` 与镜头
+        距离无关——这就是老路上"已知直径当比例尺"的思路，只是直径现在从模型框量，不再
+        做椭圆拟合。
+
+        代价是精度：模型框的松紧会抖（实测同一条靶标 449~580 px），所以这个来源在计划里
+        会被标出来，别拿它当测量级的毫米读数。
+        """
         focal = self.focal_px
         depth = self.table_depth_mm
         if focal is not None and depth is not None and focal > 0 and depth > 0:
             return (float(depth) / float(focal), "depth/focal")
+        diameter = self.diameter_mm
+        if diameter is not None and diameter > 0 and radius_px > 0:
+            return (float(diameter) / (2.0 * float(radius_px)), "ring box")
         if self.geometry.mm_per_px is not None:
             return (float(self.geometry.mm_per_px), "station.mm_per_px")
         return (None, "none")
@@ -270,7 +289,7 @@ def _self_test() -> int:
         frame = np.zeros((size[1], size[0], 3), dtype=np.uint8)
         return RingTargetLocator(FakeDetector(hits), **kwargs).detect(frame)
 
-    # 1) 画面正中、整框可见：环心在光轴上，环号来自类别
+    # 1) 画面正中、整框可见：环心在光轴上，环号来自类别，比例尺来自"已知外径/框"
     target = run([box("tg2", 0.95, 640 - 260, 360 - 258, 640 + 260, 360 + 258)],
                  geometry=StationGeometrySettings(mm_per_px=0.5))
     if target is None:
@@ -283,6 +302,11 @@ def _self_test() -> int:
             problems.append(f"tg2 应当是 2 号环，实际 {target.digit}")
         if target.clipped:
             problems.append("整框在画面里，不该标成贴边")
+        if target.scale_source != "ring box":
+            problems.append(f"没标定时比例尺该来自模型框，实际 {target.scale_source}")
+        # 框长边 520 px、外径 95 mm -> 0.1827 mm/px（压过配置里的 0.5）
+        if abs(target.scale_mm_per_px - 95.0 / 520.0) > 1e-6:
+            problems.append(f"框比例尺算错了：{target.scale_mm_per_px}")
         print(target.summary())
 
     # 2) 框贴边：照样返回，但**没有**可对准读数
@@ -311,25 +335,36 @@ def _self_test() -> int:
     if "没有环" not in locator.last_diagnosis:
         problems.append(f"没找到环时诊断要说清楚，实际 {locator.last_diagnosis!r}")
 
-    # 5) 比例尺来源：针孔标定优先于配置固定值
+    # 5) 比例尺来源：针孔标定优先于"已知外径"与配置固定值
     target = run(
         [box("tg2", 0.9, 290.0, 260.0, 590.0, 460.0)],   # 框心 (440, 360)，偏光轴 200 px
         geometry=StationGeometrySettings(mm_per_px=0.4),
         focal_px=800.0,
-        table_depth_mm=400.0,       # 0.5 mm/px，而不是配置里的 0.4
+        table_depth_mm=400.0,       # 0.5 mm/px
     )
     if target is None or target.scale_source != "depth/focal":
         problems.append(f"有针孔标定时应当用它，实际 {target and target.scale_source}")
     elif abs(target.reading()[0] + 100.0) > 1.0:
         problems.append(f"0.5 mm/px 下偏 200 px 应当是 -100 mm，实际 {target.reading()}")
 
-    # 6) 没配比例尺：环照样给出，但没有毫米
+    # 6) 关掉"已知外径"才轮得到配置固定值
+    fallback = RingTargetSettings(outer_diameter_mm=None)
     target = run([box("tg2", 0.9, 290.0, 260.0, 590.0, 460.0)],
+                 settings=fallback,
+                 geometry=StationGeometrySettings(mm_per_px=0.5))
+    if target is None or target.scale_source != "station.mm_per_px":
+        problems.append(f"关掉外径后该退回配置固定值，实际 {target and target.scale_source}")
+    elif abs(target.reading()[0] + 100.0) > 1.0:
+        problems.append(f"0.5 mm/px 下偏 200 px 应当是 -100 mm，实际 {target.reading()}")
+
+    # 7) 什么比例尺都没有：环照样给出，但没有毫米
+    target = run([box("tg2", 0.9, 290.0, 260.0, 590.0, 460.0)],
+                 settings=fallback,
                  geometry=StationGeometrySettings(mm_per_px=None))
     if target is None or target.reading() is not None:
         problems.append("没有比例尺时不该给出可对准读数")
 
-    # 7) 类别名写错：构造时就报错，而不是一直"没找到环"
+    # 8) 类别名写错：构造时就报错，而不是一直"没找到环"
     try:
         RingTargetLocator(
             FakeDetector([]),

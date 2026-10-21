@@ -109,6 +109,11 @@ DEFAULT_STACKED_MAX_LINE_DISAGREEMENT_DEG = 2.0
 #: 顺序硬排。换一套靶标只改这张表（见 ``config.json`` 的 ``ring_target`` 块）。
 DEFAULT_RING_TARGET_CLASSES = {"tg1": 1, "tg2": 2, "tg3": 3}
 
+#: 靶标图案的**外径**（毫米）：模型框圈住的那一圈虚线外圆。现场 2026-10-20 实测 95 mm
+#: （与 ``station.outer_diameter_mm`` 同一个工件）。它当比例尺的好处是与镜头距离无关，
+#: 代价是精度取决于模型框的松紧（实测同一条靶标 449~580 px）。
+DEFAULT_RING_OUTER_DIAMETER_MM = 95.0
+
 #: 推理后端名。``auto`` 按平台选：Windows 走 OpenCV ONNX，Jetson 走 TensorRT。
 BACKEND_AUTO = "auto"
 BACKEND_TENSORRT = "tensorrt"
@@ -261,12 +266,20 @@ class RingTargetSettings:
 
     :attr:`classes` 是**唯一**的环号来源：名字写错不会静默降级，而是在
     :class:`~modules.vision.drive.numbered_ring.RingTargetLocator` 构造时直接报错。
+
+    :attr:`outer_diameter_mm` 是"这个靶标图案实际多大"——有了它，环心读数就能用
+    ``毫米/像素 = 外径 / 模型框像素`` 换算，与镜头到纸的距离无关（相机装在臂上时，
+    固定比例尺 ``station.mm_per_px`` 会差好几倍）。代价是精度受模型框松紧影响。
     """
 
     #: 类别名 → 环号（从 1 开始，且不能重复）。
     classes: Mapping[str, int] = field(
         default_factory=lambda: dict(DEFAULT_RING_TARGET_CLASSES)
     )
+    #: 靶标图案的**外径**（毫米），也就是模型框圈住的那一圈。配了它，环心读数就能用
+    #: ``毫米/像素 = 外径 / 框像素`` 当比例尺（与镜头距离无关）；``None`` 表示不这么用。
+    #: 注意它的精度取决于模型框的松紧（实测 ±15%），不是测量级的数。
+    outer_diameter_mm: Optional[float] = DEFAULT_RING_OUTER_DIAMETER_MM
 
     @property
     def names(self) -> Tuple[str, ...]:
@@ -935,7 +948,7 @@ def _stacked_ring(value: object) -> StackedRingSettings:
 
 
 def _ring_target(value: object) -> RingTargetSettings:
-    """读 ``ring_target`` 块；整块缺失时用随包的三个靶标类别。"""
+    """读 ``ring_target`` 块；整块缺失时用随包的三个靶标类别与实测外径。"""
     if value is None:
         return RingTargetSettings()
     document = _mapping(value, "ring_target")
@@ -943,6 +956,10 @@ def _ring_target(value: object) -> RingTargetSettings:
     return RingTargetSettings(
         classes=_ring_classes(
             document.get("classes", dict(defaults.classes)), "ring_target.classes"
+        ),
+        outer_diameter_mm=_optional_positive_number(
+            document.get("outer_diameter_mm", defaults.outer_diameter_mm),
+            "ring_target.outer_diameter_mm",
         ),
     )
 

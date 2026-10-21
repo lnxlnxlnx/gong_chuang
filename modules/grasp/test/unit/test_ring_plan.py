@@ -35,14 +35,14 @@ PULSES_PER_REV = 3200
 REDUCTION = 5
 
 
-def plan(reading=(0.0, 0.0), target=(0.0, 0.0), *, base_pulses=0, radial_pulses=0,
+def plan(reading=(0.0, 0.0), target=(0.0, 0.0), *, base_pulses=0, extension_pulses=0,
          jacobian=JACOBIAN, tolerance_mm=4.0) -> RingBasePlan:
     return plan_ring_base(
         reading=reading,
         target=target,
         jacobian=jacobian,
         base_pulses=base_pulses,
-        radial_pulses=radial_pulses,
+        extension_pulses=extension_pulses,
         pulses_per_revolution=PULSES_PER_REV,
         reduction_ratio=REDUCTION,
         tolerance_mm=tolerance_mm,
@@ -53,7 +53,7 @@ class SolverTests(unittest.TestCase):
     def test_already_on_target_sends_nothing(self) -> None:
         result = plan(reading=(3.0, -2.0), target=(3.0, -2.0))
         self.assertEqual(result.base_pulses, 0)
-        self.assertEqual(result.radial_pulses, 0)
+        self.assertEqual(result.extension_pulses, 0)
         self.assertTrue(result.aligned)
 
     def test_absolute_angle_is_current_plus_step(self) -> None:
@@ -98,13 +98,13 @@ class SolverTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             plan_ring_base(
                 reading=(0.0, 0.0), target=(0.0, 0.0), jacobian=JACOBIAN,
-                base_pulses=0, radial_pulses=0,
+                base_pulses=0, extension_pulses=0,
                 pulses_per_revolution=0, reduction_ratio=REDUCTION,
             )
         with self.assertRaises(ValueError):
             plan_ring_base(
                 reading=(0.0, 0.0), target=(0.0, 0.0), jacobian=JACOBIAN,
-                base_pulses=0, radial_pulses=0,
+                base_pulses=0, extension_pulses=0,
                 pulses_per_revolution=PULSES_PER_REV, reduction_ratio=0,
             )
 
@@ -132,16 +132,21 @@ def ring_target(*, digit=2, score=0.93, clipped=False, reading=(10.0, 0.0),
 
 
 class FakeArm:
-    """只提供 ``plan_ring`` 用到的那几项：里程表、脉冲数、减速比。"""
+    """只提供 ``plan_ring`` 用到的那几项：里程表、脉冲数、减速比、绝对定位。"""
 
-    def __init__(self, *, base_pulses=2000, radial_pulses=-300) -> None:
+    def __init__(self, *, base_pulses=2000, extension_pulses=-300) -> None:
         self.turns_state = Mock()
         self.turns_state.of.side_effect = lambda name: Mock(
-            pulses=base_pulses if name == "base" else radial_pulses
+            pulses=base_pulses if name == "base" else extension_pulses
         )
         self.pulses_per_revolution = PULSES_PER_REV
         self.config = Mock()
         self.config.base_reduction = REDUCTION
+        self.moves: list[tuple[str, int]] = []
+
+    def move_axis_to_motor_pulses(self, axis_name, pulses, *, rpm=None, acceleration=None):
+        self.moves.append((axis_name, int(pulses)))
+        return f"report({axis_name})"
 
 
 class FakeSource:
@@ -211,6 +216,13 @@ class SessionPlanTests(unittest.TestCase):
         grasp, _arm, _source = make_grasp(ring_target(digit=3))
         self.assertEqual(grasp.plan_ring(require_digit=3).digit, 3)
 
+    def test_a_reading_in_physical_millimetres_is_accepted(self) -> None:
+        """``ring box``（已知外径 / 模型框）也是物理毫米，与 jacobian 同一把尺。"""
+        grasp, _arm, _source = make_grasp(
+            ring_target(scale_mm_per_px=95.0 / 520.0, scale_source="ring box")
+        )
+        self.assertIsNotNone(grasp.plan_ring())
+
     def test_a_scale_that_does_not_match_the_jacobian_is_refused(self) -> None:
         """环心用 station.mm_per_px、雅可比按针孔标定：角度会整体差一个倍数。"""
         grasp, _arm, _source = make_grasp(
@@ -245,6 +257,41 @@ class SessionPlanTests(unittest.TestCase):
         grasp._closed = True
         with self.assertRaises(RuntimeError):
             grasp.plan_ring()
+
+
+class AbsolutePositionTests(unittest.TestCase):
+    """"先算、后走"：把各电机的绝对位置存下来，中间干完别的再执行。"""
+
+    def test_absolute_positions_are_per_axis(self) -> None:
+        grasp, _arm, _source = make_grasp(ring_target(reading=(10.0, 0.0)))
+        plan = grasp.plan_ring()
+        self.assertEqual(plan.pulses["base"], 2000 + plan.base_pulses)
+        self.assertEqual(plan.pulses["extension"], -300 + plan.extension_pulses)
+        self.assertAlmostEqual(plan.degrees["base"], plan.base_motor_degrees)
+        self.assertAlmostEqual(plan.degrees["extension"], plan.extension_motor_degrees)
+
+    def test_apply_moves_every_axis_to_its_absolute_position(self) -> None:
+        grasp, arm, _source = make_grasp(ring_target(reading=(10.0, 0.0)))
+        plan = grasp.plan_ring()
+        plan.apply(arm)
+        self.assertEqual(
+            arm.moves,
+            [
+                ("base", plan.pulses["base"]),
+                ("extension", plan.pulses["extension"]),
+            ],
+        )
+
+    def test_apply_can_rotate_the_base_only(self) -> None:
+        grasp, arm, _source = make_grasp(ring_target(reading=(10.0, 0.0)))
+        plan = grasp.plan_ring()
+        plan.apply(arm, axes=("base",))
+        self.assertEqual(arm.moves, [("base", plan.pulses["base"])])
+
+    def test_apply_rejects_an_axis_that_is_not_planned(self) -> None:
+        grasp, arm, _source = make_grasp(ring_target())
+        with self.assertRaisesRegex(ValueError, "lift"):
+            grasp.plan_ring().apply(arm, axes=("lift",))
 
 
 if __name__ == "__main__":

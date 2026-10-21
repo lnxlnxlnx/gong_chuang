@@ -13,9 +13,12 @@ with Grasp.open(
 ```
 
 - :class:`~modules.grasp.runtime.Grasp` —— 拥有机械臂与视觉源的会话；
-- :class:`~modules.grasp.drive.ring_plan.RingBasePlan` —— "环心 → 底座绝对角度"的解算结果；
 - :class:`~modules.grasp.drive.servo_model.ServoResult` / ``GraspReadyResult`` —— 动作结果；
 - :class:`~modules.grasp.drive.servo_model.ServoError` —— 伺服无法继续。
+
+"环心 → 底座绝对角度"的计划类型 :class:`~modules.grasp.drive.ring_plan.RingBasePlan`
+**不从这里导出**：``ring_plan`` 有自己的 ``python -m`` 自测入口，包导入时加载它会让
+runpy 报 "found in sys.modules"。需要类型注解就从定义处导入。
 
 ## 为什么要显式从定义处导出
 
@@ -30,14 +33,12 @@ with Grasp.open(
 
 from __future__ import annotations
 
-from .drive.ring_plan import RingBasePlan
 from .drive.servo_model import GraspReadyResult, ServoError, ServoResult
 from .runtime import Grasp
 
 __all__ = [
     "Grasp",
     "GraspReadyResult",
-    "RingBasePlan",
     "ServoError",
     "ServoResult",
 ]
