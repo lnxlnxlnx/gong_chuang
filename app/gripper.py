@@ -2,19 +2,13 @@ from __future__ import annotations
 
 import time
 
+from modules.arm import MotionReport
 from modules.motion import MotionBatch, MotionBatchReport
 from robot import Robot
 
 TURN_TABLE_POSITIONS = [0, 500, 1000]  # 转盘的目标位置，单位为度
 current_position_index = 0  # 当前转盘位置的索引
 
-#: 下降前等画面停稳的上限（秒）。转盘刚停下时画面还会抖一下；
-#: 超过这个时间仍在动就不下降——物块会顺着转盘走掉。
-#:
-#: **不要太短。** 实测 3 s 会卡在边界上：大角度转底座（放料那一下 base 转 1000° 以上）
-#: 之后桌面要好几秒才真正静下来，等待窗口刚好在"还在动"的最后一点用光，于是判失败，
-#: 而紧跟其后的复测已经是 1.4 灰阶 / 0.001%（远低于上限）。8 s 给了这段余振衰减的时间；
-#: 真正的持续运动照旧会被拒绝，只是多等几秒才下结论。
 SCENE_STABLE_TIMEOUT_SECONDS = 20.0
 
 
@@ -49,7 +43,9 @@ def _print_report(title: str, report: MotionBatchReport) -> None:
     print(f"[{title}] {report.summary()}")
     for item in report.items:
         result = item.result
-        if item.error is not None or result is None:
+        # 动作组允许混装：转盘/舵机的结论没有 pulses 这些字段，不是臂的报告就跳过。
+        # 这里不用 assert——混装是合法用法，assert 会把"别的模块的正常结果"炸成异常。
+        if item.error is not None or not isinstance(result, MotionReport):
             continue
         print(
             f"    {item.subject}: {result.pulses} 脉冲 / "
@@ -57,7 +53,7 @@ def _print_report(title: str, report: MotionBatchReport) -> None:
             f" / 完成于 {result.waited_seconds:.2f}s"
         )
 
-def grab_box_from_floor(robot: Robot):
+def _grab_box_from_floor(robot: Robot):
     robot.gripper.set_position(280)
     try:
         # position = robot.vision.locate()
@@ -87,7 +83,7 @@ def _scene_stability_detail(robot: Robot) -> str:
     return "；".join(parts)
 
 
-def grab_box_from_turntable(
+def grab_box_from_turntable_to_repo(
     robot: Robot,
     want_colors=("red", "green", "blue")
 ):
@@ -116,7 +112,7 @@ def grab_box_from_turntable(
                 robot,
                 want_color=color
             )
-            place_box_to_repo(robot, verbose=True)
+            _place_box_to_repo(robot, verbose=True)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         robot.arm.move_axis_to_motor_degrees("extension", 270.0)
@@ -125,6 +121,25 @@ def grab_box_from_turntable(
     robot.arm.move_axis_to_motor_degrees("extension", 270.0)
     robot.gripper.set_position(150)
     return 
+
+def grab_box_from_floor_to_repo(robot: Robot, want_colors: list[str], verbose: bool = False):
+    """把物料从地面圆环放到仓库里。不需要考虑初始状态。"""
+    _move_axes_to(robot, {"lift": 660, "extension": 620.0, "base": 0}).wait()
+    print("移动到抓料位置")
+    try:
+        for color in want_colors:
+            robot.grasp.align_xy(want=color)
+            robot.arm.move_axis_to_motor_degrees("lift", 90)
+            robot.gripper.close_jaws()
+            _place_box_to_repo(robot, verbose=True)
+            input(f"已抓取 {color} 物料，回车继续，输入 q 跳过：").strip().lower()
+            
+    except Exception as e:
+        print(f"Error occurred during pick and place operation: {e}")
+        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+        return
+    
+    robot.arm.move_axis_to_motor_degrees("extension", 270.0)
 
 def _grab_box_from_turntable(
     robot: Robot,
@@ -149,7 +164,7 @@ def _grab_box_from_turntable(
     robot.arm.move_axis_to_motor_degrees("lift", 550)
     robot.gripper.close_jaws()
     
-def grab_box_from_car(robot: Robot):
+def _grab_box_from_car(robot: Robot):
     """从车上抓料，最后**转到 plan 里算好的绝对位置**（环正上方）。
 
     ``plan`` 是 :meth:`modules.grasp.runtime.Grasp.plan_ring` 的返回值——它只算不动，
@@ -176,7 +191,7 @@ def grab_box_from_car(robot: Robot):
     batch.add(_move_axes_to(robot, {"lift": 500, "extension": 400.0, "base": 0}))
     batch.wait()
 
-def place_box_to_repo(robot: Robot, *, verbose: bool = False):
+def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
     '''当爪子上有物体时，将物体放置在指定位置。'''
     global current_position_index
     arm = robot.arm
@@ -203,7 +218,7 @@ def place_box_to_repo(robot: Robot, *, verbose: bool = False):
     batch.add(_move_axes_to(robot, {"lift": 720, "extension": 620.0, "base": 0}))
     batch.wait()
 
-def place_box_to_floor(robot: Robot, *, verbose: bool = False):
+def place_box_from_repo_to_floor(robot: Robot, *, verbose: bool = False):
     '''把物料放到地面的圆环内。不需要考虑初始状态。'''
     batch = robot.motion.begin()
     batch.add(robot.gripper.open_jaws(wait=False))
@@ -220,7 +235,7 @@ def place_box_to_floor(robot: Robot, *, verbose: bool = False):
             base_deg     = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
             
-            grab_box_from_car(robot)
+            _grab_box_from_car(robot)
             # 到这里已经抓着料了：转到 plan 里算好的**绝对位置**（环的正上方）。
             # plan 是 robot.grasp.plan_ring() 的返回值；plan.degrees 就是 {"base": ...,
             # "extension": ...} 两个绝对电机角度，正好喂 _move_axes_to。
@@ -242,31 +257,11 @@ def place_box_to_box(robot: Robot, *, _want: str):
     robot.grasp.align_xy(want=_want)
     extension_deg = robot.arm.turns_state.of("extension").motor_degrees
     base_deg = robot.arm.turns_state.of("base").motor_degrees
-    grab_box_from_car(robot)
-    _move_axes_to(robot, {"lift": 95, "extension": extension_deg, "base": base_deg}).wait()
+    _grab_box_from_car(robot)
+    _move_axes_to(robot, {"lift": 520, "extension": extension_deg, "base": base_deg}).wait()
+    robot.gripper.open_jaws()
+    robot.arm.move_axis_to_motor_degrees("lift", 695)
+    _move_axes_to(robot, {"lift": 720, "extension": 550, "base": 0}).wait()
 
-def align_box(robot: Robot):
-    try:
-        report = robot.vision.locate()
-    except Exception as e:
-        print("视觉识别失败", e)
-        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-        return
-        
-    if report.best is None:
-        print("画面里没有通过校验的物料")
-        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-        return
-    material = report.best
-    print(
-        f"物料：{material.name or '未知'}，"
-        f"相机系 xyz=({material.x_mm:.1f}, {material.y_mm:.1f}, "
-        f"{material.z_mm:.1f}) mm"
-    )
 
-    try:
-        robot.grasp.align_xy()
-    except Exception as e:
-        print("对准失败", e)
-        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-        return
+    

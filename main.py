@@ -10,12 +10,10 @@ import time
 
 from app.gripper import (
     _move_axes_to,
-    align_box,
-    grab_box_from_car,
-    grab_box_from_floor,
-    grab_box_from_turntable,  # 圆盘->仓库
-    place_box_to_floor,  # 仓库->地面圆环
-    place_box_to_repo,
+    grab_box_from_floor_to_repo,
+    grab_box_from_turntable_to_repo,  # 圆盘->仓库
+    place_box_from_repo_to_floor,  # 仓库->地面圆环
+    place_box_to_box,  # 物料到物料
 )
 
 SCENE_STABLE_TIMEOUT_SECONDS = 20.0
@@ -39,9 +37,15 @@ def main() -> None:
     with Robot.open(grasp=True, gripper=True, turntable=True) as robot:
         robot.gripper.set_position(280)
         robot.turntable.go_home()
-        grab_box_from_turntable(robot, want_colors= ["red", "blue", "green"])
+        _move_axes_to(robot, {"lift": 495, "extension": 550, "base": 0}).wait()
+        print("初始状态移动完毕")
+        grab_box_from_floor_to_repo(robot, want_colors= ["red", "blue", "green"])
+        place_box_to_box(robot, _want = "blue")
+        place_box_to_box(robot, _want = "red")
+        return
+        grab_box_from_turntable_to_repo(robot, want_colors= ["red", "blue", "green"])
         input("抓完了，回车继续：")
-        place_box_to_floor(robot, verbose=True)
+        place_box_from_repo_to_floor(robot, verbose=True)
 
 
 def locate_material(*, config_path=None) -> None:
@@ -71,7 +75,7 @@ def pick_manual() -> None:
         # robot.arm.move_up(pulses=6000)          # 675度
         robot.arm.move_axis_to_motor_degrees("lift", 675)
         robot.arm.move_forward(3200)
-        grab_box_from_turntable(robot)
+        grab_box_from_turntable_to_repo(robot)
         
 
 def _place_box(robot: Robot):
