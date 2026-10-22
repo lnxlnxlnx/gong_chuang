@@ -122,26 +122,18 @@ def grab_box_from_turntable_to_repo(
     robot.gripper.set_position(150)
     return 
 
-def place_box_from_floor_to_repo(robot: Robot, want_colors: list[str]):
+def grab_box_from_floor_to_repo(robot: Robot, want_colors: list[str], verbose: bool = False):
     """把物料从地面圆环放到仓库里。不需要考虑初始状态。"""
-    robot.arm.move_axis_to_motor_degrees("lift", 375)
-    robot.arm.move_axis_to_motor_degrees("extension", 750.0)
-    time.sleep(1.0)
+    _move_axes_to(robot, {"lift": 660, "extension": 620.0, "base": 0}).wait()
+    print("移动到抓料位置")
     try:
         for color in want_colors:
-            result = robot.grasp.align_xy(want=color)      # 只算：环心 → 各轴绝对位置，不动电机
-            base_deg     = robot.arm.turns_state.of("base").motor_degrees
-            extension_deg = robot.arm.turns_state.of("extension").motor_degrees
+            robot.grasp.align_xy(want=color)
+            robot.arm.move_axis_to_motor_degrees("lift", 90)
+            robot.gripper.close_jaws()
+            _place_box_to_repo(robot, verbose=True)
+            input(f"已抓取 {color} 物料，回车继续，输入 q 跳过：").strip().lower()
             
-            _grab_box_from_car(robot)
-            # 到这里已经抓着料了：转到 plan 里算好的**绝对位置**（环的正上方）。
-            # plan 是 robot.grasp.plan_ring() 的返回值；plan.degrees 就是 {"base": ...,
-            # "extension": ...} 两个绝对电机角度，正好喂 _move_axes_to。
-            new_dir = dict({"lift": 95}, **{"base": base_deg, "extension": extension_deg})
-            _move_axes_to(robot, new_dir).wait()
-            robot.gripper.open_jaws()
-            _move_axes_to(robot, {"lift": 375, "extension": 750.0, "base": 0}).wait()
-            input("放料完成，回车继续，输入 q 跳过：").strip().lower()
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         robot.arm.move_axis_to_motor_degrees("extension", 270.0)

@@ -10,6 +10,7 @@ import time
 
 from app.gripper import (
     _move_axes_to,
+    grab_box_from_floor_to_repo,
     grab_box_from_turntable_to_repo,  # 圆盘->仓库
     place_box_from_repo_to_floor,  # 仓库->地面圆环
     place_box_to_box,  # 物料到物料
@@ -38,8 +39,9 @@ def main() -> None:
         robot.turntable.go_home()
         _move_axes_to(robot, {"lift": 495, "extension": 550, "base": 0}).wait()
         print("初始状态移动完毕")
-        
-        place_box_to_box(robot, _want = "green")
+        grab_box_from_floor_to_repo(robot, want_colors= ["red", "blue", "green"])
+        place_box_to_box(robot, _want = "blue")
+        place_box_to_box(robot, _want = "red")
         return
         grab_box_from_turntable_to_repo(robot, want_colors= ["red", "blue", "green"])
         input("抓完了，回车继续：")
