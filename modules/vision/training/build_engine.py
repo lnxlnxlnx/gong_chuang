@@ -223,13 +223,16 @@ def _human_size(path: Path) -> str:
     return f"{path.stat().st_size / (1024 * 1024):.1f} MB"
 
 
-def _describe_engine(engine_path: Path):
+def _describe_engine(engine_path: Path, *, class_names: list[str] | None = None):
     """加载引擎并报出输入/输出形状与单帧耗时；返回 (detector, 每帧毫秒)。"""
     import numpy as np
 
     from modules.vision.drive.yolov8 import YOLOv8Detector
 
-    detector = YOLOv8Detector(str(engine_path))
+    # 类别表必须在构造时传进去：构造器会拿 `4 + 类别数` 跟引擎的输出通道对一遍，
+    # 不传就退回内置的四类表，于是七类引擎在加载阶段就被判成"类别对不上"——
+    # 验收会失败，而失败原因看起来像是 engine 坏了。
+    detector = YOLOv8Detector(str(engine_path), class_names=class_names)
     blob = np.zeros(detector.input_shape, dtype=np.float32)
     for _ in range(CHECK_WARMUP):
         detector.infer(blob)
@@ -252,7 +255,18 @@ def check_engine(
         print("先构建：python -m modules.vision.training.build_engine", file=sys.stderr)
         return 2
     try:
-        detector, elapsed_ms = _describe_engine(engine_path)
+        detector, elapsed_ms = _describe_engine(engine_path, class_names=class_names)
+    except ValueError as error:
+        # 引擎本身打得开，是类别表/输入边长和它对不上；重建只会得到同样的结果，
+        # 所以这里的提示不能再喊 "--force"。
+        print(f"engine 与类别表/输入边长对不上：{error}", file=sys.stderr)
+        print(
+            "engine 没坏，不要重建：改 modules/vision/config.json 的 "
+            "model.class_names / model.input_size，或用 --class-names "
+            "red,yellow,blue,green,tg1,tg2,tg3 临时指定",
+            file=sys.stderr,
+        )
+        return 3
     except Exception as error:  # TensorRT 的失败类型很杂，统一翻译成"重建一次"
         print(f"加载 engine 失败：{type(error).__name__}: {error}", file=sys.stderr)
         print(

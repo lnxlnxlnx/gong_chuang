@@ -71,3 +71,21 @@ def run_map_by_func(profile: HardwareProfile, func: Callable) -> None:
     with MecanumChassis._from_settings(profile=profile, port=_port()) as car:
         if _confirmed("运行地图"):
             func(car, profile)
+
+
+if __name__ == "__main__":
+    # profile = HardwareProfile(
+    #     expect_ack=True,
+    #     pulses_per_revolution=2000,
+    #     acceleration=100,
+    #     pattern="X",
+    #     rotation_gain=1.0,
+    #     motion_transform="standard",
+    #     individual_rpm=100,
+    #     individual_duration=1.0,
+    #     chassis_rpm=100,
+    #     chassis_duration=1.0,
+    #     chassis_pause=0.5,
+    # )
+    profile = HardwareProfile()
+    with MecanumChassis._from_settings(profile=profile, port=_port()) as car:
