@@ -10,13 +10,9 @@ import time
 
 from app.gripper import (
     _move_axes_to,
-    align_box,
-    grab_box_from_car,
-    grab_box_from_floor,
-    grab_box_from_turntable,  # 圆盘->仓库
-    place_box_to_box,  # 物料堆叠
-    place_box_to_floor,  # 仓库->地面圆环
-    place_box_to_repo,
+    grab_box_from_turntable_to_repo,  # 圆盘->仓库
+    place_box_from_repo_to_floor,  # 仓库->地面圆环
+    place_box_to_box,  # 物料到物料
 )
 
 SCENE_STABLE_TIMEOUT_SECONDS = 20.0
@@ -45,9 +41,9 @@ def main() -> None:
         
         place_box_to_box(robot, _want = "green")
         return
-        grab_box_from_turntable(robot, want_colors= ["red", "blue", "green"])
+        grab_box_from_turntable_to_repo(robot, want_colors= ["red", "blue", "green"])
         input("抓完了，回车继续：")
-        place_box_to_floor(robot, verbose=True)
+        place_box_from_repo_to_floor(robot, verbose=True)
 
 
 def locate_material(*, config_path=None) -> None:

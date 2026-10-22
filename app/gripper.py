@@ -57,7 +57,7 @@ def _print_report(title: str, report: MotionBatchReport) -> None:
             f" / 完成于 {result.waited_seconds:.2f}s"
         )
 
-def grab_box_from_floor(robot: Robot):
+def _grab_box_from_floor(robot: Robot):
     robot.gripper.set_position(280)
     try:
         # position = robot.vision.locate()
@@ -87,7 +87,7 @@ def _scene_stability_detail(robot: Robot) -> str:
     return "；".join(parts)
 
 
-def grab_box_from_turntable(
+def grab_box_from_turntable_to_repo(
     robot: Robot,
     want_colors=("red", "green", "blue")
 ):
@@ -116,7 +116,7 @@ def grab_box_from_turntable(
                 robot,
                 want_color=color
             )
-            place_box_to_repo(robot, verbose=True)
+            _place_box_to_repo(robot, verbose=True)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         robot.arm.move_axis_to_motor_degrees("extension", 270.0)
@@ -125,6 +125,33 @@ def grab_box_from_turntable(
     robot.arm.move_axis_to_motor_degrees("extension", 270.0)
     robot.gripper.set_position(150)
     return 
+
+def place_box_from_floor_to_repo(robot: Robot, want_colors: list[str]):
+    """把物料从地面圆环放到仓库里。不需要考虑初始状态。"""
+    robot.arm.move_axis_to_motor_degrees("lift", 375)
+    robot.arm.move_axis_to_motor_degrees("extension", 750.0)
+    time.sleep(1.0)
+    try:
+        for color in want_colors:
+            result = robot.grasp.align_xy(want=color)      # 只算：环心 → 各轴绝对位置，不动电机
+            base_deg     = robot.arm.turns_state.of("base").motor_degrees
+            extension_deg = robot.arm.turns_state.of("extension").motor_degrees
+            
+            _grab_box_from_car(robot)
+            # 到这里已经抓着料了：转到 plan 里算好的**绝对位置**（环的正上方）。
+            # plan 是 robot.grasp.plan_ring() 的返回值；plan.degrees 就是 {"base": ...,
+            # "extension": ...} 两个绝对电机角度，正好喂 _move_axes_to。
+            new_dir = dict({"lift": 95}, **{"base": base_deg, "extension": extension_deg})
+            _move_axes_to(robot, new_dir).wait()
+            robot.gripper.open_jaws()
+            _move_axes_to(robot, {"lift": 375, "extension": 750.0, "base": 0}).wait()
+            input("放料完成，回车继续，输入 q 跳过：").strip().lower()
+    except Exception as e:
+        print(f"Error occurred during pick and place operation: {e}")
+        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+        return
+    
+    robot.arm.move_axis_to_motor_degrees("extension", 270.0)
 
 def _grab_box_from_turntable(
     robot: Robot,
@@ -149,7 +176,7 @@ def _grab_box_from_turntable(
     robot.arm.move_axis_to_motor_degrees("lift", 550)
     robot.gripper.close_jaws()
     
-def grab_box_from_car(robot: Robot):
+def _grab_box_from_car(robot: Robot):
     """从车上抓料，最后**转到 plan 里算好的绝对位置**（环正上方）。
 
     ``plan`` 是 :meth:`modules.grasp.runtime.Grasp.plan_ring` 的返回值——它只算不动，
@@ -176,7 +203,7 @@ def grab_box_from_car(robot: Robot):
     batch.add(_move_axes_to(robot, {"lift": 500, "extension": 400.0, "base": 0}))
     batch.wait()
 
-def place_box_to_repo(robot: Robot, *, verbose: bool = False):
+def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
     '''当爪子上有物体时，将物体放置在指定位置。'''
     global current_position_index
     arm = robot.arm
@@ -203,7 +230,7 @@ def place_box_to_repo(robot: Robot, *, verbose: bool = False):
     batch.add(_move_axes_to(robot, {"lift": 720, "extension": 620.0, "base": 0}))
     batch.wait()
 
-def place_box_to_floor(robot: Robot, *, verbose: bool = False):
+def place_box_from_repo_to_floor(robot: Robot, *, verbose: bool = False):
     '''把物料放到地面的圆环内。不需要考虑初始状态。'''
     batch = robot.motion.begin()
     batch.add(robot.gripper.open_jaws(wait=False))
@@ -220,7 +247,7 @@ def place_box_to_floor(robot: Robot, *, verbose: bool = False):
             base_deg     = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
             
-            grab_box_from_car(robot)
+            _grab_box_from_car(robot)
             # 到这里已经抓着料了：转到 plan 里算好的**绝对位置**（环的正上方）。
             # plan 是 robot.grasp.plan_ring() 的返回值；plan.degrees 就是 {"base": ...,
             # "extension": ...} 两个绝对电机角度，正好喂 _move_axes_to。
@@ -242,34 +269,11 @@ def place_box_to_box(robot: Robot, *, _want: str):
     robot.grasp.align_xy(want=_want)
     extension_deg = robot.arm.turns_state.of("extension").motor_degrees
     base_deg = robot.arm.turns_state.of("base").motor_degrees
-    grab_box_from_car(robot)
+    _grab_box_from_car(robot)
     _move_axes_to(robot, {"lift": 520, "extension": extension_deg, "base": base_deg}).wait()
     robot.gripper.open_jaws()
     robot.arm.move_axis_to_motor_degrees("lift", 695)
     _move_axes_to(robot, {"lift": 720, "extension": 550, "base": 0}).wait()
 
-def align_box(robot: Robot):
-    try:
-        report = robot.vision.locate()
-    except Exception as e:
-        print("视觉识别失败", e)
-        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-        return
-        
-    if report.best is None:
-        print("画面里没有通过校验的物料")
-        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-        return
-    material = report.best
-    print(
-        f"物料：{material.name or '未知'}，"
-        f"相机系 xyz=({material.x_mm:.1f}, {material.y_mm:.1f}, "
-        f"{material.z_mm:.1f}) mm"
-    )
 
-    try:
-        robot.grasp.align_xy()
-    except Exception as e:
-        print("对准失败", e)
-        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
-        return
+    
