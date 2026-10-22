@@ -2,19 +2,13 @@ from __future__ import annotations
 
 import time
 
+from modules.arm import MotionReport
 from modules.motion import MotionBatch, MotionBatchReport
 from robot import Robot
 
 TURN_TABLE_POSITIONS = [0, 500, 1000]  # 转盘的目标位置，单位为度
 current_position_index = 0  # 当前转盘位置的索引
 
-#: 下降前等画面停稳的上限（秒）。转盘刚停下时画面还会抖一下；
-#: 超过这个时间仍在动就不下降——物块会顺着转盘走掉。
-#:
-#: **不要太短。** 实测 3 s 会卡在边界上：大角度转底座（放料那一下 base 转 1000° 以上）
-#: 之后桌面要好几秒才真正静下来，等待窗口刚好在"还在动"的最后一点用光，于是判失败，
-#: 而紧跟其后的复测已经是 1.4 灰阶 / 0.001%（远低于上限）。8 s 给了这段余振衰减的时间；
-#: 真正的持续运动照旧会被拒绝，只是多等几秒才下结论。
 SCENE_STABLE_TIMEOUT_SECONDS = 20.0
 
 
@@ -49,7 +43,9 @@ def _print_report(title: str, report: MotionBatchReport) -> None:
     print(f"[{title}] {report.summary()}")
     for item in report.items:
         result = item.result
-        if item.error is not None or result is None:
+        # 动作组允许混装：转盘/舵机的结论没有 pulses 这些字段，不是臂的报告就跳过。
+        # 这里不用 assert——混装是合法用法，assert 会把"别的模块的正常结果"炸成异常。
+        if item.error is not None or not isinstance(result, MotionReport):
             continue
         print(
             f"    {item.subject}: {result.pulses} 脉冲 / "

@@ -1456,12 +1456,11 @@ def _self_test() -> int:
         def __init__(self, arm: FakeArm) -> None:
             self.arm = arm
             self.error = None
-            self._published: Optional[Tuple[float, float, float]] = None
             self.guarded_reads = 0
             self.unguarded_reads = 0
 
-        def _publish(self, stamp: float) -> None:
-            self._published = (self.arm.offset[0], self.arm.offset[1], stamp)
+        def _publish(self, stamp: float) -> Tuple[float, float, float]:
+            return (self.arm.offset[0], self.arm.offset[1], stamp)
 
         def frame(self, *, timeout=None, max_age_seconds=None, min_received_at=None):
             from modules.vision.drive.sighting import parse_sighting
@@ -1471,8 +1470,7 @@ def _self_test() -> int:
             else:
                 self.guarded_reads += 1
             # 每次都发布当前真实位姿（真摄像头每次读都是一帧新画面）。
-            self._publish(max(time.monotonic(), min_received_at or 0.0))
-            x, y, stamp = self._published
+            x, y, stamp = self._publish(max(time.monotonic(), min_received_at or 0.0))
             item = parse_sighting(
                 f"物料 4: @(566,376) 绿色物料（green），xyz=({x:.4f},{y:.4f},113.2) mm",
                 received_at=stamp,

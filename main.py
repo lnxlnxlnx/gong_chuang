@@ -73,7 +73,7 @@ def pick_manual() -> None:
         # robot.arm.move_up(pulses=6000)          # 675度
         robot.arm.move_axis_to_motor_degrees("lift", 675)
         robot.arm.move_forward(3200)
-        grab_box_from_turntable(robot)
+        grab_box_from_turntable_to_repo(robot)
         
 
 def _place_box(robot: Robot):
