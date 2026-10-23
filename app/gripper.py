@@ -97,7 +97,8 @@ def grab_box_from_turntable_to_repo(
     大动作之后桌面余振要好几秒才衰减完）。
     """
     robot.arm.move_axis_to_motor_degrees("lift", 600)
-    _move_axes_to(robot, {"lift": 720, "extension": 620.0, "base": 0}).wait()
+    _move_axes_to(robot, {"lift": 720, "extension": 370.0, "base": 350}).wait()
+    input("继续")
     try:
         for color in want_colors :
             # wait_scene_stable 返回 True = 看满最小等待（3.5 s）之后画面仍然静止，可以抓；
@@ -215,7 +216,7 @@ def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
         robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False)
     )
     batch.add(robot.gripper.open_jaws(wait=False))
-    batch.add(_move_axes_to(robot, {"lift": 720, "extension": 620.0, "base": 0}))
+    batch.add(_move_axes_to(robot, {"lift": 720, "extension": 370.0, "base": 350}))
     batch.wait()
 
 def place_box_from_repo_to_floor(robot: Robot, *, verbose: bool = False):
