@@ -57,4 +57,7 @@ if __name__ == "__main__":
         # robot.chassis.forward(rpm = 60, duration = 4)
         
         # 放置物料
-        place_box_from_repo_to_floor(robot)
+        # place_box_from_repo_to_floor(robot)
+        
+        # 抓取物料(需要注意抓取时不能撞到物料盘)
+        grab_box_from_floor_to_repo(robot, want_colors=["green", "blue"])

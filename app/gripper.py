@@ -150,15 +150,16 @@ def grab_box_from_floor_to_repo(
     want_colors: list[str],
     verbose: bool = False,
     *,
-    home: dict[str, float] | None = {"lift": 760, "extension": 150.0, "base": 350},
+    home: dict[str, float] | None = {"lift": 760, "extension": 10.0, "base": 400},
 ):
     """把物料从地面圆环放到仓库里。不需要考虑初始状态。
 
     ``home`` 默认是地面抓料位 ``{lift: 660, extension: 620.0, base: 0}``（伸缩比
     :data:`READY_POSE` 短一点，够得到地面圆环）；传 ``None`` 表示这次不摆。
     """
+    robot.arm.move_axis_to_motor_degrees("lift", 400)
     _go_home(robot, home)
-    print("移动到抓料位置")
+    input("移动到抓料位置")
     try:
         for color in want_colors:
             robot.grasp.align_xy(want=color)
@@ -172,7 +173,7 @@ def grab_box_from_floor_to_repo(
         _move_axes_to(robot, SAFE_RETRACT).wait()
         return
     
-    _move_axes_to(robot, SAFE_RETRACT).wait()
+    _go_home(robot, home)
 
 def _grab_box_from_turntable(
     robot: Robot,
@@ -233,6 +234,7 @@ def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
     #    注意：底座这次要转约 9300 脉冲，超过"不许和伸缩并行"的 600 脉冲上限。
     #    那条限制只在 RobotArm.move_axes 里检查，单轴帧不拦，所以现场必须确认
     #    工作区是空的（伸出状态下横扫会把整条臂扫过去）。
+    robot.arm.move_axis_to_motor_degrees("lift", 700)
     report = _move_axes_to(robot, {"lift": 900, "extension": 10, "base": 1048}).wait()
     if verbose:
         _print_report("放料前", report)
