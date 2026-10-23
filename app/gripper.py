@@ -120,7 +120,7 @@ def grab_box_from_turntable_to_repo(
     robot.arm.move_axis_to_motor_degrees("base", 350)
     robot.arm.move_axis_to_motor_degrees("extension", 160)
     
-    input("继续")
+    # input("继续")
     try:
         for color in want_colors :
             # wait_scene_stable 返回 True = 看满最小等待（3.5 s）之后画面仍然静止，可以抓；
@@ -194,7 +194,7 @@ def _grab_box_from_turntable(
         return
 
 
-    robot.arm.move_axis_to_motor_degrees("lift", 550)
+    robot.arm.move_axis_to_motor_degrees("lift", 550, rpm=150)
     robot.gripper.close_jaws()
     
 def _grab_box_from_car(robot: Robot):

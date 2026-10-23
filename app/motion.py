@@ -45,6 +45,7 @@ def func_run_half_map(car, profile: HardwareProfile) -> None:
 if __name__ == "__main__":
     with Robot.open(grasp=True, gripper=True, turntable=True, chassis = True) as robot:
         robot.turntable.go_home()
+        robot.gripper.open_jaws()
         # robot.chassis.forward_left(rpm = 60, duration=4.5 * 0.5)      # 90
         # robot.chassis.forward(rpm=60, duration=6.5 * 0.5)     # 240
 
