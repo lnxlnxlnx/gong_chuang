@@ -31,6 +31,25 @@ Emm42 V5.0 闭环步进驱动器串口协议(ZDT Emm 固件)：
 
 读取命令的返回帧长度见 :meth:`Emm42Driver._read` 的 ``REPLY_LENGTHS``。多字节数值一律
 **大端**，带符号的量按说明书的通用套路编码为 ``符号字节(00 正 / 01 负) + 无符号数值``。
+
+## 回包怎么读：只有"结构完整 + 地址对得上"才算我的
+
+共用一条总线时，读到的字节里混着别人的回包、驱动器异步发的到位包（``地址 FD 9F 6B``，
+``Response`` 菜单选了 ``Reached`` / ``Both`` 时才会有），以及**被打坏的帧**。老的读法是
+"读一次 4 字节就当自己的 ACK"，于是真机上 5 号的 ``05 F3 02 6B`` 读成 ``45 F3 02 6B``
+（地址字节差一位）、``05 7F A0 ED`` 这种整帧只有地址对得上，两种都只能报"5 号回了怪东西"，
+真正的原因（总线上的坏字节）反而看不见。
+
+现在 :meth:`Emm42Driver._read_reply_for` 按**字节流重新对齐**：``[地址][...][0x6B]``、
+长度正确、地址是自己的才算一帧；整帧但是别人的、或是不属于本次交换的到位包，记下来继续等；
+尾字节不是 ``0x6B`` 的（半帧、坏帧、垃圾）只丢一个字节重新对齐。
+
+"没等到合格回包"因此分成两种，处理方式也不同：
+
+- **驱动器回过话**（``02``/``E2``/``00 EE`` 这类真结论）→ 立刻报错，重发没有意义；
+- **什么都没等到**（回包被打坏、或根本没回）→ 对**幂等**命令重发（见
+  :data:`Emm42Driver.MAX_ATTEMPTS`）；相对位置帧**不重发**——它表达的是"再走这么多"，
+  重发就是让那根轴多走一段。
 """
 
 from __future__ import annotations
@@ -155,17 +174,27 @@ def _decode_signed(
     return -value if sign_byte == 0x01 else value
 
 
-def _foreign_note(foreign: List[bytes]) -> str:
-    """把"等待期间被跳过的别人的帧"缀在错误信息后面。
+def _discarded_note(discarded: List[bytes]) -> str:
+    """把"等待期间丢掉的字节"缀在错误信息后面。
 
-    真正的元凶常常在**别人的地址**上：这台机器的总线上，6/7 号驱动器偶尔会对
-    收到的帧回 ``地址 00 EE 6B``（错误命令），而这些帧以前会被算到正在等 ACK 的
-    那台头上。报错时把它们原样列出来，才看得见到底是谁在说话。
+    丢掉的可能是**别人的整帧**（这台机器的总线上，6/7 号驱动器偶尔会对收到的帧回
+    ``地址 00 EE 6B``（错误命令）），也可能是**凑不成帧的零碎字节**（半帧、被打坏的
+    帧）。两种都原样列出来，才看得见总线上到底发生了什么；只写一句"电机 5 没有 ACK"
+    会把人引到错误的方向。
     """
-    if not foreign:
+    if not discarded:
         return ""
-    listed = ", ".join(frame.hex(" ") for frame in foreign)
-    return f" (discarded foreign frames: {listed})"
+    listed = ", ".join(chunk.hex(" ") for chunk in discarded)
+    return f" (discarded: {listed})"
+
+
+def _bytes_waiting(serial_port: SerialPort) -> int:
+    """输入缓冲里还有多少字节；没有 ``in_waiting`` 的假串口按 0（已经安静）算。
+
+    ``in_waiting`` 是真 pyserial 的属性，本驱动只**用**它、不要求注入的假串口也有，
+    所以不写进 :class:`SerialPort` 协议——离线单测看到的等待行为因此与以前一致。
+    """
+    return int(getattr(serial_port, "in_waiting", 0) or 0)
 
 
 class Emm42Driver:
@@ -176,10 +205,32 @@ class Emm42Driver:
     CHECKSUM = 0x6B    # 固定帧尾字节(该协议所有命令都以 0x6B 结尾)
     MAX_RPM = 3000     # 速度上限
 
-    #: 等一条回包时最多跳过几条**别人的** 4 字节帧，之后就把最后读到的那条交回调用方报错。
-    #: 共用总线上出现别人的帧是正常的（``expect_ack=False`` 的那一侧不读应答），
-    #: 但数量有限；给个上限是为了"真有台驱动器在刷屏"时不会把等待拖成无限。
+    #: 等一条回包时最多记录几条**丢掉的**字节块（别人的整帧、凑不成帧的零碎字节），
+    #: 之后只是不再记，仍然继续丢、继续等。共用总线上出现别人的帧是正常的
+    #: （``expect_ack=False`` 的那一侧不读应答），上限只影响报错信息的长短。
     MAX_FOREIGN_FRAMES = 8
+
+    #: 控制动作命令回包的长度：``[地址][功能码][状态][0x6B]``。
+    ACK_LENGTH: Final = 4
+
+    #: 到位包的状态字节。位置模式下 ``Response`` 菜单选了 ``Reached`` / ``Both`` 时，
+    #: 驱动器会在**运动结束**时异步发 ``地址 FD 9F 6B``（说明书 6.3.1）。它不是任何一条
+    #: 命令的 ACK，撞进读窗口时按"不是我等的"丢掉继续等，而不是当成 ACK 报怪东西。
+    REACHED_STATUS: Final = 0x9F
+
+    #: 一条命令最多发几遍。只对 :meth:`_write` 里 ``retry_safe=True`` 的**幂等**命令生效：
+    #: 回包被打坏时驱动器几乎肯定已经执行过前一遍，重发一遍结果一样；而相对位置帧重发一次
+    #: 就是让那根轴多走一段，所以它永远只发一遍。
+    MAX_ATTEMPTS: Final = 3
+
+    #: 重发之前的静默（秒）：坏掉的那一次交换可能还有字节在路上，先让总线安静一下。
+    RETRY_SETTLE_SECONDS: Final = 0.03
+
+    #: 等总线安静用：发帧前若缓冲里还有字节在来，最多等这么久。
+    QUIET_TIMEOUT_SECONDS: Final = 0.05
+
+    #: 等总线安静时两次检查「还有没有字节在来」之间的间隔（秒）。
+    QUIET_POLL_SECONDS: Final = 0.001
 
     #: 不等回包的命令（``expect_ack=False``）**发完之后**必须留的静默时间（秒）。
     #:
@@ -215,6 +266,7 @@ class Emm42Driver:
         expect_ack: bool = True,
         serial_port: Optional[SerialPort] = None,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         # 地址 1..255, 同一串口总线上可用不同地址挂多台驱动器
         if not 1 <= motor_id <= 255:
@@ -232,6 +284,8 @@ class Emm42Driver:
         self._serial = serial_port
         # 不等回包的命令发完之后要留静默，见 ``UNACKED_SETTLE_SECONDS``；测试可注入假实现
         self._sleep = sleep
+        # 单调时钟：等回包的截止时间与"等总线安静"都用它；测试可注入假实现
+        self._clock = clock
 
     def initialize(self) -> "Emm42Driver":
         """Open the configured USB-TTL serial port at 115200 baud."""
@@ -249,8 +303,10 @@ class Emm42Driver:
         """Enable or disable motor torque output.
 
         帧: addr F3 AB 01 00 6B -> 使能锁轴; addr F3 AB 00 00 6B -> 失能松轴。
+        幂等（同一个状态再发一遍结果一样），所以回包读不到时允许重发，见
+        :meth:`_write` 的 ``retry_safe``。
         """
-        self._write(0xF3, b"\xAB" + bytes((int(enabled), 0)))
+        self._write(0xF3, b"\xAB" + bytes((int(enabled), 0)), retry_safe=True)
 
     def set_speed(self, direction: Direction, rpm: int, acceleration: int) -> None:
         """Run continuously in the requested direction at ``rpm``.
@@ -319,8 +375,11 @@ class Emm42Driver:
 
         帧: addr FE 98 [sync] 6B  (0xFE 0x98 为"立即停止")。
         若电机已经停止/失能，驱动器可能返回 E2，表示无需再次执行停止。
+        幂等（再停一次还是停），所以回包读不到时允许重发。
         """
-        self._write(0xFE, b"\x98\x00", accepted_statuses=(0x02, 0xE2))
+        self._write(
+            0xFE, b"\x98\x00", accepted_statuses=(0x02, 0xE2), retry_safe=True
+        )
 
     def home(self, mode: HomeMode) -> None:
         """Trigger the requested homing mode configured in the motor driver.
@@ -449,21 +508,26 @@ class Emm42Driver:
         self._drain_stale_input(serial_port)
         serial_port.write(bytes((self.motor_id, function, self.CHECKSUM)))
         serial_port.flush()
-        reply, foreign = self._read_reply_for(self.motor_id, total)
+        reply, seen = self._read_reply_for(self.motor_id, total)
+        note = _discarded_note(seen)
         if not reply:
+            # 走到这里说明"没读到一条结构完整、地址对得上的回包"：驱动器回的
+            # ``地址 00 EE 6B``（错误命令）比正常帧短，先单独认出来再谈别的。
+            raw = b"".join(seen)
+            if not raw:
+                raise RuntimeError(
+                    f"Emm42 motor {self.motor_id} read command "
+                    f"0x{function:02X} received no reply"
+                )
+            extra = note if len(seen) > 1 else ""
+            if raw[:3] == bytes((self.motor_id, 0x00, 0xEE)):
+                raise RuntimeError(
+                    f"Emm42 motor {self.motor_id} rejected read command 0x{function:02X}: "
+                    f"{raw.hex(' ')}" + extra
+                )
             raise RuntimeError(
-                f"Emm42 motor {self.motor_id} read command "
-                f"0x{function:02X} received no reply" + _foreign_note(foreign)
-            )
-        if (
-            len(reply) >= 3
-            and reply[0] == self.motor_id
-            and reply[1] == 0x00
-            and reply[2] == 0xEE
-        ):
-            raise RuntimeError(
-                f"Emm42 motor {self.motor_id} rejected read command 0x{function:02X}: "
-                f"{reply.hex(' ')}" + _foreign_note(foreign)
+                f"Emm42 motor {self.motor_id} read command 0x{function:02X} returned "
+                f"unexpected reply: {raw.hex(' ')}" + extra
             )
         if (
             len(reply) != total
@@ -473,7 +537,7 @@ class Emm42Driver:
         ):
             raise RuntimeError(
                 f"Emm42 motor {self.motor_id} read command 0x{function:02X} returned "
-                f"unexpected reply: {reply.hex(' ')}" + _foreign_note(foreign)
+                f"unexpected reply: {reply.hex(' ')}" + note
             )
         return reply[2:-1]
 
@@ -551,7 +615,9 @@ class Emm42Driver:
             + bytes((int(absolute), int(synchronized)))
         )
         # 位置命令帧: addr FD dir rpm acc pulses absolute sync 6B
-        self._write(0xFD, parameters)
+        # 绝对位置帧是幂等的（目标不变），回包读不到可以重发；相对位置帧不行——
+        # 它表达的是"再走这么多"，重发就是多走一段。
+        self._write(0xFD, parameters, retry_safe=absolute)
 
     def _open_serial(self) -> SerialPort:
         try:
@@ -569,77 +635,160 @@ class Emm42Driver:
         *,
         accepted_statuses: Tuple[int, ...] = (0x02,),
         address: Optional[int] = None,
+        retry_safe: bool = False,
     ) -> None:
+        """拼帧、发出去、校验回包 ``[motor_id] [function] [status] [0x6B]``。
+
+        ``retry_safe`` 只给**幂等**命令：回包被打坏时驱动器几乎肯定已经执行过前一遍，
+        重发一遍结果一样（使能/失能、停止、绝对位置）。相对位置帧不能重发，见
+        :meth:`_write_position`；落在这里的一次异常因此仍然会被报给调用方。
+
+        两条分支的分别很重要：**驱动器回过话**（哪怕是 ``E2`` / ``00 EE``）就是真结论，
+        立刻报错；**什么都没等到**才重发——回包可能只是被总线上的坏字节弄坏了。
+        """
         # 拼装完整帧并验证驱动器 ACK: [motor_id] [function] [status] [0x6B]
         serial_port = self._require_serial()
         target_address = self.motor_id if address is None else address
         frame = bytes((target_address, function)) + parameters + bytes((self.CHECKSUM,))
-        self._drain_stale_input(serial_port)
-        serial_port.write(frame)
-        serial_port.flush()
-        if not self.expect_ack:
-            # 发完不管的命令必须把总线让出来：紧接着写下一帧（可能是另一个模块的）会
-            # 把那一帧弄坏，见 ``UNACKED_SETTLE_SECONDS``。arm 的 6/7 号使能之后隔 0 ms
-            # 就是底盘 1 号的使能，真机上坏掉的正是后面这一帧。
-            self._sleep(self.UNACKED_SETTLE_SECONDS)
-            return
-        reply, foreign = self._read_reply_for(target_address, 4)
-        expected_prefix = bytes((target_address, function))
-        if not reply:
-            raise RuntimeError(
-                f"Emm42 motor {self.motor_id} command 0x{function:02X} received no ACK"
-                + _foreign_note(foreign)
+        attempts = self.MAX_ATTEMPTS if retry_safe else 1
+        discarded: List[bytes] = []
+        for attempt in range(1, attempts + 1):
+            self._drain_stale_input(serial_port)
+            serial_port.write(frame)
+            serial_port.flush()
+            if not self.expect_ack:
+                # 发完不管的命令必须把总线让出来：紧接着写下一帧（可能是另一个模块的）会
+                # 把那一帧弄坏，见 ``UNACKED_SETTLE_SECONDS``。arm 的 6/7 号使能之后隔 0 ms
+                # 就是底盘 1 号的使能，真机上坏掉的正是后面这一帧。
+                self._sleep(self.UNACKED_SETTLE_SECONDS)
+                return
+            reply, seen = self._read_reply_for(
+                target_address, self.ACK_LENGTH, function=function
             )
-        is_expected_reply = (
-            len(reply) == 4
-            and reply[:2] == expected_prefix
-            and reply[2] in accepted_statuses
-            and reply[3] == self.CHECKSUM
+            discarded.extend(seen)
+            is_expected_reply = (
+                len(reply) == self.ACK_LENGTH
+                and reply[:2] == bytes((target_address, function))
+                and reply[2] in accepted_statuses
+                and reply[3] == self.CHECKSUM
+            )
+            if is_expected_reply:
+                return
+            if reply:
+                # 驱动器**回过话**了：这是真结论（E2 = 条件不满足、00 EE = 不认这条命令），
+                # 重发既没意义，也会把这条结论盖掉。
+                raise RuntimeError(
+                    f"Emm42 motor {self.motor_id} command 0x{function:02X} returned unexpected ACK: "
+                    f"{reply.hex(' ')}" + _discarded_note(discarded)
+                )
+            if attempt < attempts:
+                # 回包没读到合格帧：可能只是被打坏了。幂等命令重发一遍，先让总线安静。
+                self._sleep(self.RETRY_SETTLE_SECONDS)
+        retried = f" (sent {attempts} times)" if attempts > 1 else ""
+        raise RuntimeError(
+            f"Emm42 motor {self.motor_id} command 0x{function:02X} received no ACK"
+            + retried
+            + _discarded_note(discarded)
         )
-        if not is_expected_reply:
-            raise RuntimeError(
-                f"Emm42 motor {self.motor_id} command 0x{function:02X} returned unexpected ACK: {reply.hex(' ')}"
-                + _foreign_note(foreign)
-            )
 
     def _require_serial(self) -> SerialPort:
         if self._serial is None:
             raise RuntimeError("call initialize() before sending commands")
         return self._serial
 
-    def _read_reply_for(self, expected_address: int, length: int) -> Tuple[bytes, List[bytes]]:
-        """读回包，跳过**不是发给本驱动器**的帧。
+    def _read_reply_for(
+        self,
+        expected_address: int,
+        length: int,
+        *,
+        function: Optional[int] = None,
+    ) -> Tuple[bytes, List[bytes]]:
+        """读一条**结构完整、地址对得上**的回包；其余字节一律丢掉继续等。
 
-        返回 ``(自己的那一帧或空, 被跳过的别人的帧)``。
+        返回 ``(自己的那一帧或空, 丢掉的字节块)``。
 
-        共用一条总线时，"别人的帧"必然会出现，而且**不只在缓冲里躺着**：arm 的 6/7 号是
-        ``expect_ack=False``，发完命令就走，它们的应答是在之后几毫秒才到线的；底盘紧接着
-        等自己的 ACK，``read`` 就会先撞上它。真机上见到的正是这一条——报错写着"1 号轮
-        ACK 不对"，字节却是 ``07 00 EE 6B``（7 号回的"错误命令"）。
+        为什么不是"读一次 4 字节就当自己的 ACK"：共用总线上读到的字节里混着别人的回包、
+        驱动器异步发的到位包，还有**被打坏的帧**。真机上 5 号的 ``05 F3 02 6B`` 就读成过
+        ``45 F3 02 6B``（地址字节差一位），``05 7F A0 ED`` 这种则四个字节里只有一个对得上
+        ——按老读法，两种都只能报"5 号回了怪东西"，线上到底怎么坏的看不见。
 
-        所以这里的规矩是：**先认地址，再认功能码**。不是自己的 4 字节完整帧就丢掉继续等，
-        最多丢 :data:`MAX_FOREIGN_FRAMES` 条；丢完还没等到自己的，就把最后那条交回调用方
-        报错（错误信息里会列出被丢掉的帧，避免又指错人）。``expected_address`` 为 0
-        （广播的 ``00 FF 66 6B``）时按老规矩直接返回，不做地址过滤。
+        所以这里的规矩是**字节流重新对齐**：
+
+        - ``[地址][...][0x6B]`` 且长度正确、地址是自己的（``expected_address=0`` 广播时不做
+          地址过滤）→ 交回调用方做功能码/状态校验；
+        - 整帧但不是自己的，或是 ``FD 9F`` 到位包（而本次等的不是位置 ACK）→ 记下来继续等；
+        - 尾字节不是 ``0x6B``（半帧、坏帧、垃圾）→ **只丢一个字节**再对齐，剩下的等下一轮；
+        - 一直没有合格帧（读超时）→ 返回空，把丢掉的字节原样交回调用方（报错时列出来）。
+
+        丢弃清单最多记 :data:`MAX_FOREIGN_FRAMES` 条，记满了照样继续丢、继续等——上限只
+        影响报错信息的长短，不影响判定。
         """
-        foreign: List[bytes] = []
+        serial_port = self._require_serial()
+        discarded: List[bytes] = []
+        junk = bytearray()
+        buffer = bytearray()
+        deadline = self._clock() + self.timeout
         while True:
-            reply = self._require_serial().read(length)
-            if not reply:
-                return b"", foreign
-            if (
-                expected_address != 0
-                and len(reply) == 4
-                and reply[0] != expected_address
-                and reply[-1] == self.CHECKSUM
-                and len(foreign) < self.MAX_FOREIGN_FRAMES
-            ):
-                foreign.append(reply)
-                continue
-            return reply, foreign
+            if self._clock() >= deadline:
+                # 有人在刷屏（一直读得到字节）：不能把等待拖成无限，到点收工。
+                break
+            chunk = serial_port.read(length - len(buffer))
+            if not chunk:
+                # 读超时（pyserial 的 read 会等满 timeout）：这条命令不会再回包了。
+                break
+            buffer.extend(chunk)
+            while len(buffer) >= length:
+                candidate = bytes(buffer[:length])
+                if candidate[-1] != self.CHECKSUM:
+                    # 不是帧尾：这一个字节是垃圾或半帧残留，丢掉重新对齐。
+                    junk.append(buffer[0])
+                    del buffer[:1]
+                    continue
+                del buffer[:length]
+                if expected_address != 0 and candidate[0] != expected_address:
+                    self._keep_discarded(discarded, junk, candidate)
+                    continue
+                if (
+                    function != 0xFD
+                    and candidate[1] == 0xFD
+                    and candidate[2] == self.REACHED_STATUS
+                ):
+                    self._keep_discarded(discarded, junk, candidate)
+                    continue
+                return candidate, self._flush_leftovers(discarded, junk, buffer)
+        return b"", self._flush_leftovers(discarded, junk, buffer)
 
     @staticmethod
-    def _drain_stale_input(serial_port: SerialPort) -> None:
+    def _keep_discarded(
+        discarded: List[bytes], junk: bytearray, frame: bytes
+    ) -> None:
+        """记下"不是我等的一整帧"，并先把它前面那段零碎字节并成一条记进去。
+
+        先冲零碎再记帧，顺序才和线上一致：读者看到的顺序就是字节到达的顺序。
+        """
+        if junk:
+            discarded.append(bytes(junk))
+            junk.clear()
+        if len(discarded) < Emm42Driver.MAX_FOREIGN_FRAMES:
+            discarded.append(frame)
+
+    @staticmethod
+    def _flush_leftovers(
+        discarded: List[bytes], junk: bytearray, buffer: bytearray
+    ) -> List[bytes]:
+        """把"凑不成帧的字节"并成一条记进丢弃清单，然后清掉它们。
+
+        ``junk``（重新对齐时丢掉的）与 ``buffer``（还没凑够一帧的尾巴）在字节流里是
+        连续的一段，合成一条报出来，报错信息里看到的就是线上原样的那串字节。
+        """
+        leftover = bytes(junk) + bytes(buffer)
+        junk.clear()
+        buffer.clear()
+        if leftover:
+            discarded.append(leftover)
+        return discarded
+
+    def _drain_stale_input(self, serial_port: SerialPort) -> None:
         """发命令前丢掉输入缓冲里的**别人**的字节。
 
         同一个 Robot 会话里 arm(5/6/7) 与 chassis(1~4) 共用这条总线，而
@@ -648,9 +797,19 @@ class Emm42Driver:
 
         不先清掉，下一条 ``read(4)`` 会把**最早那 4 字节**当成自己的 ACK：报出来的
         地址是别人的（真机上见过用 1 号的名义报出 6 号的错误帧），而真正的 ACK 反被
-        下一条命令读走。所以这是"共用总线 + 有的驱动器不回读"下唯一稳的读法。
+        下一条命令读走。
+
+        只清一把还不够：一帧**正在接收**时清，剩下的半帧会在我们发起读之前落到缓冲里，
+        被拼进自己的回包——"四个字节里只有地址对得上"那种坏包就是这么来的。所以清完再看
+        ``in_waiting``：还有字节在来就等一小会再清，直到安静或到
+        :data:`QUIET_TIMEOUT_SECONDS` 上限；总线本来就静着时（假串口没有 ``in_waiting``
+        也算这一种）什么都不等，与以前完全一样。
         """
         serial_port.reset_input_buffer()
+        deadline = self._clock() + self.QUIET_TIMEOUT_SECONDS
+        while _bytes_waiting(serial_port) and self._clock() < deadline:
+            self._sleep(self.QUIET_POLL_SECONDS)
+            serial_port.reset_input_buffer()
 
     @staticmethod
     def _require_range(name: str, value: int, minimum: int, maximum: int) -> None:

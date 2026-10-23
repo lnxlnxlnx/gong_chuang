@@ -20,7 +20,7 @@ class FakeSerial:
         *,
         acknowledge_emm42: bool = False,
         read_replies: dict[int, list[bytes]] | None = None,
-        control_replies: dict[int, bytes] | None = None,
+        control_replies: dict[int, bytes | list[bytes]] | None = None,
         write_foreign: list[bytes] | None = None,
     ) -> None:
         self._receive_buffer = bytearray()
@@ -29,8 +29,12 @@ class FakeSerial:
         self._read_replies = {
             function: list(frames) for function, frames in (read_replies or {}).items()
         }
-        #: 功能码 -> 该条控制命令的应答帧，用来表达"02 以外的状态"（如停止命令的 E2）。
-        self._control_replies = dict(control_replies or {})
+        #: 功能码 -> 该条控制命令的应答帧（给一列就按次取，最后一条重复），
+        #: 用来表达"02 以外的状态"（如停止命令的 E2）与"第一次的回包被打坏了"。
+        self._control_replies = {
+            function: list(frames) if isinstance(frames, (list, tuple)) else [frames]
+            for function, frames in (control_replies or {}).items()
+        }
         #: 每次写入后、本命令应答之前先塞进缓冲的"别人的帧"（模拟另一台驱动器插话）。
         #: 它必须出现在**写入之后**才逼真：发命令前清缓冲清不掉"在路上"的帧。
         self._write_foreign = list(write_foreign or [])
@@ -38,6 +42,11 @@ class FakeSerial:
         #: 发命令前清输入缓冲的次数；驱动每次发包都该清一次（见 ``reset_input_buffer``）。
         self.drained = 0
         self.is_open = True
+
+    @property
+    def in_waiting(self) -> int:
+        """真串口的"还有多少字节在输入缓冲里"；驱动用它判断总线静了没有。"""
+        return len(self._receive_buffer)
 
     def write(self, data: bytes) -> int:
         frame = bytes(data)
@@ -54,7 +63,9 @@ class FakeSerial:
                 sequence.pop(0) if len(sequence) > 1 else sequence[0]
             )
         elif control is not None:
-            self._receive_buffer.extend(control)
+            self._receive_buffer.extend(
+                control.pop(0) if len(control) > 1 else control[0]
+            )
         elif self._acknowledge_emm42 and len(frame) >= 3 and frame[-1] == 0x6B:
             self._receive_buffer.extend(bytes((frame[0], frame[1], 0x02, 0x6B)))
         return len(data)
@@ -300,6 +311,174 @@ class Emm42DriverTests(unittest.TestCase):
     def test_set_speed_rejects_invalid_rpm(self) -> None:
         with self.assertRaises(ValueError):
             self.motor.set_speed(Direction.CW, rpm=3001, acceleration=0)
+
+
+class ChunkedFakeSerial(FakeSerial):
+    """每次 ``read`` 最多回几字节：模拟一条回包跨两次读才凑齐（USB 分包）。"""
+
+    def __init__(self, *, chunk: int = 2, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._chunk = chunk
+
+    def read(self, size: int) -> bytes:
+        return super().read(min(size, self._chunk))
+
+
+class ArrivingFakeSerial(FakeSerial):
+    """清缓冲时帧还在路上：``in_waiting`` 前几次报"还有字节在来"，之后才安静。"""
+
+    def __init__(self, *, arriving: int = 2, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._arriving = arriving
+
+    @property
+    def in_waiting(self) -> int:
+        return self._arriving if self._arriving > 0 else len(self._receive_buffer)
+
+    def reset_input_buffer(self) -> None:
+        super().reset_input_buffer()
+        if self._arriving > 0:
+            self._arriving -= 1
+
+
+class Emm42GarbledReplyTests(unittest.TestCase):
+    """回包被打坏时怎么办：坏帧不当成自己的 ACK、幂等命令重发、相对位置帧不重发。
+
+    真机现场（``app/motion.py``）：5 号轴偶尔报
+    ``command 0xFD returned unexpected ACK: 05 7f a0 ed``，紧接着清理时的失能报
+    ``command 0xF3 received no ACK (discarded foreign frames: 45 f3 02 6b)``——
+    后者是一条**结构完整**的 F3 应答，只有地址字节从 ``05`` 变成 ``45``（差一位）。
+    也就是说命令确实到了驱动器、也执行了，坏的是读回来的字节。
+    """
+
+    #: 真机读到的坏帧：地址是自己的，功能码/状态/帧尾全是垃圾（合法帧必须以 6B 结尾）。
+    GARBAGE = bytes.fromhex("01 7F A0 ED")
+
+    def test_a_garbled_frame_is_named_instead_of_being_our_ack(self) -> None:
+        """四个字节里只有地址对得上时，不能当成"驱动器回了怪东西"。
+
+        报成 ``unexpected ACK: 01 7f a0 ed`` 会把人引向"驱动器坏了"；真相是这条回包
+        在线上被打坏了，所以应该报"没读到合格回包"，并把线上那些字节原样列出来。
+        """
+        serial = FakeSerial(control_replies={0xF3: self.GARBAGE})
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        with self.assertRaisesRegex(RuntimeError, r"no ACK.*01 7f a0 ed"):
+            motor.enable(True)
+
+    def test_an_idempotent_command_is_resent_when_its_reply_is_garbled(self) -> None:
+        """失能/使能是幂等的：回包坏掉一次就再发一遍，别把整个清理流程拖崩。
+
+        真机上第一段 traceback 就是这里：关闭时 ``disable`` 报 no ACK，把
+        ``RobotArm`` 清理失败一路带成 ``Robot 清理失败``，业务异常反而被盖掉。
+        """
+        serial = FakeSerial(
+            control_replies={
+                0xF3: [self.GARBAGE, bytes.fromhex("01 F3 02 6B")],
+            }
+        )
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        motor.enable(False)
+
+        self.assertEqual(
+            serial.writes,
+            [bytes.fromhex("01 F3 AB 00 00 6B"), bytes.fromhex("01 F3 AB 00 00 6B")],
+        )
+
+    def test_a_relative_move_is_not_resent_because_that_would_move_twice(self) -> None:
+        """相对位置帧表达的是"再走这么多"：重发一次就是让那根轴多走一段。"""
+        serial = FakeSerial(
+            control_replies={
+                0xFD: [self.GARBAGE, bytes.fromhex("01 FD 02 6B")],
+            }
+        )
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        with self.assertRaisesRegex(RuntimeError, r"no ACK.*01 7f a0 ed"):
+            motor.move_relative_pulses(800, rpm=80, acceleration=200)
+
+        self.assertEqual(len(serial.writes), 1)
+
+    def test_an_absolute_move_is_resent_because_its_target_does_not_change(self) -> None:
+        """绝对位置帧是幂等的：目标不变，重发一遍结果一样，所以允许重发。"""
+        serial = FakeSerial(
+            control_replies={
+                0xFD: [self.GARBAGE, bytes.fromhex("01 FD 02 6B")],
+            }
+        )
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        motor.move_absolute_pulses(3200, rpm=300, acceleration=10)
+
+        self.assertEqual(len(serial.writes), 2)
+        self.assertEqual(serial.writes[0], serial.writes[1])
+
+    def test_a_real_rejection_is_reported_instead_of_being_resent(self) -> None:
+        """驱动器回过话（哪怕是否定的）就是真结论：重发既没意义也会盖掉它。"""
+        serial = FakeSerial(control_replies={0xF3: bytes.fromhex("01 F3 E2 6B")})
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        with self.assertRaisesRegex(RuntimeError, r"unexpected ACK: 01 f3 e2 6b"):
+            motor.enable(True)
+
+        self.assertEqual(len(serial.writes), 1)
+
+    def test_a_reply_split_across_two_reads_is_assembled(self) -> None:
+        """回包跨两次读才到齐（USB 分包）时要拼起来，不能拿半帧去判对错。"""
+        serial = ChunkedFakeSerial(chunk=2, acknowledge_emm42=True)
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        motor.enable(True)
+
+        self.assertEqual(serial.writes, [bytes.fromhex("01 F3 AB 01 00 6B")])
+
+    def test_the_reached_packet_is_not_mistaken_for_a_control_ack(self) -> None:
+        """``Response=Both`` 时驱动器运动结束会异步发 ``01 FD 9F 6B``。
+
+        它不是任何一条命令的 ACK，撞进读窗口时丢掉继续等，而不是把下一条命令判成失败。
+        """
+        serial = FakeSerial(
+            acknowledge_emm42=True,
+            write_foreign=[bytes.fromhex("01 FD 9F 6B")],
+        )
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        motor.enable(True)
+
+        self.assertEqual(serial.writes, [bytes.fromhex("01 F3 AB 01 00 6B")])
+
+    def test_the_bus_is_waited_out_when_bytes_are_still_arriving(self) -> None:
+        """清缓冲时帧还在路上：要等到线安静再发，否则剩下的半帧会被拼进自己的回包。"""
+        slept: list[float] = []
+        serial = ArrivingFakeSerial(arriving=2, acknowledge_emm42=True)
+        motor = Emm42Driver(
+            "/dev/ttyUSB1",
+            motor_id=1,
+            serial_port=serial,
+            sleep=slept.append,
+        )
+
+        motor.enable(True)
+
+        self.assertEqual(serial.drained, 2)
+        self.assertEqual(slept, [Emm42Driver.QUIET_POLL_SECONDS])
+
+    def test_a_quiet_bus_costs_nothing(self) -> None:
+        """总线本来就静着时不清第二把、也不睡——与加这道闸之前完全一样。"""
+        slept: list[float] = []
+        serial = FakeSerial(acknowledge_emm42=True)
+        motor = Emm42Driver(
+            "/dev/ttyUSB1",
+            motor_id=1,
+            serial_port=serial,
+            sleep=slept.append,
+        )
+
+        motor.enable(True)
+
+        self.assertEqual(serial.drained, 1)
+        self.assertEqual(slept, [])
 
 
 class Emm42ReadCommandTests(unittest.TestCase):
