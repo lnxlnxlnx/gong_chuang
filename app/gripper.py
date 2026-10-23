@@ -210,7 +210,7 @@ def _grab_box_from_car(robot: Robot):
     batch.add(robot.arm.move_axis_to_motor_degrees("lift", 675))
     batch.add(robot.gripper.set_position(150, wait=False))
     batch.wait()
-    report = _move_axes_to(robot, {"lift": 980, "extension": 5, "base": 1058}).wait()
+    report = _move_axes_to(robot, {"lift": 980, "extension": 5, "base": 1045}).wait()
     robot.gripper.set_position(100)
     robot.arm.move_axis_to_motor_degrees("lift", 840)
     
@@ -259,7 +259,7 @@ def place_box_from_repo_to_floor(
     robot: Robot,
     *,
     verbose: bool = False,
-    home: dict[str, float] | None = {"lift": 760, "extension": 10.0, "base": 450},
+    home: dict[str, float] | None = {"lift": 760, "extension": 50.0, "base": 465},
 ):
     '''把物料放到地面的圆环内。不需要考虑初始状态。
 
@@ -273,12 +273,13 @@ def place_box_from_repo_to_floor(
     print("移动到安全位置")
     batch.wait()
     _go_home(robot, home)
-    input("继续")
+    # input("继续")
 
     try:
         for _ in range(3):
             # 容差按 2 mm 收：全局 tolerance_mm 是 6 mm（还给抓料用），放料要的是"落在
             # 环心"，6 mm 的残差在 95 mm 的靶标上肉眼就看得出偏心。
+            time.sleep(1.5)  # 先让车停稳
             result = robot.grasp.align_ring(tolerance_mm=2.0)  # 环心 → 各轴绝对位置
             base_deg     = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
@@ -295,7 +296,7 @@ def place_box_from_repo_to_floor(
                 robot.arm.move_axis_to_motor_degrees("lift", 375)
             _go_home(robot, home)
             input("放料完成，回车继续，输入 q 跳过：").strip().lower()
-            robot.chassis.forward(rpm=30, duration=1.4)
+            robot.chassis.forward(rpm=30, duration=1.45)
             time.sleep(1)       # 等待车子平稳
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
