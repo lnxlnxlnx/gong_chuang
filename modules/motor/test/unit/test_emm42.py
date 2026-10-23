@@ -21,6 +21,7 @@ class FakeSerial:
         acknowledge_emm42: bool = False,
         read_replies: dict[int, list[bytes]] | None = None,
         control_replies: dict[int, bytes] | None = None,
+        write_foreign: list[bytes] | None = None,
     ) -> None:
         self._receive_buffer = bytearray()
         self._acknowledge_emm42 = acknowledge_emm42
@@ -30,6 +31,9 @@ class FakeSerial:
         }
         #: 功能码 -> 该条控制命令的应答帧，用来表达"02 以外的状态"（如停止命令的 E2）。
         self._control_replies = dict(control_replies or {})
+        #: 每次写入后、本命令应答之前先塞进缓冲的"别人的帧"（模拟另一台驱动器插话）。
+        #: 它必须出现在**写入之后**才逼真：发命令前清缓冲清不掉"在路上"的帧。
+        self._write_foreign = list(write_foreign or [])
         self.writes: list[bytes] = []
         #: 发命令前清输入缓冲的次数；驱动每次发包都该清一次（见 ``reset_input_buffer``）。
         self.drained = 0
@@ -38,6 +42,8 @@ class FakeSerial:
     def write(self, data: bytes) -> int:
         frame = bytes(data)
         self.writes.append(frame)
+        if self._write_foreign:
+            self._receive_buffer.extend(self._write_foreign.pop(0))
         # 读取命令是 3 字节帧 [地址][功能码][校验]，驱动器按功能码回一条定长数据。
         # 读命令不参与控制命令的 ACK 机制，所以两条分支互斥（真机上也是这样：
         # Response=None 仍然会回答读命令，见说明书 4.2 / 8.1）。
@@ -201,6 +207,31 @@ class Emm42DriverTests(unittest.TestCase):
 
         self.assertEqual(serial.drained, 1)
         self.assertEqual(serial.writes, [bytes.fromhex("01 F3 AB 01 00 6B")])
+
+    def test_a_foreign_frame_is_skipped_instead_of_becoming_our_ack(self) -> None:
+        """别人在**发包之后**才到线的帧也拦得住。
+
+        清缓冲清不掉"在路上"的应答：arm 的 6/7 号是 ``expect_ack=False``，发完就走，
+        它们的错误帧是在底盘开始等 ACK 之后几毫秒才到的（真机上是 ``07 00 EE 6B``）。
+        这不是自己的帧，跳过继续等，最后读到的仍是自己的 ``01 F3 02 6B``。
+        """
+        serial = FakeSerial(
+            acknowledge_emm42=True,
+            write_foreign=[bytes.fromhex("07 00 EE 6B")],
+        )
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        motor.enable(True)
+
+        self.assertEqual(serial.writes, [bytes.fromhex("01 F3 AB 01 00 6B")])
+
+    def test_skipped_foreign_frames_are_named_in_the_error(self) -> None:
+        """等了半天只有别人的帧：报错要点名，不能再写成"1 号轮 ACK 不对"。"""
+        serial = FakeSerial(write_foreign=[bytes.fromhex("07 00 EE 6B")])
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        with self.assertRaisesRegex(RuntimeError, r"no ACK.*07 00 ee 6b"):
+            motor.enable(True)
 
     def test_home_writes_requested_home_mode(self) -> None:
         self.motor.home(HomeMode.MULTI_TURN_COLLISION)

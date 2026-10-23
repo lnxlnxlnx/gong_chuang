@@ -38,7 +38,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Callable, Final, Optional, Protocol, Tuple
+from typing import Callable, Final, List, Optional, Protocol, Tuple
 
 
 class SerialPort(Protocol):
@@ -155,6 +155,19 @@ def _decode_signed(
     return -value if sign_byte == 0x01 else value
 
 
+def _foreign_note(foreign: List[bytes]) -> str:
+    """把"等待期间被跳过的别人的帧"缀在错误信息后面。
+
+    真正的元凶常常在**别人的地址**上：这台机器的总线上，6/7 号驱动器偶尔会对
+    收到的帧回 ``地址 00 EE 6B``（错误命令），而这些帧以前会被算到正在等 ACK 的
+    那台头上。报错时把它们原样列出来，才看得见到底是谁在说话。
+    """
+    if not foreign:
+        return ""
+    listed = ", ".join(frame.hex(" ") for frame in foreign)
+    return f" (discarded foreign frames: {listed})"
+
+
 class Emm42Driver:
     """Control one Emm42 V5.0 driver through its TTL UART port."""
 
@@ -162,6 +175,11 @@ class Emm42Driver:
     BAUDRATE = 115200  # 驱动器固定波特率
     CHECKSUM = 0x6B    # 固定帧尾字节(该协议所有命令都以 0x6B 结尾)
     MAX_RPM = 3000     # 速度上限
+
+    #: 等一条回包时最多跳过几条**别人的** 4 字节帧，之后就把最后读到的那条交回调用方报错。
+    #: 共用总线上出现别人的帧是正常的（``expect_ack=False`` 的那一侧不读应答），
+    #: 但数量有限；给个上限是为了"真有台驱动器在刷屏"时不会把等待拖成无限。
+    MAX_FOREIGN_FRAMES = 8
 
     #: 读取类命令的**整帧**长度(含地址、功能码与校验字节)，
     #: 逐条来自说明书 6.3.2 / 6.3.4。
@@ -414,11 +432,11 @@ class Emm42Driver:
         self._drain_stale_input(serial_port)
         serial_port.write(bytes((self.motor_id, function, self.CHECKSUM)))
         serial_port.flush()
-        reply = serial_port.read(total)
+        reply, foreign = self._read_reply_for(self.motor_id, total)
         if not reply:
             raise RuntimeError(
                 f"Emm42 motor {self.motor_id} read command "
-                f"0x{function:02X} received no reply"
+                f"0x{function:02X} received no reply" + _foreign_note(foreign)
             )
         if (
             len(reply) >= 3
@@ -428,7 +446,7 @@ class Emm42Driver:
         ):
             raise RuntimeError(
                 f"Emm42 motor {self.motor_id} rejected read command 0x{function:02X}: "
-                f"{reply.hex(' ')}"
+                f"{reply.hex(' ')}" + _foreign_note(foreign)
             )
         if (
             len(reply) != total
@@ -438,7 +456,7 @@ class Emm42Driver:
         ):
             raise RuntimeError(
                 f"Emm42 motor {self.motor_id} read command 0x{function:02X} returned "
-                f"unexpected reply: {reply.hex(' ')}"
+                f"unexpected reply: {reply.hex(' ')}" + _foreign_note(foreign)
             )
         return reply[2:-1]
 
@@ -544,11 +562,12 @@ class Emm42Driver:
         serial_port.flush()
         if not self.expect_ack:
             return
-        reply = serial_port.read(4)
+        reply, foreign = self._read_reply_for(target_address, 4)
         expected_prefix = bytes((target_address, function))
         if not reply:
             raise RuntimeError(
                 f"Emm42 motor {self.motor_id} command 0x{function:02X} received no ACK"
+                + _foreign_note(foreign)
             )
         is_expected_reply = (
             len(reply) == 4
@@ -559,12 +578,44 @@ class Emm42Driver:
         if not is_expected_reply:
             raise RuntimeError(
                 f"Emm42 motor {self.motor_id} command 0x{function:02X} returned unexpected ACK: {reply.hex(' ')}"
+                + _foreign_note(foreign)
             )
 
     def _require_serial(self) -> SerialPort:
         if self._serial is None:
             raise RuntimeError("call initialize() before sending commands")
         return self._serial
+
+    def _read_reply_for(self, expected_address: int, length: int) -> Tuple[bytes, List[bytes]]:
+        """读回包，跳过**不是发给本驱动器**的帧。
+
+        返回 ``(自己的那一帧或空, 被跳过的别人的帧)``。
+
+        共用一条总线时，"别人的帧"必然会出现，而且**不只在缓冲里躺着**：arm 的 6/7 号是
+        ``expect_ack=False``，发完命令就走，它们的应答是在之后几毫秒才到线的；底盘紧接着
+        等自己的 ACK，``read`` 就会先撞上它。真机上见到的正是这一条——报错写着"1 号轮
+        ACK 不对"，字节却是 ``07 00 EE 6B``（7 号回的"错误命令"）。
+
+        所以这里的规矩是：**先认地址，再认功能码**。不是自己的 4 字节完整帧就丢掉继续等，
+        最多丢 :data:`MAX_FOREIGN_FRAMES` 条；丢完还没等到自己的，就把最后那条交回调用方
+        报错（错误信息里会列出被丢掉的帧，避免又指错人）。``expected_address`` 为 0
+        （广播的 ``00 FF 66 6B``）时按老规矩直接返回，不做地址过滤。
+        """
+        foreign: List[bytes] = []
+        while True:
+            reply = self._require_serial().read(length)
+            if not reply:
+                return b"", foreign
+            if (
+                expected_address != 0
+                and len(reply) == 4
+                and reply[0] != expected_address
+                and reply[-1] == self.CHECKSUM
+                and len(foreign) < self.MAX_FOREIGN_FRAMES
+            ):
+                foreign.append(reply)
+                continue
+            return reply, foreign
 
     @staticmethod
     def _drain_stale_input(serial_port: SerialPort) -> None:
