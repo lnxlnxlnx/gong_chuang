@@ -398,6 +398,23 @@ class ServoConfig:
     safe_lift_pulses: int = 0
     #: 转底盘的角度超过这么多度时，就必须先抬升。
     safe_lift_angle_degrees: float = 1.0
+
+    # ------------------------------------------------------ 环心对准的落料补偿
+    #
+    # 闭环只保证"环心读数 = 目标读数"，它看不见料落在环心的哪一侧：镜头光轴与爪口
+    # 之间有固定偏差，抓料后料在爪里也会偏一侧。于是读数对准了、料却固定偏开。
+    # 这两个数就是**料实际偏离环心的量**，加在环心那一次的伺服目标上抵消掉。
+
+    #: 落料补偿的 x（毫米，相机系：**向右为正**）。料往环心右边偏多少就写多少。
+    #:
+    #: 落点误差 = 补偿量 − 实际偏移：照着现场看到的症状填，放一次看残差微调即可
+    #: （符号写反就是两倍偏差，一眼看得出）。只作用于环心路径
+    #: （:meth:`modules.grasp.runtime.Grasp.plan_ring` 与 ``align_ring``）；
+    #: 物料对准（``align_xy``）仍然对着 ``target``，否则两边一起平移、
+    #: 相对偏差一点没变。``0`` 表示不补偿，与加这个字段之前的行为完全一致。
+    ring_offset_x_mm: float = 0.0
+    #: 落料补偿的 y（毫米，相机系：**向下为正**），同 :attr:`ring_offset_x_mm`。
+    ring_offset_y_mm: float = 0.0
     #: 两条位置帧之间的最小间隔（秒）。
     #: **不能省。** 实测这台机器的 CH340 上，两条 ``FD`` 位置帧背靠背连发（间隔 0 ms）
     #: 会让**两帧都失效**——不是丢一帧，是两个轴都不动，而且驱动器 ``Response=None``
@@ -485,6 +502,11 @@ class ServoConfig:
                 raise ValueError(f"{name} 必须是正数")
         if self.z_min_mm >= self.z_max_mm:
             raise ValueError("z_min_mm 必须小于 z_max_mm")
+        # 落料补偿可以是负数（往左/往上偏），但不能是 NaN/inf：那会让目标读数变成 NaN，
+        # 于是"误差"全成了 NaN、比较恒为假，闭环永远走不到容差也不会报错。
+        for name in ("ring_offset_x_mm", "ring_offset_y_mm"):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} 必须是有限数")
 
     def step_limit_for(self, error_mm: float) -> int:
         """当前误差该用哪一档的单步上限。"""
@@ -824,6 +846,15 @@ def load_servo_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ServoConfig:
         ),
         find_max_steps=_integer(
             document.get("find_max_steps", defaults.find_max_steps), "find_max_steps"
+        ),
+        # 落料补偿：用 _number 而不是 _positive —— 往左/往上偏时是负数。
+        ring_offset_x_mm=_number(
+            document.get("ring_offset_x_mm", defaults.ring_offset_x_mm),
+            "ring_offset_x_mm",
+        ),
+        ring_offset_y_mm=_number(
+            document.get("ring_offset_y_mm", defaults.ring_offset_y_mm),
+            "ring_offset_y_mm",
         ),
     )
 

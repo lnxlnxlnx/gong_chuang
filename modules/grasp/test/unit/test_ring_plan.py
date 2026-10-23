@@ -159,9 +159,11 @@ class FakeSource:
         return self._target
 
 
-def make_grasp(target) -> tuple[Grasp, FakeArm, FakeSource]:
+def make_grasp(
+    target, config: ServoConfig | None = None
+) -> tuple[Grasp, FakeArm, FakeSource]:
     grasp = Grasp(
-        config=ServoConfig(),
+        config=config if config is not None else ServoConfig(),
         selector=ObjectSelector(),
         target=ServoTarget(x_mm=0.0, y_mm=0.0),
         jacobian=JACOBIAN,
@@ -189,6 +191,37 @@ class SessionPlanTests(unittest.TestCase):
         grasp._target = ServoTarget(x_mm=5.0, y_mm=0.0)
         result = grasp.plan_ring()
         self.assertEqual(result.base_pulses, 0, "读数等于目标，不该动")
+
+    def test_the_ring_offset_shifts_the_ring_target_only(self) -> None:
+        """落料补偿：读数正好等于「target + 补偿」时不该再动（料会落在环心）。"""
+        grasp, _arm, _source = make_grasp(
+            ring_target(reading=(7.5, 0.0)),
+            config=ServoConfig(ring_offset_x_mm=7.5),
+        )
+        # 补偿只加在环心那一次上：物料用的 target 一个数都没变。
+        self.assertEqual((grasp._target.x_mm, grasp._target.y_mm), (0.0, 0.0))
+        self.assertEqual(grasp._ring_target().x_mm, 7.5)
+        self.assertEqual(
+            grasp.plan_ring().base_pulses, 0, "读数等于补偿后的目标，不该动"
+        )
+
+    def test_without_an_offset_the_same_reading_still_moves(self) -> None:
+        """不配补偿（默认 0）时行为与加这个字段之前完全一致。"""
+        grasp, _arm, _source = make_grasp(ring_target(reading=(7.5, 0.0)))
+        self.assertEqual(grasp._ring_target().x_mm, 0.0)
+        self.assertNotEqual(grasp.plan_ring().base_pulses, 0)
+
+    def test_the_offset_follows_a_retaught_target(self) -> None:
+        """补偿是相对 ``target`` 的偏移：重标 target 之后环心目标跟着走。"""
+        grasp, _arm, _source = make_grasp(
+            ring_target(reading=(5.0, 0.0)),
+            config=ServoConfig(ring_offset_x_mm=7.5),
+        )
+        grasp._target = ServoTarget(x_mm=-2.5, y_mm=0.0)
+        self.assertEqual(grasp._ring_target().x_mm, 5.0)
+        self.assertEqual(
+            grasp.plan_ring().base_pulses, 0, "读数等于 target + 补偿，不该动"
+        )
 
     def test_no_ring_in_view_is_an_error(self) -> None:
         grasp, _arm, _source = make_grasp(None)
@@ -394,6 +427,17 @@ class ClosedLoopTests(unittest.TestCase):
         self.assertEqual(len(arm.moves), 2, arm.moves)   # 底座 + 伸缩，各一次
         self.assertAlmostEqual(result.response or 0.0, 1.0, places=6)
         self.assertLess(result.final_error_mm, 1.0)
+
+    def test_the_closed_loop_lands_on_the_compensated_target(self) -> None:
+        """落料补偿改的是闭环的**终点**：读数停在「target + 补偿」，不是停在 0。"""
+        grasp, arm = make_closed_loop(1.0)
+        grasp._config = ServoConfig(ring_offset_x_mm=7.5)
+        result = grasp.align_ring(gain=1.0)
+        self.assertTrue(result.aligned, result.summary())
+        # 脉冲要取整，落点差着半个脉冲的量级（0.036 mm），所以按 delta 比。
+        self.assertAlmostEqual(arm.reading[0], 7.5, delta=0.1)
+        self.assertAlmostEqual(arm.reading[1], 0.0, delta=0.1)
+        self.assertLess(result.final_error_mm, 0.1, "残差要跟补偿后的目标同一口径")
 
     def test_a_half_sensitive_machine_converges_by_learning_the_response(self) -> None:
         """真机只有配置的一半灵敏：闭环按实测算出响应比 0.5，第二步就补上了。"""

@@ -651,9 +651,12 @@ class Grasp:
 
         final_error = None
         if final_reading is not None and self._target is not None:
+            # 残差要跟**环心那一次的目标**比（含落料补偿），否则报出来的数与闭环停下的
+            # 判据不是同一个口径：补偿 7.5 mm 时它会一直显示差 7.5 mm。
+            ring_target = self._ring_target()
             final_error = math.hypot(
-                final_reading[0] - self._target.x_mm,
-                final_reading[1] - self._target.y_mm,
+                final_reading[0] - ring_target.x_mm,
+                final_reading[1] - ring_target.y_mm,
             )
         return RingAlignResult(
             steps=tuple(steps),
@@ -692,6 +695,20 @@ class Grasp:
             )
         return target
 
+    def _ring_target(self) -> ServoTarget:
+        """环心那一次伺服的**目标读数**：配置里的 ``target`` 加上落料补偿。
+
+        补偿只加在环心路径上（``ServoConfig.ring_offset_x_mm``）：物料对准仍然对着
+        ``self._target``。两边都加等于整体平移，料与环的相对偏差一点没变。
+
+        闭环看不见"料落在环心的哪一侧"（镜头光轴与爪口有固定偏差、料在爪里也会
+        偏），所以这份偏差只能量出来写进配置；落点误差 = 补偿量 − 实际偏移。
+        """
+        return ServoTarget(
+            x_mm=self._target.x_mm + self._config.ring_offset_x_mm,
+            y_mm=self._target.y_mm + self._config.ring_offset_y_mm,
+        )
+
     def _plan_for_ring(self, arm, target, *, scale_mm_per_px):
         """一帧已定位的环 → 各轴绝对位置（闭环与单次计划共用这一处）。"""
         from modules.grasp.drive.ring_plan import plan_ring_base
@@ -699,9 +716,10 @@ class Grasp:
         reading = self._ring_reading_in_jacobian_units(
             target, target.reading(), scale_mm_per_px
         )
+        ring_target = self._ring_target()
         plan = plan_ring_base(
             reading=reading,
-            target=(self._target.x_mm, self._target.y_mm),
+            target=(ring_target.x_mm, ring_target.y_mm),
             jacobian=self._jacobian,
             base_pulses=arm.turns_state.of("base").pulses,
             extension_pulses=arm.turns_state.of("extension").pulses,

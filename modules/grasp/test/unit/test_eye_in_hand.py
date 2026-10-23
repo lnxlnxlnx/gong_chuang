@@ -271,6 +271,31 @@ class ConfigFileTests(unittest.TestCase):
         self.assertIsNone(document["target_wait_seconds"])
         self.assertIsNone(load_servo_config().target_wait_seconds)
 
+    def test_the_ring_offset_is_written_in_the_project_config(self) -> None:
+        """落料补偿是现场量出来手改的数：两个键必须真的落在配置文件里。"""
+        document = json.loads(model.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        self.assertIn("ring_offset_x_mm", document)
+        self.assertIn("ring_offset_y_mm", document)
+        config = load_servo_config()
+        self.assertTrue(math.isfinite(config.ring_offset_x_mm))
+        self.assertTrue(math.isfinite(config.ring_offset_y_mm))
+
+    def test_the_ring_offset_defaults_to_zero_and_reads_back(self) -> None:
+        """不配 = 0，与加这个字段之前的行为一致；配了（含负数）原样读回来。"""
+        self.assertEqual(ServoConfig().ring_offset_x_mm, 0.0)
+        self.assertEqual(ServoConfig().ring_offset_y_mm, 0.0)
+        self.write({"ring_offset_x_mm": 7.5, "ring_offset_y_mm": -2.25})
+        config = load_servo_config(self.path)
+        self.assertEqual(config.ring_offset_x_mm, 7.5)
+        self.assertEqual(config.ring_offset_y_mm, -2.25)
+
+    def test_a_non_numeric_ring_offset_is_rejected(self) -> None:
+        for document in ({"ring_offset_x_mm": "7.5"}, {"ring_offset_y_mm": None}):
+            with self.subTest(document=document):
+                self.write(document)
+                with self.assertRaises(ServoError):
+                    load_servo_config(self.path)
+
     def test_target_wait_zero_keeps_the_old_semantics(self) -> None:
         """``0`` 与 ``null`` 是两件事：0 = 不加额外等待，null = 一直等。"""
         self.write({"target_wait_seconds": 0})

@@ -39,6 +39,9 @@ def main() -> None:
         robot.turntable.go_home()
         _move_axes_to(robot, {"lift": 495, "extension": 550, "base": 0}).wait()
         print("初始状态移动完毕")
+        place_box_from_repo_to_floor(robot, verbose=True)
+        place_box_from_repo_to_floor(robot, verbose=True)
+        return
         grab_box_from_floor_to_repo(robot, want_colors= ["red", "blue", "green"])
         place_box_to_box(robot, _want = "blue")
         place_box_to_box(robot, _want = "red")

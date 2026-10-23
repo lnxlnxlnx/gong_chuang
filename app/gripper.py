@@ -231,7 +231,9 @@ def place_box_from_repo_to_floor(robot: Robot, *, verbose: bool = False):
 
     try:
         for _ in range(3):
-            result = robot.grasp.align_ring()      # 只算：环心 → 各轴绝对位置，不动电机
+            # 容差按 2 mm 收：全局 tolerance_mm 是 6 mm（还给抓料用），放料要的是"落在
+            # 环心"，6 mm 的残差在 95 mm 的靶标上肉眼就看得出偏心。
+            result = robot.grasp.align_ring(tolerance_mm=2.0)  # 环心 → 各轴绝对位置
             base_deg     = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
             
