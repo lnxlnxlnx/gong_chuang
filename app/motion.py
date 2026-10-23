@@ -51,4 +51,10 @@ if __name__ == "__main__":
 
         # time.sleep(1)
         # input("开始抓取物料")
-        grab_box_from_turntable_to_repo(robot)
+        # grab_box_from_turntable_to_repo(robot)
+        # robot.chassis.forward(rpm = 60, duration = 8.5 * 0.5)
+        # robot.chassis.rotate_ccw(rpm = 60, duration = 1.75)
+        # robot.chassis.forward(rpm = 60, duration = 4)
+        
+        # 放置物料
+        place_box_from_repo_to_floor(robot)

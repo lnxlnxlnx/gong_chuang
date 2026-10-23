@@ -1,6 +1,6 @@
 {
   "gripper": {
-    "duration_ms": 250
+    "duration_ms": 400
   },
   "turntable": {
     "duration_ms": 1500,

@@ -116,9 +116,9 @@ def grab_box_from_turntable_to_repo(
     ``home`` 是进流程前先摆到的姿态，默认 :data:`READY_POSE`；传 ``None`` 表示这次不摆
     （调用方已经在这一姿态上时省一次往返；轴本来就停在目标上时也不会发帧）。
     """
-    robot.arm.move_axis_to_motor_degrees("lift", 720)
+    robot.arm.move_axis_to_motor_degrees("lift", 760)
     robot.arm.move_axis_to_motor_degrees("base", 350)
-    robot.arm.move_axis_to_motor_degrees("extension", 160)
+    robot.arm.move_axis_to_motor_degrees("extension", 150)
     
     # input("继续")
     try:
@@ -150,7 +150,7 @@ def grab_box_from_floor_to_repo(
     want_colors: list[str],
     verbose: bool = False,
     *,
-    home: dict[str, float] | None = {"lift": 660, "extension": 620.0, "base": 0},
+    home: dict[str, float] | None = {"lift": 760, "extension": 150.0, "base": 350},
 ):
     """把物料从地面圆环放到仓库里。不需要考虑初始状态。
 
@@ -209,19 +209,19 @@ def _grab_box_from_car(robot: Robot):
     batch.add(robot.arm.move_axis_to_motor_degrees("lift", 675))
     batch.add(robot.gripper.set_position(150, wait=False))
     batch.wait()
-    report = _move_axes_to(robot, {"lift": 980, "extension": 5, "base": 1048}).wait()
+    report = _move_axes_to(robot, {"lift": 980, "extension": 5, "base": 1058}).wait()
     robot.gripper.set_position(100)
     robot.arm.move_axis_to_motor_degrees("lift", 830)
     
     robot.gripper.close_jaws()
+    
     robot.arm.move_axis_to_motor_degrees("lift", 980)
-    _move_axes_to(robot, {"extension": 400.0, "base": 500}).wait()
     current_position_index = (current_position_index + 1) % len(TURN_TABLE_POSITIONS)
     batch = robot.motion.begin()
     batch.add(
         robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False)
     )
-    batch.add(_move_axes_to(robot, {"lift": 500, "extension": 400.0, "base": 0}))
+    batch.add(_move_axes_to(robot, {"lift": 760, "base": 420}))
     batch.wait()
 
 def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
@@ -248,15 +248,15 @@ def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
         robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False)
     )
     batch.add(robot.gripper.open_jaws(wait=False))
-    batch.add(_move_axes_to(robot, {"lift": 720, "extension": 270.0, "base": 350}))
+    batch.add(_move_axes_to(robot, {"lift": 760, "extension": 270.0, "base": 350}))
     batch.wait()
-    robot.arm.move_axis_to_motor_degrees("extension", 160)
+    robot.arm.move_axis_to_motor_degrees("extension", 150)
 
 def place_box_from_repo_to_floor(
     robot: Robot,
     *,
     verbose: bool = False,
-    home: dict[str, float] | None = None,
+    home: dict[str, float] | None = {"lift": 760, "extension": 10.0, "base": 420},
 ):
     '''把物料放到地面的圆环内。不需要考虑初始状态。
 
@@ -264,15 +264,13 @@ def place_box_from_repo_to_floor(
     中转位，所以整段保持原样；``home`` 只用来在它**之前**额外摆一次姿态，
     ``None`` 表示不摆。
     '''
-    _go_home(robot, home)
     batch = robot.motion.begin()
     batch.add(robot.gripper.open_jaws(wait=False))
     batch.add(robot.arm.move_axis_to_motor_degrees("lift", 375, wait=False))
     print("移动到安全位置")
     batch.wait()
-    time.sleep(1.0)
-    robot.arm.move_axis_to_motor_degrees("extension", 750.0)
-    time.sleep(1.0)
+    _go_home(robot, home)
+    input("继续")
 
     try:
         for _ in range(3):
@@ -291,7 +289,8 @@ def place_box_from_repo_to_floor(
                 _move_axes_to(robot, new_dir).wait()
                 
                 robot.gripper.open_jaws()
-            _move_axes_to(robot, {"lift": 375, "extension": 750.0, "base": 0}).wait()
+                robot.arm.move_axis_to_motor_degrees("lift", 375)
+            _go_home(robot, home)
             input("放料完成，回车继续，输入 q 跳过：").strip().lower()
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
