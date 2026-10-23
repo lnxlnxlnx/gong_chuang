@@ -96,8 +96,10 @@ def grab_box_from_turntable_to_repo(
     不落下去扑空（``SCENE_STABLE_TIMEOUT_SECONDS`` 是这段等待的上限，**不能设太短**：
     大动作之后桌面余振要好几秒才衰减完）。
     """
-    robot.arm.move_axis_to_motor_degrees("lift", 600)
-    _move_axes_to(robot, {"lift": 720, "extension": 370.0, "base": 350}).wait()
+    robot.arm.move_axis_to_motor_degrees("lift", 720)
+    robot.arm.move_axis_to_motor_degrees("base", 350)
+    robot.arm.move_axis_to_motor_degrees("extension", 160)
+    
     input("继续")
     try:
         for color in want_colors :
@@ -216,8 +218,9 @@ def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
         robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False)
     )
     batch.add(robot.gripper.open_jaws(wait=False))
-    batch.add(_move_axes_to(robot, {"lift": 720, "extension": 370.0, "base": 350}))
+    batch.add(_move_axes_to(robot, {"lift": 720, "extension": 270.0, "base": 350}))
     batch.wait()
+    robot.arm.move_axis_to_motor_degrees("extension", 160)
 
 def place_box_from_repo_to_floor(robot: Robot, *, verbose: bool = False):
     '''把物料放到地面的圆环内。不需要考虑初始状态。'''
