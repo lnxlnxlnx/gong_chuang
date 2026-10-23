@@ -51,6 +51,11 @@ class SerialPort(Protocol):
 
     本驱动只执行 ``serial_port.write(frame)`` 后 ``flush``，**不消费**这个返回值，
     所以这里只修正协议声明，不引入"短写要报错"之类的新行为——那是另一件事。
+
+    ``reset_input_buffer`` 不是可有可无的：同一个 ``Robot`` 会话里 arm 与 chassis 共用
+    这条总线，而 ``expect_ack=False`` 的驱动器发完命令不读应答，缓冲里就会留下别人的
+    字节。发命令前必须能丢掉它们，见 :meth:`Emm42Driver._drain_stale_input`。
+    真实现是 pyserial 的 ``Serial.reset_input_buffer``。
     """
 
     is_open: bool
@@ -60,6 +65,8 @@ class SerialPort(Protocol):
     def flush(self) -> None: ...
 
     def read(self, size: int) -> bytes: ...
+
+    def reset_input_buffer(self) -> None: ...
 
     def close(self) -> None: ...
 
@@ -404,6 +411,7 @@ class Emm42Driver:
             ) from None
 
         serial_port = self._require_serial()
+        self._drain_stale_input(serial_port)
         serial_port.write(bytes((self.motor_id, function, self.CHECKSUM)))
         serial_port.flush()
         reply = serial_port.read(total)
@@ -531,6 +539,7 @@ class Emm42Driver:
         serial_port = self._require_serial()
         target_address = self.motor_id if address is None else address
         frame = bytes((target_address, function)) + parameters + bytes((self.CHECKSUM,))
+        self._drain_stale_input(serial_port)
         serial_port.write(frame)
         serial_port.flush()
         if not self.expect_ack:
@@ -556,6 +565,20 @@ class Emm42Driver:
         if self._serial is None:
             raise RuntimeError("call initialize() before sending commands")
         return self._serial
+
+    @staticmethod
+    def _drain_stale_input(serial_port: SerialPort) -> None:
+        """发命令前丢掉输入缓冲里的**别人**的字节。
+
+        同一个 Robot 会话里 arm(5/6/7) 与 chassis(1~4) 共用这条总线，而
+        ``expect_ack=False`` 的驱动器发完命令就返回、不读应答；读超时之后迟到的回包、
+        以及帧被弄坏时驱动器回的 ``地址 00 EE 6B``（错误命令）也都留在缓冲里。
+
+        不先清掉，下一条 ``read(4)`` 会把**最早那 4 字节**当成自己的 ACK：报出来的
+        地址是别人的（真机上见过用 1 号的名义报出 6 号的错误帧），而真正的 ACK 反被
+        下一条命令读走。所以这是"共用总线 + 有的驱动器不回读"下唯一稳的读法。
+        """
+        serial_port.reset_input_buffer()
 
     @staticmethod
     def _require_range(name: str, value: int, minimum: int, maximum: int) -> None:

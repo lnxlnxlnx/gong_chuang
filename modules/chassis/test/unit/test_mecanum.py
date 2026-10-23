@@ -29,6 +29,10 @@ class FakeSerial:
         del self._receive_buffer[:size]
         return data
 
+    def reset_input_buffer(self) -> None:
+        """驱动每次发包前都会清缓冲：应答是 :meth:`write` 里当场产生的，这里没东西可清。"""
+        self._receive_buffer.clear()
+
     def close(self) -> None:
         self.is_open = False
 

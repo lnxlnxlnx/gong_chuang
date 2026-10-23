@@ -125,6 +125,10 @@ class FakeSerial:
         del self._receive_buffer[:size]
         return data
 
+    def reset_input_buffer(self) -> None:
+        """驱动每次发包前都会清缓冲：应答是 :meth:`write` 里当场产生的，这里没东西可清。"""
+        self._receive_buffer.clear()
+
     def close(self) -> None:
         self.is_open = False
 
@@ -165,9 +169,39 @@ class ArmAxesTestCase(unittest.TestCase):
             clock=self.clock,
             **settings,
         )
-        # 装配时已经使能三个轴；这些用例只看之后的动作帧。
+        # 装配时已经使能三个轴（帧间也留了间隔）；这些用例只看之后的动作帧与等待。
         self.serial.writes.clear()
+        self.sleep.calls.clear()
         return self.arm
+
+
+class EnableFrameSpacingTests(unittest.TestCase):
+    """三轴使能帧之间必须留间隔。
+
+    5/6/7 里只有 5 号会回包、6/7 号不回，所以 ``expect_ack=False`` 的那两条之间没有
+    任何自然的停顿；背靠背发帧会让帧在这台机器的 USB-TTL 上失效，驱动器回的那条
+    ``地址 00 EE 6B``（错误命令）没人读走，下一个用总线的人就会拿它当自己的 ACK。
+    """
+
+    def test_enable_frames_are_spaced_by_the_inter_frame_gap(self) -> None:
+        clock = FakeClock()
+        sleep = RecordingSleep(clock)
+        serial = FakeSerial()
+
+        RobotArm._from_settings(
+            config=fixture_config(),
+            port="/dev/ttyUSB0",
+            bus=serial,
+            sleep=sleep,
+            clock=clock,
+        )
+
+        self.assertEqual(
+            [frame[0] for frame in serial.writes],
+            [BASE_MOTOR_ID, LIFT_MOTOR_ID, EXTENSION_MOTOR_ID],
+        )
+        # 三条帧之间两个间隔，最后一条之后不再等。
+        self.assertEqual(sleep.calls, [DEFAULT_INTER_FRAME_SECONDS] * 2)
 
 
 class MoveAxesSameStartTests(ArmAxesTestCase):

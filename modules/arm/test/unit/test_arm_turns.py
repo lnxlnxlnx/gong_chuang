@@ -42,6 +42,10 @@ class FakeSerial:
     def read(self, size: int) -> bytes:
         return b""
 
+    def reset_input_buffer(self) -> None:
+        """只写不读的假总线：没有应答可清，保留方法是为了满足 SerialPort 协议。"""
+        pass
+
     def close(self) -> None:
         self.is_open = False
 

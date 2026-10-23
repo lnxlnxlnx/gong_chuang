@@ -76,6 +76,10 @@ class FakeSerial:
         del self._receive_buffer[:size]
         return data
 
+    def reset_input_buffer(self) -> None:
+        """驱动每次发包前都会清缓冲：应答是 :meth:`write` 里当场产生的，这里没东西可清。"""
+        self._receive_buffer.clear()
+
     def close(self) -> None:
         self.is_open = False
 
@@ -91,8 +95,9 @@ class UnitMoveTestCase(unittest.TestCase):
             bus=self.serial,
             sleep=self.sleep_calls.append,
         )
-        # 装配时已经使能三轴（3 条 0xF3 帧）；本文件只看之后的动作帧。
+        # 装配时已经使能三轴（3 条 0xF3 帧，帧间也留了间隔）；本文件只看之后的动作帧。
         self.serial.writes.clear()
+        self.sleep_calls.clear()
         return self.arm
 
 

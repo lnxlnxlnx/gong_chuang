@@ -89,6 +89,10 @@ class FakeEmm42Bus:
     def read(self, size: int) -> bytes:
         return b""
 
+    def reset_input_buffer(self) -> None:
+        """只写不读的假总线（机械臂三轴都是 ``expect_ack=False``），没有应答可清。"""
+        pass
+
     def close(self) -> None:
         self.is_open = False
 
@@ -116,7 +120,9 @@ class CrossModuleMotionTests(unittest.TestCase):
             sleep=self.clock.sleep,
             clock=self.clock,
         )
+        # 装配时已经使能三轴（并留了帧间隔）；本用例只看之后这三个模块的动作与等待。
         self.bus.writes.clear()
+        self.clock.slept.clear()
 
         self.gripper_servo = Mock()
         self.gripper_servo.read_position.return_value = 40  # 闭到 40：夹住物料了

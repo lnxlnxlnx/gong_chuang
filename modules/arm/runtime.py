@@ -287,7 +287,8 @@ class RobotArm:
             取值见 :data:`WAIT_MODES`。
         :param clock: 单调时钟；轮询模式下由它和 ``sleep`` 一起判定超时，
             测试注入假实现。
-        :param inter_frame_seconds: :meth:`move_axes` 连发多条缓存帧时的帧间隔；
+        :param inter_frame_seconds: 连续两条**单帧**命令之间该留的间隔：
+            :meth:`move_axes` 的缓存帧，以及使能/失能/停止这类逐轴命令都用它；
             见 :data:`modules.motor.drive.motion.DEFAULT_INTER_FRAME_SECONDS`。
         :param parallel_rotation_limit_pulses: 底座旋转与伸缩可并行的脉冲上限；
             见 :data:`modules.motor.drive.motion.DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`。
@@ -346,7 +347,7 @@ class RobotArm:
             传 ``bus`` 时默认 ``False``（借来的）。
         :param wait_mode: ``wait=True`` 时怎么知道动作走完了，
             取值见 :data:`WAIT_MODES`。
-        :param inter_frame_seconds: :meth:`move_axes` 连发缓存帧时的帧间隔；
+        :param inter_frame_seconds: 连续两条单帧命令之间该留的间隔（缓存位置帧、逐轴使能/失能/停止都用它）；
             ``None`` 用 :data:`modules.motor.drive.motion.DEFAULT_INTER_FRAME_SECONDS`。
             这是**USB-TTL 转接板的脾气**，换板子才需要动它。
         :param parallel_rotation_limit_pulses: 底座旋转与伸缩可并行的脉冲上限；
@@ -519,19 +520,30 @@ class RobotArm:
         self._stop_axes()
         self.pose_state.mark_unknown()
 
+    def _each_axis(self, action: Callable[["Emm42Driver"], None]) -> None:
+        """按地址顺序逐轴发**单帧**命令，帧间留 ``inter_frame_seconds``。
+
+        ``enable`` / ``disable`` / ``stop`` 这类单帧命令原来是一条接一条发出去的。
+        这台机器的 USB-TTL 上背靠背发帧会让帧失效（见
+        :data:`modules.motor.drive.motion.DEFAULT_INTER_FRAME_SECONDS`）：三轴里
+        5 号会回包、6/7 号不回，弄坏的帧只留下一条 ``地址 00 EE 6B``（错误命令）
+        没人读走，下一个用总线的人（底盘）就会把这条错误帧当成自己的 ACK。
+        """
+        for index, axis_name in enumerate(AXIS_NAMES):
+            if index:
+                self._sleep(self.inter_frame_seconds)
+            action(self._motors[axis_name])
+
     def _stop_axes(self) -> None:
-        for axis_name in AXIS_NAMES:
-            self._motors[axis_name].stop()
+        self._each_axis(lambda motor: motor.stop())
 
     def _disable_axes(self) -> None:
-        for axis_name in AXIS_NAMES:
-            self._motors[axis_name].enable(False)
+        self._each_axis(lambda motor: motor.enable(False))
 
     def enable_all(self) -> None:
         """按地址顺序给三个轴使能扭矩。``open`` 已经做过；需要重新使能时才调。"""
         self._require_open()
-        for axis_name in AXIS_NAMES:
-            self._motors[axis_name].enable(True)
+        self._each_axis(lambda motor: motor.enable(True))
 
     def disable_all(self) -> None:
         """释放三个轴的扭矩。位姿随之失效（松开之后轴可以被外力推动）。"""

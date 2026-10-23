@@ -17,18 +17,22 @@ class FakeSerial:
 
     def __init__(
         self,
-        replies: list[bytes] | None = None,
         *,
         acknowledge_emm42: bool = False,
         read_replies: dict[int, list[bytes]] | None = None,
+        control_replies: dict[int, bytes] | None = None,
     ) -> None:
-        self._receive_buffer = bytearray(b"".join(replies or []))
+        self._receive_buffer = bytearray()
         self._acknowledge_emm42 = acknowledge_emm42
         #: 功能码 -> 依次返回的应答帧；最后一条会一直重复，用来表达"状态不再变化"。
         self._read_replies = {
             function: list(frames) for function, frames in (read_replies or {}).items()
         }
+        #: 功能码 -> 该条控制命令的应答帧，用来表达"02 以外的状态"（如停止命令的 E2）。
+        self._control_replies = dict(control_replies or {})
         self.writes: list[bytes] = []
+        #: 发命令前清输入缓冲的次数；驱动每次发包都该清一次（见 ``reset_input_buffer``）。
+        self.drained = 0
         self.is_open = True
 
     def write(self, data: bytes) -> int:
@@ -38,10 +42,13 @@ class FakeSerial:
         # 读命令不参与控制命令的 ACK 机制，所以两条分支互斥（真机上也是这样：
         # Response=None 仍然会回答读命令，见说明书 4.2 / 8.1）。
         sequence = self._read_replies.get(frame[1]) if len(frame) == 3 else None
+        control = self._control_replies.get(frame[1]) if len(frame) > 3 else None
         if sequence:
             self._receive_buffer.extend(
                 sequence.pop(0) if len(sequence) > 1 else sequence[0]
             )
+        elif control is not None:
+            self._receive_buffer.extend(control)
         elif self._acknowledge_emm42 and len(frame) >= 3 and frame[-1] == 0x6B:
             self._receive_buffer.extend(bytes((frame[0], frame[1], 0x02, 0x6B)))
         return len(data)
@@ -53,6 +60,20 @@ class FakeSerial:
         data = bytes(self._receive_buffer[:size])
         del self._receive_buffer[:size]
         return data
+
+    def reset_input_buffer(self) -> None:
+        """丢掉还没被读走的字节：驱动每次发包前都会调一次。
+
+        真驱动器的 ``Response=None`` 不回答合法控制命令，却会回答**被它判为非法**的帧；
+        漏读一次就会毒到下一条命令。本假件的应答都在 :meth:`write` 里当场产生，
+        所以这里清掉的只可能是测试自己塞进去的"残留"（见 :meth:`push_stale`）。
+        """
+        self.drained += 1
+        self._receive_buffer.clear()
+
+    def push_stale(self, data: bytes) -> None:
+        """模拟"总线上别人留下的字节"（例如 ``expect_ack=False`` 那一侧漏读的错误帧）。"""
+        self._receive_buffer.extend(data)
 
     def close(self) -> None:
         self.is_open = False
@@ -158,12 +179,28 @@ class Emm42DriverTests(unittest.TestCase):
         self.assertEqual(self.serial.writes, [bytes.fromhex("01 FE 98 00 6B")])
 
     def test_stop_accepts_already_stopped_status(self) -> None:
-        serial = FakeSerial(replies=[bytes.fromhex("01 FE E2 6B")])
+        serial = FakeSerial(control_replies={0xFE: bytes.fromhex("01 FE E2 6B")})
         motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
 
         motor.stop()
 
         self.assertEqual(serial.writes, [bytes.fromhex("01 FE 98 00 6B")])
+
+    def test_stale_input_is_drained_before_every_command(self) -> None:
+        """总线上别人的字节不能算作自己的 ACK。
+
+        arm(5/6/7) 与 chassis(1~4) 共用一条总线，``expect_ack=False`` 的驱动器发完命令
+        不读应答；缓冲里留着的那 4 字节会顶替下一条命令的 ACK，报出来的地址还是别人的
+        （真机上见过用 1 号的名义报出 6 号的错误帧 ``06 00 EE 6B``）。
+        """
+        serial = FakeSerial(acknowledge_emm42=True)
+        serial.push_stale(bytes.fromhex("06 00 EE 6B"))
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        motor.enable(True)
+
+        self.assertEqual(serial.drained, 1)
+        self.assertEqual(serial.writes, [bytes.fromhex("01 F3 AB 01 00 6B")])
 
     def test_home_writes_requested_home_mode(self) -> None:
         self.motor.home(HomeMode.MULTI_TURN_COLLISION)

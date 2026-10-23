@@ -134,6 +134,10 @@ class LaserScannerTests(unittest.TestCase):
             def flush(self):
                 pass
 
+            def reset_input_buffer(self):
+                """``expect_ack=False`` 的只写假总线，没有残留可清。"""
+                pass
+
         serial_port = MotorSerial()
         motor = Emm42Driver("COM28", 8, expect_ack=False, serial_port=serial_port)
 
