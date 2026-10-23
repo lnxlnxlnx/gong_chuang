@@ -44,8 +44,9 @@ def func_run_half_map(car, profile: HardwareProfile) -> None:
     
 if __name__ == "__main__":
     with Robot.open(grasp=True, gripper=True, turntable=True, chassis = True) as robot:
-        robot.chassis.forward_left(rpm = 60, duration=3 * 0.5)      # 90
-        robot.chassis.forward(rpm=60, duration=8 * 0.5)     # 240
+        # robot.chassis.forward_left(rpm = 60, duration=4 * 0.5)      # 90
+        # robot.chassis.forward(rpm=60, duration=6.5 * 0.5)     # 240
+
         # time.sleep(1)
         input("开始抓取物料")
         grab_box_from_turntable_to_repo(robot)

@@ -13,7 +13,7 @@ SCENE_STABLE_TIMEOUT_SECONDS = 20.0
 
 #: 三轴待命中转姿态（升降抬到工作高度、伸缩伸到够料位、底座回正）。
 #: 只给一部分键也合法：``_move_axes_to`` 没给的轴一帧都不发。
-READY_POSE = {"lift": 720, "extension": 620.0, "base": 0}
+READY_POSE = {"lift": 720, "extension": 370.0, "base": 350}
 
 #: 出事时的安全回缩：只把伸缩轴收回**初始位**——``modules/arm/hardware.json`` 的
 #: ``initial_motor_degrees.extension = 270.0``。和 ``READY_POSE`` 不是一回事：那个是
@@ -118,6 +118,7 @@ def grab_box_from_turntable_to_repo(
     """
     robot.arm.move_axis_to_motor_degrees("lift", 600)
     _go_home(robot, home)
+    input("继续")
     try:
         for color in want_colors :
             # wait_scene_stable 返回 True = 看满最小等待（3.5 s）之后画面仍然静止，可以抓；
