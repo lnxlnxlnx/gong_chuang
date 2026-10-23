@@ -50,6 +50,8 @@ def _move_axes_to(robot: Robot, targets: dict[str, float]) -> MotionBatch:
 def _go_home(robot: Robot, home: dict[str, float] | None) -> None:
     """走到本次流程的入口姿态；``home=None`` 表示这次不走（跳过重复往返）。"""
     if home is not None:
+        if home["lift"] > 400:
+            robot.arm.move_axis_to_motor_degrees("lift", 400)
         _move_axes_to(robot, home).wait()
 
 
@@ -150,7 +152,7 @@ def grab_box_from_floor_to_repo(
     want_colors: list[str],
     verbose: bool = False,
     *,
-    home: dict[str, float] | None = {"lift": 760, "extension": 10.0, "base": 400},
+    home: dict[str, float] | None = {"lift": 760, "extension": 120.0, "base": 400},
 ):
     """把物料从地面圆环放到仓库里。不需要考虑初始状态。
 
@@ -166,6 +168,8 @@ def grab_box_from_floor_to_repo(
             robot.arm.move_axis_to_motor_degrees("lift", 90)
             robot.gripper.close_jaws()
             _place_box_to_repo(robot, verbose=True)
+            robot.chassis.backward(rpm=30, duration=1.35)
+            robot.arm.move_axis_to_motor_degrees("extension", 120)
             input(f"已抓取 {color} 物料，回车继续，输入 q 跳过：").strip().lower()
             
     except Exception as e:
@@ -296,7 +300,7 @@ def place_box_from_repo_to_floor(
                 robot.arm.move_axis_to_motor_degrees("lift", 375)
             _go_home(robot, home)
             input("放料完成，回车继续，输入 q 跳过：").strip().lower()
-            robot.chassis.forward(rpm=30, duration=1.45)
+            robot.chassis.forward(rpm=30, duration=1.35)
             time.sleep(1)       # 等待车子平稳
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
@@ -309,7 +313,7 @@ def place_box_to_box(
     robot: Robot,
     *,
     _want: str,
-    home: dict[str, float] | None = None,
+    home: dict[str, float] | None = {"lift": 760, "extension": 50.0, "base": 475},
 ):
     # home 只用来在对准之前额外摆一次姿态；这个函数今天没有入口姿态动作，默认不摆。
     _go_home(robot, home)
@@ -317,10 +321,10 @@ def place_box_to_box(
     extension_deg = robot.arm.turns_state.of("extension").motor_degrees
     base_deg = robot.arm.turns_state.of("base").motor_degrees
     _grab_box_from_car(robot)
-    _move_axes_to(robot, {"lift": 520, "extension": extension_deg, "base": base_deg}).wait()
+    _move_axes_to(robot, {"lift": 490, "extension": extension_deg, "base": base_deg}).wait()
     robot.gripper.open_jaws()
     robot.arm.move_axis_to_motor_degrees("lift", 695)
-    _move_axes_to(robot, {"lift": 720, "extension": 550, "base": 0}).wait()
+    _go_home(robot, home)
 
 
     

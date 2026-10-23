@@ -1,6 +1,6 @@
 {
   "vehicle": {
-    "acceleration": 5,
+    "acceleration": 150,
     "rotation_gain": 1.0,
     "rpm": 60
   },
