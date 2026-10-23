@@ -668,7 +668,11 @@ class Emm42Driver:
             discarded.extend(seen)
             is_expected_reply = (
                 len(reply) == self.ACK_LENGTH
-                and reply[:2] == bytes((target_address, function))
+                # 广播（地址 0）时每台驱动器用**自己的**地址回话，不能要求地址字节是 0：
+                # 真机上 ``00 FF 66 6B`` 收到 ``01 FF 02 6B``（1 号用自己的地址回话）。
+                # 与 ``_read_reply_for`` 那条"广播不做地址过滤"是同一个规矩。
+                and (target_address == 0 or reply[0] == target_address)
+                and reply[1] == function
                 and reply[2] in accepted_statuses
                 and reply[3] == self.CHECKSUM
             )
@@ -714,8 +718,8 @@ class Emm42Driver:
 
         所以这里的规矩是**字节流重新对齐**：
 
-        - ``[地址][...][0x6B]`` 且长度正确、地址是自己的（``expected_address=0`` 广播时不做
-          地址过滤）→ 交回调用方做功能码/状态校验；
+        - ``[地址][...][0x6B]`` 且长度正确，地址是自己的；广播帧没有地址可过滤，
+          改用功能码过滤 → 交回调用方做状态校验；
         - 整帧但不是自己的，或是 ``FD 9F`` 到位包（而本次等的不是位置 ACK）→ 记下来继续等；
         - 尾字节不是 ``0x6B``（半帧、坏帧、垃圾）→ **只丢一个字节**再对齐，剩下的等下一轮；
         - 一直没有合格帧（读超时）→ 返回空，把丢掉的字节原样交回调用方（报错时列出来）。
@@ -746,6 +750,15 @@ class Emm42Driver:
                     continue
                 del buffer[:length]
                 if expected_address != 0 and candidate[0] != expected_address:
+                    self._keep_discarded(discarded, junk, candidate)
+                    continue
+                if (
+                    expected_address == 0
+                    and function is not None
+                    and candidate[1] != function
+                ):
+                    # 广播没有地址可过滤，只能靠功能码认自己的回包：否则缓冲里任何完整帧
+                    # （别的功能码、别的模块迟到的回包）都会被当成广播的 ACK 交上去。
                     self._keep_discarded(discarded, junk, candidate)
                     continue
                 if (

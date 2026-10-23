@@ -216,6 +216,40 @@ class Emm42DriverTests(unittest.TestCase):
         self.motor.trigger_sync_motion()
         self.assertEqual(self.serial.writes, [bytes.fromhex("00 FF 66 6B")])
 
+    def test_trigger_sync_motion_accepts_the_answering_drivers_address(self) -> None:
+        """广播帧的回包地址是**回话那台驱动器自己的地址**，不是广播地址 00。
+
+        真机上 ``00 FF 66 6B`` 收到的是 ``01 FF 02 6B``（1 号用自己的地址回话）。
+        要求地址字节等于 0 会把这**条执行成功**的回包判成怪 ACK，四轮同步起步的脉冲动作
+        当场抛异常（位置帧已经缓存、同步帧也已经跑掉了，报错纯属误报）。
+        """
+        serial = FakeSerial(control_replies={0xFF: bytes.fromhex("01 FF 02 6B")})
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        motor.trigger_sync_motion()
+
+        self.assertEqual(serial.writes, [bytes.fromhex("00 FF 66 6B")])
+
+    def test_trigger_sync_motion_still_rejects_an_unaccepted_status(self) -> None:
+        """放宽的只有地址字节：状态不是 ``02`` 的广播回包仍然报错，不能被吞掉。"""
+        serial = FakeSerial(control_replies={0xFF: bytes.fromhex("01 FF E2 6B")})
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        with self.assertRaisesRegex(RuntimeError, "unexpected ACK: 01 ff e2 6b"):
+            motor.trigger_sync_motion()
+
+    def test_a_broadcast_ack_is_matched_by_function_not_by_address(self) -> None:
+        """广播没有地址可过滤，功能码对不上的整帧不能顶替同步 ACK。
+
+        清输入缓冲挡不住"在路上"的迟到帧（另一个模块的回包在广播帧之后才落到缓冲里），
+        所以广播这一侧必须靠功能码认自己的回包；认出来是别人的就记进丢弃清单继续等。
+        """
+        serial = FakeSerial(control_replies={0xFF: bytes.fromhex("01 F3 02 6B")})
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        with self.assertRaisesRegex(RuntimeError, "received no ACK.*01 f3 02 6b"):
+            motor.trigger_sync_motion()
+
     def test_move_absolute_encodes_absolute_mode(self) -> None:
         self.motor.move_absolute(
             degrees=360.0,
