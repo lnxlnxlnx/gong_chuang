@@ -181,6 +181,20 @@ class Emm42Driver:
     #: 但数量有限；给个上限是为了"真有台驱动器在刷屏"时不会把等待拖成无限。
     MAX_FOREIGN_FRAMES = 8
 
+    #: 不等回包的命令（``expect_ack=False``）**发完之后**必须留的静默时间（秒）。
+    #:
+    #: 这台机器的 USB-TTL（CH340）上，上一帧还没出完就写下一帧会**把下一帧弄坏**：
+    #: 帧里混进上一帧的字节，于是本该收到命令的那台（比如底盘 1 号）一声不响，而地址
+    #: 恰好对上的那台（上一帧是发给 5/6/7 的，地址就落在这三个里）回一条
+    #: ``地址 00 EE 6B``（错误命令）。真机现象就是"1 号轮等了 100 ms 没有 ACK，
+    #: 缓冲里却有一条 07 号的错误帧"。
+    #:
+    #: **等回包的命令不需要它**：读 ACK 本身就要一个来回（≥1 ms），已经把两帧分开了
+    #: （菜单 4 单独跑底盘一直没问题，就是这么分开的）。所以这里只补"发完不管"这一种。
+    #: 取值与 :data:`modules.motor.drive.motion.DEFAULT_INTER_FRAME_SECONDS` 同源
+    #: （现场实测 30 ms 足够）；不直接 import 那一份是因为 motion 依赖本模块，会成环。
+    UNACKED_SETTLE_SECONDS: Final = 0.03
+
     #: 读取类命令的**整帧**长度(含地址、功能码与校验字节)，
     #: 逐条来自说明书 6.3.2 / 6.3.4。
     #: ``0x36`` 是 8 字节而不是 7——位置值前面还有一个符号字节，少算一个字节整帧就错位。
@@ -200,6 +214,7 @@ class Emm42Driver:
         pulses_per_revolution: int = 3200,
         expect_ack: bool = True,
         serial_port: Optional[SerialPort] = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         # 地址 1..255, 同一串口总线上可用不同地址挂多台驱动器
         if not 1 <= motor_id <= 255:
@@ -215,6 +230,8 @@ class Emm42Driver:
         self.pulses_per_revolution = pulses_per_revolution
         # 测试时可注入 FakeSerial, 避免真正打开串口
         self._serial = serial_port
+        # 不等回包的命令发完之后要留静默，见 ``UNACKED_SETTLE_SECONDS``；测试可注入假实现
+        self._sleep = sleep
 
     def initialize(self) -> "Emm42Driver":
         """Open the configured USB-TTL serial port at 115200 baud."""
@@ -561,6 +578,10 @@ class Emm42Driver:
         serial_port.write(frame)
         serial_port.flush()
         if not self.expect_ack:
+            # 发完不管的命令必须把总线让出来：紧接着写下一帧（可能是另一个模块的）会
+            # 把那一帧弄坏，见 ``UNACKED_SETTLE_SECONDS``。arm 的 6/7 号使能之后隔 0 ms
+            # 就是底盘 1 号的使能，真机上坏掉的正是后面这一帧。
+            self._sleep(self.UNACKED_SETTLE_SECONDS)
             return
         reply, foreign = self._read_reply_for(target_address, 4)
         expected_prefix = bytes((target_address, function))

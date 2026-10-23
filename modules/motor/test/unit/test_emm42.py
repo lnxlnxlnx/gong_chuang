@@ -143,6 +143,42 @@ class Emm42DriverTests(unittest.TestCase):
 
         self.assertEqual(serial.writes, [bytes.fromhex("01 F3 AB 01 00 6B")])
 
+    def test_an_unacked_command_leaves_the_bus_idle_before_the_next_frame(self) -> None:
+        """发完不管的命令后面必须留静默，否则下一帧会被这台 CH340 弄坏。
+
+        arm 的 6/7 号就是这种驱动器：它们的使能帧发完 0 ms 就是底盘 1 号的使能帧，
+        真机上坏掉的是后面那一帧——1 号收不到合法命令，缓冲里却多出一条 7 号的
+        ``07 00 EE 6B``（错误命令）。
+        """
+        slept: list[float] = []
+        serial = FakeSerial()
+        motor = Emm42Driver(
+            "/dev/ttyUSB1",
+            motor_id=6,
+            serial_port=serial,
+            expect_ack=False,
+            sleep=slept.append,
+        )
+
+        motor.enable(True)
+
+        self.assertEqual(slept, [Emm42Driver.UNACKED_SETTLE_SECONDS])
+
+    def test_an_acked_command_does_not_settle_because_the_ack_already_spaces_frames(self) -> None:
+        """等回包的命令不用再加静默：读 ACK 的一个来回已经把两帧分开了。"""
+        slept: list[float] = []
+        serial = FakeSerial(acknowledge_emm42=True)
+        motor = Emm42Driver(
+            "/dev/ttyUSB1",
+            motor_id=1,
+            serial_port=serial,
+            sleep=slept.append,
+        )
+
+        motor.enable(True)
+
+        self.assertEqual(slept, [])
+
     def test_set_speed_encodes_direction_speed_and_acceleration(self) -> None:
         self.motor.set_speed(Direction.CCW, rpm=1500, acceleration=10)
         self.assertEqual(self.serial.writes, [bytes.fromhex("01 F6 01 05 DC 0A 00 6B")])
