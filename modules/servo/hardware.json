@@ -3,7 +3,7 @@
     "port": "COM35"
   },
   "jetson": {
-    "port": "/dev/ttyUSB1"
+    "port": "/dev/ttyUSB0"
   },
   "bus": {
     "baudrate": 115200,

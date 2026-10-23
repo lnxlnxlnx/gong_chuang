@@ -231,5 +231,67 @@ class MainFlowTests(unittest.TestCase):
         self.assertFalse(args.check)
 
 
+class CheckEngineTests(unittest.TestCase):
+    """``--check`` 必须带着配置里的类别表加载引擎。
+
+    engine 自己只有张量形状，类别数错了只能在加载时拿 ``4 + 类别数`` 拦下来；
+    验收如果不把类别表传进构造器，七类 engine 会被内置的四类表判成"对不上"，
+    于是构建成功却报验收失败。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.engine = _touch(Path(self._tmp.name) / "best.engine")
+        self.names = ["red", "yellow", "blue", "green", "tg1", "tg2", "tg3"]
+
+    def _fake_detector(self, seen, *, channels=11):
+        class FakeDetector:
+            def __init__(self, path, **kwargs):
+                seen["path"] = path
+                seen["class_names"] = kwargs.get("class_names")
+                names = list(kwargs.get("class_names") or ())
+                if 4 + len(names) != channels:
+                    raise ValueError(
+                        f"输出 {channels - 4} 个类别（4 + {channels - 4} = {channels} 个通道），"
+                        f"但类别表有 {len(names)} 个"
+                    )
+                self.input_shape = (1, 3, 320, 320)
+                self.output_shape = (1, channels, 2100)
+                self.input_size = 320
+                self.class_names = names
+
+            def infer(self, blob):
+                return None
+
+            def close(self):
+                pass
+
+        return FakeDetector
+
+    def test_class_table_reaches_the_detector(self) -> None:
+        seen = {}
+        out = io.StringIO()
+        with patch(
+            "modules.vision.drive.yolov8.YOLOv8Detector", self._fake_detector(seen)
+        ), redirect_stdout(out):
+            status = build_engine.check_engine(self.engine, class_names=self.names)
+        self.assertEqual(status, 0)
+        self.assertEqual(seen["class_names"], self.names)
+        self.assertIn("tg1", out.getvalue())
+
+    def test_mismatch_tells_you_not_to_rebuild(self) -> None:
+        seen = {}
+        err = io.StringIO()
+        with patch(
+            "modules.vision.drive.yolov8.YOLOv8Detector", self._fake_detector(seen, channels=8)
+        ), redirect_stderr(err), redirect_stdout(io.StringIO()):
+            status = build_engine.check_engine(self.engine, class_names=self.names)
+        self.assertEqual(status, 3)
+        message = err.getvalue()
+        self.assertIn("不要重建", message)
+        self.assertNotIn("build_engine --force", message)
+
+
 if __name__ == "__main__":
     unittest.main()

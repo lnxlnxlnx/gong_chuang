@@ -124,7 +124,7 @@ def grab_box_from_turntable_to_repo(
 
 def grab_box_from_floor_to_repo(robot: Robot, want_colors: list[str], verbose: bool = False):
     """把物料从地面圆环放到仓库里。不需要考虑初始状态。"""
-    _move_axes_to(robot, {"lift": 660, "extension": 620.0, "base": 0}).wait()
+    _move_axes_to(robot, {"lift": 720, "extension": 620.0, "base": 0}).wait()
     print("移动到抓料位置")
     try:
         for color in want_colors:
