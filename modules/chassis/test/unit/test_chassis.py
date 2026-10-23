@@ -49,6 +49,48 @@ class ChassisFacadeTests(unittest.TestCase):
     def test_facade_exposes_single_wheel_access_for_service_operations(self) -> None:
         self.assertIs(self.chassis.wheel(WheelPosition.FL), self.drive.get_wheel(WheelPosition.FL))
 
+    def test_forward_with_mm_uses_the_position_mode(self) -> None:
+        serial = FakeSerial()
+        drive = MecanumDrive(
+            "COM14", serial_port=serial, sleep=lambda _seconds: None, mm_per_wheel_rev=160.0
+        )
+        chassis = MecanumChassis(drive)
+
+        counts = chassis.forward(rpm=200, mm=160.0)
+
+        self.assertEqual(counts, [3200, 3200, 3200, 3200])
+        self.assertEqual([frame[1] for frame in serial.writes[:4]], [0xFD] * 4)
+        self.assertEqual(serial.writes[4], bytes.fromhex("00 FF 66 6B"))
+
+    def test_drive_mm_is_exposed_on_the_facade(self) -> None:
+        serial = FakeSerial()
+        drive = MecanumDrive(
+            "COM14", serial_port=serial, sleep=lambda _seconds: None, mm_per_wheel_rev=160.0
+        )
+        chassis = MecanumChassis(drive)
+
+        counts = chassis.drive_mm(1.0, 0.0, 80.0, rpm=200, wait=False)
+
+        self.assertEqual(counts, [1600, 1600, 1600, 1600])
+
+    def test_rotation_methods_do_not_take_mm(self) -> None:
+        """旋转不改变车心位置：``rotate_*`` 连这个关键字都没有。"""
+        with self.assertRaises(TypeError):
+            self.chassis.rotate_cw(mm=100)  # type: ignore[call-arg]
+
+    def test_rpm_may_be_omitted_when_the_drive_has_a_default(self) -> None:
+        serial = FakeSerial()
+        drive = MecanumDrive(
+            "COM14", serial_port=serial, sleep=lambda _seconds: None, default_rpm=45
+        )
+        chassis = MecanumChassis(drive)
+
+        chassis.forward()
+
+        self.assertEqual(
+            [int.from_bytes(frame[3:5], "big") for frame in serial.writes[:4]], [45, 45, 45, 45]
+        )
+
 
 class ChassisLifecycleTests(unittest.TestCase):
     """统一生命周期：关闭幂等、每项收尾独立尝试、关闭后动作失败。"""

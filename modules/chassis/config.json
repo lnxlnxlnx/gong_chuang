@@ -1,7 +1,8 @@
 {
   "vehicle": {
     "acceleration": 5,
-    "rotation_gain": 1.0
+    "rotation_gain": 1.0,
+    "rpm": 60
   },
   "profiles": {
     "jetson": {
