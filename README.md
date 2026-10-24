@@ -103,7 +103,7 @@ with MecanumChassis.open() as car:    # 读配置 + 打开（或借用）步进�
 |---|---|---|---|
 | `pulses` | 位置模式：本次走多少脉冲（正数，方向由动作方法决定） | 必填（第一个位置参数） | 可选关键字；给 `pulses` 就走位置模式 |
 | `duration` | 速度模式：一条速度命令持续多少秒 | 不支持（机械臂只有相对位置模式） | 可选；与 `pulses` 只能给一个 |
-| `rpm` | 目标转速，缺省用配置值 | 可选关键字 | 必填（第一个位置参数） |
+| `rpm` | 目标转速，缺省用配置值 | 可选关键字 | 可选（缺省用 `config.json` 的 `vehicle.rpm`） |
 | `acceleration` | 曲线加减速档位 `0..255`，缺省用配置值 | 可选关键字 | 可选 |
 | `wait` | `True`（默认）等到动作走完再返回报告；`False` 只发命令、返回**票据** | 默认 `True` | 默认 `True`（位置模式用） |
 
@@ -112,7 +112,7 @@ with MecanumChassis.open() as car:    # 读配置 + 打开（或借用）步进�
 - 轮子位置模式默认走 Emm42 多机同步：四条 `0xFD` 帧缓存后发 `00 FF 66 6B` 同时启动；0 脉冲的轮子不下发。
 - **帧间必须留间隔**（`DEFAULT_INTER_FRAME_SECONDS`，30 ms）：这台机器的 CH340 上背靠背发帧会让后面的帧失效。机械臂逐轴命令、底盘逐轮命令与同步广播都由代码自己插这个间隔，调用方不用管。
 - 上层整车 API：`MecanumChassis` 的 `forward` / `backward` / `left` / `right` / `rotate_cw` / `rotate_ccw` / `forward_left` / `forward_right` / `backward_left` / `backward_right`，都可带 `duration`（速度模式）、`pulses`（位置模式，按峰值轮）或 `mm`（位置模式，按车心位移，需标定）或都不带（持续运动）。
-- 底盘驱动层（`car.drive`）还有两个通用入口：`drive(vx, vy, omega, rpm)`（速度模式，任意方向）、`drive_pulses(vx, vy, omega, pulses, rpm)` / `drive_mm(vx, vy, mm, rpm)`（位置模式，任意方向）。
+- 底盘驱动层（`car.drive`）还有三个通用入口：`drive(vx, vy, omega, rpm)`（速度模式，任意方向）、`drive_pulses(vx, vy, omega, pulses, rpm)` / `drive_mm(vx, vy, mm, rpm)`（位置模式，任意方向）。
 - 单轮维护：`car.drive.get_wheel(w)` 拿到 `Emm42Driver`；`enable_wheel` / `set_wheel_speed` / `stop_wheel` 是逐轮命令，`enable_all` / `disable_all` / `stop` 是四轮一起。
 - 当前实车使用标定后的麦轮坐标变换 `motion_transform="calibrated"`，四轮横移都会参与运动。
 - 若装配后方向反了：整车方向反 → 把 `drive()` 的 `vx`/`vy` 取反；辊子排布不同 → 换 `pattern="O"`；单轮转向反 → 在 `wheel_signs` 给该轮 `-1`。
