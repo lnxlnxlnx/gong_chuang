@@ -1,50 +1,35 @@
-"""机械臂上层：统一生命周期、相对脉冲原语与两个**绝对坐标**入口。
+"""机械臂上层：统一生命周期、相对脉冲原语与绝对脉冲目标。
 
 真实定义就在这里（原 ``modules/arm/drive/robot_arm.py`` 已退出）。驱动层
-(:mod:`modules.motor.drive.emm42`) 只负责协议帧，本模块负责"爪子该去哪"。
+(:mod:`modules.motor.drive.emm42`) 只负责协议帧，本模块负责"这条轴走多少"。
 
 ## 生命周期
 
 ```python
 with RobotArm.open() as arm:          # 读配置 + 开（或借）一条串口
-    arm.move_up(pulses=800)           # 相对脉冲，含义与单位不变
+    arm.move_up(pulses=800)           # 相对脉冲
 ```
 
 上层不再自己 ``initialize()`` / 使能 / 收尾：``open`` 已经做过，``close`` 或 ``with``
 负责收尾。``stop`` 只是"停住执行器"，不关连接、不额外失能。
 
-## 两套坐标，同一个夹持点
+## 两种给目标的方式
 
-- :meth:`RobotArm.move_cylindrical`：``base_degrees`` / ``radial_mm`` / ``height_mm``；
-- :meth:`RobotArm.move_to`：基座 XYZ 毫米，逆解后进入同一套规划与执行。
+- **相对原语**：``move_up`` / ``move_down`` / ``move_forward`` / ``move_backward`` /
+  ``rotate_cw`` / ``rotate_ccw``，单位是脉冲（正数 = 该轴正方向）；
+- **绝对脉冲目标**：:meth:`RobotArm.move_axis_to_motor_degrees` /
+  :meth:`RobotArm.move_axis_to_motor_pulses`，给的是"相对原点走到哪个电机位置"
+  （``3200 脉冲 = 360°``，不取模），增量由 :attr:`turns_state` 的读数算出来，
+  所以同一个目标反复调用是幂等的。超出单帧上限会自动拆段。
+  零点由配置的 ``initial_motor_degrees`` 声明，回零之后即 0。
 
-两者都是**绝对位置**（不是本次增量），都定位**爪口中心（实际夹持点）**，参考系是：
-
-- ``height_mm`` / ``z_mm``：台面为 0，向上为正；
-- XY 原点：基座旋转轴与台面参考平面的交点（不是摄像头光心，也不是"回零后所在位置"）；
-- ``base_degrees``：底座实际角位置，``+X`` 是标定的 0°，``+Y`` 是沿 ``rotate_cw``
-  正方向转 90° 后的方向；角度符号沿用 CW 为正。
-
-绝对定位要求"位姿已知"（显式回零或用已标定测量写入），并且要在**发第一条运动帧之前**
-完成全部预检——目标、每一段中间位姿、每一帧的整数脉冲都在
-:mod:`modules.arm.motion_plan` 里算完。
-
-## 相对原语仍然直接可用
-
-``move_up`` / ``move_down`` / ``move_forward`` / ``move_backward`` / ``rotate_cw`` /
-``rotate_ccw`` / ``move_base_degrees`` / ``move_lift_mm`` / ``move_radial_mm`` 的含义、
-单位与参数**都不变**。它们不自行绕安全廊道，也不改变调用者指定的动作；``wait=True``
-时按实际下发的整数脉冲推进位姿，``wait=False`` 会让位姿变成未知。
-
-``move_cylindrical_by`` / ``move_by`` 是同一条路上的**一次多轴组合**：各走一个增量
-（度 / 毫米），同样不需要位姿已知——极坐标的每个轴本来就能相对走。唯一的例外是
-``move_by`` 的 x/y：X-Y 到 (底座角, 半径) 的换算随所在方位变化，所以那一对增量需要
-当前位姿才能分解，详见那里的说明。
+绝对 XYZ / 圆柱坐标那套（``motion_plan``、位姿推算、回零建参考）已经退出：抓取走的是
+**脉冲闭环**（相机看画面挪多少像素 → 每像素多少脉冲），不需要毫米级绝对位姿。标定记录
+（``homing`` / ``limits`` / ``safe_pose``）仍留在 hardware.json 里，代码不再读它们。
 
 ## 一次让多根轴动：``move_axes``
 
-``move_cylindrical_by`` 是**串行**的（抬升 → 伸缩 → 底座，每段等完再发下一段）；
-:meth:`RobotArm.move_axes` 是**并行**的那一个，默认走 Emm42 的多机同步三步法：
+:meth:`RobotArm.move_axes` 默认是**并行**的那一个，默认走 Emm42 的多机同步三步法：
 
 ```
 逐轴发 0xFD（多机同步标志 = 01）缓存住 → 帧间留 DEFAULT_INTER_FRAME_SECONDS
@@ -54,7 +39,7 @@ with RobotArm.open() as arm:          # 读配置 + 开（或借）一条串口
 于是三根轴是**真的同时起步**（轮子早就是这么走的，见 ``MecanumDrive``），
 而不是"发完第一条再发第二条"那种差几十毫秒的伪并行。代价是它们**各自到位**：
 谁走的路短谁先停。想让它们同时停要按轴改 rpm（联动/插补），那是另一件事，
-本模块刻意不做——``motion_plan`` 也写着"不增加多轴插补"。
+本模块刻意不做。
 
 并行**不是无条件的**：底座要转的角度超过
 :data:`modules.motor.drive.motion.DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES` 时不许和
@@ -69,12 +54,11 @@ with RobotArm.open() as arm:          # 读配置 + 开（或借）一条串口
 
 ```python
 ticket = arm.move_up(pulses=800, wait=False)   # 帧已经发出去了
-ticket.wait()                                   # 到点 → 推进位姿 → 返回 MotionReport
+ticket.wait()                                   # 到点 → 返回 MotionReport
 ```
 
 票据的 ``estimated_seconds`` 就是过去那份报告里同名字段，"还要等多久"因此在这条路上
-一样看得见；而位姿从"永远未知"变成"等完就对上"——**不调用 ``wait`` 的话和以前完全一样**。
-多轴的那一份票据会把三根轴的位姿一起推进，并返回一个报告元组。
+一样看得见。多轴的那一份票据 ``wait()`` 之后给出这一组的报告元组。
 
 ## 等一次动作走完：两种策略
 
@@ -160,7 +144,7 @@ WAIT_MODES = (WAIT_ESTIMATE, WAIT_IN_POSITION)
 #: 多轴模式：各轴先缓存、再一条广播让它们**同时起步**（默认）。
 AXES_SAME_START = "same_start"
 
-#: 多轴模式：按安全顺序**逐轴**走完再走下一轴（与 :meth:`RobotArm.move_cylindrical_by` 同序）。
+#: 多轴模式：按安全顺序**逐轴**走完再走下一轴（与 :meth:`_serial_order` 同序）。
 AXES_SERIAL = "serial"
 
 #: 允许的多轴模式，见模块文档字符串的"一次让多根轴动"一节。
@@ -182,7 +166,7 @@ def _require_axes_mode(value: str) -> str:
 def _serial_order(moves: "List[Tuple[str, int]]") -> "List[Tuple[str, int]]":
     """按``AXES_SERIAL`` 的安全顺序重排：抬升 → 伸缩 → 底座 → 下降。
 
-    与 :meth:`RobotArm.move_cylindrical_by` 同一条规矩：要抬升就先抬，要下降就放到最后
+    与 :func:`_serial_order` 同一条规矩：要抬升就先抬，要下降就放到最后
     （免得在低位转动底座或前伸），只走平面时先伸缩、再转底座。
     """
     by_axis = dict(moves)
@@ -276,7 +260,7 @@ class RobotArm:
         self._bus = bus
         self._owns_bus = bool(owns_bus) and bus is not None
         self._closed = False
-        #: 三轴的命令脉冲里程表；与位姿分开，因为它一个标定都不需要（见 arm_state）。
+        #: 三轴的命令脉冲里程表：一个标定都不需要，所以永远有值（见 arm_state）。
         #: **启程读数**取自配置的 ``initial_motor_degrees``：程序启动那一刻轴若不在原点上
         #: （换爪子、重新对齿之后就是这种情况），就按那里的声明起算；回零 / 绝对归零会把
         #: 原点重新定义，届时读数照旧清成 0。
@@ -433,7 +417,7 @@ class RobotArm:
 
         每项独立尝试：停报错不该让失能与关串口一个都不做。第一项错误不阻断其他项，
         全部试完才报告，错误清单含每个失败阶段、以第一项为 ``__cause__``。
-        重复调用不再发任何命令。位姿立即变成未知（连接没了，谁也不知道轴在哪）。
+        重复调用不再发任何命令。
         """
         if self._closed:
             return
@@ -473,8 +457,7 @@ class RobotArm:
     def stop(self) -> None:
         """停住三个轴；不关连接、不额外失能。
 
-        机械结构上的位置随停止失效（急停之后驱动器可能丢步），所以位姿立即变成未知：
-        上层若还要用绝对坐标，必须显式重新回零。
+        急停之后驱动器可能丢步，里程表只记下发过的脉冲，与真实位置未必一致。
         """
         self._require_open()
         self._stop_axes()
@@ -505,11 +488,11 @@ class RobotArm:
         self._each_axis(lambda motor: motor.enable(True))
 
     def disable_all(self) -> None:
-        """释放三个轴的扭矩。位姿随之失效（松开之后轴可以被外力推动）。"""
+        """释放三个轴的扭矩（松开之后轴可以被外力推动）。"""
         self._require_open()
         self._disable_axes()
 
-    # ------------------------------------------------------------- 位姿
+    # ------------------------------------------------- 按里程表走绝对脉冲位置
     def move_axis_to_motor_pulses(
         self,
         axis_name: str,
@@ -559,8 +542,7 @@ class RobotArm:
         停在别处，第一次绝对定位会先把那段差额走掉——差额由配置的 ``initial_motor_degrees``
         声明（见 :meth:`modules.arm.config.ArmConfig.initial_motor_pulses`）。
 
-        注意别和 :meth:`move_base_degrees` 搞混：那个是**输出轴**角度、按增量走。
-        """
+                """
         return self.move_axis_to_motor_pulses(
             axis_name,
             motor_pulses_for_degrees(
@@ -693,7 +675,7 @@ class RobotArm:
         reports = ticket.wait()
         ```
 
-        与 :meth:`move_cylindrical_by` 的分工：那个是**串行**的（按安全顺序逐段走完），
+        与 :meth:`_serial_order` 的分工：那个是**串行**的（按安全顺序逐段走完），
         这个是**并行**的（默认 Emm42 多机同步三步法：逐轴缓存 → 广播触发一起起步）。
         并行的代价是**各自到位**——谁走的路短谁先停；想让它们同时停要按轴改 rpm
         （联动/插补），本模块刻意不做。
@@ -704,7 +686,7 @@ class RobotArm:
         :param wait: ``True`` 等整组走完，返回报告元组；``False`` 返回票据。
         :returns: ``wait=True`` 时是按 :data:`modules.arm.config.AXIS_NAMES` 顺序的报告元组
             （只含真发了帧的轴）；``wait=False`` 时是 :class:`~modules.motion.MotionTicket`，
-            它的 ``wait()`` 返回同样的元组并把这几根轴的位姿一起推进。
+            它的 ``wait()`` 返回同样的报告元组。
         :raises ValueError: 轴名/脉冲非法、``mode`` 不认识、底座与伸缩的并行超限，
             或者 ``mode=AXES_SERIAL`` 配 ``wait=False``（那两者互相矛盾）。
         """
@@ -771,8 +753,6 @@ class RobotArm:
         self._require_axes_can_run_together(moves)
         speed = self.config.rpm if rpm is None else rpm
         accel = self.config.acceleration if acceleration is None else acceleration
-        # 位姿在动作在途时会变成未知，所以先把**发帧之前**那一份位姿收好：
-        # 收尾时必须从它起算，否则异步动作就再也算不回位置了。
         buffered: List[str] = []
         sent: List[MotionReport] = []
         try:
@@ -829,7 +809,7 @@ class RobotArm:
         *,
         already_waited: bool,
     ) -> Tuple[MotionReport, ...]:
-        """等一组已触发的多轴动作走完，把这一组的位移一起记进位姿，返回补全的报告。
+        """等一组已触发的多轴动作走完，返回补全了等待时长与状态\u7684报告。
 
         ``already_waited=True`` 表示"估算那一段已经睡过了"（票据自己的 ``wait`` 睡的），
         所以这里只补轮询；``False`` 表示还没等过（同步调用），按 :attr:`wait_mode` 等。
@@ -901,10 +881,10 @@ class RobotArm:
         acceleration: Optional[int],
         wait: bool,
     ) -> Union[MotionReport, MotionTicket]:
-        """发一条带符号的相对动作，并按**实际下发的整数脉冲**推进位姿。
+        """发一条带符号的相对动作，并按**实际下发的整数脉冲**记账。
 
-        位姿更新只有这一处：方向原语与单位制方法都走它，所以"相对毫米再调底层动作"
-        不会把同一次位移累计两遍。
+        记账只有 ``_send`` 一处：方向原语与绝对脉冲目标都走它，所以同一次位移
+        不会被累计两遍。
 
         ``wait=True`` 返回 :class:`MotionReport`；``wait=False`` 返回
         :class:`~modules.motion.MotionTicket`——那时动作**还没有结论**，
@@ -929,8 +909,7 @@ class RobotArm:
         )
         if wait:
             return report
-        # 只发了帧、没等它走完：什么时候到位不知道，位置不可信——等票据收尾时才推进。
-        # 起点必须是**发帧之前**那一份位姿：下面这一句之后就再也读不到了。
+        # 只发了帧、没等它走完：结论要等票据到点才有。
         return self._move_ticket(axis_name, pulses, rpm, acceleration, report)
 
     def _instant_ticket(self, subject: str, result: object) -> MotionTicket:
