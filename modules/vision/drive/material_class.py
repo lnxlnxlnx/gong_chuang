@@ -1,7 +1,7 @@
 """是哪一种物料：把检测框翻译成"哪一种物料"+ 中文标签 + 置信度。
 
-职责单一：只回答"是哪一种"。"有没有"在 ``modules.vision.drive.material_presence``，
-框从哪来在 ``modules.vision.drive.material_yolo``，多远在 ``modules.vision.drive.material_distance``。
+职责单一：只回答"是哪一种"。框从哪来在 ``modules.vision.drive.material_yolo``，
+多远（毫米）由 ``material_face`` + 针孔模型回答。
 
 类别名来自模型自己的类别表（``config.json`` 的 ``model.class_names``，见
 ``modules.vision.drive.yolov8.DEFAULT_CLASS_NAMES`` 的兜底）；中文标签用
@@ -77,7 +77,7 @@ class MaterialClassifier:
         materials: class names that count as materials.
         labels: class name -> Chinese label; defaults to
             :data:`DEFAULT_MATERIAL_LABELS`.
-        min_score / min_area_px: same filters as :class:`modules.vision.drive.material_presence`
+        min_score / min_area_px: 过滤弱框与小框的门槛
             so both modules agree on what a valid box is.
         pick: how the "top" candidate is chosen — currently always by confidence
             (kept as a parameter so a nearest-to-ring rule can be added later).

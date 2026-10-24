@@ -15,6 +15,8 @@ base_degrees = atan2(Y, X)        radial_mm = hypot(X, Y)
 ```
 
 高度 ``height_mm`` 是**离台面**的高度，向上为正。它由相机深度换算而来
+（``table_depth − point_depth``），不是机械臂自己的绝对坐标——本机械臂只按脉冲走。
+
 ## 单位与脉冲
 
 只用两个机器常数，且都来自实测标定：

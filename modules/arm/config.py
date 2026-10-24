@@ -377,10 +377,12 @@ def load_arm_config(
 
     - ``rpm`` / ``acceleration`` / ``default_pulses`` / ``max_pulses`` 是调参，留在
       ``config.json`` 的 ``motion`` 段；
-    - 轴地址、减速比、导程、行程、安全位、回零方式是**硬件事实**，全在 ``hardware.json``；
+    - 轴地址、减速比、导程、启程读数（`initial_motor_degrees`）是**硬件事实**，全在
+      ``hardware.json``；``limits`` / ``safe_pose`` / ``homing`` 只剩加载校验，
+      代码不再用它们做运动决策（见 ``modules/arm/docs/机械臂Emm42三轴控制说明.md``）；
     - 脉冲/圈是驱动器细分，只有一份，读 ``modules/motor/hardware.json``（``bus`` 段）。
 
-    返回值仍然是**合并后的** :class:`ArmConfig` 快照：``motion_plan`` / ``runtime`` /
+    返回值仍然是**合并后的** :class:`ArmConfig` 快照：``runtime`` /
     测试都不需要知道它来自两个文件，只有写配置的人需要。
 
     任何一项缺失都报出具体的**文件与键名**，不退回代码默认值——默认值会让"漏写"看起来

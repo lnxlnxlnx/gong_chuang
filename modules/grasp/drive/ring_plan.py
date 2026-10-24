@@ -27,7 +27,8 @@ robot.arm.move_axis_to_motor_degrees("extension", plan.extension)   # 伸缩绝�
 
 所以这里返回的角度与 :meth:`modules.arm.runtime.RobotArm.move_axis_to_motor_degrees`
 是同一个口径（电机轴，3200 脉冲 = 360°，不取模）。因为是绝对位置，算完隔多久再走都
-对得上——只要中间**没回零**（``home_all`` 会清零里程表）。
+对得上——只要中间**没清零里程表**（现在没有代码会自动清零，只有手动
+``turns_state.mark_origin()`` 或改 ``initial_motor_degrees`` 才会重定义原点）。
 
 ## 一次线性化：够用，但要复核
 
@@ -150,7 +151,7 @@ class RingBasePlan:
         ``axes=("base",)``。
 
         计划记录的是**算的时候**那个姿态下的绝对角度，所以执行前不要回零
-        （``home_all`` 会把里程表清零，绝对值就不再指向同一个位置）。
+        （清零里程表之后，之前算出来的绝对值就不再指向同一个位置）。
 
         :returns: 每根轴一份 ``MotionReport``（按 ``axes`` 顺序）。
         """
