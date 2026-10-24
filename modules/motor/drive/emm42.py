@@ -508,7 +508,9 @@ class Emm42Driver:
         self._drain_stale_input(serial_port)
         serial_port.write(bytes((self.motor_id, function, self.CHECKSUM)))
         serial_port.flush()
-        reply, seen = self._read_reply_for(self.motor_id, total)
+        # 功能码也要交给匹配器：只比对地址时，同一条总线**同地址**的残留帧（上一轮的
+        # ``NN FF 02 6B`` 之类）会被当成这条读命令的回包。
+        reply, seen = self._read_reply_for(self.motor_id, total, function=function)
         note = _discarded_note(seen)
         if not reply:
             # 走到这里说明"没读到一条结构完整、地址对得上的回包"：驱动器回的
@@ -718,9 +720,10 @@ class Emm42Driver:
 
         所以这里的规矩是**字节流重新对齐**：
 
-        - ``[地址][...][0x6B]`` 且长度正确，地址是自己的；广播帧没有地址可过滤，
-          改用功能码过滤 → 交回调用方做状态校验；
-        - 整帧但不是自己的，或是 ``FD 9F`` 到位包（而本次等的不是位置 ACK）→ 记下来继续等；
+        - ``[地址][...][0x6B]`` 且长度正确，地址是自己的、功能码对得上 → 交回调用方做
+          状态校验。地址与功能码**两条都要**：广播帧没有地址可过滤，只能靠功能码；
+          单播只看地址时，同地址上一轮遗留的帧会被当成这次的回包；
+        - 整帧但不是自己的、功能码对不上的、或是 ``FD 9F`` 到位包 → 记下来继续等；
         - 尾字节不是 ``0x6B``（半帧、坏帧、垃圾）→ **只丢一个字节**再对齐，剩下的等下一轮；
         - 一直没有合格帧（读超时）→ 返回空，把丢掉的字节原样交回调用方（报错时列出来）。
 
@@ -752,20 +755,16 @@ class Emm42Driver:
                 if expected_address != 0 and candidate[0] != expected_address:
                     self._keep_discarded(discarded, junk, candidate)
                     continue
-                if (
-                    expected_address == 0
-                    and function is not None
-                    and candidate[1] != function
-                ):
-                    # 广播没有地址可过滤，只能靠功能码认自己的回包：否则缓冲里任何完整帧
-                    # （别的功能码、别的模块迟到的回包）都会被当成广播的 ACK 交上去。
+                if function is not None and candidate[1] != function:
+                    # 功能码对不上就不可能是这次交换的回包，**单播也一样**：同一台驱动器
+                    # 上一轮遗留的 ``01 FF 02 6B``（同步广播的 ACK）与本次的 ``01 FD 02 6B``
+                    # 只差这个字节，只比地址就会把它当成自己的回包。
                     self._keep_discarded(discarded, junk, candidate)
                     continue
-                if (
-                    function != 0xFD
-                    and candidate[1] == 0xFD
-                    and candidate[2] == self.REACHED_STATUS
-                ):
+                if candidate[1] == 0xFD and candidate[2] == self.REACHED_STATUS:
+                    # 到位包（``Response=Reached`` / ``Both``）**永远**不是命令 ACK——等的
+                    # 就是位置命令（``0xFD``）时也一样：它是上一段动作结束时异步发的，
+                    # 撞进这次的读窗口就被当成"状态 9F"，把下一条命令判成失败。
                     self._keep_discarded(discarded, junk, candidate)
                     continue
                 return candidate, self._flush_leftovers(discarded, junk, buffer)

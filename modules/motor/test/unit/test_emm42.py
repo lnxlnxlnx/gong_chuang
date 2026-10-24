@@ -482,6 +482,40 @@ class Emm42GarbledReplyTests(unittest.TestCase):
 
         self.assertEqual(serial.writes, [bytes.fromhex("01 F3 AB 01 00 6B")])
 
+    def test_a_stale_broadcast_ack_is_not_taken_as_a_unicast_reply(self) -> None:
+        """上一轮同步广播留下的 ``01 FF 02 6B`` 不能顶替 1 号轮的位置命令回包。
+
+        真机现场：``forward_left`` 只给两只轮子发缓存帧，广播 ``00 FF 66 6B`` 却让四台
+        都回话、只读走第一帧；紧接着 ``forward`` 给 1 号轮发 ``0xFD``，只比地址的老匹配
+        把那条残留帧当成了它的 ACK，报 ``command 0xFD returned unexpected ACK``。
+        """
+        serial = FakeSerial(
+            acknowledge_emm42=True,
+            write_foreign=[bytes.fromhex("01 FF 02 6B")],
+        )
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        motor.move_relative_pulses(800, rpm=80, acceleration=200)
+
+        self.assertEqual(len(serial.writes), 1)
+
+    def test_a_reached_packet_is_not_taken_as_a_position_ack(self) -> None:
+        """等位置命令的 ACK 时，上一段动作的 ``01 FD 9F 6B`` 也要丢掉。
+
+        它与真正的 ACK 只差状态字节；以前只在"等的不是位置命令"时才过滤，于是位置
+        命令把上一段的到位包当成"状态 9F"判成失败——这正是两个动作之间必须插 sleep
+        才不出错的那条路。
+        """
+        serial = FakeSerial(
+            acknowledge_emm42=True,
+            write_foreign=[bytes.fromhex("01 FD 9F 6B")],
+        )
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        motor.move_relative_pulses(800, rpm=80, acceleration=200)
+
+        self.assertEqual(len(serial.writes), 1)
+
     def test_the_bus_is_waited_out_when_bytes_are_still_arriving(self) -> None:
         """清缓冲时帧还在路上：要等到线安静再发，否则剩下的半帧会被拼进自己的回包。"""
         slept: list[float] = []
@@ -599,6 +633,22 @@ class Emm42ReadCommandTests(unittest.TestCase):
 
                 self.assertTrue(motor.read_status().in_position)
                 self.assertEqual(serial.writes, [bytes.fromhex("01 3A 6B")])
+
+    def test_a_read_reply_is_matched_by_function_too(self) -> None:
+        """读命令的回包也要认功能码：上面那条 ``0x3B`` 是回零状态，不是电机状态。
+
+        两者都是 4 字节、地址都可能是自己，只比地址就会把回零标志解成"未使能"。
+        """
+        serial = FakeSerial(
+            read_replies={0x3A: [bytes.fromhex("01 3A 03 6B")]},
+            write_foreign=[bytes.fromhex("01 3B 00 6B")],
+        )
+        motor = Emm42Driver("/dev/ttyUSB1", motor_id=1, serial_port=serial)
+
+        status = motor.read_status()
+
+        self.assertTrue(status.enabled)
+        self.assertTrue(status.in_position)
 
     def test_read_command_surfaces_the_driver_error_frame(self) -> None:
         motor, _ = no_ack_driver({0x36: [bytes.fromhex("01 00 EE 6B")]})
