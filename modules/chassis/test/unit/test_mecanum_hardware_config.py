@@ -160,7 +160,6 @@ class MecanumHardwareConfigTests(unittest.TestCase):
         # profile 的校准值真的传到了驱动上。
         self.assertEqual(drive.call_args.kwargs["motion_transform"], expected.motion_transform)
         self.assertEqual(drive.call_args.kwargs["motor_ids"], expected.motor_ids)
-        drive.return_value.initialize.assert_called_once_with()
         drive.return_value.enable_all.assert_called_once_with(True)
 
     def test_the_module_level_motor_config_path_override_is_used(self) -> None:

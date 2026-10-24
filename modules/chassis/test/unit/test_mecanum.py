@@ -6,7 +6,7 @@ import unittest
 
 from modules.chassis.drive.mecanum import MecanumDrive, WheelPosition, WHEEL_ORDER
 from modules.motor.drive.motion import DEFAULT_INTER_FRAME_SECONDS, estimate_move_seconds
-from modules.motor.drive.emm42 import Direction, HomeMode
+from modules.motor.drive.emm42 import Direction
 
 #: 两帧之间该留的静默；断言里逐条列出来，表示"帧间有空隙"这件事是被测试守住的。
 GAP = DEFAULT_INTER_FRAME_SECONDS
@@ -235,32 +235,6 @@ class ConvenienceMethodTests(MecanumDriveTests):
 
 
 class LowLevelApiTests(MecanumDriveTests):
-    def test_move_wheels_relative_sends_four_position_frames(self) -> None:
-        self.car.move_wheels_relative(90, -90, 180, -180, rpm=120, acceleration=5)
-        self.assertEqual([frame[0] for frame in self.serial.writes[:4]], [1, 2, 3, 4])
-        self.assertEqual([frame[1] for frame in self.serial.writes[:4]], [0xFD] * 4)
-        self.assertEqual([frame[-2] for frame in self.serial.writes[:4]], [1] * 4)
-        self.assertEqual(self.serial.writes[4], bytes.fromhex("00 FF 66 6B"))
-
-    def test_move_wheels_absolute_sends_four_position_frames(self) -> None:
-        self.car.move_wheels_absolute(90, 90, 90, 90, rpm=120, acceleration=5)
-        self.assertEqual([frame[0] for frame in self.serial.writes[:4]], [1, 2, 3, 4])
-        self.assertEqual([frame[1] for frame in self.serial.writes[:4]], [0xFD] * 4)
-        self.assertEqual([frame[-2] for frame in self.serial.writes[:4]], [1] * 4)
-        self.assertEqual(self.serial.writes[4], bytes.fromhex("00 FF 66 6B"))
-
-    def test_set_speeds_direct(self) -> None:
-        self.car.set_speeds(10, -20, 30, -40)
-        self.assertEqual(
-            self.serial.writes,
-            [
-                bytes.fromhex("01 F6 00 00 0A 0A 00 6B"),
-                bytes.fromhex("02 F6 01 00 14 0A 00 6B"),
-                bytes.fromhex("03 F6 00 00 1E 0A 00 6B"),
-                bytes.fromhex("04 F6 01 00 28 0A 00 6B"),
-            ],
-        )
-
     def test_enable_all_sends_four_enable_frames(self) -> None:
         self.car.enable_all(True)
         self.assertEqual(
@@ -278,17 +252,6 @@ class LowLevelApiTests(MecanumDriveTests):
     def test_stop_wheel_sends_single_estop(self) -> None:
         self.car.stop_wheel(WheelPosition.RL)
         self.assertEqual(self.serial.writes, [bytes.fromhex("03 FE 98 00 6B")])
-
-    def test_move_wheel_relative_passthrough(self) -> None:
-        self.car.move_wheel_relative(WheelPosition.FL, degrees=-360.0, rpm=1500, acceleration=0)
-        self.assertEqual(
-            self.serial.writes,
-            [bytes.fromhex("01 FD 01 05 DC 00 00 00 0C 80 00 00 6B")],
-        )
-
-    def test_home_wheel_passthrough(self) -> None:
-        self.car.home_wheel(WheelPosition.RR, HomeMode.MULTI_TURN_COLLISION)
-        self.assertEqual(self.serial.writes, [bytes.fromhex("04 9A 02 00 6B")])
 
     def test_get_wheel_returns_underlying_driver(self) -> None:
         self.assertIs(self.car.get_wheel(WheelPosition.FL), self.car.wheels[WheelPosition.FL])
@@ -378,19 +341,6 @@ class PulseModeTests(unittest.TestCase):
 
         self.assertEqual([frame[0] for frame in self.serial.writes[:2]], [1, 3])
         self.assertEqual([frame[2] for frame in self.serial.writes[:2]], [int(Direction.CW), int(Direction.CCW)])
-        self.assertEqual(self.serial.writes[2], bytes.fromhex("00 FF 66 6B"))
-
-    def test_move_wheels_absolute_pulses_encodes_absolute_mode(self) -> None:
-        self.car.move_wheels_absolute_pulses(0, 3200, -3200, 0, rpm=200, acceleration=5)
-
-        # FL/RR 是 0 脉冲，不下发；帧尾两字节 = [绝对模式标志, 同步标志]。
-        self.assertEqual([frame[0] for frame in self.serial.writes[:2]], [2, 3])
-        self.assertEqual(
-            [frame[2] for frame in self.serial.writes[:2]],
-            [int(Direction.CW), int(Direction.CCW)],
-        )
-        self.assertEqual([frame[-3] for frame in self.serial.writes[:2]], [1, 1])
-        self.assertEqual([frame[-2] for frame in self.serial.writes[:2]], [1, 1])
         self.assertEqual(self.serial.writes[2], bytes.fromhex("00 FF 66 6B"))
 
     def test_zero_kinematics_stops_instead_of_moving(self) -> None:

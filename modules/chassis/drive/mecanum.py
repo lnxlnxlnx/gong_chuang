@@ -34,7 +34,7 @@ from modules.motor.drive.motion import (
     DEFAULT_SETTLE_SECONDS,
     estimate_move_seconds,
 )
-from modules.motor.drive.emm42 import Direction, Emm42Driver, HomeMode, SerialPort
+from modules.motor.drive.emm42 import Direction, Emm42Driver, SerialPort
 
 
 class WheelPosition(IntEnum):
@@ -203,13 +203,6 @@ class MecanumDrive:
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
-    def initialize(self) -> "MecanumDrive":
-        """返回自身以供链式调用；共享串口在构造时已打开。
-
-        注意：四台驱动共用同一个串口对象，因此这里不会重复 open。
-        """
-        return self
-
     @property
     def owns_serial(self) -> bool:
         """这条总线是不是本对象打开的；借用的不归它关。"""
@@ -283,67 +276,9 @@ class MecanumDrive:
             direction, abs(signed_rpm), acceleration if acceleration is not None else self.acceleration
         )
 
-    def set_wheel_acceleration(self, wheel: WheelPosition, acceleration: int) -> None:
-        """设单个轮子的加速度档 (0..255)，由下一次发出的命令携带。"""
-        self.acceleration = acceleration  # 缺省用全局值，这里语义上即为“设置默认加速度”
-
     def stop_wheel(self, wheel: WheelPosition) -> None:
         """让单个轮子立即停止（发 EStop 帧）。"""
         self.wheels[wheel].stop()
-
-    def move_wheel_relative(self, wheel: WheelPosition, degrees: float, rpm: int, acceleration: int | None = None) -> None:
-        """单轮相对角度移动；正角度=前进方向。"""
-        self.get_wheel(wheel).move_relative(degrees, rpm, acceleration if acceleration is not None else self.acceleration)
-
-    def move_wheel_absolute(self, wheel: WheelPosition, degrees: float, rpm: int, acceleration: int | None = None) -> None:
-        """单轮绝对角度移动。"""
-        self.get_wheel(wheel).move_absolute(degrees, rpm, acceleration if acceleration is not None else self.acceleration)
-
-    def move_wheels_relative(
-        self,
-        fl: float,
-        fr: float,
-        rl: float,
-        rr: float,
-        rpm: int,
-        acceleration: int | None = None,
-        synchronized: bool = True,
-    ) -> None:
-        """按 FL、FR、RL、RR 逻辑顺序让四个轮子相对移动指定角度。"""
-        for wheel, degrees in zip(WHEEL_ORDER, (fl, fr, rl, rr)):
-            self.get_wheel(wheel).move_relative(
-                degrees,
-                rpm,
-                acceleration if acceleration is not None else self.acceleration,
-                synchronized=synchronized,
-            )
-        if synchronized:
-            self.wheels[WHEEL_ORDER[0]].trigger_sync_motion()
-
-    def move_wheels_absolute(
-        self,
-        fl: float,
-        fr: float,
-        rl: float,
-        rr: float,
-        rpm: int,
-        acceleration: int | None = None,
-        synchronized: bool = True,
-    ) -> None:
-        """按 FL、FR、RL、RR 逻辑顺序让四个轮子到达绝对角度。"""
-        for wheel, degrees in zip(WHEEL_ORDER, (fl, fr, rl, rr)):
-            self.get_wheel(wheel).move_absolute(
-                degrees,
-                rpm,
-                acceleration if acceleration is not None else self.acceleration,
-                synchronized=synchronized,
-            )
-        if synchronized:
-            self.wheels[WHEEL_ORDER[0]].trigger_sync_motion()
-
-    def home_wheel(self, wheel: WheelPosition, mode: HomeMode) -> None:
-        """让单个轮子执行回零。"""
-        self.wheels[wheel].home(mode)
 
     def move_wheels_relative_pulses(
         self,
@@ -364,26 +299,6 @@ class MecanumDrive:
         self._move_wheel_frames(
             (fl, fr, rl, rr),
             lambda motor, pulses, accel: motor.move_relative_pulses(
-                pulses, rpm, accel, synchronized=synchronized
-            ),
-            acceleration,
-            synchronized,
-        )
-
-    def move_wheels_absolute_pulses(
-        self,
-        fl: int,
-        fr: int,
-        rl: int,
-        rr: int,
-        rpm: int,
-        acceleration: int | None = None,
-        synchronized: bool = True,
-    ) -> None:
-        """按 FL、FR、RL、RR 顺序让四个轮子到达绝对脉冲位置。"""
-        self._move_wheel_frames(
-            (fl, fr, rl, rr),
-            lambda motor, pulses, accel: motor.move_absolute_pulses(
                 pulses, rpm, accel, synchronized=synchronized
             ),
             acceleration,
@@ -576,18 +491,6 @@ class MecanumDrive:
             matrix = _MATRIX_O if self.pattern == "O" else _MATRIX_X
         w = omega * self.rotation_gain
         return [a * vx + b * vy + c * w for a, b, c in matrix]
-
-    def set_speeds(self, fl: int, fr: int, rl: int, rr: int, acceleration: int | None = None) -> None:
-        """直接按 [FL, FR, RL, RR] 顺序设置四个轮的带符号轮速。
-
-        这是最低层的整车入口：绕过矩阵，由上层自行决定各轮 RPM。
-        """
-        signed = dict(zip(WHEEL_ORDER, (fl, fr, rl, rr)))
-        self._each_wheel(
-            lambda wheel, motor: self.set_wheel_speed(
-                wheel, signed[wheel], acceleration
-            )
-        )
 
     def stop(self) -> None:
         """四个轮子全部立即停止（EStop）。"""

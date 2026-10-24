@@ -57,7 +57,6 @@ from modules.chassis.config import (
 from modules.chassis.drive.mecanum import (
     MecanumDrive,
     SerialPort,
-    WheelPosition,
 )
 from modules.motor.config import DEFAULT_HARDWARE_PATH as MOTOR_HARDWARE_PATH
 from modules.motor.config import load_bus_config
@@ -157,7 +156,6 @@ class MecanumChassis:
             drive._owns_serial = bool(owns_bus)
         session = cls(drive)
         try:
-            drive.initialize()
             drive.enable_all(True)
         except BaseException as primary:
             try:
@@ -222,62 +220,11 @@ class MecanumChassis:
         self._require_open()
         self.drive.enable_all()
 
-    def enable_all(self) -> None:
-        self.enable()
-
     def disable(self) -> None:
         self._require_open()
         self.drive.disable_all()
 
-    def disable_all(self) -> None:
-        self.disable()
-
-    def wheel(self, wheel: WheelPosition):
-        """返回底层单轮对象，供回零等维护操作使用。"""
-        self._require_open()
-        return self.drive.get_wheel(wheel)
-
-    def set_wheel_speed(self, wheel: WheelPosition, signed_rpm: int, acceleration: int | None = None) -> None:
-        self._require_open()
-        self.drive.set_wheel_speed(wheel, signed_rpm, acceleration)
-
     # ------------------------------------------------------------- 整车动作
-    def drive_pulses(
-        self,
-        vx: float,
-        vy: float,
-        omega: float,
-        pulses: int,
-        rpm: int | None = None,
-        acceleration: int | None = None,
-        *,
-        wait: bool = True,
-    ) -> list[int] | None:
-        """逆运动学 + 脉冲数：任意方向按**峰值轮**走固定脉冲数。
-
-        ``pulses`` 量的是走得最远那只轮；要按车心距离走就用 :meth:`drive_mm`。
-        """
-        self._require_open()
-        return self.drive.drive_pulses(vx, vy, omega, pulses, rpm, acceleration, wait=wait)
-
-    def drive_mm(
-        self,
-        vx: float,
-        vy: float,
-        mm: float,
-        rpm: int | None = None,
-        acceleration: int | None = None,
-        *,
-        wait: bool = True,
-    ) -> list[int] | None:
-        """逆运动学 + 车心位移毫米：纯平移方向走固定距离。
-
-        斜向时轮子行程与车心位移不成 1:1（X 排布 45° 时只有两只轮子滚，各滚 √2 倍），
-        这里按车心位移换算。旋转不收毫米，要转请用 ``rotate_cw`` / ``rotate_ccw``。
-        """
-        self._require_open()
-        return self.drive.drive_mm(vx, vy, mm, rpm, acceleration, wait=wait)
-
     def _direction(self, name: str, rpm, acceleration, duration, *, pulses, mm=None, wait):
         self._require_open()
         # 只有平移方向方法收 ``mm``：rotate_* 根本没有这个关键字，别把 None 递过去。
@@ -345,30 +292,3 @@ class MecanumChassis:
                        duration: float | None = None, *, pulses: int | None = None,
                        mm: float | None = None, wait: bool = True) -> list[int] | None:
         return self._direction("backward_right", rpm, acceleration, duration, pulses=pulses, mm=mm, wait=wait)
-
-    # ------------------------------------------------------------- 四轮直控
-    def move_wheels_relative(self, fl: float, fr: float, rl: float, rr: float,
-                             rpm: int, acceleration: int | None = None,
-                             synchronized: bool = True) -> None:
-        self._require_open()
-        self.drive.move_wheels_relative(fl, fr, rl, rr, rpm, acceleration, synchronized)
-
-    def move_wheels_absolute(self, fl: float, fr: float, rl: float, rr: float,
-                             rpm: int, acceleration: int | None = None,
-                             synchronized: bool = True) -> None:
-        self._require_open()
-        self.drive.move_wheels_absolute(fl, fr, rl, rr, rpm, acceleration, synchronized)
-
-    def move_wheels_relative_pulses(self, fl: int, fr: int, rl: int, rr: int,
-                                    rpm: int, acceleration: int | None = None,
-                                    synchronized: bool = True) -> None:
-        """四轮位置模式：直接给脉冲数，正数=该轮前进方向。"""
-        self._require_open()
-        self.drive.move_wheels_relative_pulses(fl, fr, rl, rr, rpm, acceleration, synchronized)
-
-    def move_wheels_absolute_pulses(self, fl: int, fr: int, rl: int, rr: int,
-                                    rpm: int, acceleration: int | None = None,
-                                    synchronized: bool = True) -> None:
-        """四轮位置模式：直接给绝对脉冲位置。"""
-        self._require_open()
-        self.drive.move_wheels_absolute_pulses(fl, fr, rl, rr, rpm, acceleration, synchronized)

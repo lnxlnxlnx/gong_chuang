@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from modules.chassis.runtime import MecanumChassis
-from modules.chassis.drive.mecanum import MecanumDrive, WheelPosition
+from modules.chassis.drive.mecanum import MecanumDrive
 from modules.chassis.test.unit.test_mecanum import FakeSerial
 
 
@@ -34,21 +34,6 @@ class ChassisFacadeTests(unittest.TestCase):
         self.assertEqual([frame[1] for frame in self.serial.writes[:4]], [0xFD] * 4)
         self.assertEqual(self.serial.writes[4], bytes.fromhex("00 FF 66 6B"))
 
-    def test_move_wheels_relative_pulses_passthrough(self) -> None:
-        self.chassis.move_wheels_relative_pulses(0, 3200, 0, -3200, rpm=200)
-
-        self.assertEqual([frame[0] for frame in self.serial.writes[:2]], [2, 4])
-        self.assertEqual([frame[1] for frame in self.serial.writes[:2]], [0xFD, 0xFD])
-
-    def test_relative_position_moves_all_wheels_in_logical_order(self) -> None:
-        self.chassis.move_wheels_relative(fl=90, fr=-90, rl=180, rr=-180, rpm=120)
-        self.assertEqual([frame[0] for frame in self.serial.writes[:4]], [1, 2, 3, 4])
-        self.assertEqual([frame[1] for frame in self.serial.writes[:4]], [0xFD] * 4)
-        self.assertEqual(self.serial.writes[4], bytes.fromhex("00 FF 66 6B"))
-
-    def test_facade_exposes_single_wheel_access_for_service_operations(self) -> None:
-        self.assertIs(self.chassis.wheel(WheelPosition.FL), self.drive.get_wheel(WheelPosition.FL))
-
     def test_forward_with_mm_uses_the_position_mode(self) -> None:
         serial = FakeSerial()
         drive = MecanumDrive(
@@ -61,17 +46,6 @@ class ChassisFacadeTests(unittest.TestCase):
         self.assertEqual(counts, [3200, 3200, 3200, 3200])
         self.assertEqual([frame[1] for frame in serial.writes[:4]], [0xFD] * 4)
         self.assertEqual(serial.writes[4], bytes.fromhex("00 FF 66 6B"))
-
-    def test_drive_mm_is_exposed_on_the_facade(self) -> None:
-        serial = FakeSerial()
-        drive = MecanumDrive(
-            "COM14", serial_port=serial, sleep=lambda _seconds: None, mm_per_wheel_rev=160.0
-        )
-        chassis = MecanumChassis(drive)
-
-        counts = chassis.drive_mm(1.0, 0.0, 80.0, rpm=200, wait=False)
-
-        self.assertEqual(counts, [1600, 1600, 1600, 1600])
 
     def test_rotation_methods_do_not_take_mm(self) -> None:
         """旋转不改变车心位置：``rotate_*`` 连这个关键字都没有。"""
@@ -136,8 +110,6 @@ class ChassisLifecycleTests(unittest.TestCase):
             self.chassis.forward(rpm=30)
         with self.assertRaises(RuntimeError):
             self.chassis.stop()
-        with self.assertRaises(RuntimeError):
-            self.chassis.wheel(WheelPosition.FL)
 
     def test_a_borrowed_bus_is_not_closed_by_the_chassis(self) -> None:
         """借来的步进连接不归底盘关：擅自关掉会切断 arm 的总线。"""
