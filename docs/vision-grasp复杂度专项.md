@@ -1,5 +1,8 @@
 # vision + grasp 调用接口与内部重构专项
 
+> **2026-10-24 现状提醒**：本文是当时的快照，不随代码更新。机械臂绝对圆柱 / XYZ 坐标那套（`move_cylindrical` / `move_to` / `move_by` / `home_all` / `move_all_to_zero` / `arm_state` / `motion_plan`）与两个 YOLO 辅助检出器（`material_presence` / `material_distance`）已从代码移除；当前接口见 `README.md` 与 `modules/*/docs/`。
+
+
 > 配套：[视觉与抓取优先的重构方案](可评审性优化方案.md)。本文定义两个模块如何被调用，以及内部实现必须满足的条件。
 > 状态：**已按本文实施**（2026-10-15）；[逐文件执行说明](plans/2026-10-15-vision-grasp执行方案.md) 冻结的文件/符号归属、内部创建接缝、CLI 覆盖与迁移顺序均已落地。真机验收未执行。
 > 用户已明确：优先改善视觉、抓取调用方式；采用清晰的类接口；**对象负责设备生命周期，上层只传配置并调用方法**。
