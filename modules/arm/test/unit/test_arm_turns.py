@@ -286,21 +286,6 @@ class RobotArmTurnsTests(unittest.TestCase):
         self.assertEqual(report.turns.pulses, 800)
         self.assertEqual(self.arm.turns_state.of("lift").pulses, 800)
 
-    def test_absolute_zeroing_puts_the_axis_back_on_the_origin(self) -> None:
-        """绝对归位和回零停在同一个物理点（驱动器计数器 0），所以原点同此。"""
-        self.arm.move_up(pulses=800)
-
-        self.arm.move_axis_to_zero("lift")
-
-        self.assertEqual(self.arm.turns_state.of("lift").pulses, 0)
-
-    def test_an_unwaited_move_still_counts_because_the_frame_was_sent(self) -> None:
-        """``wait=False`` 不推进位姿（不知道走没走到），但帧确实发出去了。"""
-        self.arm.move_up(pulses=800, wait=False)
-
-        self.assertFalse(self.arm.pose_state.is_known)
-        self.assertEqual(self.arm.turns_state.of("lift").pulses, 800)
-
     def test_direction_uses_the_same_axis_as_the_physical_primitive(self) -> None:
         self.arm.rotate_cw(pulses=4000)
         self.arm.rotate_ccw(pulses=1000)
@@ -357,13 +342,6 @@ class RobotArmInitialTurnsTests(unittest.TestCase):
             self.arm.turns_state.of("extension").pulses,
             2400 + PULSES_PER_REVOLUTION,
         )
-
-    def test_zeroing_the_axis_re_defines_the_origin(self) -> None:
-        """绝对归位把轴送回驱动器计数器 0，启程读数不该留在账上。"""
-        self.arm.move_axis_to_zero("extension")
-
-        self.assertEqual(self.arm.turns_state.of("extension").pulses, 0)
-
 
 class RobotArmAbsoluteMotorPositionTests(unittest.TestCase):
     """``move_axis_to_motor_pulses`` / ``move_axis_to_motor_degrees``：

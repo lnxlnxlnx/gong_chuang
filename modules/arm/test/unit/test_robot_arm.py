@@ -441,7 +441,7 @@ class RobotArmConstructionTests(unittest.TestCase):
     """
 
     def test_assembly_enables_every_axis_without_moving(self) -> None:
-        """装配完就是"已使能、没动过"：三条使能帧，没有动作帧，位姿仍是未知。"""
+        """装配完就是"已使能、没动过"：三条使能帧，没有动作帧，账上也还是 0。"""
         serial = FakeSerial()
 
         arm = RobotArm._from_settings(
@@ -452,7 +452,7 @@ class RobotArmConstructionTests(unittest.TestCase):
             serial.writes,
             [torque_frame(motor_id=motor_id, enabled=True) for motor_id in (5, 6, 7)],
         )
-        self.assertIsNone(arm.pose, "装配不做任何运动，位姿必须未知")
+        self.assertEqual(arm.turns_state.of("base").pulses, 0, "装配不做任何运动")
 
     def test_motor_failure_closes_the_serial_the_assembly_opened(self) -> None:
         serial = FakeSerial()

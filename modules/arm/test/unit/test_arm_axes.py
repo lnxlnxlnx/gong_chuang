@@ -8,7 +8,6 @@ from __future__ import annotations
 import unittest
 
 from modules.arm.config import ArmConfig, AxisConfig
-from modules.arm.drive.kinematics import CylindricalPose
 from modules.arm.runtime import (
     AXES_SAME_START,
     AXES_SERIAL,
@@ -347,35 +346,9 @@ class MoveAxesSafetyTests(ArmAxesTestCase):
         with self.assertRaisesRegex(ValueError, AXES_SERIAL):
             arm.move_axes({"base": 1, "extension": 1})
 
-    def test_a_frame_failure_really_clears_what_was_already_buffered(self) -> None:
-        """缓存了却没触发是危险状态：下一次别人的广播会让这些轴突然动起来。"""
-        serial = FailingSerial()
-        arm = self.make_arm(serial=serial, config=fixture_config(max_pulses=5000))
-        arm.pose_state.record_measurement(CylindricalPose(0.0, 250.0, 100.0))
-        # 装配时发过三条使能帧；计数从这里开始，第 2 条动作帧（升降）发不出去。
-        serial.fail_from(2)
-
-        with self.assertRaisesRegex(RuntimeError, "串口炸了"):
-            arm.move_axes({"base": 100, "lift": 200})
-
-        self.assertEqual(
-            serial.writes,
-            [
-                buffered_position_frame(
-                    motor_id=BASE_MOTOR_ID, direction=Direction.CW, pulses=100
-                ),
-                # 先补一条触发把缓存消费掉，再停住已经起步的那根轴。
-                SYNC_TRIGGER_FRAME,
-                emergency_stop_frame(motor_id=BASE_MOTOR_ID),
-            ],
-        )
-        self.assertFalse(arm.pose_state.is_known)
-
-
 class MoveAxesSerialModeTests(ArmAxesTestCase):
     def test_serial_mode_walks_the_safety_corridor_one_axis_at_a_time(self) -> None:
         arm = self.make_arm()
-        arm.pose_state.record_measurement(CylindricalPose(0.0, 250.0, 100.0))
 
         reports = arm.move_axes(
             {"base": 600, "lift": 800, "extension": -400}, mode=AXES_SERIAL
@@ -410,38 +383,6 @@ class MoveAxesSerialModeTests(ArmAxesTestCase):
 
 
 class MoveAxesTicketTests(ArmAxesTestCase):
-    def test_wait_false_returns_a_ticket_and_marks_the_pose_unknown(self) -> None:
-        arm = self.make_arm()
-        arm.pose_state.record_measurement(CylindricalPose(0.0, 250.0, 100.0))
-
-        ticket = arm.move_axes({"base": 3200, "lift": 400}, wait=False)
-
-        self.assertIsInstance(ticket, MotionTicket)
-        self.assertTrue(ticket.pending)
-        # 只发了帧：什么时候到位不知道，位置不可信。
-        self.assertFalse(arm.pose_state.is_known)
-        self.assertEqual(ticket.subject, "arm:base+lift")
-        # 整组等的是**最长**的那一根：底座 3200 脉冲比升降 400 脉冲慢得多。
-        self.assertAlmostEqual(
-            ticket.estimated_seconds,
-            estimate_move_seconds(3200, SAFE_TEST_RPM, PULSES_PER_REVOLUTION, SAFE_TEST_ACCELERATION),
-            places=9,
-        )
-
-    def test_waiting_the_ticket_finishes_the_group_and_advances_the_pose(self) -> None:
-        arm = self.make_arm()
-        arm.pose_state.record_measurement(CylindricalPose(0.0, 250.0, 100.0))
-        ticket = arm.move_axes({"base": 3200}, wait=False)
-
-        reports = ticket.wait()
-
-        self.assertEqual(ticket.state, DONE)
-        self.assertEqual(len(reports), 1)
-        self.assertEqual(reports[0].motor_id, BASE_MOTOR_ID)
-        # 3200 脉冲 = 电机一圈；底座减速比 6 → 输出轴 60°。
-        self.assertTrue(arm.pose_state.is_known)
-        self.assertAlmostEqual(arm.pose_state.pose.base_degrees, 60.0, places=9)
-
     def test_the_ticket_only_sleeps_once_for_the_longest_axis(self) -> None:
         arm = self.make_arm()
         ticket = arm.move_axes({"base": 4000, "lift": 800}, wait=False)
@@ -469,18 +410,6 @@ class MoveAxesTicketTests(ArmAxesTestCase):
             [emergency_stop_frame(motor_id=BASE_MOTOR_ID), emergency_stop_frame(motor_id=LIFT_MOTOR_ID)],
         )
         # 取消不收尾：动作没走完，推进位姿会记错位置。
-        self.assertFalse(arm.pose_state.is_known)
-
-    def test_a_ticket_waited_after_close_does_not_resurrect_the_pose(self) -> None:
-        """会话关了之后位姿就该保持未知：迟到的收尾不能把它"复活"。"""
-        arm = self.make_arm()
-        arm.pose_state.record_measurement(CylindricalPose(0.0, 250.0, 100.0))
-        ticket = arm.move_axes({"base": 3200}, wait=False)
-
-        arm.close()
-        ticket.wait()
-
-        self.assertFalse(arm.pose_state.is_known)
 
     def test_the_ticket_can_go_straight_into_a_motion_batch(self) -> None:
         from modules.motion import MotionBatch

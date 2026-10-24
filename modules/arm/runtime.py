@@ -102,24 +102,22 @@ with RobotArm.open(wait_mode=WAIT_IN_POSITION) as arm:
 轮询模式还会把**实际等待时长**和**最后一次读到的状态**放进 :class:`MotionReport`，
 所以"估算偏了多少"和"是不是撞上了"都能事后看到，不必再猜。
 
-## 两个状态：爪子在哪，电机转了多少
+## 一个状态：电机转了多少
 
-- ``pose_state``（:class:`modules.arm.arm_state.ArmPose`）：爪口在圆柱坐标里的位置。
-  依赖标定（``mm_per_motor_rev`` 等），缺标定就整体变未知，而且底座角被归一化。
 - ``turns_state``（:class:`modules.arm.arm_state.MotorTurnsState`）：三轴的**命令脉冲
   里程表**。一个标定都不需要，所以永远有值；底座角**不归一**。
 
-后者是为"底座能转整圈"这件事存在的：``base_degrees`` 归一到 ``(-180, 180]``，连续同向
-转十圈和原地没动看起来一模一样，而线缆会绕死。里程表不归一，所以看得见——但它是**下发
+它是为"底座能转整圈"这件事存在的：连续同向转十圈和原地没动看起来一模一样，而线缆会绕死。
+里程表不归一，所以看得见——但它是**下发
 的脉冲**，丢步和打滑不会体现，要和实测对账就读 ``0x36``。
 
 它记的是**相对原点**的读数，而"程序启动那一刻轴在哪"由配置的 ``initial_motor_degrees``
 声明（缺省表示三根轴都在原点上）。换爪子、重新对齿或重装电机之后某根轴的机械初始位不再
 落在原点上时（例如伸缩停在 270° = 2400 脉冲），就在那里如实声明，而不是让软件继续以为
-它在原点；回零 / 绝对归零重新定义原点之后，读数照旧回到 0。
+它在原点；回零之后读数照旧回到 0。
 
-两张账都只在 ``_send`` 一处推进（回零/绝对归位另把原点清零），所以方向原语、单位制方法
-和绝对规划帧走的是同一条路，既不会漏记也不会把同一次位移记两遍。每次
+这一本账只在 ``_send`` 一处推进，所以方向原语、单位制方法
+和绝对脉冲目标走的是同一条路，既不会漏记也不会把同一次位移记两遍。每次
 :class:`MotionReport` 都会带上该轴累计到那一刻的读数。
 """
 
@@ -130,20 +128,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, List, Mapping, Optional, Tuple, Union
 
-from modules.arm.arm_state import ArmPose, MotorTurns, MotorTurnsState
+from modules.arm.arm_state import MotorTurns, MotorTurnsState
 from modules.arm.config import AXIS_NAMES, ArmConfig, load_arm_config
 from modules.arm.drive.kinematics import (
     BASE_AXIS,
     EXTENSION_AXIS,
     LIFT_AXIS,
-    CylindricalPose,
-    base_degrees_for_pulses,
-    base_pulses_for_degrees,
-    linear_pulses_for_mm,
-    mm_for_linear_pulses,
     motor_degrees_for_pulses,
     motor_pulses_for_degrees,
-    normalize_degrees,
 )
 from modules.motor.drive.emm42 import Direction, Emm42Driver, MotorStatus, SerialPort
 from modules.motor.drive.motion import (
@@ -237,16 +229,6 @@ class RobotArm:
     LIFT_AXIS = LIFT_AXIS
     EXTENSION_AXIS = EXTENSION_AXIS
 
-    #: 回零顺序：先缩回、再升降、最后转底座——和运动时的安全廊道是同一条规矩。
-    HOME_ORDER = (EXTENSION_AXIS, LIFT_AXIS, BASE_AXIS)
-
-    #: 轴名 -> 配置里的行程区间字段名（行程是按"量"存的，不是按轴）。
-    AXIS_LIMIT_FIELDS = {
-        BASE_AXIS: "base_limit",
-        LIFT_AXIS: "height_limit",
-        EXTENSION_AXIS: "radial_limit",
-    }
-
     def __init__(
         self,
         config: ArmConfig,
@@ -294,8 +276,6 @@ class RobotArm:
         self._bus = bus
         self._owns_bus = bool(owns_bus) and bus is not None
         self._closed = False
-        #: 爪口中心的位姿；**唯一所有者是这里**，完成回零或测量写入之前是"未知"。
-        self.pose_state = ArmPose()
         #: 三轴的命令脉冲里程表；与位姿分开，因为它一个标定都不需要（见 arm_state）。
         #: **启程读数**取自配置的 ``initial_motor_degrees``：程序启动那一刻轴若不在原点上
         #: （换爪子、重新对齿之后就是这种情况），就按那里的声明起算；回零 / 绝对归零会把
@@ -458,7 +438,6 @@ class RobotArm:
         if self._closed:
             return
         self._closed = True
-        self.pose_state.mark_unknown()
         errors = []
         for stage, action in (
             ("stop", self._stop_axes),
@@ -499,7 +478,6 @@ class RobotArm:
         """
         self._require_open()
         self._stop_axes()
-        self.pose_state.mark_unknown()
 
     def _each_axis(self, action: Callable[["Emm42Driver"], None]) -> None:
         """按地址顺序逐轴发**单帧**命令，帧间留 ``inter_frame_seconds``。
@@ -530,175 +508,8 @@ class RobotArm:
         """释放三个轴的扭矩。位姿随之失效（松开之后轴可以被外力推动）。"""
         self._require_open()
         self._disable_axes()
-        self.pose_state.mark_unknown()
 
     # ------------------------------------------------------------- 位姿
-    @property
-    def pose(self) -> Optional[CylindricalPose]:
-        """夹持点的当前推算位姿；未知时为 ``None``。**只读**，调用者不能自行写值。"""
-        return self.pose_state.pose
-
-    @property
-    def pose_source(self) -> str:
-        """位姿来源：``unknown`` / ``homed`` / ``measured`` / ``dead_reckoned``。"""
-        return self.pose_state.source
-
-    def record_measurement(self, pose: CylindricalPose) -> None:
-        """写入一次**已标定测量**得到的夹持点位姿（迁移自旧管线的观测消费者）。
-
-        测量必须先通过数值、夹持点与行程校验；相机只给方向角时，调用方必须保证它与
-        已知连续角位置对应，或在行程内有唯一等价角——**猜圈数是禁止的**。
-        """
-        self._require_open()
-        if not isinstance(pose, CylindricalPose):
-            raise TypeError("record_measurement 需要 CylindricalPose")
-        for name, value in (
-            ("base_degrees", pose.base_degrees),
-            ("radial_mm", pose.radial_mm),
-            ("height_mm", pose.height_mm),
-        ):
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError(f"{name} 必须是数字")
-        if pose.radial_mm < 0:
-            raise ValueError("radial_mm 不能是负数")
-        problems = []
-        for name, value, limit, unit in (
-            ("底座角", pose.base_degrees, self.config.base_limit, "°"),
-            ("半径", pose.radial_mm, self.config.radial_limit, " mm"),
-            ("高度", pose.height_mm, self.config.height_limit, " mm"),
-        ):
-            if limit is not None and not limit.contains(value):
-                problems.append(f"{name} {value:.3f}{unit} 超出 {limit.describe()}{unit}")
-        if problems:
-            raise ValueError("测量位姿不可用：" + "；".join(problems))
-        self.pose_state.record_measurement(
-            CylindricalPose(
-                normalize_degrees(pose.base_degrees), pose.radial_mm, pose.height_mm
-            )
-        )
-
-    def mark_pose_unknown(self) -> None:
-        """主动把位姿打回未知（发帧中断、被外力动过、怀疑丢步时用）。"""
-        self.pose_state.mark_unknown()
-
-    # ------------------------------------------------------------- 回零
-    def home_axis(self, axis_name: str, *, wait: bool = True) -> float:
-        """触发一根轴的单圈回零；返回等了多久。
-
-        回零耗时不确定，而 5/6/7 号驱动器是 ``Response=None``，回零结束不会回任何包，
-        所以 ``wait=True`` 只能等一个保守时长（``homing.expected_seconds + settle_seconds``）。
-
-        **单轴回零不建立三轴参考**：位姿立即变成未知。
-        """
-        self._require_open()
-        homing = self.config.require_homing()
-        self.pose_state.mark_unknown()
-        self._motors[axis_name].home(homing.mode)
-        if wait:
-            self._sleep(homing.wait_seconds)
-            # 回零让这根轴停在驱动器零点上，所以原点就定义在这里。
-            # ``wait=False`` 不重置：不知道何时到位，调用方确认后自己调 mark_origin。
-            self.turns_state.mark_origin(axis_name)
-        return homing.wait_seconds
-
-    def home_all(self, *, wait: bool = True) -> Tuple[float, ...]:
-        """按 伸缩 → 升降 → 底座 的顺序回零，成功等待后建立绝对参考。
-
-        建立参考的门槛（在**第一条回零帧之前**检查，见
-        :meth:`modules.arm.config.ArmConfig.homing_reference_problems`）：``homing``、
-        ``safe_pose``、三轴行程与转换常数齐全，且单圈回零下行程两端距参考位都严格小于
-        半个电机圈。缺少判断所需标定时**明确拒绝**，而不是回完零拿一个不知道是哪一圈的
-        位姿继续定位。
-
-        ``wait=False`` 不建立参考（不知道什么时候到位）。中途失败同样保持未知。
-        """
-        self._require_open()
-        if not wait:
-            # 异步回零：连参考位都不能记录，位姿直接失效。
-            self.pose_state.mark_unknown()
-            return tuple(
-                self.home_axis(axis_name, wait=False) for axis_name in self.HOME_ORDER
-            )
-        problems = self.config.homing_reference_problems()
-        if problems:
-            raise ValueError(
-                "还不能建立绝对参考（回零会落在一个不知道是哪一圈的姿态上）：\n  - "
-                + "\n  - ".join(problems)
-            )
-        homing = self.config.require_homing()
-        # 开始前先让旧位姿失效：中途失败时绝不能留下一个"看起来还有效"的位置。
-        self.pose_state.mark_unknown()
-        waited = []
-        try:
-            for axis_name in self.HOME_ORDER:
-                self._motors[axis_name].home(homing.mode)
-                self._sleep(homing.wait_seconds)
-                waited.append(homing.wait_seconds)
-        except BaseException:
-            self.pose_state.mark_unknown()
-            raise
-        # 只有三轴都发完并等待完成，才按配置的 safe_pose 记录参考。
-        self.pose_state.record_home(self.config.require_safe_pose())
-        # 三根轴现在都停在驱动器零点上，原点同样定义在这里。
-        self.turns_state.mark_origin()
-        return tuple(waited)
-
-    # ------------------------------------------------------------- 归位
-    def move_axis_to_zero(
-        self,
-        axis_name: str,
-        *,
-        rpm: Optional[int] = None,
-        acceleration: Optional[int] = None,
-        wait: bool = True,
-    ) -> float:
-        """绝对模式把一根轴送回脉冲位置 0；返回本次等待的秒数。
-
-        绝对模式**不知道当前位置**，所以耗时估不出来。``wait=True`` 等的是按该轴行程
-        跨度算出的**最坏情况**。归位不建立参考：位姿立即变成未知。
-        """
-        self._require_open()
-        speed = self.config.rpm if rpm is None else rpm
-        accel = self.config.acceleration if acceleration is None else acceleration
-        seconds = 0.0
-        if wait:
-            seconds = estimate_move_seconds(
-                self._zero_travel_pulses(axis_name),
-                speed,
-                self.pulses_per_revolution,
-                accel,
-                self.settle_seconds,
-            )
-        self.pose_state.mark_unknown()
-        self._motors[axis_name].move_absolute_pulses(0, speed, accel)
-        if wait:
-            self._sleep(seconds)
-            # 绝对归位和回零停在同一个物理点上（驱动器位置计数器 0），原点同此。
-            self.turns_state.mark_origin(axis_name)
-        return seconds
-
-    def move_all_to_zero(
-        self,
-        *,
-        rpm: Optional[int] = None,
-        acceleration: Optional[int] = None,
-        wait: bool = True,
-    ) -> Tuple[float, ...]:
-        """按 伸缩 → 升降 → 底座 的顺序把三轴送回零点（归位）。
-
-        必须在**回过零之后**调用——绝对模式依赖驱动器内部的位置计数器。
-        整臂归位只有在既有参考有效、全部预检与等待完成之后才更新位姿；这里保守地
-        一律置为未知，要求调用方重新建立参考。
-        """
-        self._require_open()
-        return tuple(
-            self.move_axis_to_zero(
-                axis_name, rpm=rpm, acceleration=acceleration, wait=wait
-            )
-            for axis_name in self.HOME_ORDER
-        )
-
-    # --------------------------------------------- 按里程表走绝对位置
     def move_axis_to_motor_pulses(
         self,
         axis_name: str,
@@ -833,31 +644,6 @@ class RobotArm:
             motor_status=reports[-1].motor_status,
             turns=self.turns_state.of(axis_name),
         )
-
-    def _zero_travel_pulses(self, axis_name: str) -> int:
-        """归位最坏要走多少脉冲：按该轴配置的行程跨度算。"""
-        field = self.AXIS_LIMIT_FIELDS[axis_name]
-        limit = getattr(self.config, field)
-        if limit is None:
-            raise ValueError(
-                f"limits 里对应 {axis_name} 的区间还没标定（{field}），估不出归位耗时；"
-                "请传 wait=False 自己等待"
-            )
-        span = limit.maximum - limit.minimum
-        if axis_name == self.BASE_AXIS:
-            pulses = base_pulses_for_degrees(
-                span,
-                pulses_per_revolution=self.pulses_per_revolution,
-                reduction_ratio=self.config.base_reduction,
-            )
-        else:
-            pulses = linear_pulses_for_mm(
-                span,
-                pulses_per_revolution=self.pulses_per_revolution,
-                mm_per_motor_rev=self.config.require_mm_per_motor_rev(axis_name),
-            )
-        return max(1, abs(pulses))
-
     # ------------------------------------------------------------- 方向原语
     def rotate_cw(self, pulses: int, *, rpm: Optional[int] = None,
                   acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
@@ -987,7 +773,6 @@ class RobotArm:
         accel = self.config.acceleration if acceleration is None else acceleration
         # 位姿在动作在途时会变成未知，所以先把**发帧之前**那一份位姿收好：
         # 收尾时必须从它起算，否则异步动作就再也算不回位置了。
-        started_pose = self.pose_state.pose
         buffered: List[str] = []
         sent: List[MotionReport] = []
         try:
@@ -1012,25 +797,22 @@ class RobotArm:
         except BaseException:
             # 缓存了却没触发是危险状态：下一次别人的广播会让这些轴突然动起来。
             self._clear_buffered(buffered)
-            self.pose_state.mark_unknown()
             raise
         started = self._clock()
         if wait:
             try:
                 return self._finish_axes(
-                    moves, sent, speed, accel, started, started_pose, already_waited=False
+                    moves, sent, speed, accel, started, already_waited=False
                 )
             except BaseException:
                 # 帧已经发出去了、结论却拿不到：位置不可信，宁可重新对账。
-                self.pose_state.mark_unknown()
                 raise
         # 只发了帧：什么时候到位不知道，位置不可信——等票据收尾时才推进。
-        self.pose_state.mark_unknown()
         return MotionTicket(
             "arm:" + "+".join(axis_name for axis_name, _ in moves),
             max(item.estimated_seconds for item in sent),
             finalize=lambda: self._finish_axes(
-                moves, sent, speed, accel, started, started_pose, already_waited=True
+                moves, sent, speed, accel, started, already_waited=True
             ),
             cancel=lambda: self._stop_axes_named([name for name, _ in moves]),
             clock=self._clock,
@@ -1044,7 +826,6 @@ class RobotArm:
         speed: int,
         accel: int,
         started: float,
-        started_pose: Optional[CylindricalPose],
         *,
         already_waited: bool,
     ) -> Tuple[MotionReport, ...]:
@@ -1063,7 +844,6 @@ class RobotArm:
         elif not already_waited:
             self._sleep(max(item.estimated_seconds for item in sent))
         waited = self._clock() - started
-        self._record_pose_after(started_pose, tuple(moves))
         return tuple(
             replace(item, waited_seconds=waited, motor_status=status) for item in sent
         )
@@ -1148,13 +928,10 @@ class RobotArm:
             axis_name, direction, abs(pulses), rpm=rpm, acceleration=acceleration, wait=wait
         )
         if wait:
-            self._advance_pose(axis_name, pulses)
             return report
         # 只发了帧、没等它走完：什么时候到位不知道，位置不可信——等票据收尾时才推进。
         # 起点必须是**发帧之前**那一份位姿：下面这一句之后就再也读不到了。
-        started_pose = self.pose_state.pose
-        self.pose_state.mark_unknown()
-        return self._move_ticket(axis_name, pulses, rpm, acceleration, report, started_pose)
+        return self._move_ticket(axis_name, pulses, rpm, acceleration, report)
 
     def _instant_ticket(self, subject: str, result: object) -> MotionTicket:
         """给"没有东西可等"的动作建票据：``wait()`` 立刻给出结论，不发帧也不睡。"""
@@ -1169,16 +946,13 @@ class RobotArm:
         rpm: Optional[int],
         acceleration: Optional[int],
         sent: MotionReport,
-        started_pose: Optional[CylindricalPose],
     ) -> MotionTicket:
         """给一条**已经发出**的单轴动作建票据。
 
         到点之后：按 :attr:`wait_mode` 确认走完（轮询模式才需要，估算那一段票据自己
-        已经睡过了）→ 从 ``started_pose`` 起算推进位姿 → 返回补全了 ``waited_seconds``
-        与 ``motor_status`` 的报告。
+        已经睡过了）→ 返回补全了 ``waited_seconds`` 与 ``motor_status`` 的报告。
 
-        ``cancel`` 只停这一根轴，而且**不收尾**：动作没走完就推进位姿会记错位置，
-        所以取消之后位姿保持未知。
+        ``cancel`` 只停这一根轴，而且**不收尾**：命令已经发出去了，停在哪里不知道。
         """
         speed = self.config.rpm if rpm is None else rpm
         accel = self.config.acceleration if acceleration is None else acceleration
@@ -1191,7 +965,6 @@ class RobotArm:
                     axis_name, abs(signed_pulses), speed, accel, started
                 )
             waited = self._clock() - started
-            self._record_pose_after(started_pose, ((axis_name, signed_pulses),))
             return replace(sent, waited_seconds=waited, motor_status=status)
 
         return MotionTicket(
@@ -1310,82 +1083,6 @@ class RobotArm:
             sleep=self._sleep,
             clock=self._clock,
         )
-
-    def _advance_pose(self, axis_name: str, signed_pulses: int) -> None:
-        """按实际下发的带符号整数脉冲推进位姿。
-
-        位姿本来就未知时什么都不做（不能凭空造一个绝对位置）；已知时按标定换算成
-        增量，角度照测量域归一。
-        """
-        # 直接对**局部**取值判空：``pose_state.is_known`` 是个布尔属性，类型检查器
-        # 不会据此把 ``pose`` 缩窄成非空，而"未知时不推进"这条业务规则必须靠这个判断。
-        self._record_pose_after(self.pose_state.pose, ((axis_name, signed_pulses),))
-
-    def _record_pose_after(
-        self,
-        started_pose: Optional[CylindricalPose],
-        moves: Tuple[Tuple[str, int], ...],
-    ) -> None:
-        """把一组增量叠加到**发帧那一刻**的位姿上；只有全程算得出来才写回位姿。
-
-        为什么要传"那时"的位姿：动作在途时位姿一律是未知的（见
-        :meth:`modules.arm.arm_state.ArmPose.mark_unknown` 的调用点），所以收尾如果
-        从"当前读数"起算，读到的永远是 ``None``，异步动作就再也没有位姿了。
-        缺标定（毫米换算不出来）时保持未知——不猜一个位置出来。
-
-        位姿推进只有这一处：同步动作、单轴票据、多轴票据全走它。
-        """
-        if self._closed:
-            # 会话已经关了：连接没了，谁也不知道轴在哪，迟到的收尾不该把位姿"复活"。
-            return
-        pose = started_pose
-        if pose is not None:
-            for axis_name, signed_pulses in moves:
-                pose = self._pose_after(pose, axis_name, signed_pulses)
-                if pose is None:
-                    break
-        if pose is None:
-            self.pose_state.mark_unknown()
-        else:
-            # 起点是**发帧之前**那一份，所以现在这一刻的"未知"不该挡住回写。
-            self.pose_state.record_dead_reckoning(pose)
-
-    def _pose_after(
-        self, current: CylindricalPose, axis_name: str, signed_pulses: int
-    ) -> Optional[CylindricalPose]:
-        """从 ``current`` 走一个增量之后的位姿；缺标定算不出来时返回 ``None``。"""
-        if axis_name == BASE_AXIS:
-            degrees = base_degrees_for_pulses(
-                signed_pulses,
-                pulses_per_revolution=self.pulses_per_revolution,
-                reduction_ratio=self.config.base_reduction,
-            )
-            return CylindricalPose(
-                normalize_degrees(current.base_degrees + degrees),
-                current.radial_mm,
-                current.height_mm,
-            )
-        mm_per_rev = self.config.mm_per_motor_rev(axis_name)
-        if mm_per_rev is None:
-            # 没有毫米标定就算不出位移，只能承认不知道在哪。
-            return None
-        millimeters = mm_for_linear_pulses(
-            signed_pulses,
-            pulses_per_revolution=self.pulses_per_revolution,
-            mm_per_motor_rev=mm_per_rev,
-        )
-        if axis_name == EXTENSION_AXIS:
-            return CylindricalPose(
-                current.base_degrees,
-                current.radial_mm + millimeters,
-                current.height_mm,
-            )
-        return CylindricalPose(
-            current.base_degrees,
-            current.radial_mm,
-            current.height_mm + millimeters,
-        )
-
     def _require_safe_pulses(self, pulses: int) -> None:
         if isinstance(pulses, bool) or not isinstance(pulses, int):
             raise ValueError("pulses must be an integer")
