@@ -622,13 +622,9 @@ class Emm42Driver:
         self._write(0xFD, parameters, retry_safe=absolute)
 
     def _open_serial(self) -> SerialPort:
-        try:
-            import serial
-        except ImportError as error:
-            raise RuntimeError(
-                "pyserial is required on Jetson. Install it in the target Python environment first."
-            ) from error
-        return serial.Serial(self.port, baudrate=self.BAUDRATE, timeout=self.timeout)
+        from modules.serial_link import open_serial
+
+        return open_serial(self.port, baudrate=self.BAUDRATE, timeout=self.timeout)
 
     def _write(
         self,

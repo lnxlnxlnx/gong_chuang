@@ -450,13 +450,9 @@ class RobotArm:
 
     @staticmethod
     def _open_serial(port: str) -> SerialPort:
-        try:
-            import serial
-        except ImportError as error:
-            raise RuntimeError(
-                "pyserial is required on Jetson. Install it in the target Python environment first."
-            ) from error
-        return serial.Serial(port, baudrate=Emm42Driver.BAUDRATE, timeout=0.1)
+        from modules.serial_link import open_serial
+
+        return open_serial(port, baudrate=Emm42Driver.BAUDRATE, timeout=0.1)
 
     @property
     def closed(self) -> bool:

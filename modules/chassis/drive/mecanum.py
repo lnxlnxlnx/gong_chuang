@@ -229,13 +229,11 @@ class MecanumDrive:
         serial_port.close()
 
     def _open_shared_serial(self) -> SerialPort:
-        try:
-            import serial
-        except ImportError as error:
-            raise RuntimeError(
-                "pyserial is required on Jetson. Install it in the target Python environment first."
-            ) from error
-        return serial.Serial(self.port, baudrate=Emm42Driver.BAUDRATE, timeout=self.timeout)
+        from modules.serial_link import open_serial
+
+        return open_serial(
+            self.port, baudrate=Emm42Driver.BAUDRATE, timeout=self.timeout
+        )
 
     # ------------------------------------------------------------------
     # 底层 API：单轮控制（disable/调速/加减速/位置/回零均逐轮暴露）

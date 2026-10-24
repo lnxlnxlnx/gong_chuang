@@ -108,14 +108,10 @@ def usb_serial_candidates() -> Tuple[str, ...]:
 
 
 def _serial_opener(baudrate: int, timeout_seconds: float) -> Callable[[str], ProbedPort]:
+    from modules.serial_link import open_serial
+
     def open_port(port: str) -> ProbedPort:
-        try:
-            import serial
-        except ImportError as error:
-            raise RuntimeError(
-                "pyserial is required on Jetson. Install it in the target Python environment first."
-            ) from error
-        return serial.Serial(port, baudrate=baudrate, timeout=timeout_seconds)
+        return open_serial(port, baudrate=baudrate, timeout=timeout_seconds)
 
     return open_port
 
