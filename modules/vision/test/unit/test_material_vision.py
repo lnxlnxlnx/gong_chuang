@@ -1,4 +1,4 @@
-"""Verify the material detection trio offline: YOLO wrapper, presence, class."""
+"""Verify the material detection path offline: YOLO wrapper + class table."""
 
 from __future__ import annotations
 
@@ -13,15 +13,6 @@ from modules.vision.drive.material_class import (
     DEFAULT_MATERIAL_LABELS,
     UNKNOWN_MATERIAL_LABEL,
     MaterialClassifier,
-)
-from modules.vision.drive.material_presence import (
-    REASON_LOW_SCORE,
-    REASON_NO_HIT,
-    REASON_NON_MATERIAL,
-    REASON_OK,
-    REASON_OUTSIDE,
-    REASON_TOO_SMALL,
-    MaterialPresence,
 )
 from modules.vision.drive.material_yolo import MATERIAL_CLASS_NAMES, MaterialYOLO, is_inside_region, is_material
 from modules.vision.drive.yolov8 import Detection
@@ -170,80 +161,6 @@ class MaterialYOLOTests(unittest.TestCase):
     def test_missing_model_file_is_reported(self) -> None:
         with self.assertRaises(FileNotFoundError):
             MaterialYOLO("no-such-model.onnx").detector
-
-
-class MaterialPresenceTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.region = LockedRegion(center_x=320.0, center_y=240.0, radius=80.0)
-        self.presence = MaterialPresence()
-
-    def test_accepts_a_material_inside_the_region(self) -> None:
-        result = self.presence.check([detection()], self.region)
-        self.assertTrue(result.present)
-        self.assertEqual(result.count, 1)
-        self.assertEqual(result.reason, REASON_OK)
-        self.assertEqual(result.best.name, "red")
-
-    def test_reports_every_rejection_reason(self) -> None:
-        cases = [
-            ([], REASON_NO_HIT),
-            ([detection("target-1", class_id=6)], REASON_NON_MATERIAL),
-            ([detection(score=0.1)], REASON_LOW_SCORE),
-            ([detection(x1=300, y1=220, x2=306, y2=226)], REASON_TOO_SMALL),
-            ([detection(x1=0, y1=0, x2=80, y2=80)], REASON_OUTSIDE),
-        ]
-        for hits, expected in cases:
-            with self.subTest(reason=expected):
-                result = self.presence.check(hits, self.region)
-                self.assertFalse(result.present)
-                self.assertEqual(result.reason, expected)
-                self.assertIsNone(result.best)
-
-    def test_dominant_reason_is_reported_when_nothing_passes(self) -> None:
-        weak = [detection(score=0.1), detection("green", score=0.2, class_id=1)]
-        self.assertEqual(self.presence.check(weak, self.region).reason, REASON_LOW_SCORE)
-
-    def test_any_class_can_count_as_material(self) -> None:
-        presence = MaterialPresence(require_material_class=False)
-        self.assertTrue(presence.check([detection("target-1", class_id=6)], self.region).present)
-
-    def test_region_mode_intersect_accepts_a_straddling_box(self) -> None:
-        # 框中心在圆外，但框与圆的外接矩形相交
-        straddling = detection(x1=400.0, y1=230.0, x2=460.0, y2=250.0)
-        self.assertFalse(self.presence.check([straddling], self.region).present)
-        intersecting = MaterialPresence(region_mode="intersect")
-        self.assertTrue(intersecting.check([straddling], self.region).present)
-
-    def test_region_mode_any_ignores_the_region(self) -> None:
-        far = detection(x1=0.0, y1=0.0, x2=80.0, y2=80.0)
-        presence = MaterialPresence(region_mode="any")
-        self.assertTrue(presence.check([far], self.region).present)
-
-    def test_pick_nearest_prefers_the_closest_box(self) -> None:
-        # 两个框都在圆内：near 更靠圆心，far 置信度更高
-        near = detection("red", x1=300.0, y1=220.0, x2=340.0, y2=260.0)
-        far = detection("blue", score=0.95, class_id=2, x1=350.0, y1=220.0, x2=390.0, y2=260.0)
-
-        by_score = self.presence.check([near, far], self.region)
-        self.assertIs(by_score.best, far)
-        by_distance = MaterialPresence(pick="nearest").check([near, far], self.region)
-        self.assertIs(by_distance.best, near)
-
-    def test_region_can_be_omitted(self) -> None:
-        presence = MaterialPresence()
-        self.assertTrue(presence.check([detection(x1=0, y1=0, x2=80, y2=80)], None).present)
-
-    def test_rejects_invalid_configuration(self) -> None:
-        with self.assertRaises(ValueError):
-            MaterialPresence(region_mode="nope")
-        with self.assertRaises(ValueError):
-            MaterialPresence(pick="nope")
-        with self.assertRaises(ValueError):
-            MaterialPresence(min_score=-1)
-
-    def test_result_is_truthy_when_present(self) -> None:
-        self.assertTrue(self.presence.check([detection()], self.region))
-        self.assertFalse(self.presence.check([], self.region))
 
 
 class MaterialClassifierTests(unittest.TestCase):
