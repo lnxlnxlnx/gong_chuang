@@ -15,9 +15,6 @@ base_degrees = atan2(Y, X)        radial_mm = hypot(X, Y)
 ```
 
 高度 ``height_mm`` 是**离台面**的高度，向上为正。它由相机深度换算而来
-（见 :func:`height_above_table`），不是机械臂自己的绝对坐标——本机械臂只有相对
-位置模式，绝对高度一律以视觉测量为准。
-
 ## 单位与脉冲
 
 只用两个机器常数，且都来自实测标定：
@@ -181,30 +178,6 @@ def inverse_cylindrical(plane_x_mm: float, plane_y_mm: float, height_mm: float) 
     )
 
 
-def forward_cylindrical(pose: CylindricalPose) -> Tuple[float, float, float]:
-    """圆柱关节量 → 机械臂平面坐标 ``(X, Y, Z)``；用来验证逆解。"""
-    if pose.radial_mm < 0:
-        raise ValueError("radial_mm must not be negative")
-    radians = math.radians(pose.base_degrees)
-    return (
-        pose.radial_mm * math.cos(radians),
-        pose.radial_mm * math.sin(radians),
-        pose.height_mm,
-    )
-
-
-def shortest_angle_delta_degrees(start_degrees: float, target_degrees: float) -> float:
-    """从 ``start`` 转到 ``target`` 的最短转角，结果落在 ``(-180, 180]``。
-
-    底座能转几百度的臂上这一条很要紧：不做最短路径，θ 从 170° 到 -170° 会走 340° 的
-    长路，把整条臂横扫过工作区。
-    """
-    _require_finite("start_degrees", start_degrees)
-    _require_finite("target_degrees", target_degrees)
-    delta = (target_degrees - start_degrees) % 360.0
-    return delta - 360.0 if delta > 180.0 else delta
-
-
 def normalize_degrees(degrees: float) -> float:
     """把绝对角度归一到 ``(-180, 180]``，与 ``atan2`` 的输出同域。
 
@@ -218,81 +191,6 @@ def normalize_degrees(degrees: float) -> float:
     return wrapped - 360.0 if wrapped > 180.0 else wrapped
 
 
-def height_above_table(*, table_depth_mm: float, point_depth_mm: float) -> float:
-    """相机深度换算成离台面高度。
-
-    镜头俯视时深度沿光轴向下递增，所以台面深度减去物点深度就是高度。
-    ``table_depth_mm`` 是一次性标定的常数（见 ``modules/grasp/docs/抓取坐标链路.md``）。
-    """
-    _require_finite("table_depth_mm", table_depth_mm)
-    _require_finite("point_depth_mm", point_depth_mm)
-    return float(table_depth_mm) - float(point_depth_mm)
-
-
-def grip_height_mm(*, material_height_mm: float, grip_ratio: float) -> float:
-    """侧向夹取时**夹持点**离台面的高度。
-
-    - ``grip_ratio``：夹在物料的哪个高度，``0`` 贴台面、``0.5`` 半高、``1`` 顶面。
-
-    侧向夹取的夹持点高度依赖物料高度，所以单目测出的物料高度在这里真正被用到；
-    这也是 ``MaterialLocator`` 的深度不只为 XY 服务的地方。
-
-    **不含**靶标与夹持点之间的竖直偏移：那个偏移在把观测写成夹持点位姿时**减过一次**
-    （见 ``modules/grasp/drive/pipeline.py`` 的 ``_grasp_pose``），生成目标时不能再加一遍。
-    """
-    _require_finite("material_height_mm", material_height_mm)
-    if not 0.0 <= grip_ratio <= 1.0:
-        raise ValueError("grip_ratio must be in 0..1")
-    if material_height_mm < 0:
-        raise ValueError("material_height_mm must not be negative")
-    return material_height_mm * grip_ratio
-
-
-# ---------------------------------------------------------------- 可达性
-def check_reachable(
-    pose: CylindricalPose,
-    *,
-    base_limit: Optional[TravelLimit] = None,
-    radial_limit: Optional[TravelLimit] = None,
-    height_limit: Optional[TravelLimit] = None,
-) -> Tuple[str, ...]:
-    """返回所有越界说明；全部在范围内时返回空元组。
-
-    传 ``None`` 的轴**不检查**。没标定行程就等于没有软件保护，这一点调用方必须清楚，
-    所以消息里会写明是哪个轴、越了多少。
-    """
-    problems = []
-    for value, limit, name, unit in (
-        (pose.base_degrees, base_limit, BASE_AXIS, "°"),
-        (pose.radial_mm, radial_limit, EXTENSION_AXIS, " mm"),
-        (pose.height_mm, height_limit, LIFT_AXIS, " mm"),
-    ):
-        if limit is not None and not limit.contains(value):
-            problems.append(
-                f"{name} 目标 {value:.1f}{unit} 超出行程 {limit.describe()}{unit}"
-            )
-    return tuple(problems)
-
-
-def require_reachable(
-    pose: CylindricalPose,
-    *,
-    base_limit: Optional[TravelLimit] = None,
-    radial_limit: Optional[TravelLimit] = None,
-    height_limit: Optional[TravelLimit] = None,
-) -> None:
-    """越界时抛 ``ValueError``；必须在发出任何运动帧之前调用。"""
-    problems = check_reachable(
-        pose,
-        base_limit=base_limit,
-        radial_limit=radial_limit,
-        height_limit=height_limit,
-    )
-    if problems:
-        raise ValueError("；".join(problems))
-
-
-# ---------------------------------------------------------------- 内部校验
 def _round_half_away(value: float) -> int:
     """四舍五入（.5 远离零），避免 Python 的银行家舍入让对称位移不对称。"""
     return int(math.copysign(math.floor(abs(value) + 0.5), value))
@@ -342,34 +240,9 @@ def _self_test() -> int:
     # 半个脉冲以下的位移取整成 0，调用方当作"已到位"。
     assert linear_pulses_for_mm(0.001, pulses_per_revolution=ppr, mm_per_motor_rev=40.0) == 0
 
-    # 逆解与正解互逆。
+    # 逆解（基座 XYZ -> 圆柱）落在文档写的位置上。
     pose = inverse_cylindrical(0.0, 100.0, 30.0)
     assert abs(pose.base_degrees - 90.0) < 1e-9 and abs(pose.radial_mm - 100.0) < 1e-9
-    back = forward_cylindrical(pose)
-    assert abs(back[0]) < 1e-9 and abs(back[1] - 100.0) < 1e-9 and abs(back[2] - 30.0) < 1e-9
-
-    # 最短转角走短边。
-    assert abs(shortest_angle_delta_degrees(170.0, -170.0) - 20.0) < 1e-9
-    assert abs(shortest_angle_delta_degrees(-170.0, 170.0) + 20.0) < 1e-9
-    assert abs(shortest_angle_delta_degrees(0.0, 180.0) - 180.0) < 1e-9
-
-    # 深度换算成高度：台面 300 mm，物点 285 mm -> 高 15 mm。
-    assert abs(height_above_table(table_depth_mm=300.0, point_depth_mm=285.0) - 15.0) < 1e-9
-
-    # 侧向夹取：物料高 20 mm、夹半高 -> 夹持点高 10 mm（不含靶标偏移）。
-    assert abs(grip_height_mm(material_height_mm=20.0, grip_ratio=0.5) - 10.0) < 1e-9
-    assert abs(grip_height_mm(material_height_mm=20.0, grip_ratio=1.0) - 20.0) < 1e-9
-
-    # 可达性。
-    limit = TravelLimit(-110.0, 110.0)
-    assert check_reachable(CylindricalPose(90.0, 80.0, 10.0), base_limit=limit) == ()
-    problems = check_reachable(
-        CylindricalPose(150.0, 999.0, 10.0),
-        base_limit=limit,
-        radial_limit=TravelLimit(40.0, 160.0),
-    )
-    assert len(problems) == 2, problems
-
     # 没标定的直线轴必须拒绝毫米指令。
     try:
         linear_pulses_for_mm(10.0, pulses_per_revolution=ppr, mm_per_motor_rev=None)
@@ -378,7 +251,7 @@ def _self_test() -> int:
     else:
         raise AssertionError("未标定的直线轴必须报错")
 
-    print("圆柱运动学自测通过：换算、逆解、最短转角、可达性、未标定保护都正确。")
+    print("圆柱运动学自测通过：换算、逆解、未标定保护都正确。")
     return 0
 
 

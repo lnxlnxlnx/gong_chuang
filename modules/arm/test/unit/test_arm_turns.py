@@ -262,30 +262,11 @@ class RobotArmTurnsTests(unittest.TestCase):
         self.assertEqual(self.arm.turns_state.of("lift").pulses, 500)
 
     def test_a_unit_converted_move_advances_by_the_actual_pulses(self) -> None:
-        """``move_lift_mm`` 传的是毫米，记的必须是**换算后的整数脉冲**。"""
-        report = self.arm.move_lift_mm(61.0)
+        """``move_axis_to_motor_degrees`` 传的是角度，记的必须是**换算后的整数脉冲**。"""
+        report = self.arm.move_axis_to_motor_degrees("lift", 360.0)
 
         self.assertEqual(report.pulses, PULSES_PER_REVOLUTION)
         self.assertEqual(self.arm.turns_state.of("lift").pulses, PULSES_PER_REVOLUTION)
-
-    def test_equally_named_methods_do_not_double_count(self) -> None:
-        """毫米版内部调的是 ``_signed_move``；上一层的名字不该再记一遍。"""
-        report = self.arm.move_radial_mm(61.0)
-
-        self.assertEqual(self.arm.turns_state.of("extension").pulses, report.pulses)
-
-    def test_the_planned_absolute_path_uses_the_same_counter(self) -> None:
-        """绝对规划走 ``_execute_frame``，但它同样经过 ``_send`` —— 账只有一本。
-
-        这条如果红了，说明有人把累计挪到了上一层，绝对定位那条路就会漏记。
-        """
-        self.arm.record_measurement(CylindricalPose(0.0, 200.0, 100.0))
-
-        self.arm.move_cylindrical(base_degrees=30.0, radial_mm=200.0, height_mm=100.0)
-
-        self.assertEqual(
-            self.arm.turns_state.of("base").pulses, base_pulses_for(30.0)
-        )
 
     def test_a_rejected_move_is_not_counted(self) -> None:
         """越界的脉冲在发帧之前就被拒了，账上不该多出来。"""
@@ -370,7 +351,7 @@ class RobotArmInitialTurnsTests(unittest.TestCase):
         self.assertEqual(self.serial.writes, [])
 
     def test_relative_moves_add_on_top_of_the_declared_reading(self) -> None:
-        self.arm.move_radial_mm(61.0)
+        self.arm.move_forward(PULSES_PER_REVOLUTION)
 
         self.assertEqual(
             self.arm.turns_state.of("extension").pulses,

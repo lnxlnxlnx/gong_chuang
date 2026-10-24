@@ -125,7 +125,6 @@ with RobotArm.open(wait_mode=WAIT_IN_POSITION) as arm:
 
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -146,7 +145,6 @@ from modules.arm.drive.kinematics import (
     motor_pulses_for_degrees,
     normalize_degrees,
 )
-from modules.arm.motion_plan import PlanError, plan_absolute, plan_xyz
 from modules.motor.drive.emm42 import Direction, Emm42Driver, MotorStatus, SerialPort
 from modules.motor.drive.motion import (
     DEFAULT_INTER_FRAME_SECONDS,
@@ -232,19 +230,6 @@ class MotionReport:
 
 #: 相对 XYZ 分解允许的最小半径（毫米）。再小下去切向分量会被 ``1/r`` 放大：1 mm 半径上
 #: 一个 1 mm 的 XY 增量就是 57°，那不是"走一点"，是甩大半圈。
-_MIN_RADIUS_MM = 1.0
-
-
-def _relative_number(value: float, name: str) -> float:
-    """相对量的入口校验：必须是**有限**数字（``bool`` 不算数字）。"""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{name} 必须是数字")
-    number = float(value)
-    if not math.isfinite(number):
-        raise ValueError(f"{name} 必须是有限数字")
-    return number
-
-
 class RobotArm:
     """控制 5/6/7 号轴的机械臂上层：只发有界的相对位置命令。"""
 
@@ -596,91 +581,6 @@ class RobotArm:
         """主动把位姿打回未知（发帧中断、被外力动过、怀疑丢步时用）。"""
         self.pose_state.mark_unknown()
 
-    # ------------------------------------------------------------- 绝对坐标
-    def move_cylindrical(
-        self,
-        *,
-        base_degrees: float,
-        radial_mm: float,
-        height_mm: float,
-        rpm: Optional[int] = None,
-        acceleration: Optional[int] = None,
-    ) -> CylindricalPose:
-        """走到**绝对圆柱目标**（度 / 毫米）；返回按实际下发脉冲推算的位置。
-
-        :raises RuntimeError: 位姿未知（先显式 ``home_all`` 或写入一次测量）。
-        :raises PlanError: 缺标定、越界，或角度在行程内没有合法路线。
-        :returns: 走完之后的夹持点圆柱位姿——**按实际整数脉冲推算**，不宣称物理到位。
-        """
-        self._require_open()
-        current = self._require_pose()
-        target = CylindricalPose(
-            normalize_degrees(base_degrees), radial_mm, height_mm
-        )
-        plan = plan_absolute(config=self.config, current=current, target=target)
-        return self._run_plan(plan)
-
-    def move_to(
-        self,
-        *,
-        x_mm: float,
-        y_mm: float,
-        z_mm: float,
-        rpm: Optional[int] = None,
-        acceleration: Optional[int] = None,
-    ) -> CylindricalPose:
-        """走到**绝对基座 XYZ**（毫米）；逆解后进入与圆柱入口同一套规划与执行。
-
-        ``x=y=0`` 时没有确定的方向角：**保留当前角度**（不会隐式转到 0°）。
-
-        :raises RuntimeError: 位姿未知。
-        :raises PlanError: 缺标定、越界，或 r=0 不在行程内。
-        """
-        self._require_open()
-        current = self._require_pose()
-        plan, _target = plan_xyz(
-            config=self.config, current=current, x_mm=x_mm, y_mm=y_mm, z_mm=z_mm
-        )
-        return self._run_plan(plan)
-
-    def _require_pose(self) -> CylindricalPose:
-        if self.pose is None:
-            raise RuntimeError(
-                "机械臂位姿未知：先显式回零（home_all），"
-                "或让已标定的测量写一次位置；不要凭猜测发运动指令"
-            )
-        return self.pose
-
-    def _run_plan(self, plan) -> CylindricalPose:
-        """执行一份**已经在规划阶段定好**的动作帧序列。
-
-        执行阶段不再做任何决策：帧的顺序、脉冲数、落点都是
-        :mod:`modules.arm.motion_plan` 算好的。中途失败就停止后续帧、把位姿置为未知，
-        并抛出原始失败。
-        """
-        for frame in plan.moving_segments:
-            try:
-                self._execute_frame(frame)
-            except BaseException:
-                # 发帧或等待被打断：位置已经不可信，宁可重新对账。
-                self.pose_state.mark_unknown()
-                raise
-        return plan.final_pose
-
-    def _execute_frame(self, frame) -> None:
-        """发一帧并等它走完（按估算耗时），然后把位姿推进到该帧的落点。"""
-        signed = frame.pulses
-        direction = Direction.CW if signed > 0 else Direction.CCW
-        self._send(
-            frame.axis,
-            direction,
-            abs(signed),
-            rpm=None,
-            acceleration=None,
-            wait=True,
-        )
-        self.pose_state.record_move(frame.resulting_pose)
-
     # ------------------------------------------------------------- 回零
     def home_axis(self, axis_name: str, *, wait: bool = True) -> float:
         """触发一根轴的单圈回零；返回等了多久。
@@ -988,161 +888,6 @@ class RobotArm:
                       acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
         """伸缩轴后缩 ``pulses`` 个脉冲（CCW 是实测的负方向）。"""
         return self._signed_move(EXTENSION_AXIS, -pulses, rpm, acceleration, wait)
-
-    # ------------------------------------------------- 单位制相对动作（带符号）
-    def move_base_degrees(self, degrees: float, *, rpm: Optional[int] = None,
-                          acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
-        """底座相对转 ``degrees`` 度；正数对应 CW，负数对应 CCW。"""
-        pulses = base_pulses_for_degrees(
-            degrees,
-            pulses_per_revolution=self.pulses_per_revolution,
-            reduction_ratio=self.config.base_reduction,
-        )
-        return self._signed_move(BASE_AXIS, pulses, rpm, acceleration, wait)
-
-    def move_lift_mm(self, millimeters: float, *, rpm: Optional[int] = None,
-                     acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
-        """升降轴相对抬升（正）/ 下降（负）``millimeters`` 毫米。"""
-        pulses = linear_pulses_for_mm(
-            millimeters,
-            pulses_per_revolution=self.pulses_per_revolution,
-            mm_per_motor_rev=self.config.require_mm_per_motor_rev(LIFT_AXIS),
-        )
-        return self._signed_move(LIFT_AXIS, pulses, rpm, acceleration, wait)
-
-    def move_radial_mm(self, millimeters: float, *, rpm: Optional[int] = None,
-                       acceleration: Optional[int] = None, wait: bool = True) -> Union[MotionReport, MotionTicket]:
-        """伸缩轴相对前伸（正）/ 后缩（负）``millimeters`` 毫米。"""
-        pulses = linear_pulses_for_mm(
-            millimeters,
-            pulses_per_revolution=self.pulses_per_revolution,
-            mm_per_motor_rev=self.config.require_mm_per_motor_rev(EXTENSION_AXIS),
-        )
-        return self._signed_move(EXTENSION_AXIS, pulses, rpm, acceleration, wait)
-
-    # ------------------------------------------------- 相对位姿（一次多轴）
-    def move_cylindrical_by(
-        self,
-        *,
-        base_degrees: float = 0.0,
-        radial_mm: float = 0.0,
-        height_mm: float = 0.0,
-        rpm: Optional[int] = None,
-        acceleration: Optional[int] = None,
-    ) -> Tuple[MotionReport, ...]:
-        """相对圆柱：三个量各走一个**增量**（度 / 毫米），不需要位姿已知。
-
-        与 :meth:`move_cylindrical` 只差一句：那个是绝对目标（必须先有参考），这个只说
-        "从此刻起再走多少"，所以三个量各自都能独立下发——极坐标的每个轴本来就能相对走。
-
-        执行顺序按机械结构的安全规矩排，**不按参数顺序**：
-
-        - 要**抬升**就先抬，再走"伸缩 → 底座"；
-        - 要**下降**就把下降放到最后，免得在低位转动底座或前伸；
-        - 只走平面时先伸缩、再转底座（与 :mod:`modules.grasp.drive.servo_motion` 的大角度
-          规矩一致：伸出状态下横扫底座会把整条臂扫过工作区）。
-
-        每段都等它走完再发下一段（这里不给 ``wait=False``：那会让后面的段在位置未知时
-        接着发）。中途失败就停止后续段并抛出原始失败，**已经发出去的动作不会撤回**。
-
-        标定要求与单轴方法相同：``base_degrees`` 要 ``axes.base.reduction_ratio``；两个
-        毫米量各自要对应直线轴的 ``mm_per_motor_rev``，没标定就拒绝，不猜。
-
-        :returns: 按**执行顺序**返回每一步的报告，且只含真的发了帧的那几步（增量不足半个
-            脉冲的段取整成 0，不发帧也不出现在返回值里）。``motor_id`` 就是轴：
-            5 底座 / 6 升降 / 7 伸缩。
-        :raises ValueError: 参数不是有限数字，或该轴还没标定。
-        """
-        base = _relative_number(base_degrees, "base_degrees")
-        radial = _relative_number(radial_mm, "radial_mm")
-        height = _relative_number(height_mm, "height_mm")
-        # 按**执行顺序**排好的 (轴, 增量)：抬升在最前、下降在最后，平面先伸缩后底座。
-        steps: List[Tuple[str, float]] = []
-        if height > 0.0:
-            steps.append((LIFT_AXIS, height))
-        if radial != 0.0:
-            steps.append((EXTENSION_AXIS, radial))
-        if base != 0.0:
-            steps.append((BASE_AXIS, base))
-        if height < 0.0:
-            steps.append((LIFT_AXIS, height))
-        reports: List[MotionReport] = []
-        for axis_name, amount in steps:
-            if axis_name == LIFT_AXIS:
-                result = self.move_lift_mm(amount, rpm=rpm, acceleration=acceleration)
-            elif axis_name == EXTENSION_AXIS:
-                result = self.move_radial_mm(amount, rpm=rpm, acceleration=acceleration)
-            else:
-                result = self.move_base_degrees(amount, rpm=rpm, acceleration=acceleration)
-            # 这一段是**串行**的：每段都等完才走下一段，所以拿到的必然是报告。
-            if not isinstance(result, MotionReport):  # pragma: no cover - 同步调用恒为报告
-                raise RuntimeError("内部错误：串行多轴拿到了票据")
-            if result.pulses != 0:
-                reports.append(result)
-        return tuple(reports)
-
-    def move_by(
-        self,
-        *,
-        x_mm: float = 0.0,
-        y_mm: float = 0.0,
-        z_mm: float = 0.0,
-        rpm: Optional[int] = None,
-        acceleration: Optional[int] = None,
-    ) -> Tuple[MotionReport, ...]:
-        """相对基座 XYZ：在**当前位姿**上再走 ``(x_mm, y_mm, z_mm)``，单位毫米。
-
-        ``z_mm`` 是高度增量（台面为 0、向上为正），与位姿无关（等价于
-        :meth:`move_lift_mm`）。
-
-        ``x_mm`` / ``y_mm`` **必须知道当前位姿**。这不是保守，是极坐标臂的几何事实：水平
-        方向只有"转底座 + 伸缩"两个自由度，同一对 ``(dx, dy)`` 在不同方位对应不同的
-        ``(Δ底座角, Δ半径)``，而且切向那部分还要除以当前半径。所以 x/y 表达的是"当前所在
-        方位上的径向 / 切向分量"——没有当前 ``(底座角, 半径)`` 就分解不出来，猜一个方位
-        正是这条路上最危险的事。
-
-        不需要位姿的两条路：只要高度（``move_by(z_mm=…)`` 或 :meth:`move_lift_mm`），以及
-        相机读数的相对修正（走 :mod:`modules.grasp` 的脉冲闭环，那里的每个机器常数都已经
-        换成"每脉冲让画面挪多少"）。
-
-        :returns: 与 :meth:`move_cylindrical_by` 同一套报告（按执行顺序，只含真的发帧的段）。
-        :raises RuntimeError: x/y 非零但位姿未知（先 ``home_all`` 或写一次测量）。
-        :raises ValueError: 参数不是有限数字，或当前半径太小、X/Y 方向没有定义。
-        """
-        dx = _relative_number(x_mm, "x_mm")
-        dy = _relative_number(y_mm, "y_mm")
-        dz = _relative_number(z_mm, "z_mm")
-        if dx == 0.0 and dy == 0.0:
-            return self.move_cylindrical_by(
-                height_mm=dz, rpm=rpm, acceleration=acceleration
-            )
-        # 直接对**局部**取值判空：属性返回 Optional，类型检查器不会据此缩窄。
-        current = self.pose
-        if current is None:
-            raise RuntimeError(
-                "相对基座 XYZ 的 x/y 需要当前位姿：极坐标分解依赖此刻的底座角与半径。"
-                "先显式回零（home_all），或让已标定的测量写一次位置（record_measurement）；"
-                "只走高度（move_by(z_mm=…) / move_lift_mm）不需要位姿"
-            )
-        radius = current.radial_mm
-        if radius < _MIN_RADIUS_MM:
-            raise ValueError(
-                f"当前半径 {radius:.3f} mm 小于 {_MIN_RADIUS_MM:.1f} mm："
-                "基座轴线附近的点没有可用的 X/Y 方向，这一个增量分解不出底座角；"
-                "先伸出去一点，或改用圆柱入口 move_cylindrical_by"
-            )
-        radians = math.radians(current.base_degrees)
-        cos, sin = math.cos(radians), math.sin(radians)
-        # 圆柱 -> 基座 XYZ 是 X = r·cosθ、Y = r·sinθ，所以增量反解就是这两行。
-        radial_mm = cos * dx + sin * dy
-        base_degrees = math.degrees((-sin * dx + cos * dy) / radius)
-        return self.move_cylindrical_by(
-            base_degrees=base_degrees,
-            radial_mm=radial_mm,
-            height_mm=dz,
-            rpm=rpm,
-            acceleration=acceleration,
-        )
 
     # --------------------------------------------- 一次多轴（同时启动）
     def move_axes(
