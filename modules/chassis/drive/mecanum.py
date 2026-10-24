@@ -29,7 +29,11 @@ import time
 from enum import IntEnum
 from typing import Callable, Mapping, Protocol
 
-from modules.motor.drive.motion import DEFAULT_SETTLE_SECONDS, estimate_move_seconds
+from modules.motor.drive.motion import (
+    DEFAULT_INTER_FRAME_SECONDS,
+    DEFAULT_SETTLE_SECONDS,
+    estimate_move_seconds,
+)
 from modules.motor.drive.emm42 import Direction, Emm42Driver, HomeMode, SerialPort
 
 
@@ -123,6 +127,7 @@ class MecanumDrive:
         serial_port: SerialPort | None = None,
         sleep: Callable[[float], None] = time.sleep,
         settle_seconds: float = DEFAULT_SETTLE_SECONDS,
+        inter_frame_seconds: float = DEFAULT_INTER_FRAME_SECONDS,
         default_rpm: int | None = None,
         mm_per_wheel_rev: float | None = None,
     ) -> None:
@@ -132,6 +137,8 @@ class MecanumDrive:
             raise ValueError("rotation_gain must be positive")
         if motion_transform not in ("standard", "calibrated"):
             raise ValueError("motion_transform must be 'standard' or 'calibrated'")
+        if inter_frame_seconds < 0:
+            raise ValueError("inter_frame_seconds must not be negative")
         if default_rpm is not None:
             self._require_rpm(default_rpm)
         if mm_per_wheel_rev is not None and not (
@@ -158,6 +165,9 @@ class MecanumDrive:
         # 位置模式按脉冲计数时用到的两个参数，与 RobotArm 保持同名同义。
         self.pulses_per_revolution = pulses_per_revolution
         self.settle_seconds = settle_seconds
+        # 连续两条**单帧**命令之间该留的间隔：见 ``DEFAULT_INTER_FRAME_SECONDS``。
+        # 底盘一次动作要连发 2~4 条帧再加一条同步广播，这条总线背靠背发帧会双双失效。
+        self.inter_frame_seconds = inter_frame_seconds
         # 注入 sleep 便于离线单测；真机默认 time.sleep。
         self._sleep = sleep
 
@@ -234,10 +244,24 @@ class MecanumDrive:
         """返回某轮对应的底层 Emm42Driver，供高级用法直接调用。"""
         return self.wheels[wheel]
 
+    def _each_wheel(
+        self, action: Callable[[WheelPosition, Emm42Driver], None]
+    ) -> None:
+        """按 ``WHEEL_ORDER`` 逐轮发**单帧**命令，帧间留 ``inter_frame_seconds``。
+
+        这台机器的 USB-TTL（CH340）上背靠背发帧会让后面的帧失效，见
+        :data:`modules.motor.drive.motion.DEFAULT_INTER_FRAME_SECONDS`。底盘一个动作要
+        连发 2~4 条帧再补一条同步广播，所以帧间必须留这个间隔——机械臂那条路一直这么
+        做，底盘这边以前是裸的。
+        """
+        for index, wheel in enumerate(WHEEL_ORDER):
+            if index:
+                self._sleep(self.inter_frame_seconds)
+            action(wheel, self.wheels[wheel])
+
     def enable_all(self, enabled: bool = True) -> None:
         """使能/失能全部四个轮子的扭矩。小车移动前必须先 enable_all(True)。"""
-        for wheel in WHEEL_ORDER:
-            self.wheels[wheel].enable(enabled)
+        self._each_wheel(lambda wheel, motor: motor.enable(enabled))
 
     def disable_all(self) -> None:
         """等价于 enable_all(False)：全部失能松轴。"""
@@ -337,18 +361,16 @@ class MecanumDrive:
 
         0 脉冲的轮子不下发（协议不允许 0 位移）；``synchronized=True`` 时四条
         ``0xFD`` 帧先缓存，最后用一条 ``00 FF 66 6B`` 让四轮同时启动。
+        帧间与触发帧之前各留 ``inter_frame_seconds``，见 :meth:`_each_wheel`。
         """
-        for wheel, pulses in zip(WHEEL_ORDER, (fl, fr, rl, rr)):
-            if pulses == 0:
-                continue
-            self.get_wheel(wheel).move_relative_pulses(
-                pulses,
-                rpm,
-                acceleration if acceleration is not None else self.acceleration,
-                synchronized=synchronized,
-            )
-        if synchronized:
-            self.wheels[WHEEL_ORDER[0]].trigger_sync_motion()
+        self._move_wheel_frames(
+            (fl, fr, rl, rr),
+            lambda motor, pulses, accel: motor.move_relative_pulses(
+                pulses, rpm, accel, synchronized=synchronized
+            ),
+            acceleration,
+            synchronized,
+        )
 
     def move_wheels_absolute_pulses(
         self,
@@ -361,16 +383,36 @@ class MecanumDrive:
         synchronized: bool = True,
     ) -> None:
         """按 FL、FR、RL、RR 顺序让四个轮子到达绝对脉冲位置。"""
-        for wheel, pulses in zip(WHEEL_ORDER, (fl, fr, rl, rr)):
-            if pulses == 0:
+        self._move_wheel_frames(
+            (fl, fr, rl, rr),
+            lambda motor, pulses, accel: motor.move_absolute_pulses(
+                pulses, rpm, accel, synchronized=synchronized
+            ),
+            acceleration,
+            synchronized,
+        )
+
+    def _move_wheel_frames(
+        self,
+        counts: "tuple[int, ...]",
+        send: Callable[[Emm42Driver, int, int], None],
+        acceleration: int | None,
+        synchronized: bool,
+    ) -> None:
+        """逐轮发 ``0xFD`` 缓存帧（跳过 0 脉冲），帧间与触发帧之前都留间隔。"""
+        accel = self.acceleration if acceleration is None else acceleration
+        sent = 0
+        for wheel, value in zip(WHEEL_ORDER, counts):
+            if value == 0:
                 continue
-            self.get_wheel(wheel).move_absolute_pulses(
-                pulses,
-                rpm,
-                acceleration if acceleration is not None else self.acceleration,
-                synchronized=synchronized,
-            )
+            if sent:
+                self._sleep(self.inter_frame_seconds)
+            send(self.get_wheel(wheel), value, accel)
+            sent += 1
         if synchronized:
+            if sent:
+                # 触发帧同样不能紧贴着上一条缓存帧写
+                self._sleep(self.inter_frame_seconds)
             self.wheels[WHEEL_ORDER[0]].trigger_sync_motion()
 
     # ------------------------------------------------------------------
@@ -400,11 +442,16 @@ class MecanumDrive:
         if peak == 0:  # 全零输入 = 停止
             self.stop()
             return
-        for wheel, value in zip(WHEEL_ORDER, raw):
-            # wheel_signs 在最终发送前修正单轮转向
-            self.set_wheel_speed(
-                wheel, round(value / peak * speed * self.wheel_signs[wheel]), acceleration
+        # wheel_signs 在最终发送前修正单轮转向
+        signed = {
+            wheel: round(value / peak * speed * self.wheel_signs[wheel])
+            for wheel, value in zip(WHEEL_ORDER, raw)
+        }
+        self._each_wheel(
+            lambda wheel, motor: self.set_wheel_speed(
+                wheel, signed[wheel], acceleration
             )
+        )
 
     def drive_pulses(
         self,
@@ -537,13 +584,16 @@ class MecanumDrive:
 
         这是最低层的整车入口：绕过矩阵，由上层自行决定各轮 RPM。
         """
-        for wheel, signed_rpm in zip(WHEEL_ORDER, (fl, fr, rl, rr)):
-            self.set_wheel_speed(wheel, signed_rpm, acceleration)
+        signed = dict(zip(WHEEL_ORDER, (fl, fr, rl, rr)))
+        self._each_wheel(
+            lambda wheel, motor: self.set_wheel_speed(
+                wheel, signed[wheel], acceleration
+            )
+        )
 
     def stop(self) -> None:
         """四个轮子全部立即停止（EStop）。"""
-        for wheel in WHEEL_ORDER:
-            self.wheels[wheel].stop()
+        self._each_wheel(lambda wheel, motor: motor.stop())
 
     # ------------------------------------------------------------------
     # 高层方向方法

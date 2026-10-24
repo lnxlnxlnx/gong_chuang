@@ -5,8 +5,11 @@ from __future__ import annotations
 import unittest
 
 from modules.chassis.drive.mecanum import MecanumDrive, WheelPosition, WHEEL_ORDER
-from modules.motor.drive.motion import estimate_move_seconds
+from modules.motor.drive.motion import DEFAULT_INTER_FRAME_SECONDS, estimate_move_seconds
 from modules.motor.drive.emm42 import Direction, HomeMode
+
+#: 两帧之间该留的静默；断言里逐条列出来，表示"帧间有空隙"这件事是被测试守住的。
+GAP = DEFAULT_INTER_FRAME_SECONDS
 
 
 class FakeSerial:
@@ -339,7 +342,9 @@ class PulseModeTests(unittest.TestCase):
         self.assertEqual(counts, [3200, 3200, 3200, 3200])
         self.assertEqual(
             self.sleep.calls,
-            [estimate_move_seconds(3200, 200, self.car.pulses_per_revolution, 10)],
+            # 4 条帧之间 + 触发帧之前各留一个帧间隔，最后才是等待走完的估算
+            [GAP] * 4
+            + [estimate_move_seconds(3200, 200, self.car.pulses_per_revolution, 10)],
         )
 
     def test_diagonal_pulses_skip_wheels_that_do_not_move(self) -> None:
@@ -349,7 +354,8 @@ class PulseModeTests(unittest.TestCase):
         self.assertEqual(counts, [1600, 0, 1600, 0])
         self.assertEqual([frame[0] for frame in self.serial.writes[:2]], [1, 3])
         self.assertEqual(self.serial.writes[-1], bytes.fromhex("00 FF 66 6B"))
-        self.assertEqual(self.sleep.calls, [])
+        # 只发 2 条帧：帧间 1 个间隔 + 触发帧之前 1 个
+        self.assertEqual(self.sleep.calls, [GAP, GAP])
 
     def test_rotate_ccw_pulses_use_opposite_directions_per_wheel(self) -> None:
         counts = self.car.rotate_ccw(rpm=100, pulses=800, wait=False)
@@ -393,7 +399,8 @@ class PulseModeTests(unittest.TestCase):
         self.assertIsNone(counts)
         self.assertEqual(len(self.serial.writes), 4)
         self.assertEqual({frame[1] for frame in self.serial.writes}, {0xFE})
-        self.assertEqual(self.sleep.calls, [])
+        # 四条停止帧之间同样要留间隔
+        self.assertEqual(self.sleep.calls, [GAP] * 3)
 
     def test_pulses_and_duration_cannot_be_combined(self) -> None:
         with self.assertRaises(ValueError):
@@ -443,7 +450,8 @@ class MillimetreModeTests(unittest.TestCase):
         self.assertEqual([int.from_bytes(frame[3:5], "big") for frame in self.serial.writes[:4]], [60] * 4)
         self.assertEqual(
             self.sleep.calls,
-            [estimate_move_seconds(3200, 60, self.car.pulses_per_revolution, 10)],
+            [GAP] * 4
+            + [estimate_move_seconds(3200, 60, self.car.pulses_per_revolution, 10)],
         )
 
     def test_diagonal_mm_is_root_two_wheel_travel(self) -> None:
@@ -453,7 +461,7 @@ class MillimetreModeTests(unittest.TestCase):
         expected = round(2**0.5 * 3200)
         self.assertEqual(counts, [expected, 0, expected, 0])
         self.assertEqual([frame[0] for frame in self.serial.writes[:2]], [1, 3])
-        self.assertEqual(self.sleep.calls, [])
+        self.assertEqual(self.sleep.calls, [GAP, GAP])
 
     def test_strafe_mm_keeps_the_centre_distance(self) -> None:
         counts = self.car.strafe_left(mm=80.0, rpm=200, wait=False)
@@ -507,7 +515,7 @@ class MillimetreModeTests(unittest.TestCase):
         self.assertIsNone(counts)
         self.assertEqual(len(self.serial.writes), 4)
         self.assertEqual({frame[1] for frame in self.serial.writes}, {0xFE})
-        self.assertEqual(self.sleep.calls, [])
+        self.assertEqual(self.sleep.calls, [GAP] * 3)
 
     def test_missing_rpm_and_missing_default_is_reported(self) -> None:
         car = MecanumDrive("/dev/ttyUSB0", serial_port=FakeSerial(), mm_per_wheel_rev=160.0)
