@@ -57,8 +57,6 @@ def _move_axes_to(robot: Robot, targets: dict[str, float]) -> MotionBatch:
 def _go_home(robot: Robot, home: dict[str, float] | None) -> None:
     """走到本次流程的入口姿态；``home=None`` 表示这次不走（跳过重复往返）。"""
     if home is not None:
-        if home["lift"] > 400:
-            robot.arm.move_axis_to_motor_degrees("lift", 400)
         _move_axes_to(robot, home).wait()
 
 
@@ -416,7 +414,7 @@ def place_box_to_box(
     extension_deg = robot.arm.turns_state.of("extension").motor_degrees
     base_deg = robot.arm.turns_state.of("base").motor_degrees
     _grab_box_from_car(robot)
-    _move_axes_to(robot, {"lift": 490, "extension": extension_deg, "base": base_deg}).wait()
+    _move_axes_to(robot, {"lift": 480, "extension": extension_deg, "base": base_deg}).wait()
     robot.gripper.open_jaws()
     robot.arm.move_axis_to_motor_degrees("lift", 695)
     _go_home(robot, home)
@@ -478,6 +476,57 @@ def grab_box_from_floor_to_repo_v2(
             _place_box_to_repo(robot, verbose=True)
             _go_home(robot, home)
             input("放料完成，回车继续，输入 q 跳过：").strip().lower()
+    except Exception as e:
+        print(f"Error occurred during pick and place operation: {e}")
+        _move_axes_to(robot, SAFE_RETRACT).wait()
+        return
+    _move_axes_to(robot, SAFE_RETRACT).wait()
+
+
+#: 去台面三处**放置位**上方摆的姿态 ``(base, lift, extension)``，单位是电机角。
+#: ``lift`` 就是放料高度（v1 的 480）：太低会压到已经在那里的料，太高夹爪打不开。
+#: 换摆放/换台面就改这一张表。
+_PLACE_POSITION = [(-190, 480, 690), (-32, 480, 540), (120, 480, 690)]
+
+
+def place_box_to_box_v2(
+    robot: Robot,
+    *,
+    orders: tuple[int, int, int] = (1, 2, 3),
+    home: dict[str, float] | None = {"lift": 760, "extension": 270.0, "base": 0},
+):
+    """从仓库抓料，叠到台面上第 ``order`` 号位置的物料上；``orders`` 是**放置顺序**。
+
+    每趟的顺序（与 :func:`place_box_to_box` 同一套动作，只是多了"先去哪个位置"）：
+
+    1. 摆到 ``PLACE_POSITION[order - 1]``；
+    2. ``align_xy`` 对准——没传 ``want``，按"离光轴最近的那个"对准；
+    3. 记下对准后的底座/伸缩角；
+    4. 回仓库抓一块料（:func:`_grab_box_from_car`，它会动三轴并转料盘）；
+    5. 按记下的角度**回到刚才那个位置**、松爪、抬起。
+
+    ``home`` 只在每趟开始前摆一次；``None`` = 不摆（调用方已经在这一姿态上）。
+    """
+    digits = _check_order(orders)
+    try:
+        for order in digits:
+            base, lift, extension = _PLACE_POSITION[order - 1]
+            _move_axes_to(robot, {"lift": lift, "extension": extension, "base": base}).wait()
+            input("继续")       # 之后改为停顿1s
+            robot.grasp.align_xy(tolerance_mm=2.0)
+            # 抓料会把这几个轴都开走，所以先记下来：这趟的落点就是现在这个角度。
+            base_deg = robot.arm.turns_state.of("base").motor_degrees
+            extension_deg = robot.arm.turns_state.of("extension").motor_degrees
+            _grab_box_from_car(robot)
+            _move_axes_to(
+                robot,
+                {"extension": extension_deg, "base": base_deg},
+            ).wait()
+            robot.arm.move_axis_to_motor_degrees("lift", lift)
+            robot.gripper.open_jaws()
+            robot.arm.move_axis_to_motor_degrees("lift", 800)
+            _go_home(robot, home)
+            input(f"放置 {order} 号位完成，回车继续，输入 q 跳过：").strip().lower()
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         _move_axes_to(robot, SAFE_RETRACT).wait()
