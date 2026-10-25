@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+from dataclasses import replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -194,9 +195,17 @@ class MaterialLocator:
            当物料中心、框的等效半径 ``(w+h)/4`` 换出深度。这是常态路径，也是快的来源：
            圆面那一路在真实台面图上要给几十个候选逐个量顶面（本机实测一帧 170–380 ms），
            而一次 YOLO 推理约 20 ms。
-        2. **辅助定位（:meth:`locate_auxiliary`）：YOLO 一个物料框都给不出来时才跑。**
-           YOLO 有结果就**不执行**它。里面现在是"颜色块 / 霍夫找顶面圆"那套，
+        2. **辅助定位（:meth:`locate_auxiliary`）：框里没有一块料落在爪口正下方时才跑。**
+           两个都不满足就不执行。里面现在是"颜色块 / 霍夫找顶面圆"那套，
            可以整个换掉（覆盖 :meth:`locate_auxiliary` 即可），主流程不用动。
+
+        ## 为什么要"爪口正下方"这一条，而不是"有没有框"
+
+        只看"有没有框"会漏掉一种真机现场：相机正下方那块料模型没认出来（环里立着的深蓝柱
+        只有 ``blue 0.025``，模型只给出隔壁环的红色），于是候选里**没有**爪口下面那一块，
+        下游"挑离光轴最近的那个"就挑了隔壁的料，动作看起来完全正常。
+        所以补一个条件：框的结果里没有任何一块料离光轴小于一个物料直径时，补跑一次辅助定位
+        并把它的候选并进来。代价是这种帧多花 ~0.6 s；常态（料就在下面）一分钱不花。
 
         ``want`` 指定**要哪一个物料**：类别名（``"red"``）或从 1 开始的编号；
         它只影响 ``report.best`` 挑哪一个，整帧的候选照旧列在 ``report.regions`` 里。
@@ -212,11 +221,35 @@ class MaterialLocator:
         want = normalize_want(want)
         hits = tuple(self.yolo.detect(frame, materials_only=True))
         from_boxes = self._report_from_boxes(frame, hits, want=want)
-        if from_boxes is not None:
+        if from_boxes is None:
+            # 一个合格的物料框都没有：这才轮到辅助定位。框已经问过了，传下去（空元组）
+            # 让它别再问第二遍——同一个 frame、同样的参数，结果必然一样，重跑只是白花 20 ms。
+            return self.locate_auxiliary(frame, want=want, hits=hits)
+        if self._under_the_gripper(from_boxes):
             return from_boxes
-        # 一个合格的物料框都没有：这才轮到辅助定位。框已经问过了，传下去（空元组）
-        # 让它别再问第二遍——同一个 frame、同样的参数，结果必然一样，重跑只是白花 20 ms。
-        return self.locate_auxiliary(frame, want=want, hits=hits)
+        # 框**全在远处**：爪口正下方那块料模型没认出来。真机现场：环里立着的深蓝柱被认成
+        # ``tg3 0.22``、blue 只有 0.025，模型框只剩隔壁环的红色（离光轴 59 mm），而颜色块
+        # 那一路明明找得到它（同一个环心，12.7 mm）。下游"挑离光轴最近的那个"于是只有红色
+        # 可挑——抓错料，而且动作看起来完全正常。这时补跑一次辅助定位，把它的候选并进来。
+        # ponytail: 辅助定位本机实测 ~0.6 s/帧，所以只在"正下方没料"时才跑；批量跟随时
+        # 嫌慢就把颜色块先降到 1/2 分辨率再找，别把这条并回去（并回去就是每帧 0.6 s）。
+        auxiliary = self.locate_auxiliary(frame, want=want, hits=hits)
+        if not auxiliary.regions:
+            return from_boxes
+        return replace(
+            from_boxes, regions=tuple(from_boxes.regions) + tuple(auxiliary.regions)
+        )
+
+    def _under_the_gripper(self, report: MaterialReport) -> bool:
+        """框路径的结果里，有没有一块料就落在爪口正下方。
+
+        判据用一个**物料直径**：光轴离它小于一圈直径，爪子伸下去就能盖住它；更远
+        说明相机其实没对着任何一块认识的料——那种帧才值得多花 0.6 s 去补辅助定位。
+        """
+        return any(
+            face.x_mm**2 + face.y_mm**2 <= self.top_diameter_mm**2
+            for face in report.faces
+        )
 
     def _report_from_boxes(
         self, frame: np.ndarray, hits: Sequence[Detection], *, want=None

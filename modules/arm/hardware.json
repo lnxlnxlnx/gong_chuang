@@ -3,7 +3,7 @@
     "base": {
       "motor_id": 5,
       "reduction_ratio": 5,
-      "expect_ack": true
+      "expect_ack": false
     },
     "lift": {
       "motor_id": 6,

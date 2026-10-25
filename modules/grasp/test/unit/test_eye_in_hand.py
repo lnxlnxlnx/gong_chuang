@@ -2060,6 +2060,29 @@ class GraspAlignXYSessionTests(unittest.TestCase):
             session.grasp.align_xy()
             self.assertTrue(session.mock("align").call_args.args[2].is_open)
 
+    def test_a_per_call_tolerance_reaches_align_x_y_only_for_that_call(self) -> None:
+        """误差门槛按次生效：配置文件一个字都不改，下一次调用还是配置里那份。"""
+        rig = self.build(hover_z_mm=None)
+        with rig as session:
+            session.grasp.align_xy(tolerance_mm=1.5)
+            self.assertEqual(session.mock("align").call_args.args[5].tolerance_mm, 1.5)
+
+            # 不传就回到配置里那份（``replaced`` 不会泄漏到下一次）。
+            session.mock("align").reset_mock()
+            session.grasp.align_xy()
+            self.assertEqual(
+                session.mock("align").call_args.args[5].tolerance_mm,
+                session.grasp._config.tolerance_mm,
+            )
+
+    def test_a_non_positive_tolerance_is_rejected_before_anything_moves(self) -> None:
+        rig = self.build(hover_z_mm=None)
+        with rig as session:
+            for bad in (0.0, -1.0):
+                with self.subTest(tolerance_mm=bad), self.assertRaises(ValueError):
+                    session.grasp.align_xy(tolerance_mm=bad)
+            session.mock("align").assert_not_called()
+
     def test_a_per_call_want_reaches_every_step_of_align_and_descend(self) -> None:
         """整轮就位（悬停 → 安全高度 → x/y → 下降）每一步都得看同一个 want。
 

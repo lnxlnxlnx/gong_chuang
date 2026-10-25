@@ -58,6 +58,9 @@ class MaterialLocatorTests(unittest.TestCase):
         self.frame = synthetic_rings()
         self.locator = MaterialLocator(
             yolo=FakeYOLO([hit("red", 0.9, 160), hit("blue", 0.7, 480)]),
+            # 这两个框都离光轴很远，按新规矩会补跑一次辅助定位；这里只关心框，
+            # 所以把圆面那一路给空——候选数才等于框数。
+            locator=RecordingLocator(()),
             focal_px=300,
         )
         self.report = self.locator.locate(self.frame)
@@ -78,16 +81,31 @@ class MaterialLocatorTests(unittest.TestCase):
         self.assertAlmostEqual(item.x_mm, (160 - 320) * item.z_mm / 300)
         self.assertAlmostEqual(item.y_mm, 0.0)
 
-    def test_the_circle_locator_is_never_called_when_a_box_exists(self):
-        """这一版快下来的全部原因：有框就不碰圆面定位器。"""
+    def test_the_circle_locator_is_never_called_when_a_box_sits_under_the_gripper(self):
+        """常态快路径：框里有一块料就在光轴正下方，就不碰圆面定位器。"""
         recorder = RecordingLocator((LockedRegion(160.0, 240.0, 40.0),))
         report = MaterialLocator(
-            locator=recorder, yolo=FakeYOLO([hit("red", 0.9, 160)]), focal_px=300
+            locator=recorder, yolo=FakeYOLO([hit("red", 0.9, 320)]), focal_px=300
         ).locate(self.frame)
 
         self.assertEqual(recorder.calls, [])
         self.assertEqual(len(report.regions), 1)
 
+    def test_a_far_away_box_still_asks_the_circle_locator(self):
+        """框全在远处 = 爪口正下方那块料模型没认出来：补跑辅助定位并把它并进来。
+
+        真机现场（WIN_20261025_16_29_41）：环里的深蓝柱只有 blue 0.025，模型只给出隔壁
+        环的红色（离光轴 59 mm）；不补这一趟，下游"挑离光轴最近的那个"就只剩红色可挑。
+        """
+        recorder = RecordingLocator((LockedRegion(320.0, 240.0, 60.0),))
+        report = MaterialLocator(
+            locator=recorder, yolo=FakeYOLO([hit("red", 0.9, 120)]), focal_px=300
+        ).locate(self.frame)
+
+        self.assertEqual(len(recorder.calls), 1)
+        self.assertEqual(len(report.regions), 2)
+        # 光轴正下方那块被并进来了——"挑离光轴最近的那个"这才有得挑。
+        self.assertIn(320.0, [region.center_x_px for region in report.regions])
     def test_best_prefers_the_highest_classification_score(self):
         self.assertEqual(self.report.best.name, "red")
 
@@ -197,8 +215,8 @@ class AuxiliaryLocateTests(unittest.TestCase):
         self.assertEqual(report.colour_source, "stub")
         self.assertEqual(silent.auxiliary_calls, 1)
 
-        # 主算有框时，辅助定位一次都不该被执行——这是"有结果就不执行它"。
-        loud = StubAuxiliary(yolo=FakeYOLO([hit("red", 0.9, 160)]), focal_px=300)
+        # 主算有一块料在光轴正下方时，辅助定位一次都不该被执行——"有答案就不跑另一条"。
+        loud = StubAuxiliary(yolo=FakeYOLO([hit("red", 0.9, 320)]), focal_px=300)
         report = loud.locate(synthetic_rings())
         self.assertEqual(report.colour_source, "yolo")
         self.assertEqual(loud.auxiliary_calls, 0)

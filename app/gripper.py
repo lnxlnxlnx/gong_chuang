@@ -335,7 +335,8 @@ def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
     #    注意：底座这次要转约 9300 脉冲，超过"不许和伸缩并行"的 600 脉冲上限。
     #    那条限制只在 RobotArm.move_axes 里检查，单轴帧不拦，所以现场必须确认
     #    工作区是空的（伸出状态下横扫会把整条臂扫过去）。
-    robot.arm.move_axis_to_motor_degrees("lift", 700)
+    robot.arm.move_axis_to_motor_degrees("lift", 500)
+    _move_axes_to(robot, {"extension": 270.0, "base": 400, "lift": 900}).wait()
     report = _move_axes_to(robot, {"lift": 900, "extension": 10, "base": 1048}).wait()
     if verbose:
         _print_report("放料前", report)
@@ -344,22 +345,21 @@ def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
     robot.gripper.set_position(100)
     
     robot.arm.move_axis_to_motor_degrees("lift", 980)
-    _move_axes_to(robot, {"extension": 270.0, "base": 500}).wait()
+    
+    robot.arm.move_axis_to_motor_degrees("base", 800)
     current_position_index = (current_position_index + 1) % len(TURN_TABLE_POSITIONS)
     batch = robot.motion.begin()
-    batch.add(
-        robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False)
-    )
+    batch.add(robot.arm.move_axis_to_motor_degrees("base", 200, wait=False))
+    batch.add(robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False))
     batch.add(robot.gripper.open_jaws(wait=False))
-    batch.add_all(_move_axes_to(robot, {"lift": 760, "extension": 10.0, "base": 450}))
     batch.wait()
-    # robot.arm.move_axis_to_motor_degrees("extension", 150)
+
 
 def place_box_from_repo_to_floor(
     robot: Robot,
     *,
     order=(1, 2, 3),
-    rpm: int = 30,
+    rpm: int | None = None,
     verbose: bool = False,
     home: dict[str, float] | None = {"lift": 760, "extension": 50.0, "base": 465},
 ):
@@ -396,16 +396,6 @@ def place_box_from_repo_to_floor(
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
             
             _grab_box_from_car(robot)
-            # 到这里已经抓着料了：转到 plan 里算好的**绝对位置**（环的正上方）。
-            # plan 是 robot.grasp.plan_ring() 的返回值；plan.degrees 就是 {"base": ...,
-            # "extension": ...} 两个绝对电机角度，正好喂 _move_axes_to。
-            if result.plan is not None:
-                new_dir = dict({"lift": 95}, **{"base": base_deg, "extension": extension_deg})
-                _move_axes_to(robot, new_dir).wait()
-                
-                robot.gripper.open_jaws()
-                robot.arm.move_axis_to_motor_degrees("lift", 375)
-            _go_home(robot, home)
             input("放料完成，回车继续，输入 q 跳过：").strip().lower()
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
@@ -454,15 +444,6 @@ def place_box_from_repo_to_floor_v2(
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
             
             _grab_box_from_car(robot)
-            # 到这里已经抓着料了：转到 plan 里算好的**绝对位置**（环的正上方）。
-            # plan 是 robot.grasp.plan_ring() 的返回值；plan.degrees 就是 {"base": ...,
-            # "extension": ...} 两个绝对电机角度，正好喂 _move_axes_to。
-            if result.plan is not None:
-                new_dir = dict({"lift": 95}, **{"base": base_deg, "extension": extension_deg})
-                _move_axes_to(robot, new_dir).wait()
-                
-                robot.gripper.open_jaws()
-                robot.arm.move_axis_to_motor_degrees("lift", 375)
             _go_home(robot, home)
             input("放料完成，回车继续，输入 q 跳过：").strip().lower()
     except Exception as e:
@@ -486,12 +467,12 @@ def grab_box_from_floor_to_repo_v2(
     """
     robot.arm.move_axis_to_motor_degrees("lift", 400)
     _go_home(robot, home)
-    RING_POSITION = [(-190, 580, 690), (-32, 580, 540), (100, 580, 690)]
+    RING_POSITION = [(-190, 580, 690), (-32, 580, 540), (120, 580, 690)]
     try:
         for order in orders:
             _move_axes_to(robot, {"lift": RING_POSITION[order - 1][1], "extension": RING_POSITION[order - 1][2], "base": RING_POSITION[order - 1][0]}).wait()
             input("继续")       # 之后改为停顿1s
-            result = robot.grasp.align_xy()
+            result = robot.grasp.align_xy(tolerance_mm=3.0)
             robot.arm.move_axis_to_motor_degrees("lift", 90)
             robot.gripper.close_jaws()
             _place_box_to_repo(robot, verbose=True)

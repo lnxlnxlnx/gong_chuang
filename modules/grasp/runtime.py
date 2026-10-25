@@ -389,6 +389,7 @@ class Grasp:
         single_step: bool = False,
         reading=None,
         want=None,
+        tolerance_mm: float | None = None,
     ) -> ServoResult:
         """只做 x/y 对准：**默认一步都不动高度**，高度由调用方负责。
 
@@ -413,6 +414,10 @@ class Grasp:
 
             每轮只取**一帧**、只走**一步**；``reading`` 给了就等于 ``single_step``。
             结果里的 ``unverified`` 为真——读数说的是动作**之前**那一次。
+        :param tolerance_mm: 这一次的到位门槛（毫米）；``None`` 用
+            ``eye_in_hand.json`` 的 ``tolerance_mm``（你那份是 6.0）。**比配置更严**时
+            多用几步，更松时可能一步就收工；``max_iterations`` 和单步脉冲上限都不变，
+            所以收得太严会以"没进容差"报错，而不是一直磨。负数 / 0 直接报错。
         :param want: 这一次要抓**哪一个**物料：类别名（``"red"``）或从 1 开始的编号，
             与 ``vision.locate(want)`` 同一套说法。**不传就用 ``eye_in_hand.json`` 里
             ``object`` 那一份**（那份只是默认值）。一次程序里依次抓多种物料就靠它::
@@ -452,6 +457,13 @@ class Grasp:
             lift_scale=self._lift_scale,
             on_message=self._say,
         )
+        # 门槛只改这一次：``ServoConfig`` 是 frozen 的，``replace`` 顺带跑它自己的校验
+        # （<=0 直接 ValueError），也顺带把由它派生的"停稳细档"（0.25×容差）一起改掉。
+        config = (
+            self._config
+            if tolerance_mm is None
+            else replace(self._config, tolerance_mm=float(tolerance_mm))
+        )
         if not ensure_safe_height:
             return align_x_y(
                 arm,
@@ -459,7 +471,7 @@ class Grasp:
                 selector,
                 self._target,
                 self._jacobian,
-                self._config,
+                config,
                 ensure_safe_height=False,
                 **options,
             )
@@ -469,7 +481,7 @@ class Grasp:
             selector,
             self._target,
             self._jacobian,
-            self._config,
+            config,
             **options,
         )
 
