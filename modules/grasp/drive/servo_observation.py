@@ -71,7 +71,12 @@ def select_object(
 ) -> MaterialSighting:
     """从一帧里挑出物块。
 
-    :raises ServoError: 一个都没有，或者没有一个明确的。
+    没配判别条件（``selector.is_open``）而画面里又有多个物料时，取**离光轴最近**的那
+    个：相机装在爪上，光轴正下方就是爪口要去的地方，所以"最近"就是"要抓的那个"。
+    报错让现场去填 ``want`` 是更保守的做法，但那等于把一条按次决定的事推给人——同一段
+    程序里抓几个不同物料时，最近的那个本来就是对的。
+
+    :raises ServoError: 一个都没有。
     """
     matched = [item for item in sightings if selector.matches(item)]
     if not matched:
@@ -82,13 +87,8 @@ def select_object(
             f"这一帧里没有物块（{selector.describe()}）；收到 {len(sightings)} 条：{listing}"
         )
     if len(matched) > 1 and selector.is_open:
-        listing = "、".join(f"物料 {item.material_id}({item.color})" for item in matched)
-        raise ServoError(
-            f"画面里有多个目标（{listing}），不知道该对准哪一个。两种办法：\n"
-            "  按次传（推荐，一次程序里抓多种物料就用这个）："
-            "robot.grasp.align_xy(want=\"red\")，只读定位是 robot.vision.locate(\"red\")；\n"
-            "  或者填默认值：modules/grasp/eye_in_hand.json 的 object 里写 material_id 或 color"
-        )
+        # ponytail: 纯距离启发式——两个物料离光轴差不多近时会挑错，那时按次传 want。
+        return min(matched, key=lambda item: item.planar_distance_mm)
     return matched[-1]
 
 
@@ -230,9 +230,7 @@ def _settled_sighting(
                     message = (
                         f"等了 {config.settle_timeout_seconds:.1f} s 也没能稳定看到物块；"
                         f"这一段的最后一次失败是：{last_error}\n"
-                        "  一个目标都没有时：确认物块在画面里，没有被人、线材或爪子挡住；"
-                        "提示多个目标时：在 modules/grasp/eye_in_hand.json 的 object 里"
-                        "填 material_id 或 color"
+                        "  一个目标都没有时：确认物块在画面里，没有被人、线材或爪子挡住"
                     )
                 if isinstance(last_error, ObjectMissing):
                     raise ObjectMissing(message) from last_error

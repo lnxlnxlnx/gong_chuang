@@ -78,8 +78,9 @@ class ObjectSelector:
     - ``material_id``：按编号认（最稳）；
     - ``color``：按颜色认。
 
-    两个都不给时要求**画面里只有一个目标**：多于一个就直接报错，
-    因为猜错目标会让机械臂朝错误的方向动，而动作本身看起来完全正常。
+    两个都不给时**画面里有几个就挑离光轴最近的那个**（见
+    :func:`modules.grasp.drive.servo_observation.select_object`）——相机装在爪上，
+    光轴正下方就是爪口要去的地方。要抓的不是最近的那个时，按次传 ``want``。
     """
 
     material_id: Optional[int] = None
@@ -124,7 +125,7 @@ class ObjectSelector:
 
     def describe(self) -> str:
         if self.is_open:
-            return "物块 = 画面里唯一的目标"
+            return "物块 = 离光轴最近的目标"
         parts = []
         if self.material_id is not None:
             parts.append(f"编号 {self.material_id}")

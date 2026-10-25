@@ -11,6 +11,7 @@ import time
 from app.gripper import (
     _move_axes_to,
     grab_box_from_floor_to_repo,
+    grab_box_from_floor_to_repo_v2,
     grab_box_from_turntable_to_repo,  # 圆盘->仓库
     place_box_from_repo_to_floor,  # 仓库->地面圆环
     place_box_from_repo_to_floor_v2,  # 仓库->地面圆环
@@ -39,7 +40,8 @@ def main() -> None:
         robot.gripper.set_position(280)
         robot.turntable.go_home()
         _move_axes_to(robot, {"lift": 495, "extension": 550, "base": 0}).wait()
-        place_box_from_repo_to_floor_v2(robot)
+        # place_box_from_repo_to_floor_v2(robot)
+        grab_box_from_floor_to_repo_v2(robot)
         input("结束!!!!!!!!!!!")
 
 

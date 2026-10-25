@@ -160,9 +160,17 @@ class ObjectSelectorTests(unittest.TestCase):
         self.assertTrue(selector.is_open)
         self.assertEqual(select_object((self.green,), selector).material_id, 4)
 
-    def test_open_selector_refuses_ambiguity(self) -> None:
-        with self.assertRaisesRegex(ServoError, "多个目标"):
-            select_object((self.green, self.blue), ObjectSelector())
+    def test_open_selector_takes_the_nearest_target(self) -> None:
+        """没配判别条件、画面里又有多个时：离光轴最近的那个就是爪口下的那个。"""
+        self.assertEqual(
+            select_object((self.blue, self.green), ObjectSelector()).material_id, 4
+        )
+        self.assertEqual(
+            select_object(
+                (self.green, sighting(9, -0.5, 0.2, "red")), ObjectSelector()
+            ).material_id,
+            9,
+        )
 
     def test_material_id_selects(self) -> None:
         selector = ObjectSelector(material_id=5)
@@ -186,14 +194,6 @@ class ObjectSelectorTests(unittest.TestCase):
         with self.assertRaises(ServoError) as caught:
             select_object((self.green,), ObjectSelector(material_id=99))
         self.assertIn("物料 4", str(caught.exception))
-
-    def test_the_ambiguity_error_names_both_ways_out(self) -> None:
-        """报错要说清两条路：按次传（推荐），或者填默认值。"""
-        with self.assertRaises(ServoError) as caught:
-            select_object((self.green, self.blue), ObjectSelector())
-        message = str(caught.exception)
-        self.assertIn("want=", message)
-        self.assertIn("eye_in_hand.json", message)
 
     def test_from_want_speaks_the_same_language_as_locate(self) -> None:
         """``locate("red")`` 与 ``align_xy(want="red")`` 必须是同一套说法。"""
@@ -2353,25 +2353,32 @@ class OcclusionTests(unittest.TestCase):
                 ensure_safe_height=False,
             )
 
-    def test_several_targets_are_never_treated_as_occlusion(self) -> None:
-        """画面里有两个目标时**不能**当遮挡收工：那会朝错的目标走，必须问人。"""
+    def test_several_targets_align_to_the_nearest_one(self) -> None:
+        """画面里多一个远处的物料不该打断对准：挑离光轴最近的那个继续走。"""
 
         class TwoTargets:
             error = None
 
+            def __init__(self, arm: "FakeArm") -> None:
+                self.arm = arm
+
             def frame(self, **_kwargs):
                 stamp = time.monotonic()
                 return (
-                    sighting(1, 30.0, 0.0, stamp=stamp),
-                    sighting(2, -30.0, 0.0, stamp=stamp),
+                    sighting(
+                        1, self.arm.offset[0] + 300.0, self.arm.offset[1], stamp=stamp
+                    ),
+                    sighting(2, self.arm.offset[0], self.arm.offset[1], stamp=stamp),
                 )
 
-        arm = FakeArm(self.TRUTH)
-        with self.assertRaisesRegex(ServoError, "多个目标"):
-            align_x_y(
-                arm, TwoTargets(), ObjectSelector(), self.TARGET, self.TRUTH, self.config(),
-                ensure_safe_height=False,
-            )
+        arm = FakeArm(self.TRUTH, gain=0.6)
+        result = align_x_y(
+            arm, TwoTargets(arm), ObjectSelector(), self.TARGET, self.TRUTH, self.config(),
+            ensure_safe_height=False,
+        )
+
+        self.assertFalse(result.occluded)
+        self.assertLess(result.error_mm, 6.0)
 
     def test_the_timeout_message_carries_the_last_inner_reason(self) -> None:
         """超时那句必须带上最后一次内层原因——否则三种成因长得一模一样。"""

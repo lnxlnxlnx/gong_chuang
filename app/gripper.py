@@ -471,4 +471,34 @@ def place_box_from_repo_to_floor_v2(
         return
 
     _move_axes_to(robot, SAFE_RETRACT).wait()
-    
+
+
+def grab_box_from_floor_to_repo_v2(
+    robot: Robot,
+    *,
+    orders: tuple[int, int, int] = (3, 2, 1),
+    home: dict[str, float] | None = {"lift": 760, "extension": 400, "base": -32},
+):
+    """把物料从地面圆环放到仓库里。不需要考虑初始状态。
+
+    ``home`` 是进流程前先摆到的姿态，默认 :data:`READY_POSE`；传 ``None`` 表示这次不摆
+    （调用方已经在这一姿态上时省一次往返；轴本来就停在目标上时也不会发帧）。
+    """
+    robot.arm.move_axis_to_motor_degrees("lift", 400)
+    _go_home(robot, home)
+    RING_POSITION = [(-190, 580, 690), (-32, 580, 540), (100, 580, 690)]
+    try:
+        for order in orders:
+            _move_axes_to(robot, {"lift": RING_POSITION[order - 1][1], "extension": RING_POSITION[order - 1][2], "base": RING_POSITION[order - 1][0]}).wait()
+            input("继续")       # 之后改为停顿1s
+            result = robot.grasp.align_xy()
+            robot.arm.move_axis_to_motor_degrees("lift", 90)
+            robot.gripper.close_jaws()
+            _place_box_to_repo(robot, verbose=True)
+            _go_home(robot, home)
+            input("放料完成，回车继续，输入 q 跳过：").strip().lower()
+    except Exception as e:
+        print(f"Error occurred during pick and place operation: {e}")
+        _move_axes_to(robot, SAFE_RETRACT).wait()
+        return
+    _move_axes_to(robot, SAFE_RETRACT).wait()
