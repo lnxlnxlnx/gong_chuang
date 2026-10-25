@@ -6,6 +6,7 @@ from modules.arm import MotionReport
 from modules.chassis.drive.mecanum import WHEEL_ORDER
 from modules.motion import MotionBatch, MotionBatchReport
 from modules.motor.drive.emm42 import POSITION_UNITS_PER_REVOLUTION
+from modules.vision.drive.numbered_ring import derive_ring_row
 from robot import Robot
 
 TURN_TABLE_POSITIONS = [0, 500, 1000]  # 转盘的目标位置，单位为度
@@ -156,6 +157,20 @@ LATERAL_MAX_PULSES = 3000
 RING_READ_ATTEMPTS = 5
 #: 两次读环之间的间隔（秒）；一个来回约一次取帧，别把相机读空。
 RING_READ_INTERVAL_SECONDS = 0.15
+#: 车头与"三环圆心连线"的夹角门槛（度）。垂直就行了，所以目标倾角是 0。
+RING_ROW_SQUARE_TOLERANCE_DEG = 1.0
+#: 车头与"相机画面水平轴"的固定差角（度）。装出来的臂不是正对车头时补这个。
+#: 它等于**车头摆正时**该量到的直线倾角：人眼把车头摆到与环排垂直，跑一次
+#: :func:`square_chassis_to_ring_row` 读打印出来的倾角，把那个数填这里。
+ROW_SQUARE_YAW_OFFSET_DEG = 3.05
+#: 还不知道"每脉冲让倾角变多少度"时的第一步试转量（脉冲）。
+ROW_ROTATE_TRIAL_PULSES = 300
+#: 单步最多转多少脉冲：离得再远也别一把扫过去。
+ROW_ROTATE_MAX_PULSES = 2000
+#: 一帧看清三环、随后一次性放完三个环之前要摆的姿态（``lift``/``extension``/``base``，
+#: 电机角度）：伸缩比逐环对准时短一点、镜头离地面远一些，整排 2×150 mm 才进得了画面。
+#: 现场按取景改这一份；换场地只需要动它和 ``station.center_spacing_mm``。
+RING_ROW_OBSERVE_POSE = {"lift": 760, "extension": 400, "base": -32}
 
 
 def _read_ring(robot: Robot, *, digit: int | None = None, attempts: int = RING_READ_ATTEMPTS):
@@ -247,6 +262,111 @@ def center_chassis_on_ring(
     raise RuntimeError(
         f"{max_iterations} 步还没把车对到环前（最后横向残差 {x_mm:+.1f} mm，"
         f"门槛 {tolerance_mm:.1f} mm）：检查轮子是不是打滑或撞到东西"
+    )
+
+
+def _read_ring_row(robot: Robot, *, attempts: int = RING_READ_ATTEMPTS):
+    """读**一帧**、把三环圆心那条直线解出来；凑不齐就重试几帧。
+
+    凑齐 = 2 号环 + 至少一个相邻环都有可用读数。一帧运动模糊、或环刚好贴到画面边
+    （贴边的框心不是环心，``reading()`` 会是 ``None``）都不该让整次解算失败。
+
+    :returns: ``(row, middle_target)``。``middle_target`` 是 2 号环那一份
+        ``RingTarget``：中间环的比例尺来源要从它身上取（同一帧只有这一把尺）。
+    :raises RuntimeError: 连读 ``attempts`` 帧都凑不齐（带上最后看到的是哪些号）。
+    """
+    last_problem = "一帧都没读到"
+    for index in range(max(1, int(attempts))):
+        if index:
+            time.sleep(RING_READ_INTERVAL_SECONDS)
+        targets = robot.vision.locate_rings()
+        readings = {
+            digit: target.reading()
+            for digit, target in targets.items()
+            if target.reading() is not None
+        }
+        if 2 not in readings:
+            last_problem = f"这一帧没有可用的 2 号环心（看到 {sorted(targets)}）"
+            continue
+        if len(readings) < 2:
+            last_problem = "只看到 2 号环，定不出直线（1 号或 3 号要进画面且不贴边）"
+            continue
+        row = derive_ring_row(readings, spacing_mm=robot.vision.ring_center_spacing_mm)
+        return row, targets[2]
+    raise RuntimeError(f"三环直线解不出来：{last_problem}")
+
+
+def square_chassis_to_ring_row(
+    robot: Robot,
+    *,
+    yaw_offset_deg: float = ROW_SQUARE_YAW_OFFSET_DEG,
+    tolerance_deg: float = RING_ROW_SQUARE_TOLERANCE_DEG,
+    max_iterations: int = 4,
+    rpm: int = 30,
+) -> float:
+    """转**车**让车头与三环圆心那条直线垂直：读一帧倾角，按实测响应比一步到位。
+
+    倾角是 1→3 号环心连线的方向角（度，画面右为 0、下为正）。相机与车头若严格同向，
+    车头正对时这条线在画面里是水平的（倾角 0）；实际装出来差的那几度就是
+    ``yaw_offset_deg``——**车头摆正时应该量到的倾角**。第一步用固定试转量摸出"每脉冲
+    转多少度"，之后按牛顿一步算到位：轮径、地面打滑、四轮方向都不必预先标定，闭环自己学。
+
+    调 ``yaw_offset_deg``：人眼把车头摆到与环排垂直，跑一次本函数读打印出来的倾角，
+    把那个数填进 :data:`ROW_SQUARE_YAW_OFFSET_DEG`（或直接按次传参）。之后它就停在
+    那个角度上，而不是停在 0。它是**当前观察姿态下**的量：改了 ``RING_ROW_OBSERVE_POSE``
+    里的 ``base``（底座转了几度，画面就跟着转几度）之后要重新调一次。
+
+    与 :func:`center_chassis_on_ring` 只差在动哪个轴：那个用横移把环心推到光轴上，
+    这个用自转把环排的倾角转到目标角。调用前先把臂摆到能同时看见 2 号与至少一个相邻环
+    的姿态（见 :data:`RING_ROW_OBSERVE_POSE`）。只想读一个数、不想让车转（标定要的就是
+    这个）就传 ``tolerance_deg=180``：取一帧就返回，倾角打在打印里。
+
+    :returns: 最后量到的倾角**相对目标**的残差（度）；``0`` = 已经垂直。
+    :raises RuntimeError: 凑不出三环直线、车转了却量不到角度变化、或转满步数仍不垂直。
+    """
+    gain: float | None = None  # 每 +1 脉冲（顺时针转）让直线倾角变化多少度
+    previous: tuple[float, int] | None = None
+    yaw = 0.0
+    residual = 0.0
+    for attempt in range(1, max(1, int(max_iterations)) + 1):
+        row, _middle = _read_ring_row(robot)
+        yaw = row.yaw_deg
+        residual = yaw - yaw_offset_deg
+        # 先结算上一步：车真的转了多少度；一步都没转就别再猜。
+        if previous is not None and previous[1]:
+            observed = (residual - previous[0]) / previous[1]
+            if abs(observed) < 1e-6:
+                raise RuntimeError(
+                    f"车转了 {previous[1]:+d} 脉冲，直线倾角却一点没变"
+                    f"（残差 {previous[0]:+.2f}° → {residual:+.2f}°）："
+                    "轮子没动、打滑到量不出来，或者相机根本没跟着车转"
+                )
+            gain = observed
+        if abs(residual) <= tolerance_deg:
+            print(
+                f"  车头已与三环直线垂直：倾角 {yaw:+.2f}°"
+                f"（目标 {yaw_offset_deg:+.2f}°、残差 {residual:+.2f}°；读了 {attempt} 帧）"
+            )
+            return residual
+        magnitude = (
+            ROW_ROTATE_TRIAL_PULSES
+            if gain is None
+            else abs(int(round(-residual / gain)))
+        )
+        magnitude = min(max(magnitude, 1), ROW_ROTATE_MAX_PULSES)
+        # 残差为正 = 画面右边那头更低（更靠近车）：顺时针转把它转平。
+        if residual > 0:
+            robot.chassis.rotate_cw(rpm=rpm, pulses=magnitude)
+            step = magnitude
+        else:
+            robot.chassis.rotate_ccw(rpm=rpm, pulses=magnitude)
+            step = -magnitude
+        previous = (residual, step)
+
+    raise RuntimeError(
+        f"{max_iterations} 步还没把车头转到与三环直线垂直：最后倾角 {yaw:+.2f}°"
+        f"（目标 {yaw_offset_deg:+.2f}°、残差 {residual:+.2f}°、门槛 {tolerance_deg:.2f}°）："
+        "检查轮子是不是打滑或撞到东西"
     )
 
 
@@ -650,6 +770,55 @@ def place_box_from_repo_to_floor_v2(
             robot.arm.move_axis_to_motor_degrees("lift", 375)
             _go_home(robot, home)
             # input("放料完成，回车继续，输入 q 跳过：").strip().lower()
+    except Exception as e:
+        print(f"Error occurred during pick and place operation: {e}")
+        _move_axes_to(robot, SAFE_RETRACT).wait()
+        return
+
+    _move_axes_to(robot, SAFE_RETRACT).wait()
+
+
+def place_box_from_repo_to_floor_v3(
+    robot: Robot,
+    *,
+    orders: tuple[int, int, int] = (1, 2, 3),
+    observe: dict[str, float] | None = RING_ROW_OBSERVE_POSE,
+    place_lift: float = 95.0,
+):
+    """把物料从仓库放到地面圆环里：**一帧看清三环，算完三个落点，一趟放完**。
+
+    动作与 v2 一样（去仓库抓料 → 走到落点 → 降到 ``place_lift`` 松爪 → 抬起），差别只在
+    "环在哪"从哪来：
+
+    1. 摆到 ``observe`` 读**一帧**：2 号环心实测，三环连线的倾角给出方向，两侧环心 =
+       中间环心 ∓ ``station.center_spacing_mm``（现场 150 mm）沿直线外推；
+    2. 三个环心**一次性**解算成三份各轴绝对位置（:meth:`Grasp.plan_ring_readings`）；
+    3. 三趟之间不再拍帧、不再逐环对准，车也不动。
+
+    解算是**一次线性化**：观察姿态与落点姿态差得远时雅可比会变，``plan.residual_mm``
+    就是预测残差。真放不进环就退回 v2 的闭环（``align_ring``，每步重拍重算）。
+
+    ``observe=None`` = 调用方已经在这一姿态上（省一次往返）；``orders`` 是**放置顺序**。
+    """
+    digits = _check_order(orders)
+    robot.arm.move_axis_to_motor_degrees("lift", 400)
+    _go_home(robot, observe)
+    try:
+        row, middle = _read_ring_row(robot)
+        print(row.summary())
+        # 中间环的比例尺来源就是这一帧的尺：外推出的 1/3 号环心与它同一把尺。
+        plans = robot.grasp.plan_ring_readings(
+            row.centers_mm, scale_source=middle.scale_source
+        )
+        for digit in digits:
+            plan = plans[digit]
+            # 抓料会把这几个轴都开走；plan 记的是**绝对**角度，中间怎么走都对得上。
+            _grab_box_from_car(robot)
+            _move_axes_to(robot, {"extension": plan.extension, "base": plan.base}).wait()
+            robot.arm.move_axis_to_motor_degrees("lift", place_lift)
+            robot.gripper.open_jaws()
+            robot.arm.move_axis_to_motor_degrees("lift", 375)
+            print(f"  {digit} 号环：{plan.summary()}")
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         _move_axes_to(robot, SAFE_RETRACT).wait()

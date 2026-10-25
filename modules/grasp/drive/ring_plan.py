@@ -170,9 +170,9 @@ class RingBasePlan:
         )
 
     def summary(self) -> str:
-        where = (
-            f"环 {self.digit}（{self.score:.2f}）" if self.digit is not None else "环"
-        )
+        where = f"环 {self.digit}" if self.digit is not None else "环"
+        if self.digit is not None and self.score is not None:
+            where += f"（{self.score:.2f}）"
         return (
             f"{where} 读数 ({self.reading[0]:+.1f}, {self.reading[1]:+.1f}) mm，"
             f"误差 {math.hypot(*self.error_mm):.1f} mm → "

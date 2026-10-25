@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -131,6 +131,101 @@ class RingTarget:
             f"@({self.center_px[0]:.0f},{self.center_px[1]:.0f}) r={self.radius_px:.0f}px "
             f"{where}，{shape}，{scale}"
         )
+
+
+@dataclass(frozen=True)
+class RingRow:
+    """三个环排成的那条直线：倾角 + 三个环心（相机系毫米）。
+
+    ``centers_mm`` 的 2 号是**实测**环心，1/3 号是按已知间距沿直线外推出来的；
+    ``measured_span_mm`` 是两端都看得见时实测的 1↔3 跨距，用来核对"间距 150 mm"
+    这条假设与比例尺对不对（``None`` = 只有一侧可见）。
+    """
+
+    #: 直线倾角（度）：画面右方为 0、下方为正，按**直线**折进 ``(-90, 90]``。
+    yaw_deg: float
+    #: 三个环心（相机系毫米），键就是环号 1/2/3。
+    centers_mm: Dict[int, Tuple[float, float]]
+    measured_span_mm: Optional[float] = None
+
+    def summary(self) -> str:
+        middle = self.centers_mm[2]
+        span = (
+            f"实测 1-3 跨距 {self.measured_span_mm:.0f} mm"
+            if self.measured_span_mm is not None
+            else "只有一侧环可见"
+        )
+        return (
+            f"三环直线：倾角 {self.yaw_deg:+.1f}°，"
+            f"2 号环心 ({middle[0]:+.1f},{middle[1]:+.1f}) mm，{span}"
+        )
+
+
+def derive_ring_row(
+    centers_mm: "Mapping[int, Sequence[float]]", *, spacing_mm: float
+) -> RingRow:
+    """一帧里看到的环心（1/2/3 里至少两个）→ 三个环心 + 直线倾角。
+
+    中间环（2 号）用**实测**环心，两侧按"相邻圆心间距 = ``spacing_mm``"沿直线外推。
+    为什么不直接用 1/3 号的实测框心：相机装在臂上、镜头离纸很近，两端常常贴到画面边，
+    而贴边的框心会偏出几十像素（``RingTarget.reading`` 那时干脆返回 ``None``）；三个环
+    的间距是**装好的物理真值**，用实测的中间环 + 直线方向推出来比贴边框可信。
+
+    方向取"离得最远的那一对"：两端都可见时用 1→3（同样的读数噪声摊到角度上最小，
+    与 ``ring_station`` 取 1→3 是同一个理由），否则用 2 号与看得见的那一侧。
+
+    :raises ValueError: 没有 2 号环（没有可以当锚点的实测环心）、两个相邻环都没看到
+        （定不出直线）、某一对环心重合，或 ``spacing_mm`` 不是正数。
+    """
+    if not spacing_mm > 0:
+        raise ValueError(f"spacing_mm 必须是正数（毫米），收到 {spacing_mm!r}")
+    if 2 not in centers_mm:
+        raise ValueError("三环直线要用 2 号环的实测环心，但这一帧没有 2 号环")
+    middle = _finite_pair(centers_mm[2], "2 号环心")
+    sides = [digit for digit in (1, 3) if digit in centers_mm]
+    if not sides:
+        raise ValueError("只看到 2 号环，定不出三环这条直线：让 1 号或 3 号也进画面")
+    if len(sides) == 2:
+        first = _finite_pair(centers_mm[1], "1 号环心")
+        last = _finite_pair(centers_mm[3], "3 号环心")
+    elif sides[0] == 3:
+        first, last = middle, _finite_pair(centers_mm[3], "3 号环心")
+    else:
+        first, last = _finite_pair(centers_mm[1], "1 号环心"), middle
+
+    dx, dy = last[0] - first[0], last[1] - first[1]
+    span = math.hypot(dx, dy)
+    if span <= 0:
+        raise ValueError(f"两个环心重合（{first} 与 {last}），定不出直线")
+    unit = (dx / span, dy / span)
+    yaw = math.degrees(math.atan2(unit[1], unit[0]))
+    return RingRow(
+        # 直线没有方向：170° 与 -10° 是同一条线，折进 (-90, 90] 才能取最小转角。
+        yaw_deg=(yaw + 90.0) % 180.0 - 90.0,
+        centers_mm={
+            1: (middle[0] - spacing_mm * unit[0], middle[1] - spacing_mm * unit[1]),
+            2: middle,
+            3: (middle[0] + spacing_mm * unit[0], middle[1] + spacing_mm * unit[1]),
+        },
+        measured_span_mm=span if len(sides) == 2 else None,
+    )
+
+
+def _finite_pair(value: "Sequence[float]", name: str) -> Tuple[float, float]:
+    """把一个环心读成两个有限数；写错就当场报错（外推错一格就是 150 mm）。"""
+    if isinstance(value, (str, bytes)):
+        raise ValueError(f"{name} 要写成 (x, y) 两个数，收到 {value!r}")
+    numbers = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise ValueError(f"{name} 里的每一项都必须是数字，收到 {item!r}")
+        number = float(item)
+        if not math.isfinite(number):
+            raise ValueError(f"{name} 里有非有限数：{item!r}")
+        numbers.append(number)
+    if len(numbers) != 2:
+        raise ValueError(f"{name} 要写成 (x, y) 两个数，收到 {value!r}")
+    return (numbers[0], numbers[1])
 
 
 class RingTargetLocator:
@@ -227,6 +322,37 @@ class RingTargetLocator:
             return None
         chosen = max(hits, key=lambda hit: self._rank(hit, width, height))
         return self._build(chosen, width, height, len(hits), frame)
+
+    def detect_all(self, frame: np.ndarray) -> Dict[int, RingTarget]:
+        """一帧里**每个环号各取一个**框：``{环号: RingTarget}``，模型只跑一次。
+
+        与 :meth:`detect` 的差别只是"不再只挑一个"：三环同框时要把三个都拿到手，
+        才能用环心连线的倾角把两端外推出来（见 :func:`derive_ring_row`）。同一个环号
+        有多个框时仍按 :meth:`_rank` 取最好的那个；贴边 / 没比例尺的框照样返回，
+        它们的 ``RingTarget.reading()`` 会如实是 ``None``。
+        """
+        if frame is None:
+            raise ValueError("frame 不能是 None")
+        height, width = frame.shape[:2]
+        hits = [
+            hit for hit in self.detector.detect(frame) if hit.name in self.digits
+        ]
+        chosen: Dict[int, "Detection"] = {}
+        for hit in hits:
+            digit = int(self.digits[hit.name])
+            best = chosen.get(digit)
+            if best is None or self._rank(hit, width, height) > self._rank(
+                best, width, height
+            ):
+                chosen[digit] = hit
+        self.last_diagnosis = (
+            f"{len(hits)} 个环框，识别到 "
+            + ("、".join(str(digit) for digit in sorted(chosen)) or "无")
+        )
+        return {
+            digit: self._build(hit, width, height, len(hits), frame)
+            for digit, hit in sorted(chosen.items())
+        }
 
     def _names_for(self, digit: int) -> str:
         """环号 → 类别名（报错用；一个环号可能配了多个名字）。"""

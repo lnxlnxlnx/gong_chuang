@@ -92,6 +92,11 @@ class GraspSettings(TypedDict):
     lift_scale: LiftScale | None
 
 
+#: 环心读数**可以当物理毫米用**的比例尺来源。雅可比是按物理毫米标定的，其余来源
+#: （``station.mm_per_px`` 是给固定相机标的值）会整体差一个倍数，而计划看起来完全正常。
+PHYSICAL_RING_SCALES = ("depth/focal", "ring box")
+
+
 def _new_arm(port: str, arm_config) -> RobotArm:
     """真实构造机械臂的唯一位置；测试在这里注入假臂。
 
@@ -539,6 +544,33 @@ class Grasp:
         )
         return self._plan_for_ring(arm, target, scale_mm_per_px=scale_mm_per_px)
 
+    def plan_ring_readings(
+        self,
+        readings: "dict[int, tuple[float, float]]",
+        *,
+        scale_source: str = "",
+    ) -> "dict[int, RingBasePlan]":
+        """一批**已经算好的**环心读数 → ``{环号: 各轴绝对位置}``；一帧都不拍。
+
+        ``readings`` 是 ``{环号: (x_mm, y_mm)}``，与 :meth:`plan_ring` 的读数是同一套
+        单位（相机系毫米）。三环成排时"2 号环实测 + 一条直线"就能把 1/3 号的环心算
+        出来，再一次性解算三个落点——:func:`app.gripper.place_box_from_repo_to_floor_v3`
+        就是这么用的；抓料/摆料之后拿 ``plan.apply(arm)`` 走到那个绝对位置。
+
+        ``scale_source`` 是这批读数**来自那一帧**的比例尺来源
+        （``RingTarget.scale_source``）。它与雅可比必须是同一把尺，这条不变式与
+        :meth:`plan_ring` 完全一样：非物理毫米的来源在这里同样拒绝，而不是给一个
+        像样的错角度。
+
+        :raises ServoError: 比例尺不是物理毫米，或雅可比奇异。
+        """
+        self._require_physical_ring_scale(scale_source, None)
+        arm, _source = self._require_resources()
+        return {
+            int(digit): self._plan_from_reading(arm, reading, digit=int(digit))
+            for digit, reading in readings.items()
+        }
+
     def align_ring(
         self,
         *,
@@ -763,12 +795,18 @@ class Grasp:
 
     def _plan_for_ring(self, arm, target, *, scale_mm_per_px):
         """一帧已定位的环 → 各轴绝对位置（闭环与单次计划共用这一处）。"""
-        from modules.grasp.drive.ring_plan import plan_ring_base
-
         reading = self._ring_reading_in_jacobian_units(
             target, target.reading(), scale_mm_per_px
         )
-        ring_target = self._ring_target(target.digit)
+        return self._plan_from_reading(
+            arm, reading, digit=int(target.digit), score=float(target.score)
+        )
+
+    def _plan_from_reading(self, arm, reading, *, digit, score=None):
+        """读数**已经与雅可比同一把尺**（比例尺由调用方核过）→ 各轴绝对位置。"""
+        from modules.grasp.drive.ring_plan import plan_ring_base
+
+        ring_target = self._ring_target(digit)
         plan = plan_ring_base(
             reading=reading,
             target=(ring_target.x_mm, ring_target.y_mm),
@@ -779,7 +817,7 @@ class Grasp:
             reduction_ratio=arm.config.base_reduction,
             tolerance_mm=self._config.tolerance_mm,
         )
-        return replace(plan, digit=int(target.digit), score=float(target.score))
+        return replace(plan, digit=int(digit), score=score)
 
     @staticmethod
     def _unusable_ring_reason(target) -> str:
@@ -813,14 +851,25 @@ class Grasp:
                 raise ServoError("环心读数没有比例尺，换不了单位")
             factor = float(scale_mm_per_px) / float(current)
             return (reading[0] * factor, reading[1] * factor)
-        if target.scale_source in ("depth/focal", "ring box"):
-            # 两种都是物理毫米，与雅可比同一把尺：
-            # depth/focal 是针孔标定；ring box 是"外径 / 模型框像素"。
-            return reading
+        self._require_physical_ring_scale(target.scale_source, current)
+        return reading
+
+    @staticmethod
+    def _require_physical_ring_scale(
+        scale_source: str, scale_mm_per_px: float | None
+    ) -> None:
+        """环心读数的比例尺必须是**物理毫米**（与雅可比同一把尺）；不是就拒绝。
+
+        ``station.mm_per_px`` 是给固定相机标的值，相机装在臂上时它会差好几倍：
+        照着算出来的角度看起来完全正常，爪子却朝错的地方去。
+        """
+        if scale_source in PHYSICAL_RING_SCALES:
+            return
+        measured = "无" if scale_mm_per_px is None else f"{scale_mm_per_px:.4f} mm/px"
         raise ServoError(
-            f"环心读数的比例尺是 {target.scale_source}"
-            f"（{current:.4f} mm/px），不是物理毫米，而 jacobian 是按物理毫米标定的："
-            "直接算角度会整体差一个倍数，而计划看起来完全正常。\n"
+            f"环心读数的比例尺是 {scale_source or '未知'}（{measured}），"
+            "不是物理毫米，而 jacobian 是按物理毫米标定的：直接算角度会整体差一个倍数，"
+            "而计划看起来完全正常。\n"
             "  两种做法：\n"
             "  1) 给 modules/vision/config.json 的 ring_target 填 outer_diameter_mm"
             "（靶标图案外径，现场 95 mm），环心读数就会用“外径 / 模型框”换算，"

@@ -11,7 +11,7 @@
   },
   "gripper": {
     "servo_id": 1,
-    "open_position": 280,
+    "open_position": 350,
     "closed_position": 30
   },
   "turntable": {

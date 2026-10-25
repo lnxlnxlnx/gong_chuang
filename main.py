@@ -17,8 +17,10 @@ from app.gripper import (
     grab_box_from_turntable_to_repo_v2,  # 圆盘->仓库（跟着料走）
     place_box_from_repo_to_floor,  # 仓库->地面圆环
     place_box_from_repo_to_floor_v2,  # 仓库->地面圆环
+    place_box_from_repo_to_floor_v3,  # 仓库->地面圆环
     place_box_to_box,  # 物料到物料
     place_box_to_box_v2,  # 物料到物料（按 order 依次放三个位置）
+    square_chassis_to_ring_row,  # 车纵向对到圆环正前方
 )
 
 SCENE_STABLE_TIMEOUT_SECONDS = 20.0
@@ -40,12 +42,21 @@ def main() -> None:
     """
     # demo_material()
     with Robot.open(grasp=True, gripper=True, turntable=True, chassis=True) as robot:
-        robot.gripper.set_position(280)
+        robot.gripper.set_position(350)
         robot.turntable.go_home()
         _move_axes_to(robot, {"lift": 495, "extension": 540, "base": 0}).wait()
-        _move_axes_to(robot, {"lift": 800, "base": -32}).wait()  # 先让环进视野
-        residual = center_chassis_on_ring(robot, require_digit=2) 
-        input(f"环心对准，残差 {residual:+.1f} mm，按回车继续")
+        _move_axes_to(robot, {"lift": 980, "base": -32}).wait()  # 先让环进视野
+        ############
+        # robot.arm.move_axis_to_motor_degrees("lift", 980)
+        # residual = center_chassis_on_ring(robot, require_digit=2) 
+        # input(f"环心对准，残差 {residual:+.1f} mm，按回车继续")
+        # square_chassis_to_ring_row(robot)
+        square_chassis_to_ring_row(robot)
+        time.sleep(0.1)
+        center_chassis_on_ring(robot, require_digit=2, max_iterations = 6)
+        place_box_from_repo_to_floor_v2(robot)
+        input("环心对准，按回车继续")
+        #############
         grab_box_from_turntable_to_repo_v2(robot)
         input("抓取完成，按回车继续")
         grab_box_from_floor_to_repo_v2(robot)
