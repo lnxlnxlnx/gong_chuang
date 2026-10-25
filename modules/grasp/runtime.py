@@ -597,7 +597,7 @@ class Grasp:
         final_plan = None
         for attempt in range(1, max(1, int(max_iterations)) + 1):
             target = self._locate_ring_for_plan(
-                source, timeout=timeout, require_digit=require_digit
+                source, timeout=timeout, require_digit=require_digit, settle=True
             )
             plan = self._plan_for_ring(arm, target, scale_mm_per_px=scale_mm_per_px)
             digit = plan.digit
@@ -665,7 +665,7 @@ class Grasp:
         if final_reading is not None and self._target is not None:
             # 残差要跟**环心那一次的目标**比（含落料补偿），否则报出来的数与闭环停下的
             # 判据不是同一个口径：补偿 7.5 mm 时它会一直显示差 7.5 mm。
-            ring_target = self._ring_target()
+            ring_target = self._ring_target(digit)
             final_error = math.hypot(
                 final_reading[0] - ring_target.x_mm,
                 final_reading[1] - ring_target.y_mm,
@@ -684,8 +684,44 @@ class Grasp:
             note=note,
         )
 
-    def _locate_ring_for_plan(self, source, *, timeout, require_digit):
-        """读一帧并校验"这一个环能不能拿去算角度"；不能就说清楚为什么。"""
+    #: 等环心读数停稳时最多连读几帧。3 帧够滤掉底座摆完的那点余振，又不会在
+    #: "一直等不到稳定"时卡住——等不到就用最后一帧，和现在完全一样。
+    RING_SETTLE_READS = 3
+
+    def _locate_ring_for_plan(
+        self, source, *, timeout, require_digit, settle: bool = False
+    ):
+        """读一帧并校验"这一个环能不能拿去算角度"；不能就说清楚为什么。
+
+        ``settle=True``（闭环用）时连读几帧，直到相邻两次读数足够接近
+        （``settle_tolerance_mm``）。为什么要：每步走完只按**估算耗时 + 0.15 s** 睡一下
+        就去测下一帧，而底座是大惯量摆动，那点时间不够；读数抖 1–2 px，下一步的步长是
+        **按这个读数算的**，于是抖动量直接变成来回摆。单帧定位（``plan_ring``）保持一帧，
+        那条路是人看着按的，多读几帧只是白等。
+        """
+        target = self._validated_ring(
+            source, timeout=timeout, require_digit=require_digit
+        )
+        if not settle:
+            return target
+        previous = target.reading()
+        for _ in range(self.RING_SETTLE_READS - 1):
+            if previous is None:
+                break
+            following = self._validated_ring(
+                source, timeout=timeout, require_digit=require_digit
+            )
+            reading = following.reading()
+            target = following
+            if reading is not None and math.hypot(
+                reading[0] - previous[0], reading[1] - previous[1]
+            ) <= self._config.settle_tolerance_mm:
+                break
+            previous = reading
+        return target
+
+    def _validated_ring(self, source, *, timeout, require_digit):
+        """一帧环心 + 三项校验（有环 / 读数可用 / 环号对得上）。"""
         locate = getattr(source, "locate_ring", None)
         if locate is None:
             raise ServoError(
@@ -707,18 +743,22 @@ class Grasp:
             )
         return target
 
-    def _ring_target(self) -> ServoTarget:
+    def _ring_target(self, digit: int | None = None) -> ServoTarget:
         """环心那一次伺服的**目标读数**：配置里的 ``target`` 加上落料补偿。
 
-        补偿只加在环心路径上（``ServoConfig.ring_offset_x_mm``）：物料对准仍然对着
+        补偿只加在环心路径上（``ServoConfig.ring_offset``）：物料对准仍然对着
         ``self._target``。两边都加等于整体平移，料与环的相对偏差一点没变。
 
         闭环看不见"料落在环心的哪一侧"（镜头光轴与爪口有固定偏差、料在爪里也会
         偏），所以这份偏差只能量出来写进配置；落点误差 = 补偿量 − 实际偏移。
+
+        ``digit`` 给了就用**这个环号那一份**补偿（``ring_offsets``）：同一份补偿放到不同
+        环上会差一个方向，因为回程要转过的角度不同。没配这个号就退回全局那一对。
         """
+        offset_x, offset_y = self._config.ring_offset(digit)
         return ServoTarget(
-            x_mm=self._target.x_mm + self._config.ring_offset_x_mm,
-            y_mm=self._target.y_mm + self._config.ring_offset_y_mm,
+            x_mm=self._target.x_mm + offset_x,
+            y_mm=self._target.y_mm + offset_y,
         )
 
     def _plan_for_ring(self, arm, target, *, scale_mm_per_px):
@@ -728,7 +768,7 @@ class Grasp:
         reading = self._ring_reading_in_jacobian_units(
             target, target.reading(), scale_mm_per_px
         )
-        ring_target = self._ring_target()
+        ring_target = self._ring_target(target.digit)
         plan = plan_ring_base(
             reading=reading,
             target=(ring_target.x_mm, ring_target.y_mm),

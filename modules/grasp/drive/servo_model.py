@@ -416,6 +416,13 @@ class ServoConfig:
     ring_offset_x_mm: float = 0.0
     #: 落料补偿的 y（毫米，相机系：**向下为正**），同 :attr:`ring_offset_x_mm`。
     ring_offset_y_mm: float = 0.0
+    #: **按环号**的落料补偿：``((x1, y1), (x2, y2), (x3, y3))``，第 n 项给 n 号环用。
+    #:
+    #: 为什么要按环分开：补偿量里混着"镜头光轴偏爪口"和"回头路吃掉的间隙"，后者随底座
+    #: 转过的角度变——同一个数放在 1 号环对，放到 3 号环就偏一个方向。空元组 = 全部用
+    #: :attr:`ring_offset_x_mm` / :attr:`ring_offset_y_mm`（与加这个字段之前完全一致）；
+    #: 只写了前几项也行，没写的号照样退回那一对。
+    ring_offsets_mm: Tuple[Tuple[float, float], ...] = ()
     #: 两条位置帧之间的最小间隔（秒）。
     #: **不能省。** 实测这台机器的 CH340 上，两条 ``FD`` 位置帧背靠背连发（间隔 0 ms）
     #: 会让**两帧都失效**——不是丢一帧，是两个轴都不动，而且驱动器 ``Response=None``
@@ -508,6 +515,22 @@ class ServoConfig:
         for name in ("ring_offset_x_mm", "ring_offset_y_mm"):
             if not math.isfinite(getattr(self, name)):
                 raise ValueError(f"{name} 必须是有限数")
+        for index, pair in enumerate(self.ring_offsets_mm, start=1):
+            try:
+                values = tuple(float(value) for value in pair)
+            except (TypeError, ValueError):
+                values = ()
+            if len(values) != 2 or not all(math.isfinite(value) for value in values):
+                raise ValueError(
+                    f"ring_offsets 第 {index} 项要写成 (x, y) 两个有限数，收到 {pair!r}"
+                )
+
+    def ring_offset(self, digit: Optional[int] = None) -> Tuple[float, float]:
+        """这个环号的落料补偿 ``(x_mm, y_mm)``；没配这个号、或不知道环号时用全局那一对。"""
+        if digit is not None and 1 <= int(digit) <= len(self.ring_offsets_mm):
+            x_mm, y_mm = self.ring_offsets_mm[int(digit) - 1]
+            return (float(x_mm), float(y_mm))
+        return (float(self.ring_offset_x_mm), float(self.ring_offset_y_mm))
 
     def step_limit_for(self, error_mm: float) -> int:
         """当前误差该用哪一档的单步上限。"""
@@ -857,7 +880,33 @@ def load_servo_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ServoConfig:
             document.get("ring_offset_y_mm", defaults.ring_offset_y_mm),
             "ring_offset_y_mm",
         ),
+        # 按环号那一份：写成 [[x1,y1],[x2,y2],[x3,y3]]，缺省就用上面那一对。
+        ring_offsets_mm=_ring_offsets(
+            document.get("ring_offsets", defaults.ring_offsets_mm)
+        ),
     )
+
+
+def _ring_offsets(value) -> Tuple[Tuple[float, float], ...]:
+    """``[[x, y], ...]`` → 元组；形状不对当场报错，别让它变成一个永远对不上的补偿。"""
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__iter__"):
+        raise ServoError(f"ring_offsets 要写成 [[x, y], ...]，收到 {value!r}")
+    pairs = []
+    for index, pair in enumerate(value, start=1):
+        try:
+            numbers = tuple(float(number) for number in pair)
+        except (TypeError, ValueError):
+            raise ServoError(
+                f"ring_offsets 第 {index} 项要写成 [x, y] 两个数，收到 {pair!r}"
+            ) from None
+        if len(numbers) != 2 or not all(math.isfinite(number) for number in numbers):
+            raise ServoError(
+                f"ring_offsets 第 {index} 项要写成 [x, y] 两个有限数，收到 {pair!r}"
+            )
+        pairs.append(numbers)
+    return tuple(pairs)
 
 
 def load_object_selector(config_path: Path = DEFAULT_CONFIG_PATH) -> ObjectSelector:

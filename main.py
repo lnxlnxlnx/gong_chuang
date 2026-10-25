@@ -41,9 +41,9 @@ def main() -> None:
         robot.gripper.set_position(280)
         robot.turntable.go_home()
         _move_axes_to(robot, {"lift": 495, "extension": 550, "base": 0}).wait()
-        # place_box_from_repo_to_floor_v2(robot)
+        place_box_from_repo_to_floor_v2(robot)
         # grab_box_from_floor_to_repo_v2(robot)
-        place_box_to_box_v2(robot)
+        # place_box_to_box_v2(robot)
         input("结束!!!!!!!!!!!")
 
 

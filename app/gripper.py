@@ -436,12 +436,21 @@ def place_box_from_repo_to_floor_v2(
     try:
         for order in orders:
             _move_axes_to(robot, {"lift": RING_POSITION[order - 1][1], "extension": RING_POSITION[order - 1][2], "base": RING_POSITION[order - 1][0]}).wait()
-            input("继续")       # 之后改为停顿1s
-            result = robot.grasp.align_ring(tolerance_mm=2.0)
-            base_deg     = robot.arm.turns_state.of("base").motor_degrees
+            # input("继续")       # 之后改为停顿1s
+            time.sleep(1)  # 先让车停稳
+            result = robot.grasp.align_ring(tolerance_mm=2, max_iterations = 5)
+            base_deg = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
             
             _grab_box_from_car(robot)
+            
+            # 这趟的落点就是现在这个角度。抓料会把这几个轴都开走，所以先记下来：
+            # new_dir = dict({"lift": 95}, **{"base": base_deg, "extension": extension_deg})
+            _move_axes_to(robot, {"extension": extension_deg, "base": base_deg}).wait()
+            robot.arm.move_axis_to_motor_degrees("lift", 95)
+            
+            robot.gripper.open_jaws()
+            robot.arm.move_axis_to_motor_degrees("lift", 375)
             _go_home(robot, home)
             input("放料完成，回车继续，输入 q 跳过：").strip().lower()
     except Exception as e:
@@ -469,7 +478,7 @@ def grab_box_from_floor_to_repo_v2(
     try:
         for order in orders:
             _move_axes_to(robot, {"lift": RING_POSITION[order - 1][1], "extension": RING_POSITION[order - 1][2], "base": RING_POSITION[order - 1][0]}).wait()
-            input("继续")       # 之后改为停顿1s
+            time.sleep(1)  # 先让车停稳
             result = robot.grasp.align_xy(tolerance_mm=3.0)
             robot.arm.move_axis_to_motor_degrees("lift", 90)
             robot.gripper.close_jaws()

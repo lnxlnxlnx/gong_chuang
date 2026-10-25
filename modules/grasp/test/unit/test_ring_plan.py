@@ -500,5 +500,48 @@ class ClosedLoopTests(unittest.TestCase):
             grasp.align_ring()
 
 
+class RingSettleTests(unittest.TestCase):
+    """底座摆完还在抖：读数没稳就拿来算步长，抖动会被放大成来回摆。"""
+
+    class Jittery:
+        """前几帧读数在抖，之后稳住；每帧都记一次调用。"""
+
+        def __init__(self, readings) -> None:
+            self.readings = list(readings)
+            self.calls = 0
+
+        def locate_ring(self, *, timeout=None):
+            x_mm, y_mm = self.readings[min(self.calls, len(self.readings) - 1)]
+            self.calls += 1
+            return ring_target(reading=(x_mm, y_mm))
+
+    def locate(self, source):
+        grasp, _arm, _source = make_grasp(ring_target())
+        return grasp._locate_ring_for_plan(
+            source, timeout=None, require_digit=None, settle=True
+        )
+
+    def test_two_matching_frames_end_the_wait(self) -> None:
+        source = self.Jittery([(3.0, 0.0)])
+        target = self.locate(source)
+
+        self.assertEqual(source.calls, 2)   # 两帧一致就收工，不读第三次
+        self.assertAlmostEqual(target.reading()[0], 3.0, places=6)
+
+    def test_it_reads_through_a_jittering_frame(self) -> None:
+        source = self.Jittery([(3.0, 0.0), (5.0, 0.0), (5.05, 0.02)])
+        target = self.locate(source)
+
+        self.assertEqual(source.calls, 3)
+        self.assertAlmostEqual(target.reading()[0], 5.05, places=6)
+
+    def test_never_settling_still_stops_at_the_read_limit(self) -> None:
+        source = self.Jittery([(1.0, 0.0), (50.0, 0.0), (100.0, 0.0)])
+        target = self.locate(source)
+
+        self.assertEqual(source.calls, 3)   # 有上限：等不到稳定就用最后一帧
+        self.assertAlmostEqual(target.reading()[0], 100.0, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

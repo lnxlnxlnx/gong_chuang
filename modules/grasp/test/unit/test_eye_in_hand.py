@@ -239,6 +239,24 @@ class ServoConfigTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ServoConfig(**kwargs)
 
+    def test_per_ring_offsets_override_the_single_pair(self) -> None:
+        """同一个补偿放到不同环上会差一个方向，所以每个环号可以有自己的 (x, y)。"""
+        config = ServoConfig(
+            ring_offset_x_mm=5.5,
+            ring_offset_y_mm=-4.5,
+            ring_offsets_mm=((1.0, -1.0), (2.0, -2.0)),
+        )
+        self.assertEqual(config.ring_offset(1), (1.0, -1.0))
+        self.assertEqual(config.ring_offset(2), (2.0, -2.0))
+        # 没配的号、以及不知道环号时，退回全局那一对（不会静默变成 0）。
+        self.assertEqual(config.ring_offset(3), (5.5, -4.5))
+        self.assertEqual(config.ring_offset(None), (5.5, -4.5))
+
+    def test_bad_ring_offsets_are_rejected(self) -> None:
+        for bad in (((1.0,),), ((1.0, 2.0, 3.0),), ((math.nan, 0.0),)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                ServoConfig(ring_offsets_mm=bad)
+
 
 class ConfigFileTests(unittest.TestCase):
     def setUp(self) -> None:
