@@ -198,19 +198,40 @@ class RingTargetLocator:
             )
 
     # ------------------------------------------------------------- 主流程
-    def detect(self, frame: np.ndarray) -> Optional[RingTarget]:
-        """找出视野里最可能是"那个环"的框；一个都没有时返回 ``None``。"""
+    def detect(
+        self, frame: np.ndarray, *, digit: Optional[int] = None
+    ) -> Optional[RingTarget]:
+        """找出视野里最可能是"那个环"的框；一个都没有时返回 ``None``。
+
+        ``digit`` 给了就**只看这个环号**（``tg1``/``tg2``/``tg3`` 里的那一个）：画面里
+        同时看得见两个环时，模型给分高的那个未必是你要找的——校准"2 号环"的时候按分数
+        挑到 3 号，后面的 ``require_digit`` 检查只会报"是 3 号不是 2 号"，而 2 号其实
+        就在画面里。
+        """
         if frame is None:
             raise ValueError("frame 不能是 None")
         height, width = frame.shape[:2]
-        hits = [hit for hit in self.detector.detect(frame) if hit.name in self.digits]
+        hits = [
+            hit
+            for hit in self.detector.detect(frame)
+            if hit.name in self.digits
+            and (digit is None or self.digits[hit.name] == int(digit))
+        ]
         if not hits:
-            self.last_diagnosis = (
-                "画面里没有环：模型给的框里没有 " + " / ".join(self.digits)
+            wanted = (
+                f"{digit} 号环（{self._names_for(digit)}）"
+                if digit is not None
+                else " / ".join(self.digits)
             )
+            self.last_diagnosis = f"画面里没有环：模型给的框里没有 {wanted}"
             return None
         chosen = max(hits, key=lambda hit: self._rank(hit, width, height))
         return self._build(chosen, width, height, len(hits), frame)
+
+    def _names_for(self, digit: int) -> str:
+        """环号 → 类别名（报错用；一个环号可能配了多个名字）。"""
+        names = [name for name, value in self.digits.items() if int(value) == int(digit)]
+        return " / ".join(names) or "未配置"
 
     # ------------------------------------------------------------- 内部
     @staticmethod

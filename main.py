@@ -10,6 +10,7 @@ import time
 
 from app.gripper import (
     _move_axes_to,
+    center_chassis_on_ring,  # 车横向对到圆环正前方
     grab_box_from_floor_to_repo,
     grab_box_from_floor_to_repo_v2,
     grab_box_from_turntable_to_repo,  # 圆盘->仓库
@@ -38,10 +39,13 @@ def main() -> None:
     :func:`pick_manual`：一条 ``with`` 完成装配，动作一行一个，收尾交给 ``Robot``。
     """
     # demo_material()
-    with Robot.open(grasp=True, gripper=True, turntable=True) as robot:
+    with Robot.open(grasp=True, gripper=True, turntable=True, chassis=True) as robot:
         robot.gripper.set_position(280)
         robot.turntable.go_home()
-        _move_axes_to(robot, {"lift": 495, "extension": 550, "base": 0}).wait()
+        _move_axes_to(robot, {"lift": 495, "extension": 540, "base": 0}).wait()
+        _move_axes_to(robot, {"lift": 800, "base": -32}).wait()  # 先让环进视野
+        residual = center_chassis_on_ring(robot, require_digit=2) 
+        input(f"环心对准，残差 {residual:+.1f} mm，按回车继续")
         grab_box_from_turntable_to_repo_v2(robot)
         input("抓取完成，按回车继续")
         grab_box_from_floor_to_repo_v2(robot)

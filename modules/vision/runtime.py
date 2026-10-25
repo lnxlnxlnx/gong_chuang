@@ -1018,7 +1018,9 @@ class Vision:
         return self._stacked
 
     # ------------------------------------------------------------- 视野里的那一个环
-    def locate_ring(self, *, timeout: Optional[float] = None) -> "Optional[RingTarget]":
+    def locate_ring(
+        self, *, timeout: Optional[float] = None, digit: Optional[int] = None
+    ) -> "Optional[RingTarget]":
         """读一帧，找出**视野里那一个环**的环心（像素 + 相机系毫米 + 环号）。
 
         为"相机视野装不下整排环"的场合准备：相机装在臂上、镜头离纸很近时，画面里
@@ -1026,6 +1028,10 @@ class Vision:
 
         环心与环号都来自模型（``models/best.onnx`` 的 ``tg1`` / ``tg2`` / ``tg3``
         三类），所以这条路径**看不到模型就什么也给不出**——它不再是一套独立的经典 CV。
+
+        ``digit`` 给了就只找**这个环号**：画面里同时看得见两个环时，模型给分高的那个
+        未必是你要的（校准 2 号环时按分数挑到 3 号，`require_digit` 只会报"是 3 号"，
+        而 2 号就在画面里）。没给则照旧"整框可见优先、再比置信度"。
 
         与 :meth:`locate` 相同的取舍：
 
@@ -1039,7 +1045,7 @@ class Vision:
         :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
         """
         frame = self._read_frame(timeout=timeout)
-        return self._ring_target_locator().detect(frame)
+        return self._ring_target_locator().detect(frame, digit=digit)
 
     def ring_center(self, *, timeout: Optional[float] = None) -> "Optional[Tuple[float, float]]":
         """视野里那个环的**相机系中心** ``(x_mm, y_mm)``，可直接喂 ``align_xy(reading=...)``。

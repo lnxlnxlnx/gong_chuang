@@ -108,7 +108,7 @@ def _wheel_positions(chassis) -> list:
     drive = chassis.drive
     to_pulses = drive.pulses_per_revolution / POSITION_UNITS_PER_REVOLUTION
     return [
-        round(chassis.wheel(wheel).read_position() * to_pulses)
+        round(chassis.drive.get_wheel(wheel).read_position() * to_pulses)
         for wheel in WHEEL_ORDER
     ]
 
@@ -142,8 +142,112 @@ def _drive_to_ring(chassis, targets, digit: int, *, rpm: int) -> None:
     ]
     if not any(counts):
         return
-    chassis.move_wheels_relative_pulses(*counts, rpm=rpm)
+    chassis.drive.move_wheels_relative_pulses(*counts, rpm=rpm)
     time.sleep(chassis.drive._travel_seconds(counts, rpm, None))
+
+
+#: 车横向校准的门槛（毫米，相机系 x：右为正）。比臂的 2 mm 松一点：臂那边还会再对准一次。
+RING_LATERAL_TOLERANCE_MM = 3.0
+#: 还不知道"每脉冲挪多少毫米"时的第一步试走量（脉冲）。
+LATERAL_TRIAL_PULSES = 300
+#: 单步最多走多少脉冲：离得再远也别一脚油门扫过去。
+LATERAL_MAX_PULSES = 3000
+#: 读不到环时连读几帧再认输。一帧运动模糊 / 爪影扫过不该让整次校准失败。
+RING_READ_ATTEMPTS = 5
+#: 两次读环之间的间隔（秒）；一个来回约一次取帧，别把相机读空。
+RING_READ_INTERVAL_SECONDS = 0.15
+
+
+def _read_ring(robot: Robot, *, digit: int | None = None, attempts: int = RING_READ_ATTEMPTS):
+    """连读几帧找一个环；都找不到才返回 ``None``。"""
+    for index in range(max(1, int(attempts))):
+        if index:
+            time.sleep(RING_READ_INTERVAL_SECONDS)
+        target = robot.vision.locate_ring(digit=digit)
+        if target is not None:
+            return target
+    return None
+
+
+def center_chassis_on_ring(
+    robot: Robot,
+    *,
+    require_digit: int | None = None,
+    tolerance_mm: float = RING_LATERAL_TOLERANCE_MM,
+    max_iterations: int = 4,
+    rpm: int = 30,
+) -> float:
+    """把**车**横向对到圆环正前方：读环心 x，按实测响应比解出该走多少轮脉冲。
+
+    只对 x 闭环——前后（y）是臂的伸缩该管的，横向才是车的事。所以这个函数不碰机械臂，
+    只动四个轮子；调用前先把臂摆到能看见环的姿态::
+
+        _move_axes_to(robot, {"lift": 580, "extension": 690, "base": 120}).wait()
+        center_chassis_on_ring(robot, require_digit=2)
+
+    第一步用固定试走量（``LATERAL_TRIAL_PULSES``）摸出"每脉冲让画面挪多少毫米"，之后
+    按牛顿一步算到位：轮径、打滑、地面摩擦都不必预先标定，闭环自己学。方向反了（挪完
+    反而更远）当场报错，不会越走越偏。
+
+    :returns: 最后一次读到的横向残差（毫米，右为正）。
+    :raises RuntimeError: 画面里没有环 / 读数不可用 / 环号不符 / 方向反了 / 走不进容差。
+
+    读环时**连读几帧才认输**（``RING_READ_ATTEMPTS``）：一帧运动模糊、或刚好被爪影
+    扫过，不该让整次校准失败——这是"看一眼就抛"最容易误报的地方。
+    """
+    gain: float | None = None      # 每 +1 脉冲（左移）让环心 x 变化多少毫米
+    previous: tuple[float, int] | None = None
+    x_mm = 0.0
+    for attempt in range(1, max(1, int(max_iterations)) + 1):
+        target = _read_ring(robot, digit=require_digit)
+        if target is None:
+            raise RuntimeError(
+                "画面里没有环：先把臂摆到能看见靶标的位置"
+                + (f"（找的是 {require_digit} 号环）" if require_digit is not None else "")
+            )
+        if require_digit is not None and int(target.digit) != int(require_digit):
+            raise RuntimeError(
+                f"画面里的环是 {target.digit} 号，不是要求的 {require_digit} 号；"
+                "拿另一个环横向对齐会把车开到错的位置"
+            )
+        reading = target.reading()
+        if reading is None:
+            raise RuntimeError("环心读数不可用（贴边 / 缺比例尺）：换个姿态再看")
+        x_mm = float(reading[0])
+
+        # 先结算上一步：车真的动了多少，按脉冲折算；方向反了/没动就别再走。
+        if previous is not None and previous[1]:
+            observed = (x_mm - previous[0]) / previous[1]
+            if observed <= 0.0:
+                raise RuntimeError(
+                    f"车动了 {previous[1]:+d} 脉冲，画面里的环却没往反方向走"
+                    f"（{previous[0]:+.1f} → {x_mm:+.1f} mm）：横向运动学反了、轮子没动，"
+                    "或者打滑到量不出来"
+                )
+            gain = observed
+
+        if abs(x_mm) <= tolerance_mm:
+            print(f"  车已对正：横向残差 {x_mm:+.1f} mm（读了 {attempt} 帧）")
+            return x_mm
+
+        if gain is None:
+            magnitude = LATERAL_TRIAL_PULSES
+        else:
+            magnitude = abs(int(round(-x_mm / gain)))
+        magnitude = min(max(magnitude, 1), LATERAL_MAX_PULSES)
+        # x>0 = 环在画面右边 = 车偏左 → 往右挪。底盘自己的方向方法会等到走完再返回。
+        if x_mm > 0:
+            robot.chassis.strafe_right(rpm=rpm, pulses=magnitude)
+            step = -magnitude
+        else:
+            robot.chassis.strafe_left(rpm=rpm, pulses=magnitude)
+            step = magnitude
+        previous = (x_mm, step)
+
+    raise RuntimeError(
+        f"{max_iterations} 步还没把车对到环前（最后横向残差 {x_mm:+.1f} mm，"
+        f"门槛 {tolerance_mm:.1f} mm）：检查轮子是不是打滑或撞到东西"
+    )
 
 
 def _grab_box_from_floor(robot: Robot):

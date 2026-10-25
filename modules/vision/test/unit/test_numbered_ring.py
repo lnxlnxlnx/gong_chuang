@@ -129,6 +129,22 @@ class SelectionTests(unittest.TestCase):
         self.assertIsNone(locator.detect(frame()))
         self.assertIn("没有环", locator.last_diagnosis)
 
+    def test_a_wanted_digit_ignores_the_higher_scoring_other_ring(self) -> None:
+        """两个环都看得见时，要 2 号就拿 2 号——不按分数挑到 3 号。"""
+        hits = [
+            centred("tg3", score=0.99, width=360.0, height=390.0, centre=(1000.0, 270.0)),
+            centred("tg2", score=0.97, width=386.0, height=405.0, centre=(390.0, 284.0)),
+        ]
+        locator = make_locator(hits)
+
+        self.assertEqual(locator.detect(frame()).digit, 3)          # 不指定：分高的赢
+        self.assertEqual(locator.detect(frame(), digit=2).digit, 2)
+
+    def test_the_wanted_digit_missing_is_none_and_says_which(self) -> None:
+        locator = make_locator([centred("tg3", score=0.99)])
+        self.assertIsNone(locator.detect(frame(), digit=2))
+        self.assertIn("2 号环", locator.last_diagnosis)
+
     def test_none_frame_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             make_locator([centred()]).detect(None)

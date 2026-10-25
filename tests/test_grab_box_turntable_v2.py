@@ -16,6 +16,8 @@ import app.gripper as app_gripper
 def make_robot() -> Mock:
     robot = Mock()
     robot.vision.scene_stable.return_value = True
+    # 真实会话里这一项是 ``MotorTurns``；Mock 会返回 Mock，和 460 比大小会炸。
+    robot.arm.read_abs_state.return_value.motor_degrees = 760.0
     return robot
 
 

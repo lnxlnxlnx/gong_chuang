@@ -29,6 +29,13 @@ class _Drive:
     pulses_per_revolution = 3200
     wheel_signs = {wheel: 1 for wheel in WHEEL_ORDER}
 
+    def __init__(self, wheels=None) -> None:
+        self.wheels = wheels or {}
+
+    def get_wheel(self, wheel):
+        """与 ``MecanumDrive.get_wheel`` 同一个口子（``chassis.wheel`` 早就不存在了）。"""
+        return self.wheels[wheel]
+
     @staticmethod
     def _kinematics(vx: float, vy: float, omega: float) -> list:
         # 实车标定矩阵的前进列：FL/FR/RR 反转，RL 正转。
@@ -37,13 +44,10 @@ class _Drive:
 
 class _Chassis:
     def __init__(self, positions) -> None:
-        self.drive = _Drive()
         self.wheels = {
             wheel: _Wheel(position) for wheel, position in zip(WHEEL_ORDER, positions)
         }
-
-    def wheel(self, wheel):
-        return self.wheels[wheel]
+        self.drive = _Drive(self.wheels)
 
 
 def _base_pulses(units: int) -> int:
