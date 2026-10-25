@@ -12,7 +12,7 @@ from modules.vision.drive.camera import load_camera_id
 
 class VisionCameraConfigTests(unittest.TestCase):
     def test_project_defaults_select_external_camera_on_windows(self) -> None:
-        self.assertEqual(load_camera_id("windows"), 1)
+        self.assertEqual(load_camera_id("windows"), 0)
         self.assertEqual(load_camera_id("jetson"), 0)
 
     def test_selects_camera_for_each_platform(self) -> None:

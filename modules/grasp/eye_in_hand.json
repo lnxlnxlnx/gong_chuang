@@ -7,7 +7,7 @@
     "x_mm": 0.0,
     "y_mm": 0.0
   },
-  "ring_offset_x_mm": 6.5,
+  "ring_offset_x_mm": 5.5,
   "ring_offset_y_mm": -4.5,
   "jacobian": {
     "base_dx": -0.08174204217107724,

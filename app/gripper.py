@@ -307,7 +307,8 @@ def _grab_box_from_car(robot: Robot):
     """
     global current_position_index
     batch = robot.motion.begin()
-    batch.add(robot.arm.move_axis_to_motor_degrees("lift", 675))
+    batch.add(robot.arm.move_axis_to_motor_degrees("lift", 675, wait=False))
+    batch.add(robot.arm.move_axis_to_motor_degrees("base", 400, wait=False))
     batch.add(robot.gripper.set_position(150, wait=False))
     batch.wait()
     report = _move_axes_to(robot, {"lift": 980, "extension": 5, "base": 1045}).wait()
@@ -319,11 +320,10 @@ def _grab_box_from_car(robot: Robot):
     robot.arm.move_axis_to_motor_degrees("lift", 980)
     robot.arm.move_axis_to_motor_degrees("base", 800)
     current_position_index = (current_position_index + 1) % len(TURN_TABLE_POSITIONS)
-    _move_axes_to(robot, {"lift": 760, "base": 450}).wait()
-    time.sleep(0.3)
-    batch.add(
-        robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False)
-    )
+    # _move_axes_to(robot, {"lift": 760, "base": 450}).wait()
+    batch.add(robot.arm.move_axis_to_motor_degrees("lift", 760, wait=False))
+    batch.add(robot.arm.move_axis_to_motor_degrees("base", 400, wait=False))
+    batch.add(robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False))
     batch.wait()
 
 def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
@@ -351,7 +351,7 @@ def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
         robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False)
     )
     batch.add(robot.gripper.open_jaws(wait=False))
-    batch.add(_move_axes_to(robot, {"lift": 760, "extension": 10.0, "base": 450}))
+    batch.add_all(_move_axes_to(robot, {"lift": 760, "extension": 10.0, "base": 450}))
     batch.wait()
     # robot.arm.move_axis_to_motor_degrees("extension", 150)
 
@@ -431,5 +431,44 @@ def place_box_to_box(
     robot.arm.move_axis_to_motor_degrees("lift", 695)
     _go_home(robot, home)
 
+def place_box_from_repo_to_floor_v2(
+    robot: Robot,
+    *,
+    orders: tuple[int, int, int] = (1, 2, 3),
+    home: dict[str, float] | None = {"lift": 760, "extension": 400, "base": -32},
+):
+    """把物料从转盘上抓下来，放到地面圆环里。不需要处理初始状态。
 
+    ``home`` 是进流程前先摆到的姿态，默认 :data:`READY_POSE`；传 ``None`` 表示这次不摆
+    （调用方已经在这一姿态上时省一次往返；轴本来就停在目标上时也不会发帧）。
+    """
+    robot.arm.move_axis_to_motor_degrees("lift", 400)
+    _go_home(robot, home)
+    RING_POSITION = [(-190, 800, 690), (-32, 800, 540), (100, 800, 690)]
+    try:
+        for order in orders:
+            _move_axes_to(robot, {"lift": RING_POSITION[order - 1][1], "extension": RING_POSITION[order - 1][2], "base": RING_POSITION[order - 1][0]}).wait()
+            input("继续")       # 之后改为停顿1s
+            result = robot.grasp.align_ring(tolerance_mm=2.0)
+            base_deg     = robot.arm.turns_state.of("base").motor_degrees
+            extension_deg = robot.arm.turns_state.of("extension").motor_degrees
+            
+            _grab_box_from_car(robot)
+            # 到这里已经抓着料了：转到 plan 里算好的**绝对位置**（环的正上方）。
+            # plan 是 robot.grasp.plan_ring() 的返回值；plan.degrees 就是 {"base": ...,
+            # "extension": ...} 两个绝对电机角度，正好喂 _move_axes_to。
+            if result.plan is not None:
+                new_dir = dict({"lift": 95}, **{"base": base_deg, "extension": extension_deg})
+                _move_axes_to(robot, new_dir).wait()
+                
+                robot.gripper.open_jaws()
+                robot.arm.move_axis_to_motor_degrees("lift", 375)
+            _go_home(robot, home)
+            input("放料完成，回车继续，输入 q 跳过：").strip().lower()
+    except Exception as e:
+        print(f"Error occurred during pick and place operation: {e}")
+        _move_axes_to(robot, SAFE_RETRACT).wait()
+        return
+
+    _move_axes_to(robot, SAFE_RETRACT).wait()
     

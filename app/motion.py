@@ -11,6 +11,7 @@ from gripper import (
     grab_box_from_floor_to_repo,
     grab_box_from_turntable_to_repo,
     place_box_from_repo_to_floor,
+    place_box_from_repo_to_floor_v2,
     place_box_to_box,
 )
 
@@ -46,6 +47,11 @@ if __name__ == "__main__":
     with Robot.open(grasp=True, gripper=True, turntable=True, chassis = True) as robot:
         robot.turntable.go_home()
         robot.gripper.open_jaws()
+        
+        ###################
+        place_box_from_repo_to_floor_v2(robot)
+        ###################
+        
         # robot.chassis.forward_left(rpm = 60, pulses=5400)      # 90
         # robot.chassis.forward(rpm=60, pulses=9600)     # 240
 
@@ -109,6 +115,6 @@ if __name__ == "__main__":
         # robot.chassis.forward(rpm= 60, pulses=1950)
         # place_box_to_box(robot, _want="red")
         # robot.chassis.forward(rpm= 60, pulses=1950)
-        place_box_to_box(robot, _want="blue")
+        # place_box_to_box(robot, _want="blue")
         
         input("完成，回车继续")
