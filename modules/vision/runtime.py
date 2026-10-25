@@ -186,7 +186,10 @@ def _new_camera(camera_id: int):
     """只构造 1280×720 相机，**不**调用 ``initialize``（打开设备是调用方的事）。"""
     from modules.vision.drive.camera import USBCamera
 
-    return USBCamera(camera_id, width=1280, height=720)
+    # 60 fps：像素差分那条路（``scene_stability``）要的是同一个观察窗口里对比组更多，
+    # 30 fps 下 4 帧就是 100 ms，判断本身要 130–150 ms，帧率是白等的那一段。
+    # 再高没用：YOLO 主算路径一帧 27–29 ms，超过 60 fps 之后限速的是推理不是相机。
+    return USBCamera(camera_id, width=1280, height=720, fps=60)
 
 
 def _override_settings(

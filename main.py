@@ -42,7 +42,7 @@ def main() -> None:
         place_box_from_repo_to_floor(robot, verbose=True)
         place_box_from_repo_to_floor(robot, verbose=True)
         return
-        grab_box_from_floor_to_repo(robot, want_colors= ["red", "blue", "green"])
+        grab_box_from_floor_to_repo(robot, order=(3, 2, 1))
         place_box_to_box(robot, _want = "blue")
         place_box_to_box(robot, _want = "red")
         return

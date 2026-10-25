@@ -3,11 +3,18 @@ from __future__ import annotations
 import time
 
 from modules.arm import MotionReport
+from modules.chassis.drive.mecanum import WHEEL_ORDER
 from modules.motion import MotionBatch, MotionBatchReport
+from modules.motor.drive.emm42 import POSITION_UNITS_PER_REVOLUTION
 from robot import Robot
 
 TURN_TABLE_POSITIONS = [0, 500, 1000]  # 转盘的目标位置，单位为度
 current_position_index = 0  # 当前转盘位置的索引
+
+#: 地面 1/2/3 号圆环相邻两格之间的间距，单位是**位置命令脉冲**（车轮口径）。
+#: 现场实测值，换场地/改摆放就改这一个数。
+RING_STEP_PULSES = 1950
+FLOOR_RINGS = (1, 2, 3)
 
 SCENE_STABLE_TIMEOUT_SECONDS = 20.0
 
@@ -70,6 +77,77 @@ def _print_report(title: str, report: MotionBatchReport) -> None:
             f" / 完成于 {result.waited_seconds:.2f}s"
         )
 
+def _check_order(order) -> tuple:
+    """环号必须都是 1/2/3：写错一格车会多走 1950 脉冲，而动作看起来完全正常。"""
+    digits = tuple(int(digit) for digit in order)
+    unknown = [digit for digit in digits if digit not in FLOOR_RINGS]
+    if unknown:
+        raise ValueError(f"order 里的环号只能是 {FLOOR_RINGS}，收到 {digits}")
+    return digits
+
+
+def _grid_counts(chassis, pulses: int) -> list:
+    """前进 ``pulses`` 脉冲时四轮各自的带符号脉冲数。
+
+    符号跟底盘自己的运动学走（``motion_transform="calibrated"`` 下前进是三负一正），
+    这里不自己按"四轮同号"估——那样车会拧着走。
+    """
+    drive = chassis.drive
+    raw = drive._kinematics(1.0, 0.0, 0.0)
+    peak = max(abs(value) for value in raw)
+    return [
+        round(value / peak * pulses * drive.wheel_signs[wheel])
+        for value, wheel in zip(raw, WHEEL_ORDER)
+    ]
+
+
+def _wheel_positions(chassis) -> list:
+    """四轮的**实测**位置，换算成与位置命令同一把尺（命令脉冲）。
+
+    ``0x36`` 给的是 1/65536 电机圈，位置命令用的是 ``pulses_per_revolution``，
+    两者差一个常数；不换算会差 20 倍。
+    """
+    drive = chassis.drive
+    to_pulses = drive.pulses_per_revolution / POSITION_UNITS_PER_REVOLUTION
+    return [
+        round(chassis.wheel(wheel).read_position() * to_pulses)
+        for wheel in WHEEL_ORDER
+    ]
+
+
+def _ring_targets(chassis, *, start_digit: int) -> dict:
+    """1/2/3 号位的四轮**绝对**脉冲位置；调用方保证车已停在 ``start_digit`` 号位前。
+
+    编号沿前进方向递增，所以第 ``digit`` 号位 = ``start + (digit - start_digit) × 一格``。
+
+    ponytail: 车没有场地里程计，起点靠人摆、轮子打滑看不见（编码器在电机侧，不是里程轮）。
+    要更准就靠视觉编号兜底——``align_ring(require_digit=...)`` 已经会拒绝错环。
+    """
+    unit = _grid_counts(chassis, RING_STEP_PULSES)
+    start = _wheel_positions(chassis)
+    return {
+        digit: [base + (digit - start_digit) * step for base, step in zip(start, unit)]
+        for digit in FLOOR_RINGS
+    }
+
+
+def _drive_to_ring(chassis, targets, digit: int, *, rpm: int) -> None:
+    """开到 ``digit`` 号位：读实测补差、走完等结算。已经在那一格就一步不走。
+
+    发的是**相对**命令而不是绝对位置命令：``move_wheels_absolute_pulses`` 会把目标
+    恰好为 0 的轮子整条跳过（那只是绝对零点，不是"不用动"），车会拧一下。
+    目标本身是绝对的，所以中途丢一帧会在下一次补回来。
+    """
+    counts = [
+        target - actual
+        for target, actual in zip(targets[digit], _wheel_positions(chassis))
+    ]
+    if not any(counts):
+        return
+    chassis.move_wheels_relative_pulses(*counts, rpm=rpm)
+    time.sleep(chassis.drive._travel_seconds(counts, rpm, None))
+
+
 def _grab_box_from_floor(robot: Robot):
     robot.gripper.set_position(280)
     try:
@@ -128,7 +206,11 @@ def grab_box_from_turntable_to_repo(
             # wait_scene_stable 返回 True = 看满最小等待（3.5 s）之后画面仍然静止，可以抓；
             # False = 等满上限一直在动，这次不能下降。
             time.sleep(1.5)  # 先让转盘停一下，别一进去就赶上它在转
-            if not robot.vision.wait_scene_stable(timeout=SCENE_STABLE_TIMEOUT_SECONDS):
+            # interval=0.15：判一眼本身约 0.13–0.15 s（连拍 4 帧 + 差分），默认 0.3 s
+            # 的间隔等于每次都白等一半时间；放行时刻由 min_seconds=3.5 定，不跟着变。
+            if not robot.vision.wait_scene_stable(
+                timeout=SCENE_STABLE_TIMEOUT_SECONDS, interval=0.15
+            ):
                 raise RuntimeError(
                     "画面迟迟没有停稳，无法进行下一步操作；最近一次判据："
                     + _scene_stability_detail(robot)
@@ -149,34 +231,48 @@ def grab_box_from_turntable_to_repo(
 
 def grab_box_from_floor_to_repo(
     robot: Robot,
-    want_colors: list[str],
-    verbose: bool = False,
     *,
+    order=(3, 2, 1),
+    rpm: int = 30,
+    verbose: bool = False,
     home: dict[str, float] | None = {"lift": 760, "extension": 120.0, "base": 400},
 ):
     """把物料从地面圆环放到仓库里。不需要考虑初始状态。
 
-    ``home`` 默认是地面抓料位 ``{lift: 660, extension: 620.0, base: 0}``（伸缩比
-    :data:`READY_POSE` 短一点，够得到地面圆环）；传 ``None`` 表示这次不摆。
+    ``order`` 是**抓取顺序**（环号），位移由它派生：车约定停在 3 号环前，抓完
+    ``order[i]`` 再开去 ``order[i + 1]``。默认 ``(3, 2, 1)`` = 老行为（一路后退；
+    编号沿前进方向递增，所以从 3 号往回抓就是后退）。想跳着抓就传 ``(3, 1, 2)``——跨度
+    由环号差算，不是"每抓一个固定后退一格"。
+
+    抓哪个料不再按颜色选，而是按**环号**：``align_ring(require_digit=digit)`` 看到的
+    不是目标环会直接报错。注意这条路径对准的是**环心**，``ring_offset_x/y_mm`` 的落料
+    补偿照旧生效——料在环里偏得多时要按料心重新标一次补偿。
+
+    ``home`` 默认是地面抓料位（伸缩比 :data:`READY_POSE` 短一点，够得到地面圆环）；
+    传 ``None`` 表示这次不摆。
     """
+    digits = _check_order(order)
     robot.arm.move_axis_to_motor_degrees("lift", 400)
     _go_home(robot, home)
     input("移动到抓料位置")
+    # 圆环绝对位置在动手之前读一次：之后只补实测差值，中途丢帧不会累积。
+    targets = _ring_targets(robot.chassis, start_digit=3)
     try:
-        for color in want_colors:
-            robot.grasp.align_xy(want=color)
+        for digit in digits:
+            _drive_to_ring(robot.chassis, targets, digit, rpm=rpm)
+            time.sleep(1.5)  # 车停稳再对准
+            robot.grasp.align_ring(require_digit=digit, tolerance_mm=2.0)
             robot.arm.move_axis_to_motor_degrees("lift", 90)
             robot.gripper.close_jaws()
-            _place_box_to_repo(robot, verbose=True)
-            robot.chassis.backward(rpm=30, duration=1.35)
+            _place_box_to_repo(robot, verbose=verbose)
             robot.arm.move_axis_to_motor_degrees("extension", 120)
-            input(f"已抓取 {color} 物料，回车继续，输入 q 跳过：").strip().lower()
-            
+            input(f"已抓取 {digit} 号环的物料，回车继续，输入 q 跳过：").strip().lower()
+
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         _move_axes_to(robot, SAFE_RETRACT).wait()
         return
-    
+
     _go_home(robot, home)
 
 def _grab_box_from_turntable(
@@ -262,29 +358,40 @@ def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
 def place_box_from_repo_to_floor(
     robot: Robot,
     *,
+    order=(1, 2, 3),
+    rpm: int = 30,
     verbose: bool = False,
     home: dict[str, float] | None = {"lift": 760, "extension": 50.0, "base": 465},
 ):
     '''把物料放到地面的圆环内。不需要考虑初始状态。
 
+    ``order`` 是**放置顺序**（环号），位移由它派生：车约定停在 1 号环前，放完
+    ``order[i]`` 再开去 ``order[i + 1]``。``(1, 2, 3)`` = 老行为；``(2, 1, 3)`` =
+    先放 2 号、退回 1 号、再开到 3 号。放完最后一格就停在那儿，不再多前进一格。
+
     入口那一段（开爪与抬升同组并行 → 伸缩伸出 → 两次停顿）走的是**放料位**，不是待命
     中转位，所以整段保持原样；``home`` 只用来在它**之前**额外摆一次姿态，
     ``None`` 表示不摆。
     '''
+    digits = _check_order(order)
     batch = robot.motion.begin()
     batch.add(robot.gripper.open_jaws(wait=False))
     batch.add(robot.arm.move_axis_to_motor_degrees("lift", 375, wait=False))
     print("移动到安全位置")
     batch.wait()
     _go_home(robot, home)
+    # 圆环绝对位置在动手之前读一次：之后每次只补实测差值，中途丢帧不会累积。
+    targets = _ring_targets(robot.chassis, start_digit=1)
     # input("继续")
 
     try:
-        for _ in range(3):
+        for digit in digits:
+            _drive_to_ring(robot.chassis, targets, digit, rpm=rpm)
             # 容差按 2 mm 收：全局 tolerance_mm 是 6 mm（还给抓料用），放料要的是"落在
             # 环心"，6 mm 的残差在 95 mm 的靶标上肉眼就看得出偏心。
             time.sleep(1.5)  # 先让车停稳
-            result = robot.grasp.align_ring(tolerance_mm=2.0)  # 环心 → 各轴绝对位置
+            # require_digit：看到的不是目标环就报错，不拿错环的角度去动机械臂。
+            result = robot.grasp.align_ring(require_digit=digit, tolerance_mm=2.0)
             base_deg     = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
             
@@ -300,8 +407,6 @@ def place_box_from_repo_to_floor(
                 robot.arm.move_axis_to_motor_degrees("lift", 375)
             _go_home(robot, home)
             input("放料完成，回车继续，输入 q 跳过：").strip().lower()
-            robot.chassis.forward(rpm=30, duration=1.35)
-            time.sleep(1)       # 等待车子平稳
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         _move_axes_to(robot, SAFE_RETRACT).wait()

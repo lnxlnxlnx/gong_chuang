@@ -66,7 +66,7 @@ if __name__ == "__main__":
         # place_box_from_repo_to_floor(robot)
         
         # 抓取物料(需要注意抓取时不能撞到物料盘)
-        # grab_box_from_floor_to_repo(robot, want_colors=["yellow", "blue", "red"])
+        # grab_box_from_floor_to_repo(robot, order=(3, 2, 1))
         
         # 移动到拐角
         # robot.chassis.forward(rpm= 60, pulses=14300)     # 6000 + 9600 - 1300
@@ -95,8 +95,8 @@ if __name__ == "__main__":
         # robot.chassis.backward(rpm=60, pulses=1000)
         # grab_box_from_floor_to_repo(robot)
         
-        # 再次grab_box_from_floor_to_repo(robot, want_colors=["yellow", "blue", "red"])
-        # grab_box_from_floor_to_repo(robot, want_colors=["yellow", "blue", "red"])
+        # 再次grab_box_from_floor_to_repo(robot, order=(3, 2, 1))
+        # grab_box_from_floor_to_repo(robot, order=(3, 2, 1))
         
         # 移动拐角
         # robot.chassis.forward(rpm= 60, pulses=14300)     # 6000 + 9600 - 1300
