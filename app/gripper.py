@@ -194,10 +194,11 @@ def grab_box_from_turntable_to_repo(
     ``home`` 是进流程前先摆到的姿态，默认 :data:`READY_POSE`；传 ``None`` 表示这次不摆
     （调用方已经在这一姿态上时省一次往返；轴本来就停在目标上时也不会发帧）。
     """
-    robot.arm.move_axis_to_motor_degrees("lift", 460)
+    # 如果lift的高度太低就先抬到460
+    if robot.arm.read_abs_state("lift").motor_degrees < 460:
+        robot.arm.move_axis_to_motor_degrees("lift", 460)
     _go_home(robot, home)
-    global current_position_index
-    
+
     input("继续")
     try:
         for color in want_colors :
@@ -217,20 +218,7 @@ def grab_box_from_turntable_to_repo(
                 robot,
                 want_color=color
             )
-            _move_axes_to(robot, {"lift": 900, "extension": 10, "base": 1048}).wait()
-            # ② 三轴都到位之后才松爪。open_jaws 默认 wait=True，自己等到舵机走完并读回。
-            robot.gripper.set_position(100)
-            robot.arm.move_axis_to_motor_degrees("lift", 980)
-            
-            robot.arm.move_axis_to_motor_degrees("base", 800)
-            current_position_index = (current_position_index + 1) % len(TURN_TABLE_POSITIONS)
-            batch = robot.motion.begin()
-            batch.add(robot.arm.move_axis_to_motor_degrees("base", 420, wait=False))
-            batch.add(robot.arm.move_axis_to_motor_degrees("extension", 100.0, wait=False))
-            batch.add(robot.arm.move_axis_to_motor_degrees("lift", 830, wait=False))
-            batch.add(robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False))
-            batch.add(robot.gripper.open_jaws(wait=False))
-            batch.wait()
+            _stow_box_to_repo(robot)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         _move_axes_to(robot, SAFE_RETRACT).wait()
@@ -239,6 +227,73 @@ def grab_box_from_turntable_to_repo(
     _move_axes_to(robot, SAFE_RETRACT).wait()
     robot.gripper.set_position(150)
     return 
+
+
+#: 跟随转盘上那块料最多跟多久（秒）。转盘一次换位是 1.5 s，跟 20 s 还没停稳就是出事了
+#: （料被带出可达范围、或画面一直有东西在动），报错比一直转下去好。
+FOLLOW_SECONDS = 20.0
+
+
+def _follow_box_until_stable(robot: Robot, want_color, *, timeout: float = FOLLOW_SECONDS) -> None:
+    """**跟着转盘上的料走**，直到某一眼看见画面停住。
+
+    每一轮只取**一帧**、只走**一步**（``align_xy(single_step=True)``）：物块在动，
+    "等它停稳再测"是在等一个永远等不到的东西（见 ``eye_in_hand.align_xy`` 的
+    ``single_step``）。转出去、被爪影挡住的那几帧可能一个目标都没有，那不是失败，
+    接着跟——停稳由 ``vision.scene_stable()`` 判，判的是**整幅画面**而不是"这个料在不在"。
+
+    :raises RuntimeError: 跟满 ``timeout`` 秒画面仍在动（带上最后一次跟丢的原因）。
+    """
+    deadline = time.monotonic() + float(timeout)
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            robot.grasp.align_xy(single_step=True, want=want_color)
+        except Exception as error:  # noqa: BLE001 - 跟丢一帧不算失败，接着跟
+            last_error = error
+        if robot.vision.scene_stable():
+            return
+    raise RuntimeError(
+        f"跟了 {timeout:.0f} s 画面还没停稳，不敢下降；最后一次跟丢的原因："
+        f"{last_error if last_error is not None else '没有（料可能已经不在转盘上）'}"
+    )
+
+
+def grab_box_from_turntable_to_repo_v2(
+    robot: Robot,
+    want_colors=("red", "green", "blue"),
+    *,
+    home: dict[str, float] | None = {"lift": 830, "extension": 120.0, "base": 420},
+    follow_seconds: float = FOLLOW_SECONDS,
+):
+    """**跟着料走**的版本：不等它转到位，一路跟到它上方，停住了才抓。
+
+    与 :func:`grab_box_from_turntable_to_repo` 只差中间那一段：
+
+    - 旧版：站在原地等 ``wait_scene_stable`` 看到画面停稳 → 对准 → 抓；
+    - 这个版本：``_follow_box_until_stable`` 每轮单帧一步地跟着料走（料在动也跟得上），
+      看到画面停住就退出 → 后面的对准/下降/合爪与旧版完全一样
+      （``_grab_box_from_turntable`` 自己还会再对准一次，停稳之后再收一次残差）。
+
+    换位/摆料这一段共用 :func:`_stow_box_to_repo`，所以两个版本不会各漂一份。
+    """
+    if robot.arm.read_abs_state("lift").motor_degrees < 460:
+        robot.arm.move_axis_to_motor_degrees("lift", 460)
+    _go_home(robot, home)
+
+    input("继续")
+    try:
+        for color in want_colors:
+            _follow_box_until_stable(robot, color, timeout=follow_seconds)
+            _grab_box_from_turntable(robot, want_color=color)
+            _stow_box_to_repo(robot)
+    except Exception as e:
+        print(f"Error occurred during pick and place operation: {e}")
+        _move_axes_to(robot, SAFE_RETRACT).wait()
+        return
+
+    _move_axes_to(robot, SAFE_RETRACT).wait()
+    robot.gripper.set_position(150)
 
 def grab_box_from_floor_to_repo(
     robot: Robot,
@@ -309,7 +364,32 @@ def _grab_box_from_turntable(
     robot.arm.move_axis_to_motor_degrees("lift", 550, rpm=120)
     robot.gripper.close_jaws()
     robot.arm.move_axis_to_motor_degrees("lift", 800, rpm=120)
-    
+
+
+def _stow_box_to_repo(robot: Robot) -> None:
+    """夹着料从转盘上方摆到仓库位、松爪、转盘进位。
+
+    ``grab_box_from_turntable_to_repo`` 的两个版本共用这一段：换位/松爪的顺序只写一份，
+    改一处两版一起变。
+    """
+    global current_position_index
+    _move_axes_to(robot, {"lift": 900, "extension": 10, "base": 1048}).wait()
+    # 三轴都到位之后才松爪。open_jaws 默认 wait=True，自己等到舵机走完并读回。
+    robot.gripper.set_position(100)
+    robot.arm.move_axis_to_motor_degrees("lift", 980)
+    robot.arm.move_axis_to_motor_degrees("base", 800)
+    current_position_index = (current_position_index + 1) % len(TURN_TABLE_POSITIONS)
+    batch = robot.motion.begin()
+    batch.add(robot.arm.move_axis_to_motor_degrees("base", 420, wait=False))
+    batch.add(robot.arm.move_axis_to_motor_degrees("extension", 100.0, wait=False))
+    batch.add(robot.arm.move_axis_to_motor_degrees("lift", 830, wait=False))
+    batch.add(
+        robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False)
+    )
+    batch.add(robot.gripper.open_jaws(wait=False))
+    batch.wait()
+
+
 def _grab_box_from_car(robot: Robot):
     """从车上抓料，最后**转到 plan 里算好的绝对位置**（环正上方）。
 

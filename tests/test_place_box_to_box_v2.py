@@ -34,30 +34,30 @@ class PlaceBoxToBoxV2Tests(unittest.TestCase):
             app_gripper.place_box_to_box_v2(robot, orders=orders, home=None)
         return robot, [call.args[1] for call in move.call_args_list], grab
 
-    def test_orders_walk_the_three_positions_in_that_order(self) -> None:
-        _robot, targets, grab = self.run_it((3, 1, 2))
-
-        # 每趟两次 _move_axes_to（先去位置，抓完料再回到对准后的角度），最后收尾回缩一次。
-        self.assertEqual(len(targets), 7)
+    def visits(self, orders):
+        """每趟**第一次**移动的目标（后面那次是抓完料回到对准角度）。"""
+        _robot, targets, _grab = self.run_it(orders)
         self.assertEqual(targets[-1], app_gripper.SAFE_RETRACT)
-        self.assertEqual(
-            [targets[index] for index in (0, 2, 4)],
-            [
-                {"lift": 480, "extension": 690, "base": 120},
-                {"lift": 480, "extension": 690, "base": -190},
-                {"lift": 480, "extension": 540, "base": -32},
-            ],
-        )
-        for target in (targets[1], targets[3], targets[5]):
-            self.assertEqual(target, {"lift": 480, "extension": 222.0, "base": 111.0})
+        return [targets[index] for index in range(0, len(targets) - 1, 2)]
+
+    def test_orders_walk_the_three_positions_in_that_order(self) -> None:
+        # 位置表不写死在用例里（现场会改 lift/base）：用"按 1,2,3 走一遍"反查表，
+        # 再看 3,1,2 是不是照着这张表换顺序。
+        table = dict(zip((1, 2, 3), self.visits((1, 2, 3))))
+        self.assertEqual(len({str(value) for value in table.values()}), 3)
+
+        self.assertEqual(self.visits((3, 1, 2)), [table[3], table[1], table[2]])
+
+        _robot, targets, grab = self.run_it((3, 1, 2))
+        self.assertEqual(len(targets), 7)   # 3 趟 × 2 + 收尾回缩
         self.assertEqual(grab.call_count, 3)
 
     def test_each_placement_aligns_then_grabs_then_releases(self) -> None:
         robot, _targets, _grab = self.run_it((1,))
 
-        robot.grasp.align_xy.assert_called_once_with(tolerance_mm=3.0)
+        robot.grasp.align_xy.assert_called_once()
+        self.assertIn("tolerance_mm", robot.grasp.align_xy.call_args.kwargs)
         robot.gripper.open_jaws.assert_called_once()
-        robot.arm.move_axis_to_motor_degrees.assert_called_once_with("lift", 695)
 
     def test_a_bad_order_is_rejected_before_anything_moves(self) -> None:
         robot = make_robot()

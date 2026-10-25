@@ -492,6 +492,26 @@ class RobotArm:
         self._require_open()
         self._disable_axes()
 
+    def read_abs_state(self, axis_name: str) -> MotorTurns:
+        """**一根轴现在在哪**：绝对电机角度（与 ``move_axis_to_motor_degrees`` 同一把尺）。
+
+        ```python
+        state = arm.read_abs_state("lift")
+        state.motor_degrees     # 现在停的绝对角度，可以直接喂回 move_axis_to_motor_degrees
+        state.pulses            # 同一件事的脉冲口径
+        print(state.summary())  # "lift: +8900 脉冲 (+1001.25° / +2.781 圈)"
+        ```
+
+        读的是**命令里程表**（下发过多少脉冲），不是编码器实测：丢步、打滑、撞停都不会
+        体现在这里，``stop`` / 急停之后也一样。要实测就在同一个会话里比 ``0x36``
+        （``Emm42Driver.read_position()``，单位 1/65536 电机圈）；两者差多少就是丢了
+        多少步——这也是"回零之后必须重新对高度"的原因。
+
+        :raises KeyError: 轴名不认识（已知的是 ``AXIS_NAMES``）。
+        """
+        self._require_open()
+        return self.turns_state.of(axis_name)
+
     # ------------------------------------------------- 按里程表走绝对脉冲位置
     def move_axis_to_motor_pulses(
         self,

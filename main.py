@@ -13,6 +13,7 @@ from app.gripper import (
     grab_box_from_floor_to_repo,
     grab_box_from_floor_to_repo_v2,
     grab_box_from_turntable_to_repo,  # 圆盘->仓库
+    grab_box_from_turntable_to_repo_v2,  # 圆盘->仓库（跟着料走）
     place_box_from_repo_to_floor,  # 仓库->地面圆环
     place_box_from_repo_to_floor_v2,  # 仓库->地面圆环
     place_box_to_box,  # 物料到物料
@@ -41,7 +42,7 @@ def main() -> None:
         robot.gripper.set_position(280)
         robot.turntable.go_home()
         _move_axes_to(robot, {"lift": 495, "extension": 550, "base": 0}).wait()
-        grab_box_from_turntable_to_repo(robot)
+        grab_box_from_turntable_to_repo_v2(robot)
         input("抓取完成，按回车继续")
         grab_box_from_floor_to_repo_v2(robot)
         place_box_from_repo_to_floor_v2(robot)

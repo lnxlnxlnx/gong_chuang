@@ -388,6 +388,36 @@ class RobotArmInPositionWaitTests(unittest.TestCase):
             )
 
 
+class ReadAbsStateTests(ArmTestCase):
+    """``read_abs_state``：一根轴现在在哪（里程表口径，与绝对定位同一把尺）。"""
+
+    def test_it_reports_where_the_axis_was_told_to_go(self) -> None:
+        arm = self.make_arm()
+        before = arm.read_abs_state("lift").pulses
+
+        arm.move_up(pulses=1000)
+        state = arm.read_abs_state("lift")
+
+        self.assertEqual(state.pulses - before, 1000)
+        self.assertAlmostEqual(
+            state.motor_degrees, state.pulses * 360.0 / PULSES_PER_REVOLUTION
+        )
+        self.assertIn("lift", state.summary())
+
+    def test_moving_back_reduces_the_same_number(self) -> None:
+        arm = self.make_arm()
+        before = arm.read_abs_state("lift").pulses
+        arm.move_up(pulses=500)
+        arm.move_down(pulses=200)
+
+        self.assertEqual(arm.read_abs_state("lift").pulses - before, 300)
+
+    def test_an_unknown_axis_is_rejected(self) -> None:
+        arm = self.make_arm()
+        with self.assertRaises(KeyError):
+            arm.read_abs_state("gripper")
+
+
 class RobotArmAxisMappingTests(ArmTestCase):
     def test_physical_convenience_methods_use_the_confirmed_addresses_and_directions(self) -> None:
         arm = self.make_arm()
