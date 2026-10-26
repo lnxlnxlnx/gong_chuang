@@ -74,7 +74,7 @@ from modules.grasp.drive.servo_model import (
     DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH,
     LIFT_AXIS,
     MIN_JACOBIAN_DETERMINANT,
-    ObjectMissing,
+    ObjectMissingError,
     RADIAL_AXIS,
     GraspReadyResult,
     HoverResult,
@@ -572,7 +572,7 @@ def align_x_y(
                 # 要靠 settle_timeout_seconds 触发。
                 wait_for_first_target=not readings,
             )
-        except ObjectMissing:
+        except ObjectMissingError:
             # 只有"一个目标都没有"走这条路：可能只是爪子悬到物块上方把光挡住了。
             # "多个目标"与"等不到新观测"是别的类型，会照旧往上抛——那两种必须问人。
             fallback = _result_when_occluded(

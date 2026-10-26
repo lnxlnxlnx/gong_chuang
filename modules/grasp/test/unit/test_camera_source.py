@@ -335,7 +335,7 @@ class VisionSessionTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "已关闭"):
                     getattr(vision, name)()
 
-    def test_open_config_assembles_the_locator_and_the_camera_in_order(self) -> None:
+    def test_from_settings_assembles_the_locator_and_the_camera_in_order(self) -> None:
         """真正的装配路径：先加载模型，再构造相机，最后 ``initialize``。"""
         order = []
         settings = Mock()
@@ -348,7 +348,7 @@ class VisionSessionTests(unittest.TestCase):
             "modules.vision.runtime._new_camera",
             side_effect=lambda camera_id: order.append(("camera", camera_id)) or camera,
         ):
-            vision = Vision._open_config(settings)
+            vision = Vision.from_settings(settings)
 
         self.assertEqual(order, ["locator", ("camera", 7)])
         self.assertEqual(camera.initialized, True)

@@ -33,48 +33,48 @@ def send(ser: serial.Serial, frame: bytes) -> bytes:
 
 def main() -> None:
     addr = b"\x01"
-    CSUM = b"\x6B"
+    csum = b"\x6B"
     port = load_bus_config().port
 
     with serial.Serial(port, baudrate=BAUD, timeout=0.2) as ser:
         ser.reset_input_buffer()
 
         print("[1] enable (F3 AB 01 00)")
-        ack = send(ser, addr + b"\xF3\xAB\x01\x00" + CSUM)
+        ack = send(ser, addr + b"\xF3\xAB\x01\x00" + csum)
         print(f"    ack: {ack.hex(' ')}")
 
         print("[2] start velocity CW @ 120 rpm (F6 00 0078 05 00)")
-        ack = send(ser, addr + b"\xF6\x00\x00\x78\x05\x00" + CSUM)
+        ack = send(ser, addr + b"\xF6\x00\x00\x78\x05\x00" + csum)
         print(f"    ack: {ack.hex(' ')}")
         time.sleep(3.0)
 
         print("[3] GET realtime speed while running (35)")
-        ack = send(ser, addr + b"\x35" + CSUM)
+        ack = send(ser, addr + b"\x35" + csum)
         print(f"    ack: {ack.hex(' ')}")
 
         print("[4] EStop (FE 98 00) -- wait for ack right after send")
-        ack = send(ser, addr + b"\xFE\x98\x00" + CSUM)
+        ack = send(ser, addr + b"\xFE\x98\x00" + csum)
         print(f"    ack after stop: {ack.hex(' ')}")
 
         print("[5] poll realtime speed x8 to see if motor slowed")
         for i in range(8):
-            ack = send(ser, addr + b"\x35" + CSUM)
+            ack = send(ser, addr + b"\x35" + csum)
             print(f"    poll {i}: {ack.hex(' ')}")
             time.sleep(0.2)
 
         print("[6] try velocity-stop: F6 speed=0 (00 0000 05)")
-        ack = send(ser, addr + b"\xF6\x00\x00\x00\x05\x00" + CSUM)
+        ack = send(ser, addr + b"\xF6\x00\x00\x00\x05\x00" + csum)
         print(f"    ack: {ack.hex(' ')}")
         time.sleep(0.5)
 
         print("[7] poll realtime speed x4 after velocity-stop")
         for i in range(4):
-            ack = send(ser, addr + b"\x35" + CSUM)
+            ack = send(ser, addr + b"\x35" + csum)
             print(f"    poll {i}: {ack.hex(' ')}")
             time.sleep(0.2)
 
         print("[8] disable torque (F3 AB 00 00)")
-        ack = send(ser, addr + b"\xF3\xAB\x00\x00" + CSUM)
+        ack = send(ser, addr + b"\xF3\xAB\x00\x00" + csum)
         print(f"    ack: {ack.hex(' ')}")
 
 

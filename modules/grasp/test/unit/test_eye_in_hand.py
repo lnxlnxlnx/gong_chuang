@@ -58,7 +58,7 @@ from modules.grasp.drive.servo_model import (
     GraspReadyResult,
     HoverResult,
     LiftScale,
-    ObjectMissing,
+    ObjectMissingError,
     ObjectSelector,
     ServoConfig,
     ServoError,
@@ -764,7 +764,7 @@ class AlignWaitsForLateTargetTests(unittest.TestCase):
                     return (sighting(4, 12.0, -7.0, stamp=time.monotonic()),)
                 return ()
 
-        with self.assertRaises(ObjectMissing):
+        with self.assertRaises(ObjectMissingError):
             align_x_y(
                 FakeArm(self.JACOBIAN),
                 DisappearsAfterFirstMeasurement(),

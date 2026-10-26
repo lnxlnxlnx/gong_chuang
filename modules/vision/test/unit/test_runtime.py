@@ -63,7 +63,7 @@ class VisionSessionTests(unittest.TestCase):
         report = SimpleNamespace(best=None)
         locator = Mock()
         locator.locate.return_value = report
-        with patch("modules.vision.runtime._load_settings", return_value=settings) as load:
+        with patch("modules.vision.runtime.load_vision_settings", return_value=settings) as load:
             with patch("modules.vision.runtime._build_locator", return_value=locator) as build:
                 with patch("modules.vision.runtime._new_camera", return_value=camera) as new:
                     with Vision.open(config_path="custom.json") as vision:
@@ -90,7 +90,7 @@ class VisionSessionTests(unittest.TestCase):
 
     def test_config_paths_are_handed_to_the_one_settings_loader(self) -> None:
         settings = _settings()
-        with patch("modules.vision.runtime._load_settings", return_value=settings) as load:
+        with patch("modules.vision.runtime.load_vision_settings", return_value=settings) as load:
             with patch("modules.vision.runtime._build_locator"):
                 with patch("modules.vision.runtime._new_camera") as new:
                     new.return_value.read.return_value = None
@@ -103,7 +103,7 @@ class VisionSessionTests(unittest.TestCase):
         with patch("modules.vision.runtime._build_locator") as build:
             with patch("modules.vision.runtime._new_camera") as new:
                 with self.assertRaises(ValueError):
-                    Vision._open_config(settings)
+                    Vision.from_settings(settings)
         build.assert_not_called()
         new.assert_not_called()
 
@@ -113,7 +113,7 @@ class VisionSessionTests(unittest.TestCase):
         with patch("modules.vision.runtime._build_locator", side_effect=FileNotFoundError("no model")):
             with patch("modules.vision.runtime._new_camera") as new:
                 with self.assertRaises(FileNotFoundError):
-                    Vision._open_config(settings)
+                    Vision.from_settings(settings)
         new.assert_not_called()
 
     def test_camera_failure_releases_the_locator(self) -> None:
@@ -125,7 +125,7 @@ class VisionSessionTests(unittest.TestCase):
         with patch("modules.vision.runtime._build_locator", return_value=locator):
             with patch("modules.vision.runtime._new_camera", return_value=camera):
                 with self.assertRaisesRegex(RuntimeError, "camera busy"):
-                    Vision._open_config(settings)
+                    Vision.from_settings(settings)
         locator.close.assert_called_once_with()
 
     def test_partial_initialisation_failure_keeps_the_primary_error(self) -> None:
@@ -138,7 +138,7 @@ class VisionSessionTests(unittest.TestCase):
         with patch("modules.vision.runtime._build_locator", return_value=locator):
             with patch("modules.vision.runtime._new_camera", return_value=camera):
                 with self.assertRaises(RuntimeError) as caught:
-                    Vision._open_config(settings)
+                    Vision.from_settings(settings)
         self.assertIn("camera busy", str(caught.exception))
         self.assertIsInstance(caught.exception.__cause__, RuntimeError)
         self.assertIn("cleanup broke", str(caught.exception.__cause__))

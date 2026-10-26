@@ -100,7 +100,7 @@ def main() -> None:
     config = load_arm_config()
     args = parse_args(config)
     # 统一生命周期：open 已经读过配置、开好串口并使能；收尾交给 with。
-    with RobotArm._from_settings(config=config, port=args.port) as arm:
+    with RobotArm.from_settings(config=config, port=args.port) as arm:
         run_hardware_test(arm, pulses=args.pulses)
 
 

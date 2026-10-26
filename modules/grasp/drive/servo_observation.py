@@ -21,7 +21,7 @@ import time
 from typing import TYPE_CHECKING, Callable, Optional, Protocol, Sequence, Tuple
 
 from modules.grasp.drive.servo_model import (
-    ObjectMissing,
+    ObjectMissingError,
     ObjectSelector,
     ServoConfig,
     ServoError,
@@ -83,7 +83,7 @@ def select_object(
         listing = "、".join(
             f"物料 {item.material_id}({item.color})" for item in sightings
         ) or "（空）"
-        raise ObjectMissing(
+        raise ObjectMissingError(
             f"这一帧里没有物块（{selector.describe()}）；收到 {len(sightings)} 条：{listing}"
         )
     if len(matched) > 1 and selector.is_open:
@@ -232,8 +232,8 @@ def _settled_sighting(
                         f"这一段的最后一次失败是：{last_error}\n"
                         "  一个目标都没有时：确认物块在画面里，没有被人、线材或爪子挡住"
                     )
-                if isinstance(last_error, ObjectMissing):
-                    raise ObjectMissing(message) from last_error
+                if isinstance(last_error, ObjectMissingError):
+                    raise ObjectMissingError(message) from last_error
                 raise ServoError(message) from last_error
             if use_target_wait and now >= next_target_notice:
                 say(

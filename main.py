@@ -9,24 +9,24 @@ from __future__ import annotations
 import time
 
 from app.gripper import (
-    _move_axes_to,
+    move_axes_to,
     center_chassis_on_ring,  # 车横向对到圆环正前方
     grab_box_from_floor_to_repo,
-    grab_box_from_floor_to_repo_v2,
+    grab_box_from_floor_to_repo_by_material,
     grab_box_from_turntable_to_repo,  # 圆盘->仓库
-    grab_box_from_turntable_to_repo_v2,  # 圆盘->仓库（跟着料走）
+    grab_box_from_turntable_to_repo_follow,  # 圆盘->仓库（跟着料走）
     place_box_from_repo_to_floor,  # 仓库->地面圆环
-    place_box_from_repo_to_floor_v2,  # 仓库->地面圆环
-    place_box_from_repo_to_floor_v3,  # 仓库->地面圆环
+    place_box_from_repo_to_floor_by_pose,  # 仓库->地面圆环
+    place_box_from_repo_to_floor_from_center_ring,  # 仓库->地面圆环
     place_box_to_box,  # 物料到物料
-    place_box_to_box_v2,  # 物料到物料（按 order 依次放三个位置）
+    place_box_to_box_by_order,  # 物料到物料（按 order 依次放三个位置）
     square_chassis_to_ring_row,  # 车纵向对到圆环正前方
 )
 
 SCENE_STABLE_TIMEOUT_SECONDS = 20.0
 
 # 预览演示的**模块级**导入：``demo_material`` 只定义函数、不开设备，真正的装配发生在
-# 它内部（读配置 + ``Vision._open_config``）；保持模块级也让既有入口用例能直接替换它。
+# 它内部（读配置 + ``Vision.from_settings``）；保持模块级也让既有入口用例能直接替换它。
 from modules.vision.app.demo import demo_material
 from robot import Robot
 
@@ -43,16 +43,16 @@ def main() -> None:
     with Robot.open(grasp=True, gripper=True, turntable=True, chassis=True) as robot:
         robot.gripper.set_position(350)
         robot.turntable.go_home()
-        _move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
-        _move_axes_to(robot, {"lift": 950, "base": -32}).wait()  # 先让环进视野
-        place_box_from_repo_to_floor_v3(robot)
+        move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
+        move_axes_to(robot, {"lift": 950, "base": -32}).wait()  # 先让环进视野
+        place_box_from_repo_to_floor_from_center_ring(robot)
         input("环心对准，按回车继续")
-        grab_box_from_turntable_to_repo_v2(robot)
+        grab_box_from_turntable_to_repo_follow(robot)
         input("抓取完成，按回车继续")
-        grab_box_from_floor_to_repo_v2(robot)
-        place_box_from_repo_to_floor_v2(robot)
+        grab_box_from_floor_to_repo_by_material(robot)
+        place_box_from_repo_to_floor_by_pose(robot)
         input("放置完成，按回车继续")
-        place_box_to_box_v2(robot)
+        place_box_to_box_by_order(robot)
         input("结束!!!!!!!!!!!")
 
 

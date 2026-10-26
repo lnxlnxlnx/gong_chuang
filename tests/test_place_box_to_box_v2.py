@@ -1,4 +1,4 @@
-"""``place_box_to_box_v2`` 的循环骨架：按 ``orders`` 依次去三个位置、放完再回来。
+"""``place_box_to_box_by_order`` 的循环骨架：按 ``orders`` 依次去三个位置、放完再回来。
 
 只守**顺序与落点**这两件事（真实帧序列由 ``tests/test_place_box_sequence.py`` 管）：
 每个位置上应该是"先去位置 → 对准 → 去仓库抓料 → **回到对准后的角度** → 松开"，
@@ -26,12 +26,12 @@ def make_robot() -> Mock:
 class PlaceBoxToBoxV2Tests(unittest.TestCase):
     def run_it(self, orders):
         robot = make_robot()
-        with patch.object(app_gripper, "_move_axes_to") as move, \
+        with patch.object(app_gripper, "move_axes_to") as move, \
                 patch.object(app_gripper, "_go_home"), \
                 patch.object(app_gripper, "_grab_box_from_car") as grab, \
                 patch("builtins.input", return_value=""):
             move.return_value.wait.return_value = None
-            app_gripper.place_box_to_box_v2(robot, orders=orders, home=None)
+            app_gripper.place_box_to_box_by_order(robot, orders=orders, home=None)
         return robot, [call.args[1] for call in move.call_args_list], grab
 
     def visits(self, orders):
@@ -61,9 +61,9 @@ class PlaceBoxToBoxV2Tests(unittest.TestCase):
 
     def test_a_bad_order_is_rejected_before_anything_moves(self) -> None:
         robot = make_robot()
-        with patch.object(app_gripper, "_move_axes_to") as move:
+        with patch.object(app_gripper, "move_axes_to") as move:
             with self.assertRaises(ValueError):
-                app_gripper.place_box_to_box_v2(robot, orders=(0, 4))
+                app_gripper.place_box_to_box_by_order(robot, orders=(0, 4))
         move.assert_not_called()
 
 

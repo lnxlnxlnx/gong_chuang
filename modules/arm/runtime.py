@@ -301,19 +301,23 @@ class RobotArm:
         :param parallel_rotation_limit_pulses: 底座旋转与伸缩可并行的脉冲上限；
             ``None`` 用 :data:`modules.motor.drive.motion.DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`。
         """
-        from modules.motor.config import DEFAULT_HARDWARE_PATH as motor_default
+        from modules.motor.config import DEFAULT_HARDWARE_PATH as MOTOR_DEFAULT_HARDWARE_PATH
         from modules.motor.config import load_bus_config
 
         arm_path = Path(config_path) if config_path is not None else None
         config = load_arm_config(**({} if arm_path is None else {"config_path": arm_path}))
-        bus_path = Path(motor_config_path) if motor_config_path is not None else motor_default
+        bus_path = (
+            Path(motor_config_path)
+            if motor_config_path is not None
+            else MOTOR_DEFAULT_HARDWARE_PATH
+        )
         port = load_bus_config(hardware_path=bus_path).port
         tuning = {}
         if inter_frame_seconds is not None:
             tuning["inter_frame_seconds"] = inter_frame_seconds
         if parallel_rotation_limit_pulses is not None:
             tuning["parallel_rotation_limit_pulses"] = parallel_rotation_limit_pulses
-        session = cls._from_settings(
+        session = cls.from_settings(
             config=config,
             port=port,
             bus=bus,
@@ -325,7 +329,7 @@ class RobotArm:
         return session
 
     @classmethod
-    def _from_settings(
+    def from_settings(
         cls,
         *,
         config: ArmConfig,

@@ -9,7 +9,7 @@ frame loop, cleanup and return codes are covered by the normal test run.
 Patch targets follow the code, not the old package surface: tools imported at
 module top level (menu 18) are patched on that module, tools imported inside a
 function are patched where they are defined, and session creation is patched on
-``modules.vision.runtime`` (``_load_settings`` / ``_build_locator``) or on
+``modules.vision.runtime`` (``load_vision_settings`` / ``_build_locator``) or on
 ``modules.vision.drive.camera.USBCamera`` for the real ``_new_camera``.
 """
 
@@ -87,7 +87,7 @@ def detection(name: str = "red", **kwargs) -> Detection:
 def vision_settings(camera_id: int = 1):
     """A hand-built session snapshot: this platform's camera id, no targets.
 
-    会话入口现在都先读一份快照再走 ``Vision._open_config``。这里不读真的
+    会话入口现在都先读一份快照再走 ``Vision.from_settings``。这里不读真的
     ``config.json``：快照就是 ``main()`` / ``demo_material`` 会拿到的那份形状，
     装配步骤由各用例显式 mock 掉。
     """
@@ -266,9 +266,9 @@ class MaterialLocateCameraTests(CameraTestCase):
         self.FakeLocator.report = report
         locator = self.FakeLocator()
         # --camera 走 _overridden_settings（内部 from runtime import 快照与覆盖）
-        # 和 Vision._open_config（内部 _build_locator + _new_camera）：
+        # 和 Vision.from_settings（内部 _build_locator + _new_camera）：
         # 读配置/建定位器 patch 到 runtime，相机走真实的 _new_camera（见下面的 720p 断言）。
-        with patch("modules.vision.runtime._load_settings",
+        with patch("modules.vision.runtime.load_vision_settings",
                    return_value=vision_settings()), \
                 patch("modules.vision.runtime._build_locator", return_value=locator), \
                 patch("modules.vision.drive.camera.USBCamera", FakeCamera), \
@@ -341,10 +341,10 @@ class MainDemoMaterialTests(CameraTestCase):
         from modules.vision.app import demo as vision_demo
 
         locator = self.FakeLocator()
-        # demo_material 在函数内 from runtime import _load_settings / Vision，
+        # demo_material 在函数内 from runtime import load_vision_settings / Vision，
         # 以及 from ...drive.preview / ...drive.stream import 工具：
         # 读配置 patch runtime，窗口/取流 patch 定义模块，相机构造 patch drive.camera。
-        with patch("modules.vision.runtime._load_settings",
+        with patch("modules.vision.runtime.load_vision_settings",
                    return_value=vision_settings()), \
                 patch("modules.vision.runtime._build_locator", return_value=locator), \
                 patch("modules.vision.drive.camera.USBCamera", FakeCamera), \
@@ -372,7 +372,7 @@ class MainDemoMaterialTests(CameraTestCase):
             x_mm=20.0, y_mm=-10.0, z_mm=75.0, range_mm=78.3,
         )
         with patch.object(self.FakeReport, "best", item), \
-                patch("modules.vision.runtime._load_settings",
+                patch("modules.vision.runtime.load_vision_settings",
                       return_value=vision_settings()), \
                 patch("modules.vision.runtime._build_locator",
                       return_value=self.FakeLocator()), \

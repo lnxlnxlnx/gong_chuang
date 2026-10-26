@@ -73,23 +73,23 @@ class RobotTestCase(unittest.TestCase):
             patch("modules.arm.config.load_arm_config", return_value=healthy_arm_config()),
             patch("modules.motor.config.load_bus_config",
                   return_value=SimpleNamespace(port="FAKE_BUS", baudrate=115200)),
-            patch("modules.arm.runtime.RobotArm._from_settings", return_value=self.arm),
+            patch("modules.arm.runtime.RobotArm.from_settings", return_value=self.arm),
             patch("modules.chassis.runtime.MecanumChassis.load_hardware_profile",
                   return_value=healthy_chassis_profile()),
-            patch("modules.chassis.runtime.MecanumChassis._from_settings",
+            patch("modules.chassis.runtime.MecanumChassis.from_settings",
                   return_value=self.chassis),
             patch("modules.servo.config.load_gripper_config",
                   return_value=SimpleNamespace(servo_id=1)),
             patch("modules.servo.config.load_turntable_config",
                   return_value=SimpleNamespace(servo_id=2)),
-            patch("modules.servo.drive.bus_servo.load_bus_config",
+            patch("modules.servo.drive.bus_servo.load_servo_bus_config",
                   return_value=SimpleNamespace(port="SERVO", baudrate=115200)),
             patch("modules.servo.runtime.GripperServo.open", return_value=self.gripper),
             patch("modules.servo.drive.turntable.TurntableServo.open",
                   return_value=self.turntable),
-            patch("modules.vision.runtime._load_settings", return_value=Mock()),
-            patch("modules.vision.runtime.Vision._open_config", return_value=self.vision),
-            patch("modules.grasp.runtime.Grasp._from_modules_settings",
+            patch("modules.vision.runtime.load_vision_settings", return_value=Mock()),
+            patch("modules.vision.runtime.Vision.from_settings", return_value=self.vision),
+            patch("modules.grasp.runtime.Grasp.from_modules",
                   return_value=self.grasp),
             patch("modules.grasp.drive.servo_model.load_servo_config", return_value=Mock()),
             patch("modules.grasp.drive.servo_model.load_object_selector", return_value=Mock()),
@@ -128,7 +128,7 @@ class RobotTestCase(unittest.TestCase):
         with Robot.open(grasp=True) as robot:
             self.assertEqual(robot.modules, ("arm", "vision", "grasp"))
 
-        shared = patch("modules.grasp.runtime.Grasp._from_modules_settings")
+        shared = patch("modules.grasp.runtime.Grasp.from_modules")
         with shared as assemble:
             assemble.return_value = self.grasp
             with Robot.open(grasp=True) as robot:
@@ -158,9 +158,9 @@ class RobotTestCase(unittest.TestCase):
     def test_arm_and_chassis_share_one_stepper_connection(self) -> None:
         """arm+chassis 只打开**一条**步进连接，两边都借用它。"""
         with patch("robot.Robot._open_shared_bus") as open_bus, patch(
-            "modules.arm.runtime.RobotArm._from_settings"
+            "modules.arm.runtime.RobotArm.from_settings"
         ) as make_arm, patch(
-            "modules.chassis.runtime.MecanumChassis._from_settings"
+            "modules.chassis.runtime.MecanumChassis.from_settings"
         ) as make_chassis:
             open_bus.return_value = self.bus
             make_arm.return_value = self.arm
@@ -215,7 +215,7 @@ class RobotTestCase(unittest.TestCase):
     def test_a_partial_open_failure_releases_what_was_already_opened(self) -> None:
         """任一模块启动失败：已开启的全部清理，不返回半就绪 Robot。"""
         with patch(
-            "modules.chassis.runtime.MecanumChassis._from_settings",
+            "modules.chassis.runtime.MecanumChassis.from_settings",
             side_effect=RuntimeError("chassis boom"),
         ):
             with self.assertRaises(RuntimeError) as caught:
@@ -228,7 +228,7 @@ class RobotTestCase(unittest.TestCase):
     def test_a_failing_first_step_does_not_skip_the_rest(self) -> None:
         """清理第一项失败不阻断其他项，错误清单含每个失败阶段。"""
         self.arm = FakeModule("arm", self.calls, fail_on_close=RuntimeError("arm close broke"))
-        with patch("modules.arm.runtime.RobotArm._from_settings", return_value=self.arm):
+        with patch("modules.arm.runtime.RobotArm.from_settings", return_value=self.arm):
             robot = Robot.open_all()
 
             with self.assertRaises(RuntimeError) as caught:
@@ -246,7 +246,7 @@ class RobotTestCase(unittest.TestCase):
     def test_business_error_wins_over_cleanup_error(self) -> None:
         """``with`` 里出业务错、收尾也失败：业务异常是主异常，清理错误是 cause。"""
         self.arm = FakeModule("arm", self.calls, fail_on_close=RuntimeError("cleanup broke"))
-        with patch("modules.arm.runtime.RobotArm._from_settings", return_value=self.arm):
+        with patch("modules.arm.runtime.RobotArm.from_settings", return_value=self.arm):
             with self.assertRaises(ValueError) as caught:
                 with Robot.open_all():
                     raise ValueError("business broke")
@@ -274,7 +274,7 @@ class RobotTestCase(unittest.TestCase):
     def test_config_is_validated_before_the_first_device(self) -> None:
         """所有被选模块的配置先读完再开第一个设备。"""
         with patch(
-            "modules.vision.runtime._load_settings",
+            "modules.vision.runtime.load_vision_settings",
             side_effect=ValueError("bad vision config"),
         ), patch("robot.Robot._open_shared_bus") as open_bus:
             with self.assertRaises(ValueError):
@@ -358,12 +358,12 @@ class SharedBusOpenerTests(unittest.TestCase):
             "modules.motor.config.load_bus_config",
             return_value=SimpleNamespace(port="COM_TEST", baudrate=115200),
         ), patch(
-            "modules.arm.runtime.RobotArm._from_settings", return_value=arm
+            "modules.arm.runtime.RobotArm.from_settings", return_value=arm
         ) as make_arm, patch(
             "modules.chassis.runtime.MecanumChassis.load_hardware_profile",
             return_value=healthy_chassis_profile(),
         ), patch(
-            "modules.chassis.runtime.MecanumChassis._from_settings", return_value=chassis
+            "modules.chassis.runtime.MecanumChassis.from_settings", return_value=chassis
         ) as make_chassis:
             with Robot.open(arm=True, chassis=True):
                 pass
@@ -385,7 +385,7 @@ class SharedBusOpenerTests(unittest.TestCase):
             "modules.servo.config.load_turntable_config",
             return_value=SimpleNamespace(servo_id=2),
         ), patch(
-            "modules.servo.drive.bus_servo.load_bus_config",
+            "modules.servo.drive.bus_servo.load_servo_bus_config",
             return_value=SimpleNamespace(port="COM_SERVO", baudrate=115200),
         ), patch(
             "modules.servo.runtime.GripperServo.open", return_value=gripper

@@ -42,7 +42,7 @@ with Vision.open(config_path="modules/vision/config.json") as vision:
 
 ## 焦距
 
-``_open_config`` 不传 ``settings.focal_px``：主线沿用既有的**粗焦距策略**
+``from_settings`` 不传 ``settings.focal_px``：主线沿用既有的**粗焦距策略**
 （``modules.vision.drive.pinhole`` 的实拍样本值），只有 CLI 显式 ``--focal`` 才覆盖。
 这是刻意保持的既有行为，不是遗漏——改成标定焦距会改变毫米坐标和控制结果。
 """
@@ -111,7 +111,7 @@ if TYPE_CHECKING:
     from modules.vision.reports import MaterialReport, RegionReport
 
 
-def _load_settings(
+def load_vision_settings(
     config_path: Optional[Path] = None,
     calibration_path: Optional[Path] = None,
 ) -> VisionConfig:
@@ -455,11 +455,11 @@ class Vision:
         calibration_path: Optional[Path] = None,
     ) -> "Vision":
         """读取指定配置，加载模型并打开相机；返回拥有这些资源的会话。"""
-        settings = _load_settings(config_path, calibration_path)
-        return cls._open_config(settings)
+        settings = load_vision_settings(config_path, calibration_path)
+        return cls.from_settings(settings)
 
     @classmethod
-    def _open_config(cls, settings: VisionConfig, *, focal_px: Optional[float] = None) -> "Vision":
+    def from_settings(cls, settings: VisionConfig, *, focal_px: Optional[float] = None) -> "Vision":
         """按**已经读好的快照**开一个会话（CLI 覆盖走这条路，不再读第二个文件）。
 
         顺序是有意的：``camera_id`` 的检查在分配模型之前，模型的加载在打开相机之前。

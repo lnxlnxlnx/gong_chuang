@@ -28,7 +28,7 @@ from modules.vision.drive.preview import (
     warn_blank_preview,
 )
 from modules.vision.drive.stream import run_preview
-from modules.vision.runtime import Vision, _load_settings, _override_settings
+from modules.vision.runtime import Vision, load_vision_settings, _override_settings
 
 #: 每这么多帧打印一次中文结论。
 PRINT_EVERY = 30
@@ -85,7 +85,7 @@ def run(settings, *, focal_px: float | None = None) -> int:
     warned_blank = False
     frames = 0
     try:
-        with Vision._open_config(settings, focal_px=focal_px) as vision:
+        with Vision.from_settings(settings, focal_px=focal_px) as vision:
             camera_id = settings.camera_id(
                 "windows" if os.name == "nt" else "jetson"
             )
@@ -157,7 +157,7 @@ def main() -> None:
     # 覆盖先落到**配置快照**上，再进入唯一的真实会话创建路径：
     # 不写回文件、不在 public open 之后再关掉重开带覆盖的设备。
     settings = _override_settings(
-        _load_settings(),
+        load_vision_settings(),
         model_path=args.model,
         camera_id=args.camera,
         conf_thresh=args.conf,

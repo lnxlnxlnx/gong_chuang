@@ -59,7 +59,7 @@ from modules.vision.runtime import (
     DEFAULT_MEASURE_FRAMES,
     DEFAULT_SETTLE_TIMEOUT_SECONDS,
     Vision,
-    _load_settings,
+    load_vision_settings,
     _override_settings,
 )
 from project_paths import PROJECT_ROOT
@@ -118,7 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
 def overridden_settings(arguments) -> VisionConfig:
     """把命令行覆盖落到**配置快照**上（复用 vision 模块自己的校验，不写回文件）。"""
     return _override_settings(
-        _load_settings(),
+        load_vision_settings(),
         camera_id=arguments.camera,
         conf_thresh=arguments.conf,
         colour_tolerance=arguments.colour_tolerance,
@@ -412,7 +412,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
           f"放松 {targets.colour_relax_factor:.1f}")
     print("这些值来自 modules/vision/config.json；命令行覆盖只对本次运行生效。")
     try:
-        with Vision._open_config(settings, focal_px=arguments.focal) as vision:
+        with Vision.from_settings(settings, focal_px=arguments.focal) as vision:
             if arguments.measure or arguments.settle:
                 return run_measure(
                     vision,

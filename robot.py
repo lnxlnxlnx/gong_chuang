@@ -81,7 +81,7 @@ if TYPE_CHECKING:
     from modules.grasp.runtime import Grasp, GraspSettings
     from modules.motor.drive.emm42 import SerialPort
     from modules.motion import MotionController
-    from modules.servo.drive.bus_servo import SerialPort as ServoSerialPort
+    from modules.servo.drive.bus_servo import ServoSerialPort
     from modules.servo.drive.turntable import TurntableServo
     from modules.servo.runtime import GripperServo
     from modules.vision.config import VisionConfig
@@ -250,9 +250,9 @@ class Robot:
         路径语义见模块文档；``servo_config_path`` 同时给夹爪、转盘与舵机总线三个加载器，
         ``motor_config_path`` 是 arm/chassis 共用的那一份步进总线配置。
         """
-        from modules.arm.config import DEFAULT_CONFIG_PATH as arm_default
+        from modules.arm.config import DEFAULT_CONFIG_PATH as ARM_DEFAULT_CONFIG_PATH
         from modules.arm.config import load_arm_config
-        from modules.motor.config import DEFAULT_HARDWARE_PATH as motor_default
+        from modules.motor.config import DEFAULT_HARDWARE_PATH as MOTOR_DEFAULT_HARDWARE_PATH
         from modules.motor.config import load_bus_config
 
         if not any((arm, gripper, turntable, vision, chassis, grasp)):
@@ -278,10 +278,18 @@ class Robot:
         grasp_settings: Optional[GraspSettings] = None
 
         if arm:
-            arm_path = arm_default if arm_config_path is None else Path(arm_config_path)
+            arm_path = (
+                ARM_DEFAULT_CONFIG_PATH
+                if arm_config_path is None
+                else Path(arm_config_path)
+            )
             arm_config = load_arm_config(config_path=arm_path)
         if arm or chassis:
-            motor_path = motor_default if motor_config_path is None else Path(motor_config_path)
+            motor_path = (
+                MOTOR_DEFAULT_HARDWARE_PATH
+                if motor_config_path is None
+                else Path(motor_config_path)
+            )
             # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
             bus_settings = load_bus_config(hardware_path=motor_path)
             port = bus_settings.port
@@ -297,25 +305,29 @@ class Robot:
         if gripper or turntable:
             # 只**校验**舵机那份配置（夹爪段 / 转盘段 + 舵机总线）；真正的装配在开启阶段。
             # 两个模块读的是同一个文件：转盘那边还会核对两段不会用同一个 servo_id。
-            from modules.servo.config import DEFAULT_CONFIG_PATH as servo_default
+            from modules.servo.config import DEFAULT_CONFIG_PATH as SERVO_DEFAULT_CONFIG_PATH
             from modules.servo.config import load_gripper_config, load_turntable_config
-            from modules.servo.drive.bus_servo import load_bus_config as load_servo_bus
+            from modules.servo.drive.bus_servo import load_servo_bus_config
 
-            servo_path = servo_default if servo_config_path is None else Path(servo_config_path)
+            servo_path = (
+                SERVO_DEFAULT_CONFIG_PATH
+                if servo_config_path is None
+                else Path(servo_config_path)
+            )
             if gripper:
                 load_gripper_config(servo_path)
             if turntable:
                 load_turntable_config(servo_path)
             # 端口、波特率、两个舵机 ID 与行程都在 hardware.json 里；这里只读那一份。
-            servo_settings = load_servo_bus()
+            servo_settings = load_servo_bus_config()
             servo_port = servo_settings.port
             servo_baudrate = servo_settings.baudrate
 
         vision_settings = None
         if vision:
-            from modules.vision.runtime import _load_settings
+            from modules.vision.runtime import load_vision_settings
 
-            vision_settings = _load_settings(vision_config_path, vision_calibration_path)
+            vision_settings = load_vision_settings(vision_config_path, vision_calibration_path)
 
         if grasp:
             grasp_settings = cls._load_grasp_settings(grasp_config_path)
@@ -348,7 +360,7 @@ class Robot:
                 # 就地判空：不靠上面那个 `arm or chassis` 分支替这次装配担保端口存在。
                 if port is None:
                     raise RuntimeError("选了 arm 却没有可用的步进总线端口")
-                session._arm = RobotArm._from_settings(
+                session._arm = RobotArm.from_settings(
                     config=arm_config,
                     port=port,
                     bus=session._bus,
@@ -362,7 +374,7 @@ class Robot:
                     raise RuntimeError("选了 chassis 却没有读到 chassis 配置")
                 if port is None:
                     raise RuntimeError("选了 chassis 却没有可用的步进总线端口")
-                session._chassis = MecanumChassis._from_settings(
+                session._chassis = MecanumChassis.from_settings(
                     profile=chassis_profile,
                     port=port,
                     bus=session._bus,
@@ -407,7 +419,7 @@ class Robot:
 
                 if vision_settings is None:
                     raise RuntimeError("选了 vision 却没有读到视觉配置")
-                session._vision = Vision._open_config(vision_settings)
+                session._vision = Vision.from_settings(vision_settings)
 
             if grasp:
                 from modules.grasp.runtime import Grasp
@@ -415,7 +427,7 @@ class Robot:
                 if grasp_settings is None:
                     raise RuntimeError("选了 grasp 却没有读到抓取配置快照")
                 # 借用本次会话的同一个 arm 与 vision，不新开设备。
-                session._grasp = Grasp._from_modules_settings(
+                session._grasp = Grasp.from_modules(
                     config=grasp_settings["config"],
                     selector=grasp_settings["selector"],
                     target=grasp_settings["target"],
@@ -522,10 +534,10 @@ class Robot:
 
     @staticmethod
     def _load_grasp_settings(config_path: Optional[Path]) -> "GraspSettings":
-        """读并校验 eye_in_hand 那份配置；返回可直接喂给 ``_from_modules_settings`` 的快照。
+        """读并校验 eye_in_hand 那份配置；返回可直接喂给 ``from_modules`` 的快照。
 
         与 ``Grasp.from_modules`` 共用同一份参数校验，所以校验时机同样是**开设备之前**；
-        ``_require_action_ready`` 返回缩窄后的非空 target/jacobian，正是这份快照的类型要求。
+        ``require_action_ready`` 返回缩窄后的非空 target/jacobian，正是这份快照的类型要求。
         """
         from modules.grasp.drive.servo_model import (
             DEFAULT_CONFIG_PATH,
@@ -538,7 +550,7 @@ class Robot:
         from modules.grasp.runtime import Grasp, GraspSettings
 
         path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
-        target, jacobian = Grasp._require_action_ready(
+        target, jacobian = Grasp.require_action_ready(
             target=load_target(path), jacobian=load_jacobian(path)
         )
         return GraspSettings(

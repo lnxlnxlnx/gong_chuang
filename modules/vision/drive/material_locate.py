@@ -813,10 +813,10 @@ def _overridden_settings(args):
     ``--bgr`` 与 ``--palette`` 同时给时，:class:`MaterialLocator` 里既有的优先级
     （palette 优先于单一 BGR）照旧生效，这里不重复实现一遍。
     """
-    from modules.vision.runtime import _load_settings, _override_settings
+    from modules.vision.runtime import load_vision_settings, _override_settings
 
     return _override_settings(
-        _load_settings(),
+        load_vision_settings(),
         model_path=args.model,
         camera_id=args.camera,
         conf_thresh=args.conf,
@@ -900,7 +900,7 @@ def _run_camera(args) -> int:
     settings = _overridden_settings(args)
     window = open_preview()
     try:
-        with Vision._open_config(settings, focal_px=args.focal) as vision:
+        with Vision.from_settings(settings, focal_px=args.focal) as vision:
             print(f"摄像头 {args.camera}；窗口 {window!r}，按 q 退出")
             if args.want is not None:
                 print(f"只要 {args.want}（类别名或编号）；画面里没有它时标成 no material")

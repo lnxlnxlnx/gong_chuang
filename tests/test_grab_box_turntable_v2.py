@@ -1,4 +1,4 @@
-"""``grab_box_from_turntable_to_repo_v2``：跟着料走，停住了才抓。
+"""``grab_box_from_turntable_to_repo_follow``：跟着料走，停住了才抓。
 
 守的是这一版与旧版唯一的不同：抓之前是**一直跟**（单帧一步），不是站在原地等。
 料在动的时候也可能一帧都看不见（转出去/被爪影挡），那不算失败；只有跟满时限还没
@@ -57,9 +57,9 @@ class PlaceAfterFollowTests(unittest.TestCase):
                 patch.object(app_gripper, "_grab_box_from_turntable") as grab, \
                 patch.object(app_gripper, "_stow_box_to_repo") as stow, \
                 patch.object(app_gripper, "_go_home"), \
-                patch.object(app_gripper, "_move_axes_to"), \
+                patch.object(app_gripper, "move_axes_to"), \
                 patch("builtins.input", return_value=""):
-            app_gripper.grab_box_from_turntable_to_repo_v2(
+            app_gripper.grab_box_from_turntable_to_repo_follow(
                 robot, want_colors, home=None
             )
         return follow, grab, stow
@@ -79,9 +79,9 @@ class PlaceAfterFollowTests(unittest.TestCase):
             app_gripper, "_follow_box_until_stable", side_effect=RuntimeError("没停稳")
         ), patch.object(app_gripper, "_grab_box_from_turntable") as grab, \
                 patch.object(app_gripper, "_go_home"), \
-                patch.object(app_gripper, "_move_axes_to") as move, \
+                patch.object(app_gripper, "move_axes_to") as move, \
                 patch("builtins.input", return_value=""):
-            app_gripper.grab_box_from_turntable_to_repo_v2(robot, home=None)
+            app_gripper.grab_box_from_turntable_to_repo_follow(robot, home=None)
 
         grab.assert_not_called()
         move.assert_called_once_with(robot, app_gripper.SAFE_RETRACT)   # 收尾回缩

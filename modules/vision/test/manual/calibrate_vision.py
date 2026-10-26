@@ -53,7 +53,7 @@ from modules.vision.drive.preview import (
     open_preview,
     warn_blank_preview,
 )
-from modules.vision.runtime import Vision, _load_settings
+from modules.vision.runtime import Vision, load_vision_settings
 
 #: 连续读不到这么多帧就认为摄像头掉线，退出预览。
 MAX_MISSES = 30
@@ -126,7 +126,7 @@ def run(settings, *, reference_mm: float = DEFAULT_REFERENCE_MM) -> int:
     warned_blank = False
     reason = ""
     try:
-        with Vision._open_config(settings) as vision:
+        with Vision.from_settings(settings) as vision:
             camera_id = settings.camera_id("windows" if os.name == "nt" else "jetson")
             frame_size = vision._frame_size()
             print(f"摄像头 {camera_id}，窗口 {window!r}")
@@ -175,7 +175,7 @@ def run(settings, *, reference_mm: float = DEFAULT_REFERENCE_MM) -> int:
                 elif key == ord("s"):
                     _save_focal(calibration)
                 elif key == ord("c"):
-                    _print_status(_load_settings())
+                    _print_status(load_vision_settings())
     finally:
         close_previews()
     return 0 if reason in ("quit", "") else 1
@@ -276,7 +276,7 @@ def _draw(frame, calibration):
 
 def main() -> None:
     args = parse_args()
-    settings = _load_settings()
+    settings = load_vision_settings()
     print(f"配置来自 {DEFAULT_CONFIG_PATH}")
     raise SystemExit(run(settings, reference_mm=args.reference_mm))
 

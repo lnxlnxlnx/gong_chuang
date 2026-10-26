@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from modules.servo.drive import bus_servo
-from modules.servo.drive.bus_servo import AUTO_PORT, load_bus_config
+from modules.servo.drive.bus_servo import AUTO_PORT, load_servo_bus_config
 from modules.servo.test.manual import servo
 
 
@@ -29,7 +29,7 @@ class BusServoConfigTests(unittest.TestCase):
                     "bus": {"baudrate": 115200, "timeout_seconds": 0.1},
                 },
             )
-            config = load_bus_config("windows", path)
+            config = load_servo_bus_config("windows", path)
         self.assertEqual(
             (config.port, config.baudrate, config.timeout_seconds), ("COM14", 115200, 0.1)
         )
@@ -41,13 +41,13 @@ class BusServoConfigTests(unittest.TestCase):
                 {"jetson": {"port": ""}, "bus": {"baudrate": 115200, "timeout_seconds": 0.1}},
             )
             with self.assertRaisesRegex(ValueError, "jetson.port"):
-                load_bus_config("jetson", path)
+                load_servo_bus_config("jetson", path)
 
     def test_bus_section_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self._write(directory, {"windows": {"port": "COM14"}})
             with self.assertRaisesRegex(ValueError, "bus"):
-                load_bus_config("windows", path)
+                load_servo_bus_config("windows", path)
 
     def test_serial_timeout_must_be_positive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -56,11 +56,11 @@ class BusServoConfigTests(unittest.TestCase):
                 {"windows": {"port": "COM14"}, "bus": {"baudrate": 115200, "timeout_seconds": 0}},
             )
             with self.assertRaisesRegex(ValueError, "timeout_seconds"):
-                load_bus_config("windows", path)
+                load_servo_bus_config("windows", path)
 
     def test_project_file_configures_the_verified_direct_bus(self) -> None:
         """The project file must supply a usable direct-bus bus config, not just a port."""
-        config = load_bus_config("windows")
+        config = load_servo_bus_config("windows")
         self.assertEqual(config.baudrate, 115200)
         self.assertTrue(config.port.strip())
         self.assertGreater(config.timeout_seconds, 0)
@@ -133,7 +133,7 @@ class BusServoAutoPortTests(unittest.TestCase):
                 "usb_serial_candidates",
                 return_value=("/dev/ttyPROBE_K", "/dev/ttyPROBE_L"),
             ), patch.object(bus_servo, "_serial_opener", return_value=opener):
-                config = load_bus_config("jetson", path)
+                config = load_servo_bus_config("jetson", path)
 
         self.assertEqual((config.port, config.baudrate), ("/dev/ttyPROBE_L", 115200))
 
@@ -144,12 +144,12 @@ class BusServoAutoPortTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = self._write(directory, document)
             with self.assertRaisesRegex(ValueError, "servo_id"):
-                load_bus_config("jetson", path)
+                load_servo_bus_config("jetson", path)
 
     def test_a_concrete_port_is_still_read_verbatim(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self._write(directory, self._document("/dev/ttyUSB0"))
-            config = load_bus_config("jetson", path)
+            config = load_servo_bus_config("jetson", path)
 
         self.assertEqual(config.port, "/dev/ttyUSB0")
 
@@ -176,7 +176,7 @@ class ServoManualTests(unittest.TestCase):
 
     def test_main_opens_configured_port_baudrate_and_id(self) -> None:
         config = Mock(port="COM14", baudrate=115200, servo_id=2)
-        with patch.object(servo, "load_bus_config", return_value=config), \
+        with patch.object(servo, "load_servo_bus_config", return_value=config), \
                 patch.object(servo, "run_manual"), \
                 patch.object(servo, "BusServo") as bus_servo, \
                 patch("builtins.input", side_effect=["q"]):

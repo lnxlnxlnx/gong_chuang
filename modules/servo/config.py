@@ -5,7 +5,7 @@
 - ``config.json`` —— 运动调参：两个动作的 ``duration_ms`` 与转盘的停稳余量。
 
 端口是**总线**的属性、不是某个设备的属性，所以由
-:func:`modules.servo.drive.bus_servo.load_bus_config` 从同一份 ``hardware.json`` 读。
+:func:`modules.servo.drive.bus_servo.load_servo_bus_config` 从同一份 ``hardware.json`` 读。
 
 两个舵机只靠 ID 区分，所以 :func:`load_turntable_config` 会拒绝和夹爪用同一个
 ``servo_id``：那个错误发出去之后，转盘指令会去开合夹爪（或反过来），现场看到的只是

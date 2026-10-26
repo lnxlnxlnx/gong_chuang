@@ -17,7 +17,7 @@ def _confirmed(label: str) -> bool:
 
 def demo_arm(port: str) -> None:
     """Run one bounded position command in each arm direction."""
-    with RobotArm._from_settings(config=load_arm_config(), port=port) as arm:
+    with RobotArm.from_settings(config=load_arm_config(), port=port) as arm:
         motions = (
             ("底座顺时针", arm.rotate_cw),
             ("底座逆时针", arm.rotate_ccw),
@@ -33,7 +33,7 @@ def demo_arm(port: str) -> None:
 
 def arm_grab(port: str) -> None:
     """Run the shorter grab-position sequence used while tuning the gripper."""
-    with RobotArm._from_settings(config=load_arm_config(), port=port) as arm:
+    with RobotArm.from_settings(config=load_arm_config(), port=port) as arm:
         pulses = arm.config.default_pulses
         motions = (
             # 默认差不多2cm->3个默认是5cm

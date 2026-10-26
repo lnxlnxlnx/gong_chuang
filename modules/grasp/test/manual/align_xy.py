@@ -251,7 +251,7 @@ def _open_source(arguments, *, vision_settings) -> ClosableFrameSource:
     # ``--camera`` 早已落进快照（见 main），所以这里直接问快照要序号：
     # 再读一次命令行等于给"覆盖没生效"留后门。
     camera_id = vision_settings.camera_id("windows" if os.name == "nt" else "jetson")
-    source = Vision._open_config(vision_settings)
+    source = Vision.from_settings(vision_settings)
     print(f"已打开摄像头 {camera_id}，观测来自本机 MaterialLocator")
     return source
 
@@ -898,7 +898,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     其余工具模式（watch / status / set-target / target-centred / teach / calibrate /
     follow / align-z / align-z-visual / raise）各有自己的前置条件，仍然按原来的低层
-    流程走：source 由该分支自己创建和关闭，机械臂由 ``RobotArm._from_settings``
+    流程走：source 由该分支自己创建和关闭，机械臂由 ``RobotArm.from_settings``
     装配成一次就绪的会话（已经使能），收尾只调一次 ``arm.close()``。
     **不**给它们加统一的标定门禁——那会造出"缺标定所以不能跑标定"的循环。
     """
@@ -937,11 +937,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # 都不参与，读它只会把"远端能跑"变成"本地配置写错就跑不了"。
     vision_settings = None
     if not arguments.tcp:
-        from modules.vision.runtime import _load_settings, _override_settings
+        from modules.vision.runtime import load_vision_settings, _override_settings
 
         try:
             vision_settings = _override_settings(
-                _load_settings(), camera_id=arguments.camera
+                load_vision_settings(), camera_id=arguments.camera
             )
         except (ValueError, FileNotFoundError) as problem:
             print(f"视觉配置有问题：{problem}")
@@ -1011,7 +1011,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 # ------------------------------------------------------------------ 工具分支
 #
 # 下面几个模式各有前置条件，**不走** Grasp 的普通动作门禁；每个分支自己创建并关闭
-# 它需要的资源，机械臂用 ``RobotArm._from_settings`` 装配成一次就绪的会话，
+# 它需要的资源，机械臂用 ``RobotArm.from_settings`` 装配成一次就绪的会话，
 # 收尾只调一次 ``arm.close()``（停 / 失能 / 关串口都在它内部逐项试行）。
 
 
@@ -1050,8 +1050,8 @@ def _run_low_level_mode(arguments, vision_settings, config) -> int:
     selector = _selector_for(arguments)
     port = arguments.port or load_motor_bus_config().port
     print(f"打开机械臂总线 {port}")
-    # 统一生命周期：``_from_settings`` 读好配置快照、开串口并使能，是一次就绪的会话。
-    arm = RobotArm._from_settings(config=load_arm_config(), port=port)
+    # 统一生命周期：``from_settings`` 读好配置快照、开串口并使能，是一次就绪的会话。
+    arm = RobotArm.from_settings(config=load_arm_config(), port=port)
     try:
         if arguments.calibrate:
             return run_calibrate(
@@ -1086,7 +1086,7 @@ def _run_raise_mode(arguments, vision_settings) -> int:
     """
     port = arguments.port or load_motor_bus_config().port
     print(f"打开机械臂总线 {port}")
-    arm = RobotArm._from_settings(config=load_arm_config(), port=port)
+    arm = RobotArm.from_settings(config=load_arm_config(), port=port)
     try:
         return run_raise(arm=arm, pulses=arguments.raise_pulses)
     finally:
@@ -1115,7 +1115,7 @@ def _run_follow_mode(arguments, vision_settings, config) -> int:
     selector = _selector_for(arguments)
     port = arguments.port or load_motor_bus_config().port
     print(f"打开机械臂总线 {port}")
-    arm = RobotArm._from_settings(config=load_arm_config(), port=port)
+    arm = RobotArm.from_settings(config=load_arm_config(), port=port)
     try:
         return run_follow(
             arm=arm, source=source, selector=selector,

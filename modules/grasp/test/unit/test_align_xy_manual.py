@@ -79,7 +79,7 @@ class FakeArm:
 def arm_double(calls: list, *, estimated_seconds: float = 0.0) -> Mock:
     """一个"既有生命周期、又会如实上报动作时长"的假臂。
 
-    低层工具分支用 ``RobotArm._from_settings`` 装配一次就绪的会话，收尾只调一次
+    低层工具分支用 ``RobotArm.from_settings`` 装配一次就绪的会话，收尾只调一次
     ``close``（停 / 失能都在它内部）；而 ``descend_z`` / ``retract_extension`` 会真的
     发脉冲并读动作报告里的 ``estimated_seconds``。裸 ``Mock`` 的那个属性是 Mock 本身，
     ``float()`` 会当场炸，所以两个动作方法要显式给一个数（0 才不用真等）。
@@ -326,7 +326,7 @@ def fake_motor_bus(port: str = "COM9") -> Mock:
 class MainTests(unittest.TestCase):
     """``main`` 的装配顺序：校验 -> 观测源 -> 机械臂，且只装配一次。
 
-    真机上"提前开设备"的代价不是慢，是**校验被挪到设备之后**：``RobotArm._from_settings``
+    真机上"提前开设备"的代价不是慢，是**校验被挪到设备之后**：``RobotArm.from_settings``
     已经打开串口，这时候才发现没标定，机械臂已经在线上了。
     """
 
@@ -352,7 +352,7 @@ class MainTests(unittest.TestCase):
         settings = object()
         return patch.multiple(
             "modules.vision.runtime",
-            _load_settings=Mock(return_value=settings),
+            load_vision_settings=Mock(return_value=settings),
             _override_settings=Mock(return_value=settings),
         )
 
@@ -501,12 +501,12 @@ class MainTests(unittest.TestCase):
         ) as probe, patch.object(
             menu, "save_calibration", return_value="fake.json"
         ), mocks["new_arm"] as new_arm:
-            robot_arm._from_settings.return_value = arm
+            robot_arm.from_settings.return_value = arm
             status, printed = self.run_main(["--calibrate"])
 
         self.assertEqual(status, 0)
-        # 统一生命周期：低层工具分支也走 _from_settings，装配一次就绪会话。
-        robot_arm._from_settings.assert_called_once_with(
+        # 统一生命周期：低层工具分支也走 from_settings，装配一次就绪会话。
+        robot_arm.from_settings.assert_called_once_with(
             config=mocks["load_arm_config"].return_value, port="COM9"
         )
         probe.assert_called_once()
@@ -536,10 +536,10 @@ class MainTests(unittest.TestCase):
         ), patch.object(
             menu, "RobotArm"
         ) as robot_arm, patch("modules.grasp.runtime._new_arm") as new_arm:
-            robot_arm._from_settings.return_value = arm
+            robot_arm.from_settings.return_value = arm
             status, printed = self.run_main(["--align-z"])
             source_calls = open_source.call_count
-            robot_calls = robot_arm._from_settings.call_count
+            robot_calls = robot_arm.from_settings.call_count
 
         self.assertEqual(status, 0)
         self.assertEqual(source_calls, 1)

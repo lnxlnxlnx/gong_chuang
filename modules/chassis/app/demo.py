@@ -19,6 +19,6 @@ def _port() -> str:
 
 def demo_chassis(profile: HardwareProfile) -> None:
     """Move the configured chassis forward and always release the motors."""
-    with MecanumChassis._from_settings(profile=profile, port=_port()) as car:
+    with MecanumChassis.from_settings(profile=profile, port=_port()) as car:
         if input("准备底盘前进，回车执行，输入 q 跳过：").strip().lower() != "q":
             car.forward(rpm=profile.chassis_rpm, duration=10 * profile.chassis_duration)

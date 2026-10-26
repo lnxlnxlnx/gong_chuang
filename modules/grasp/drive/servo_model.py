@@ -60,7 +60,7 @@ class ServoError(RuntimeError):
     """伺服无法继续（看不到物块、雅可比奇异、不收敛、超出行程预算）。"""
 
 
-class ObjectMissing(ServoError):
+class ObjectMissingError(ServoError):
     """**这一帧里一个物块都没有**——不是"链路坏了"，也不是"有好几个目标"。
 
     单独一个类型，是因为调用方对它的处理与别的 :class:`ServoError` 不同：x/y 对准在

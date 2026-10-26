@@ -13,7 +13,7 @@ robot.arm.move_axis_to_motor_degrees("extension", plan.extension)   # 伸缩绝�
 
 ``plan.degrees`` / ``plan.pulses`` 是同一位置的字典，键就是轴名::
 
-    app.gripper._move_axes_to(robot, plan.degrees)      # {"base": 222.5, "extension": 5.7}
+    app.gripper.move_axes_to(robot, plan.degrees)      # {"base": 222.5, "extension": 5.7}
 
 ## 为什么是"里程表增量"而不是世界坐标
 

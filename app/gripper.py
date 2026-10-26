@@ -9,8 +9,8 @@ from modules.motor.drive.emm42 import POSITION_UNITS_PER_REVOLUTION
 from modules.vision.drive.numbered_ring import derive_ring_row
 from robot import Robot
 
-TURN_TABLE_POSITIONS = [0, 500, 1000]  # 转盘的目标位置，单位为度
-current_position_index = 0
+TURNTABLE_POSITIONS = [0, 500, 1000]  # 转盘的目标位置，单位为度
+_turntable_position_index = 0
 
 #: 地面 1/2/3 号圆环相邻两格之间的间距，单位是**位置命令脉冲**（车轮口径）。
 #: 现场实测值，换场地/改摆放就改这一个数。
@@ -20,7 +20,7 @@ FLOOR_RINGS = (1, 2, 3)
 SCENE_STABLE_TIMEOUT_SECONDS = 20.0
 
 #: 三轴待命中转姿态（升降抬到工作高度、伸缩伸到够料位、底座回正）。
-#: 只给一部分键也合法：``_move_axes_to`` 没给的轴一帧都不发。
+#: 只给一部分键也合法：``move_axes_to`` 没给的轴一帧都不发。
 READY_POSE = {"lift": 720, "extension": 370.0, "base": 350}
 
 #: 出事时的安全回缩：只把伸缩轴收回**初始位**——``modules/arm/hardware.json`` 的
@@ -29,7 +29,7 @@ READY_POSE = {"lift": 720, "extension": 370.0, "base": 350}
 SAFE_RETRACT = {"extension": 270.0}
 
 
-def _move_axes_to(robot: Robot, targets: dict[str, float]) -> MotionBatch:
+def move_axes_to(robot: Robot, targets: dict[str, float]) -> MotionBatch:
     """让多根轴各自走到**绝对电机角度**，同时起步；返回动作组（还没等）。
 
     用的是 :meth:`RobotArm.move_axis_to_motor_degrees`：它就是绝对电机角度
@@ -58,7 +58,7 @@ def _move_axes_to(robot: Robot, targets: dict[str, float]) -> MotionBatch:
 def _go_home(robot: Robot, home: dict[str, float] | None) -> None:
     """走到本次流程的入口姿态；``home=None`` 表示这次不走（跳过重复往返）。"""
     if home is not None:
-        _move_axes_to(robot, home).wait()
+        move_axes_to(robot, home).wait()
 
 
 def _print_report(title: str, report: MotionBatchReport) -> None:
@@ -197,7 +197,7 @@ def center_chassis_on_ring(
     只对 x 闭环——前后（y）是臂的伸缩该管的，横向才是车的事。所以这个函数不碰机械臂，
     只动四个轮子；调用前先把臂摆到能看见环的姿态::
 
-        _move_axes_to(robot, {"lift": 580, "extension": 690, "base": 120}).wait()
+        move_axes_to(robot, {"lift": 580, "extension": 690, "base": 120}).wait()
         center_chassis_on_ring(robot, require_digit=2)
 
     第一步用固定试走量（``LATERAL_TRIAL_PULSES``）摸出"每脉冲让画面挪多少毫米"，之后
@@ -443,10 +443,10 @@ def grab_box_from_turntable_to_repo(
             _stow_box_to_repo(robot)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
-        _move_axes_to(robot, SAFE_RETRACT).wait()
+        move_axes_to(robot, SAFE_RETRACT).wait()
         return
 
-    _move_axes_to(robot, SAFE_RETRACT).wait()
+    move_axes_to(robot, SAFE_RETRACT).wait()
     robot.gripper.set_position(150)
     return 
 
@@ -481,23 +481,23 @@ def _follow_box_until_stable(robot: Robot, want_color, *, timeout: float = FOLLO
     )
 
 
-def grab_box_from_turntable_to_repo_v2(
+def grab_box_from_turntable_to_repo_follow(
     robot: Robot,
     want_colors=("red", "green", "blue"),
     *,
     home: dict[str, float] | None = {"lift": 830, "extension": 120.0, "base": 420},
     follow_seconds: float = FOLLOW_SECONDS,
 ):
-    """**跟着料走**的版本：不等它转到位，一路跟到它上方，停住了才抓。
+    """**跟着料走**：不等它转到位，一路跟到它上方，停住了才抓。
 
     与 :func:`grab_box_from_turntable_to_repo` 只差中间那一段：
 
-    - 旧版：站在原地等 ``wait_scene_stable`` 看到画面停稳 → 对准 → 抓；
-    - 这个版本：``_follow_box_until_stable`` 每轮单帧一步地跟着料走（料在动也跟得上），
-      看到画面停住就退出 → 后面的对准/下降/合爪与旧版完全一样
+    - 那个入口：站在原地等 ``wait_scene_stable`` 看到画面停稳 → 对准 → 抓；
+    - 这个入口：``_follow_box_until_stable`` 每轮单帧一步地跟着料走（料在动也跟得上），
+      看到画面停住就退出 → 后面的对准/下降/合爪完全一样
       （``_grab_box_from_turntable`` 自己还会再对准一次，停稳之后再收一次残差）。
 
-    换位/摆料这一段共用 :func:`_stow_box_to_repo`，所以两个版本不会各漂一份。
+    换位/摆料这一段共用 :func:`_stow_box_to_repo`，两个入口不会各漂一份。
     """
     if robot.arm.read_abs_state("lift").motor_degrees < 460:
         robot.arm.move_axis_to_motor_degrees("lift", 460)
@@ -511,10 +511,10 @@ def grab_box_from_turntable_to_repo_v2(
             _stow_box_to_repo(robot)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
-        _move_axes_to(robot, SAFE_RETRACT).wait()
+        move_axes_to(robot, SAFE_RETRACT).wait()
         return
 
-    _move_axes_to(robot, SAFE_RETRACT).wait()
+    move_axes_to(robot, SAFE_RETRACT).wait()
     robot.gripper.set_position(150)
 
 def grab_box_from_floor_to_repo(
@@ -558,7 +558,7 @@ def grab_box_from_floor_to_repo(
 
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
-        _move_axes_to(robot, SAFE_RETRACT).wait()
+        move_axes_to(robot, SAFE_RETRACT).wait()
         return
 
     _go_home(robot, home)
@@ -577,7 +577,7 @@ def _grab_box_from_turntable(
         robot.grasp.align_xy(want = want_color)
     except Exception as e:
         print(f"Error occurred while aligning the gripper: {e}")
-        _move_axes_to(robot, SAFE_RETRACT).wait()
+        move_axes_to(robot, SAFE_RETRACT).wait()
         return
 
 
@@ -589,21 +589,21 @@ def _grab_box_from_turntable(
 def _stow_box_to_repo(robot: Robot) -> None:
     """夹着料从转盘上方摆到仓库位、松爪、转盘进位。
 
-    ``grab_box_from_turntable_to_repo`` 的两个版本共用这一段：换位/松爪的顺序只写一份，
-    改一处两版一起变。
+    ``grab_box_from_turntable_to_repo`` 与 ``..._follow`` 共用这一段：换位/松爪的顺序
+    只写一份，改一处两个入口一起变。
     """
-    global current_position_index
-    _move_axes_to(robot, {"lift": 900, "extension": 10, "base": 1048}).wait()
+    global _turntable_position_index
+    move_axes_to(robot, {"lift": 900, "extension": 10, "base": 1048}).wait()
     robot.gripper.set_position(100)
     robot.arm.move_axis_to_motor_degrees("lift", 980)
     robot.arm.move_axis_to_motor_degrees("base", 800)
-    current_position_index = (current_position_index + 1) % len(TURN_TABLE_POSITIONS)
+    _turntable_position_index = (_turntable_position_index + 1) % len(TURNTABLE_POSITIONS)
     batch = robot.motion.begin()
     batch.add(robot.arm.move_axis_to_motor_degrees("base", 420, wait=False))
     batch.add(robot.arm.move_axis_to_motor_degrees("extension", 100.0, wait=False))
     batch.add(robot.arm.move_axis_to_motor_degrees("lift", 830, wait=False))
     batch.add(
-        robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False)
+        robot.turntable.go_to(TURNTABLE_POSITIONS[_turntable_position_index], wait=False)
     )
     batch.add(robot.gripper.open_jaws(wait=False))
     batch.wait()
@@ -616,13 +616,13 @@ def _grab_box_from_car(robot: Robot):
     所以可以在抓料之前就算好（那时靶标在视野里），抓完再走。``None`` 表示这次不转
     到环上（只抓料）。
     """
-    global current_position_index
+    global _turntable_position_index
     batch = robot.motion.begin()
     batch.add(robot.arm.move_axis_to_motor_degrees("lift", 675, wait=False))
     batch.add(robot.arm.move_axis_to_motor_degrees("base", 400, wait=False))
     batch.add(robot.gripper.set_position(150, wait=False))
     batch.wait()
-    report = _move_axes_to(robot, {"lift": 980, "extension": 5, "base": 1045}).wait()
+    report = move_axes_to(robot, {"lift": 980, "extension": 5, "base": 1045}).wait()
     robot.gripper.set_position(100)
     robot.arm.move_axis_to_motor_degrees("lift", 840)
     
@@ -630,23 +630,23 @@ def _grab_box_from_car(robot: Robot):
     
     robot.arm.move_axis_to_motor_degrees("lift", 980)
     robot.arm.move_axis_to_motor_degrees("base", 800)
-    current_position_index = (current_position_index + 1) % len(TURN_TABLE_POSITIONS)
+    _turntable_position_index = (_turntable_position_index + 1) % len(TURNTABLE_POSITIONS)
     batch.add(robot.arm.move_axis_to_motor_degrees("lift", 760, wait=False))
     batch.add(robot.arm.move_axis_to_motor_degrees("base", 400, wait=False))
-    batch.add(robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False))
+    batch.add(robot.turntable.go_to(TURNTABLE_POSITIONS[_turntable_position_index], wait=False))
     batch.wait()
 
 def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
     '''当爪子上有物体时，将物体放置在指定位置。'''
-    global current_position_index
+    global _turntable_position_index
 
     # ① 抬升 + 回缩 + 转底座：三轴各自发**绝对角度**帧 → 一起动 → 一个 join 点。
     #    注意：底座这次要转约 9300 脉冲，超过"不许和伸缩并行"的 600 脉冲上限。
     #    那条限制只在 RobotArm.move_axes 里检查，单轴帧不拦，所以现场必须确认
     #    工作区是空的（伸出状态下横扫会把整条臂扫过去）。
     robot.arm.move_axis_to_motor_degrees("lift", 500)
-    _move_axes_to(robot, {"extension": 270.0, "base": 400, "lift": 900}).wait()
-    report = _move_axes_to(robot, {"lift": 900, "extension": 10, "base": 1048}).wait()
+    move_axes_to(robot, {"extension": 270.0, "base": 400, "lift": 900}).wait()
+    report = move_axes_to(robot, {"lift": 900, "extension": 10, "base": 1048}).wait()
     if verbose:
         _print_report("放料前", report)
 
@@ -656,10 +656,10 @@ def _place_box_to_repo(robot: Robot, *, verbose: bool = False):
     robot.arm.move_axis_to_motor_degrees("lift", 980)
     
     robot.arm.move_axis_to_motor_degrees("base", 800)
-    current_position_index = (current_position_index + 1) % len(TURN_TABLE_POSITIONS)
+    _turntable_position_index = (_turntable_position_index + 1) % len(TURNTABLE_POSITIONS)
     batch = robot.motion.begin()
     batch.add(robot.arm.move_axis_to_motor_degrees("base", 200, wait=False))
-    batch.add(robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False))
+    batch.add(robot.turntable.go_to(TURNTABLE_POSITIONS[_turntable_position_index], wait=False))
     batch.add(robot.gripper.open_jaws(wait=False))
     batch.wait()
 
@@ -707,10 +707,10 @@ def place_box_from_repo_to_floor(
             input("放料完成，回车继续，输入 q 跳过：").strip().lower()
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
-        _move_axes_to(robot, SAFE_RETRACT).wait()
+        move_axes_to(robot, SAFE_RETRACT).wait()
         return
     
-    _move_axes_to(robot, SAFE_RETRACT).wait()
+    move_axes_to(robot, SAFE_RETRACT).wait()
 
 def place_box_to_box(
     robot: Robot,
@@ -724,28 +724,28 @@ def place_box_to_box(
     extension_deg = robot.arm.turns_state.of("extension").motor_degrees
     base_deg = robot.arm.turns_state.of("base").motor_degrees
     _grab_box_from_car(robot)
-    _move_axes_to(robot, {"lift": 480, "extension": extension_deg, "base": base_deg}).wait()
+    move_axes_to(robot, {"lift": 480, "extension": extension_deg, "base": base_deg}).wait()
     robot.gripper.open_jaws()
     robot.arm.move_axis_to_motor_degrees("lift", 695)
     _go_home(robot, home)
 
-def place_box_from_repo_to_floor_v2(
+def place_box_from_repo_to_floor_by_pose(
     robot: Robot,
     *,
     orders: tuple[int, int, int] = (1, 2, 3),
     home: dict[str, float] | None = {"lift": 760, "extension": 400, "base": -32},
 ):
-    """把物料从转盘上抓下来，放到地面圆环里。不需要处理初始状态。
+    """把物料从仓库放到地面圆环里：车停在原地，逐环摆姿态后用 ``align_ring`` 闭环。
 
-    ``home`` 是进流程前先摆到的姿态，默认 :data:`READY_POSE`；传 ``None`` 表示这次不摆
-    （调用方已经在这一姿态上时省一次往返；轴本来就停在目标上时也不会发帧）。
+    ``home`` 是进流程前先摆到的姿态；传 ``None`` 表示这次不摆（轴本来就停在目标上时
+    也不会发帧）。
     """
     robot.arm.move_axis_to_motor_degrees("lift", 400)
     _go_home(robot, home)
-    RING_POSITION = [(-190, 800, 690), (-32, 800, 540), (100, 800, 690)]
+    ring_position = [(-190, 800, 690), (-32, 800, 540), (100, 800, 690)]
     try:
         for order in orders:
-            _move_axes_to(robot, {"lift": RING_POSITION[order - 1][1], "extension": RING_POSITION[order - 1][2], "base": RING_POSITION[order - 1][0]}).wait()
+            move_axes_to(robot, {"lift": ring_position[order - 1][1], "extension": ring_position[order - 1][2], "base": ring_position[order - 1][0]}).wait()
             time.sleep(1)  # 先让车停稳
             result = robot.grasp.align_ring(tolerance_mm=2, max_iterations = 5)
             base_deg = robot.arm.turns_state.of("base").motor_degrees
@@ -754,7 +754,7 @@ def place_box_from_repo_to_floor_v2(
             _grab_box_from_car(robot)
             
             # 这趟的落点就是现在这个角度。抓料会把这几个轴都开走，所以先记下来：
-            _move_axes_to(robot, {"extension": extension_deg, "base": base_deg}).wait()
+            move_axes_to(robot, {"extension": extension_deg, "base": base_deg}).wait()
             robot.arm.move_axis_to_motor_degrees("lift", 95)
             
             robot.gripper.open_jaws()
@@ -762,19 +762,19 @@ def place_box_from_repo_to_floor_v2(
             _go_home(robot, home)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
-        _move_axes_to(robot, SAFE_RETRACT).wait()
+        move_axes_to(robot, SAFE_RETRACT).wait()
         return
 
-    _move_axes_to(robot, SAFE_RETRACT).wait()
+    move_axes_to(robot, SAFE_RETRACT).wait()
 
 
 #: 放料前先把臂摆到 2 号环前的姿态（``base``/``lift``/``extension``，电机角度）。
-#: 取 v2 ``RING_POSITION`` 里 2 号环那一份：相机在这个姿态下看得到 2 号环，
+#: 取 :func:`place_box_from_repo_to_floor_by_pose` 里 2 号环那一份：相机在这个姿态下看得到 2 号环，
 #: ``align_ring`` 从这里开始闭环；``ring_offsets`` 的那个补偿也是在这个高度上标出来的。
 RING2_APPROACH_POSE = {"base": -32, "lift": 600, "extension": 540}
 
 
-def place_box_from_repo_to_floor_v3(
+def place_box_from_repo_to_floor_from_center_ring(
     robot: Robot,
     *,
     orders: tuple[int, int, int] = (1, 2, 3),
@@ -796,12 +796,12 @@ def place_box_from_repo_to_floor_v3(
        松爪 → 抬起。车不动，中间也不再拍帧。
 
     1/3 号是**一次线性化**解出来的（雅可比在大角度下会变），``plan.residual_mm`` 是预测
-    残差；真放不准就退回 v2 的逐环闭环（``align_ring``，每步重拍重算）。
+    残差；真放不准就退回 :func:`place_box_from_repo_to_floor_by_pose`（每步重拍重算）。
     """
     digits = _check_order(orders)
     robot.arm.move_axis_to_motor_degrees("lift", 760)
-    _move_axes_to(robot, RING2_APPROACH_POSE).wait()
-    time.sleep(1)  # 与 v2 一样：先让臂停稳再看
+    move_axes_to(robot, RING2_APPROACH_POSE).wait()
+    time.sleep(1)  # 先让臂停稳再看
     try:
         aligned = robot.grasp.align_ring(
             require_digit=2, tolerance_mm=tolerance_mm, max_iterations=6
@@ -830,20 +830,20 @@ def place_box_from_repo_to_floor_v3(
             plan = plans[digit]
             # 抓料会把这几个轴都开走；plan 记的是**绝对**角度，中间怎么走都对得上。
             _grab_box_from_car(robot)
-            _move_axes_to(robot, {"extension": plan.extension, "base": plan.base}).wait()
+            move_axes_to(robot, {"extension": plan.extension, "base": plan.base}).wait()
             robot.arm.move_axis_to_motor_degrees("lift", place_lift)
             robot.gripper.open_jaws()
             robot.arm.move_axis_to_motor_degrees("lift", 375)
             print(f"  {digit} 号环：{plan.summary()}")
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
-        _move_axes_to(robot, SAFE_RETRACT).wait()
+        move_axes_to(robot, SAFE_RETRACT).wait()
         return
 
-    _move_axes_to(robot, SAFE_RETRACT).wait()
+    move_axes_to(robot, SAFE_RETRACT).wait()
 
 
-def grab_box_from_floor_to_repo_v2(
+def grab_box_from_floor_to_repo_by_material(
     robot: Robot,
     *,
     orders: tuple[int, int, int] = (3, 2, 1),
@@ -856,10 +856,10 @@ def grab_box_from_floor_to_repo_v2(
     """
     robot.arm.move_axis_to_motor_degrees("lift", 400)
     _go_home(robot, home)
-    RING_POSITION = [(-190, 580, 690), (-32, 580, 540), (110, 580, 690)]
+    ring_position = [(-190, 580, 690), (-32, 580, 540), (110, 580, 690)]
     try:
         for order in orders:
-            _move_axes_to(robot, {"lift": RING_POSITION[order - 1][1], "extension": RING_POSITION[order - 1][2], "base": RING_POSITION[order - 1][0]}).wait()
+            move_axes_to(robot, {"lift": ring_position[order - 1][1], "extension": ring_position[order - 1][2], "base": ring_position[order - 1][0]}).wait()
             time.sleep(1)  # 先让车停稳
             result = robot.grasp.align_xy(tolerance_mm=3.0)
             robot.arm.move_axis_to_motor_degrees("lift", 90)
@@ -868,18 +868,19 @@ def grab_box_from_floor_to_repo_v2(
             _go_home(robot, home)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
-        _move_axes_to(robot, SAFE_RETRACT).wait()
+        move_axes_to(robot, SAFE_RETRACT).wait()
         return
-    _move_axes_to(robot, SAFE_RETRACT).wait()
+    move_axes_to(robot, SAFE_RETRACT).wait()
 
 
 #: 去台面三处**放置位**上方摆的姿态 ``(base, lift, extension)``，单位是电机角。
-#: ``lift`` 就是放料高度（v1 的 480）：太低会压到已经在那里的料，太高夹爪打不开。
+#: ``lift`` 就是放料高度（:func:`place_box_to_box` 用的 480）：太低会压到已经在那里
+#: 的料，太高夹爪打不开。
 #: 换摆放/换台面就改这一张表。
 _PLACE_POSITION = [(-190, 480, 690), (-32, 480, 540), (110, 480, 690)]
 
 
-def place_box_to_box_v2(
+def place_box_to_box_by_order(
     robot: Robot,
     *,
     orders: tuple[int, int, int] = (1, 2, 3),
@@ -901,14 +902,14 @@ def place_box_to_box_v2(
     try:
         for order in digits:
             base, lift, extension = _PLACE_POSITION[order - 1]
-            _move_axes_to(robot, {"lift": lift, "extension": extension, "base": base}).wait()
+            move_axes_to(robot, {"lift": lift, "extension": extension, "base": base}).wait()
             time.sleep(1)  # 先让车停稳
             robot.grasp.align_xy(tolerance_mm=2.0)
             # 抓料会把这几个轴都开走，所以先记下来：这趟的落点就是现在这个角度。
             base_deg = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
             _grab_box_from_car(robot)
-            _move_axes_to(
+            move_axes_to(
                 robot,
                 {"extension": extension_deg, "base": base_deg},
             ).wait()
@@ -918,6 +919,6 @@ def place_box_to_box_v2(
             _go_home(robot, home)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
-        _move_axes_to(robot, SAFE_RETRACT).wait()
+        move_axes_to(robot, SAFE_RETRACT).wait()
         return
-    _move_axes_to(robot, SAFE_RETRACT).wait()
+    move_axes_to(robot, SAFE_RETRACT).wait()

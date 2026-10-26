@@ -7,7 +7,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from gripper import place_box_from_repo_to_floor_v2
+from gripper import place_box_from_repo_to_floor_by_pose
 
 from modules.arm import MotionReport
 from modules.chassis.config import HardwareProfile, load_profile
@@ -16,7 +16,7 @@ from modules.motion import MotionBatch, MotionBatchReport
 from robot import Robot
 
 
-def func_run_half_map(car, profile: HardwareProfile) -> None:
+def run_half_map(car, profile: HardwareProfile) -> None:
     """Drive the recorded half-map route and return path."""
     car.forward_left(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
     car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
@@ -42,7 +42,7 @@ if __name__ == "__main__":
         robot.turntable.go_home()
         robot.gripper.open_jaws()
         
-        place_box_from_repo_to_floor_v2(robot)
+        place_box_from_repo_to_floor_by_pose(robot)
         
         
         input("完成，回车继续")

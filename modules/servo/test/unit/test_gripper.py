@@ -121,7 +121,7 @@ class GripperWiringTests(unittest.TestCase):
         bus = Mock(port="COM14", baudrate=115200, servo_id=1)
         with patch.object(gripper_manual, "parse_port", return_value=None), \
                 patch.object(gripper_manual, "load_gripper_config", return_value=config), \
-                patch.object(gripper_manual, "load_bus_config", return_value=bus), \
+                patch.object(gripper_manual, "load_servo_bus_config", return_value=bus), \
                 patch.object(gripper_manual, "run_manual"), \
                 patch.object(gripper_manual, "BusServo") as bus_servo:
             gripper_manual.main()
@@ -135,7 +135,7 @@ class GripperWiringTests(unittest.TestCase):
         bus = Mock(port="COM14", baudrate=115200, servo_id=1)
         with patch.object(gripper_manual, "parse_port", return_value="COM77"), \
                 patch.object(gripper_manual, "load_gripper_config", return_value=config), \
-                patch.object(gripper_manual, "load_bus_config", return_value=bus), \
+                patch.object(gripper_manual, "load_servo_bus_config", return_value=bus), \
                 patch.object(gripper_manual, "run_manual"), \
                 patch.object(gripper_manual, "BusServo") as bus_servo:
             gripper_manual.main()
