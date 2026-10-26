@@ -162,8 +162,7 @@ def _build_locator(settings: VisionConfig, *, focal_px: Optional[float] = None) 
             material_palette=targets.material_palette or None,
             colour_tolerance=targets.color_tolerance,
             top_diameter_mm=targets.material_diameter_mm,
-            # 颜色块路径与形状判据的放宽参数：原来写死在 material_blob / material_face
-            # 里，现场光照一变就得改代码，现在从 targets 块读（默认值与常量逐字相同）。
+            # 颜色块路径与形状判据的放宽参数：现场光照一变就要调，从 targets 块读。
             hue_tolerance=targets.hue_tolerance,
             value_ratio=targets.value_ratio,
             min_area_px=targets.min_area_px,

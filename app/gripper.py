@@ -10,7 +10,7 @@ from modules.vision.drive.numbered_ring import derive_ring_row
 from robot import Robot
 
 TURN_TABLE_POSITIONS = [0, 500, 1000]  # 转盘的目标位置，单位为度
-current_position_index = 0  # 当前转盘位置的索引
+current_position_index = 0
 
 #: 地面 1/2/3 号圆环相邻两格之间的间距，单位是**位置命令脉冲**（车轮口径）。
 #: 现场实测值，换场地/改摆放就改这一个数。
@@ -373,7 +373,6 @@ def square_chassis_to_ring_row(
 def _grab_box_from_floor(robot: Robot):
     robot.gripper.set_position(280)
     try:
-        # position = robot.vision.locate()
         robot.grasp.align_xy()
     except Exception as e:
         print(f"Error occurred while aligning the gripper: {e}")
@@ -418,7 +417,6 @@ def grab_box_from_turntable_to_repo(
     ``home`` 是进流程前先摆到的姿态，默认 :data:`READY_POSE`；传 ``None`` 表示这次不摆
     （调用方已经在这一姿态上时省一次往返；轴本来就停在目标上时也不会发帧）。
     """
-    # 如果lift的高度太低就先抬到460
     if robot.arm.read_abs_state("lift").motor_degrees < 460:
         robot.arm.move_axis_to_motor_degrees("lift", 460)
     _go_home(robot, home)
@@ -574,10 +572,8 @@ def _grab_box_from_turntable(
     停稳那一道闸在 :func:`grab_box_from_turntable` 的循环里、对准之前做；这里只把
     已经对准的爪子落到物块上再合爪。
     """
-    # robot.gripper.set_position(280)
 
     try:
-        # position = robot.vision.locate()
         robot.grasp.align_xy(want = want_color)
     except Exception as e:
         print(f"Error occurred while aligning the gripper: {e}")
@@ -598,7 +594,6 @@ def _stow_box_to_repo(robot: Robot) -> None:
     """
     global current_position_index
     _move_axes_to(robot, {"lift": 900, "extension": 10, "base": 1048}).wait()
-    # 三轴都到位之后才松爪。open_jaws 默认 wait=True，自己等到舵机走完并读回。
     robot.gripper.set_position(100)
     robot.arm.move_axis_to_motor_degrees("lift", 980)
     robot.arm.move_axis_to_motor_degrees("base", 800)
@@ -636,7 +631,6 @@ def _grab_box_from_car(robot: Robot):
     robot.arm.move_axis_to_motor_degrees("lift", 980)
     robot.arm.move_axis_to_motor_degrees("base", 800)
     current_position_index = (current_position_index + 1) % len(TURN_TABLE_POSITIONS)
-    # _move_axes_to(robot, {"lift": 760, "base": 450}).wait()
     batch.add(robot.arm.move_axis_to_motor_degrees("lift", 760, wait=False))
     batch.add(robot.arm.move_axis_to_motor_degrees("base", 400, wait=False))
     batch.add(robot.turntable.go_to(TURN_TABLE_POSITIONS[current_position_index], wait=False))
@@ -697,7 +691,6 @@ def place_box_from_repo_to_floor(
     _go_home(robot, home)
     # 圆环绝对位置在动手之前读一次：之后每次只补实测差值，中途丢帧不会累积。
     targets = _ring_targets(robot.chassis, start_digit=1)
-    # input("继续")
 
     try:
         for digit in digits:
@@ -753,7 +746,6 @@ def place_box_from_repo_to_floor_v2(
     try:
         for order in orders:
             _move_axes_to(robot, {"lift": RING_POSITION[order - 1][1], "extension": RING_POSITION[order - 1][2], "base": RING_POSITION[order - 1][0]}).wait()
-            # input("继续")       # 之后改为停顿1s
             time.sleep(1)  # 先让车停稳
             result = robot.grasp.align_ring(tolerance_mm=2, max_iterations = 5)
             base_deg = robot.arm.turns_state.of("base").motor_degrees
@@ -762,14 +754,12 @@ def place_box_from_repo_to_floor_v2(
             _grab_box_from_car(robot)
             
             # 这趟的落点就是现在这个角度。抓料会把这几个轴都开走，所以先记下来：
-            # new_dir = dict({"lift": 95}, **{"base": base_deg, "extension": extension_deg})
             _move_axes_to(robot, {"extension": extension_deg, "base": base_deg}).wait()
             robot.arm.move_axis_to_motor_degrees("lift", 95)
             
             robot.gripper.open_jaws()
             robot.arm.move_axis_to_motor_degrees("lift", 375)
             _go_home(robot, home)
-            # input("放料完成，回车继续，输入 q 跳过：").strip().lower()
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         _move_axes_to(robot, SAFE_RETRACT).wait()
@@ -876,7 +866,6 @@ def grab_box_from_floor_to_repo_v2(
             robot.gripper.close_jaws()
             _place_box_to_repo(robot, verbose=True)
             _go_home(robot, home)
-            # input("放料完成，回车继续，输入 q 跳过：").strip().lower()
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         _move_axes_to(robot, SAFE_RETRACT).wait()
@@ -927,7 +916,6 @@ def place_box_to_box_v2(
             robot.gripper.open_jaws()
             robot.arm.move_axis_to_motor_degrees("lift", 800)
             _go_home(robot, home)
-            # input(f"放置 {order} 号位完成，回车继续，输入 q 跳过：").strip().lower()
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         _move_axes_to(robot, SAFE_RETRACT).wait()

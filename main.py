@@ -37,32 +37,22 @@ def main() -> None:
     其余演示留在各自模块里：``modules.arm.app.demo``、``modules.servo.app.demo``、
     ``modules.chassis.app``（路线）。
 
-    **上层调用的样子**见 :func:`locate_material`、:func:`pick_ready` 与
-    :func:`pick_manual`：一条 ``with`` 完成装配，动作一行一个，收尾交给 ``Robot``。
+    **上层调用的样子**见 :func:`locate_material` 与 :func:`pick_manual`：
+    一条 ``with`` 完成装配，动作一行一个，收尾交给 ``Robot``。
     """
-    # demo_material()
     with Robot.open(grasp=True, gripper=True, turntable=True, chassis=True) as robot:
         robot.gripper.set_position(350)
         robot.turntable.go_home()
         _move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
         _move_axes_to(robot, {"lift": 950, "base": -32}).wait()  # 先让环进视野
-        ############
-        # robot.arm.move_axis_to_motor_degrees("lift", 980)
-        # residual = center_chassis_on_ring(robot, require_digit=2) 
-        # input(f"环心对准，残差 {residual:+.1f} mm，按回车继续")
-        # square_chassis_to_ring_row(robot)
-        # time.sleep(0.1)
-        # center_chassis_on_ring(robot, require_digit=2, max_iterations = 6)
         place_box_from_repo_to_floor_v3(robot)
         input("环心对准，按回车继续")
-        #############
         grab_box_from_turntable_to_repo_v2(robot)
         input("抓取完成，按回车继续")
         grab_box_from_floor_to_repo_v2(robot)
         place_box_from_repo_to_floor_v2(robot)
         input("放置完成，按回车继续")
         place_box_to_box_v2(robot)
-        # grab_box_from_floor_to_repo_v2(robot)
         input("结束!!!!!!!!!!!")
 
 
@@ -139,10 +129,3 @@ def _place_box(robot: Robot):
 
 if __name__ == "__main__":
     main()
-    # pick_manual()
-    # test_place_box()
-    # test_vision()
-    # adjust_arm_align()
-    # locate_material()
-    # pick_ready()
-    # test_vision()

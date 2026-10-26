@@ -455,7 +455,7 @@ class Grasp:
                 on_message=self._say,
             )
         # 两条分支只差"要不要自己查安全高度"，其余关键字一模一样：这样加参数时不会
-        # 只改到其中一条（以前那种写法正是这么漂移的）。
+        # 只改到其中一条。
         options = dict(
             single_step=single_step,
             reading=reading,
@@ -908,7 +908,6 @@ class Grasp:
         ensure_safe_height: bool = True,
         want=None,
     ) -> GraspReadyResult:
-        # NOTE: 这个函数不再使用
         """执行抓取前就位；**不闭合夹爪，也不承诺完成搬运**。
 
         顺序不是随便定的：

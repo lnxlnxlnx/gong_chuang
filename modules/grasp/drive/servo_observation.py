@@ -203,7 +203,7 @@ def _settled_sighting(
             point = (current.x_mm, current.y_mm, current.z_mm)
             if previous is not None:
                 # ``include_depth=False`` 时把 z 那一项**置零**而不是换一个判据：
-                # 三维那条路算出来的数与以前逐位相同（同一个 sqrt、同样三项）。
+                # 保持同一个 sqrt、同样三项，三维那条路的数值不变。
                 depth_delta = (point[2] - previous[2]) ** 2 if include_depth else 0.0
                 if math.sqrt(
                     (point[0] - previous[0]) ** 2

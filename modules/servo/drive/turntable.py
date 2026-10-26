@@ -73,7 +73,7 @@ from modules.servo.drive.bus_servo import (
 )
 
 #: 舵机位置量程：0..1000。一个单位对应多少度由 ``turntable.travel_degrees`` 给出
-#: （本机 240°），那是装机事实，所以不再写死在代码里。
+#: （本机 240°），那是装机事实，从配置读。
 POSITION_UNITS = 1000
 
 #: ``TurntableReport`` 单独构造时（测试、离线打印）用的兜底换算，运行时一律用配置值。

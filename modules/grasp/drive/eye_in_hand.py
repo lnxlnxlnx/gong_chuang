@@ -596,8 +596,8 @@ def align_x_y(
         offset = (sighting.x_mm, sighting.y_mm)
         readings.append(offset)
 
-        # 这里**不再**按"像素直径突变"判遮挡：真机上它总在误报，而 x/y 由像素圆心
-        # 直接决定、与 z 的尺度无关（见 docstring 的"为什么不按像素直径突变判遮挡"）。
+        # 遮挡不按"像素直径突变"判：真机上它总在误报，而 x/y 由像素圆心直接决定、
+        # 与 z 的尺度无关（见 docstring 的"为什么不按像素直径突变判遮挡"）。
         error_x = offset[0] - target.x_mm
         error_y = offset[1] - target.y_mm
         error = math.hypot(error_x, error_y)
@@ -1638,8 +1638,8 @@ def _self_test() -> int:
     assert abs(probe_arm.offset[1] - start[1]) < 1e-9, (probe_arm.offset, start)
 
     # 探出来奇异的机器要报错（两个轴在画面里同向）。
-    # 注意**必须**用同一个假臂喂给探针和链路：之前这里写成了两个不同的 FakeArm，
-    # 链路读的是一个永远不动的假臂，于是"画面没动"——被上面那条零位移检查抓了出来。
+    # **必须**用同一个假臂喂给探针和链路：两个不同的 FakeArm 会让链路读到一个永远
+    # 不动的假臂，"画面没动"会被零位移检查抓出来。
     flat_truth = ServoJacobian(base_dx=0.01, base_dy=0.01, radial_dx=0.02, radial_dy=0.02)
     flat_arm = FakeArm(flat_truth)
     try:
