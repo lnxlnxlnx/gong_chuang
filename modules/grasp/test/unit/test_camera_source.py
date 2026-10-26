@@ -8,7 +8,7 @@
 2. "丢缓冲 → 读帧 → 定位"的取帧流程，现在是 :meth:`Vision._read_report`。
 
 最容易错的一件事还是**编号**：终端里 ``MaterialReport.summary()`` 打的是
-``物料 1:``、``物料 2:``……，而 ``ObjectSelector(material_id=N)`` 要能选中同一条。
+``物料 1:``、``物料 2:``……，而 ``MaterialSelector(material_id=N)`` 要能选中同一条。
 所以这里把两边的编号对上当作硬判据——错开了，用户看到的编号就指挥不动程序。
 
 另一件是**所有权**：``Vision`` 是会话，它**总是**拥有自己取得的相机与定位器，
@@ -85,7 +85,7 @@ class SightingFromRegionTests(unittest.TestCase):
         self.assertEqual(sighting.received_at, 123.5)
 
     def test_unclassified_region_has_no_colour_or_confidence(self) -> None:
-        """YOLO 没认出来时不能编一个颜色或置信度——那会让 ObjectSelector 选错。"""
+        """YOLO 没认出来时不能编一个颜色或置信度——那会让 MaterialSelector 选错。"""
         sighting = _sighting_from_region(
             make_region(found=False, name=None, label=None, score=0.0), 2
         )
@@ -354,7 +354,7 @@ class VisionSessionTests(unittest.TestCase):
         self.assertEqual(camera.initialized, True)
 
     def test_satisfies_the_frame_source_protocol_shape(self) -> None:
-        """``servo_observation`` 只要求一个 ``frame(**kwargs)``；签名对不上就会在真机上炸。"""
+        """``visual_servo_observation`` 只要求一个 ``frame(**kwargs)``；签名对不上就会在真机上炸。"""
         import inspect
 
         vision, _camera, _locator = self.build(["f1"], [make_report([])])

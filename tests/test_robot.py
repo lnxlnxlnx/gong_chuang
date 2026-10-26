@@ -91,14 +91,14 @@ class RobotTestCase(unittest.TestCase):
             patch("modules.vision.runtime.Vision.from_settings", return_value=self.vision),
             patch("modules.grasp.runtime.Grasp.from_modules",
                   return_value=self.grasp),
-            patch("modules.grasp.drive.servo_model.load_servo_config", return_value=Mock()),
-            patch("modules.grasp.drive.servo_model.load_object_selector", return_value=Mock()),
-            patch("modules.grasp.drive.servo_model.load_target", return_value=Mock()),
+            patch("modules.grasp.drive.visual_servo_model.load_visual_servo_config", return_value=Mock()),
+            patch("modules.grasp.drive.visual_servo_model.load_material_selector", return_value=Mock()),
+            patch("modules.grasp.drive.visual_servo_model.load_target", return_value=Mock()),
             patch(
-                "modules.grasp.drive.servo_model.load_jacobian",
+                "modules.grasp.drive.visual_servo_model.load_jacobian",
                 return_value=Mock(pulses_for=Mock(return_value=(0.0, 0.0))),
             ),
-            patch("modules.grasp.drive.servo_model.load_lift_scale", return_value=None),
+            patch("modules.grasp.drive.visual_servo_model.load_lift_scale", return_value=None),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -284,7 +284,7 @@ class RobotTestCase(unittest.TestCase):
     def test_a_failing_grasp_config_keeps_devices_closed(self) -> None:
         """``grasp=True`` 时缺 target 要在开设备之前失败（与 Grasp 同一套校验）。"""
         with patch(
-            "modules.grasp.drive.servo_model.load_target", return_value=None
+            "modules.grasp.drive.visual_servo_model.load_target", return_value=None
         ), patch("robot.Robot._open_shared_bus") as open_bus:
             with self.assertRaises(Exception) as caught:
                 Robot.open(grasp=True)

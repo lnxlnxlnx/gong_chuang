@@ -854,7 +854,7 @@ class RobotArm:
     def _require_axes_can_run_together(self, moves: List[Tuple[str, int]]) -> None:
         """底座大角度旋转不许和伸缩并行——伸出状态下横扫会把整条臂扫过工作区。
 
-        与 :mod:`modules.grasp.drive.servo_motion` 是同一条规矩，阈值见
+        与 :mod:`modules.grasp.drive.visual_servo_motion` 是同一条规矩，阈值见
         :data:`modules.motor.drive.motion.DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`。
         """
         by_axis = dict(moves)

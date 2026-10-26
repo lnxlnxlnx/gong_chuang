@@ -11,15 +11,15 @@ import time
 from app.gripper import (
     move_axes_to,
     center_chassis_on_ring,  # 车横向对到圆环正前方
-    grab_box_from_floor_to_repo,
-    grab_box_from_floor_to_repo_by_material,
-    grab_box_from_turntable_to_repo,  # 圆盘->仓库
-    grab_box_from_turntable_to_repo_follow,  # 圆盘->仓库（跟着料走）
-    place_box_from_repo_to_floor,  # 仓库->地面圆环
-    place_box_from_repo_to_floor_by_pose,  # 仓库->地面圆环
-    place_box_from_repo_to_floor_from_center_ring,  # 仓库->地面圆环
-    place_box_to_box,  # 物料到物料
-    place_box_to_box_by_order,  # 物料到物料（按 order 依次放三个位置）
+    grab_material_from_floor_to_repo,
+    grab_material_from_floor_to_repo_by_xy,
+    grab_material_from_turntable_to_repo,  # 圆盘->仓库
+    grab_material_from_turntable_to_repo_follow,  # 圆盘->仓库（跟着料走）
+    place_material_from_repo_to_floor,  # 仓库->地面圆环
+    place_material_from_repo_to_floor_by_pose,  # 仓库->地面圆环
+    place_material_from_repo_to_floor_from_center_ring,  # 仓库->地面圆环
+    place_material_on_material,  # 物料到物料
+    place_material_on_material_by_order,  # 物料到物料（按 order 依次放三个位置）
     square_chassis_to_ring_row,  # 车纵向对到圆环正前方
 )
 
@@ -45,14 +45,14 @@ def main() -> None:
         robot.turntable.go_home()
         move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
         move_axes_to(robot, {"lift": 950, "base": -32}).wait()  # 先让环进视野
-        place_box_from_repo_to_floor_from_center_ring(robot)
+        place_material_from_repo_to_floor_from_center_ring(robot)
         input("环心对准，按回车继续")
-        grab_box_from_turntable_to_repo_follow(robot)
+        grab_material_from_turntable_to_repo_follow(robot)
         input("抓取完成，按回车继续")
-        grab_box_from_floor_to_repo_by_material(robot)
-        place_box_from_repo_to_floor_by_pose(robot)
+        grab_material_from_floor_to_repo_by_xy(robot)
+        place_material_from_repo_to_floor_by_pose(robot)
         input("放置完成，按回车继续")
-        place_box_to_box_by_order(robot)
+        place_material_on_material_by_order(robot)
         input("结束!!!!!!!!!!!")
 
 
@@ -83,10 +83,10 @@ def pick_manual() -> None:
         # robot.arm.move_up(pulses=6000)          # 675度
         robot.arm.move_axis_to_motor_degrees("lift", 675)
         robot.arm.move_forward(3200)
-        grab_box_from_turntable_to_repo(robot)
+        grab_material_from_turntable_to_repo(robot)
         
 
-def _place_box(robot: Robot):
+def _place_material(robot: Robot):
     try:
         report = robot.vision.locate()
     except Exception as e:

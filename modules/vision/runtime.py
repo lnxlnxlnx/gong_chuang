@@ -22,7 +22,7 @@ with Vision.open(config_path="modules/vision/config.json") as vision:
 - :meth:`Vision.locate` 是**面向业务**的：读不到画面就是失败，抛 ``RuntimeError``；
   画面里没有合格物料是**正常的空报告**（``report.best is None``），不是失败。
 - :meth:`Vision.frame` 是**面向闭环**的窄接口：读不到帧返回 ``None``，沿用伺服侧
-  "这一帧没看见"的既有契约（:class:`modules.grasp.drive.servo_observation.FrameSource`）。
+  "这一帧没看见"的既有契约（:class:`modules.grasp.drive.visual_servo_observation.FrameSource`）。
 
 两者共用一次 :meth:`Vision._read_report`，所以"一次调用只读一帧、只推理一次"只有一处实现。
 
@@ -75,7 +75,7 @@ DEFAULT_MEASURE_FRAMES = 7
 DEFAULT_SETTLE_MM = 1.0
 
 #: :meth:`Vision.measure_settled` 的重试上限（秒）。与抓取侧
-#: ``ServoConfig.settle_timeout_seconds`` 的默认值一致：同一台机器上"等停稳"
+#: ``VisualServoConfig.settle_timeout_seconds`` 的默认值一致：同一台机器上"等停稳"
 #: 的耐心不该有两个数。
 DEFAULT_SETTLE_TIMEOUT_SECONDS = 4.0
 
@@ -349,7 +349,7 @@ def _sightings_from_report(
 
     枚举的是 ``report.faces``（只含通过校验的顶面）并 ``start=1``：被丢掉的候选
     （夹爪圆弧、背景纹理）**不进编号**。先枚举 ``regions`` 再过滤会留下编号空洞，
-    于是 ``ObjectSelector(material_id=3)`` 会指到一个不存在的物料上。
+    于是 ``MaterialSelector(material_id=3)`` 会指到一个不存在的物料上。
     """
     return tuple(
         _sighting_from_region(region, index, received_at=received_at)
@@ -516,7 +516,7 @@ class Vision:
         不宣称等于相机曝光时刻，也不能用推理结束时间冒充。
 
         ``want`` 原样交给定位器，决定 :attr:`MaterialReport.best` 挑哪一个物料
-        （``frame`` 那条闭环路径不传它：那边由 ``ObjectSelector`` 选观测）。
+        （``frame`` 那条闭环路径不传它：那边由 ``MaterialSelector`` 选观测）。
         """
         camera, locator = self._require_resources()
         # 机械臂刚动完时，摄像头 / OpenCV 的缓冲里可能还压着动作**之前**的画面，
@@ -574,7 +574,7 @@ class Vision:
 
         这是**面向闭环的窄观测接口**（形状与 ``CameraLink`` 一致），供抓取和测试使用。
         ``max_age_seconds`` / ``min_received_at`` 保留原有窄接口形状：具体的新鲜度与
-        停稳筛选在 :mod:`modules.grasp.drive.servo_observation`，这里只提供时间戳。
+        停稳筛选在 :mod:`modules.grasp.drive.visual_servo_observation`，这里只提供时间戳。
         """
         result = self._read_report(timeout=timeout)
         if result is None:
@@ -655,7 +655,7 @@ class Vision:
         调用方自己决定要不要用，而不是被悄悄塞一个"看起来没事"的值。
 
         读不到画面（相机掉线）不算"还在动"：连续读失败会一直重试到超时，
-        与 :func:`modules.grasp.drive.servo_observation.measure_settled` 的取舍一致。
+        与 :func:`modules.grasp.drive.visual_servo_observation.measure_settled` 的取舍一致。
 
         ``require_motion`` / ``motion`` 补的是**另一件事**：:attr:`Fusion.confident`
         只说明"这一批读数内部一致"，它答不了"转盘到底转过没有"。画面本来就静止时，

@@ -42,7 +42,7 @@ Grasp 实例
 
 ## 包导入不预加载控制算法
 
-本模块顶层只依赖标准库与 ``servo_model``；实际的伺服算法在**动作方法内**才从
+本模块顶层只依赖标准库与 ``visual_servo_model``；实际的伺服算法在**动作方法内**才从
 :mod:`modules.grasp.drive.eye_in_hand` 导入。这样 ``import modules.grasp`` 不会把
 ``python -m modules.grasp.drive.eye_in_hand`` 的目标模块提前塞进 ``sys.modules``
 （那会让 runpy 报 "found in sys.modules"）。
@@ -57,18 +57,18 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
-from modules.grasp.drive.servo_model import (
+from modules.grasp.drive.visual_servo_model import (
     GraspReadyResult,
     HoverResult,
     LiftScale,
-    ObjectSelector,
-    ServoConfig,
-    ServoError,
-    ServoJacobian,
-    ServoResult,
-    ServoTarget,
+    MaterialSelector,
+    VisualServoConfig,
+    VisualServoError,
+    VisualServoJacobian,
+    VisualServoResult,
+    VisualServoTarget,
 )
-from modules.grasp.drive.servo_observation import ClosableFrameSource
+from modules.grasp.drive.visual_servo_observation import ClosableFrameSource
 
 if TYPE_CHECKING:
     from modules.arm.config import ArmConfig
@@ -85,10 +85,10 @@ class GraspSettings(TypedDict):
     会从类型上消失。``lift_scale`` 保持可空——它本来就是可选的。
     """
 
-    config: ServoConfig
-    selector: ObjectSelector
-    target: ServoTarget
-    jacobian: ServoJacobian
+    config: VisualServoConfig
+    selector: MaterialSelector
+    target: VisualServoTarget
+    jacobian: VisualServoJacobian
     lift_scale: LiftScale | None
 
 
@@ -121,10 +121,10 @@ class Grasp:
     def __init__(
         self,
         *,
-        config: ServoConfig,
-        selector: ObjectSelector,
-        target: ServoTarget,
-        jacobian: ServoJacobian,
+        config: VisualServoConfig,
+        selector: MaterialSelector,
+        target: VisualServoTarget,
+        jacobian: VisualServoJacobian,
         lift_scale: LiftScale | None,
         on_message: Callable[[str], None] | None = None,
     ) -> None:
@@ -184,12 +184,12 @@ class Grasp:
         """
         from modules.arm.config import DEFAULT_CONFIG_PATH as ARM_DEFAULT_CONFIG_PATH
         from modules.arm.config import load_arm_config
-        from modules.grasp.drive.servo_model import (
+        from modules.grasp.drive.visual_servo_model import (
             DEFAULT_CONFIG_PATH,
             load_jacobian,
             load_lift_scale,
-            load_object_selector,
-            load_servo_config,
+            load_material_selector,
+            load_visual_servo_config,
             load_target,
         )
         from modules.motor.config import DEFAULT_HARDWARE_PATH as MOTOR_DEFAULT_HARDWARE_PATH
@@ -209,10 +209,10 @@ class Grasp:
         )
 
         # 五份配置一次读好，构造后只使用这些值——动作方法里不再读文件。
-        config: ServoConfig = load_servo_config(grasp_path)
-        selector: ObjectSelector = load_object_selector(grasp_path)
-        target: ServoTarget | None = load_target(grasp_path)
-        jacobian: ServoJacobian | None = load_jacobian(grasp_path)
+        config: VisualServoConfig = load_visual_servo_config(grasp_path)
+        selector: MaterialSelector = load_material_selector(grasp_path)
+        target: VisualServoTarget | None = load_target(grasp_path)
+        jacobian: VisualServoJacobian | None = load_jacobian(grasp_path)
         lift_scale: LiftScale | None = load_lift_scale(grasp_path)
         # 在**打开任何设备之前**取得非空 target / jacobian（含奇异判据）。
         target, jacobian = cls.require_action_ready(target=target, jacobian=jacobian)
@@ -236,10 +236,10 @@ class Grasp:
     def _open_settings(
         cls,
         *,
-        config: ServoConfig,
-        selector: ObjectSelector,
-        target: ServoTarget,
-        jacobian: ServoJacobian,
+        config: VisualServoConfig,
+        selector: MaterialSelector,
+        target: VisualServoTarget,
+        jacobian: VisualServoJacobian,
         lift_scale: LiftScale | None,
         arm_config: ArmConfig,
         port: str,
@@ -299,22 +299,22 @@ class Grasp:
         这里 ``vision`` 明确是 :class:`~modules.vision.runtime.Vision`：借用分支**不**关闭它，
         所以它不需要 ``ClosableFrameSource`` 那层能力，类型也就更窄。
 
-        :raises ServoError: 缺 target / jacobian，或雅可比奇异。
+        :raises VisualServoError: 缺 target / jacobian，或雅可比奇异。
         """
-        from modules.grasp.drive.servo_model import (
+        from modules.grasp.drive.visual_servo_model import (
             DEFAULT_CONFIG_PATH,
             load_jacobian,
             load_lift_scale,
-            load_object_selector,
-            load_servo_config,
+            load_material_selector,
+            load_visual_servo_config,
             load_target,
         )
 
         grasp_path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
-        config: ServoConfig = load_servo_config(grasp_path)
-        selector: ObjectSelector = load_object_selector(grasp_path)
-        target: ServoTarget | None = load_target(grasp_path)
-        jacobian: ServoJacobian | None = load_jacobian(grasp_path)
+        config: VisualServoConfig = load_visual_servo_config(grasp_path)
+        selector: MaterialSelector = load_material_selector(grasp_path)
+        target: VisualServoTarget | None = load_target(grasp_path)
+        jacobian: VisualServoJacobian | None = load_jacobian(grasp_path)
         lift_scale: LiftScale | None = load_lift_scale(grasp_path)
         target, jacobian = cls.require_action_ready(target=target, jacobian=jacobian)
         return cls.from_modules(
@@ -332,10 +332,10 @@ class Grasp:
     def from_modules(
         cls,
         *,
-        config: ServoConfig,
-        selector: ObjectSelector,
-        target: ServoTarget,
-        jacobian: ServoJacobian,
+        config: VisualServoConfig,
+        selector: MaterialSelector,
+        target: VisualServoTarget,
+        jacobian: VisualServoJacobian,
         lift_scale: LiftScale | None,
         arm: RobotArm,
         vision: Vision,
@@ -365,34 +365,34 @@ class Grasp:
 
     @staticmethod
     def require_action_ready(
-        *, target: ServoTarget | None, jacobian: ServoJacobian | None
-    ) -> tuple[ServoTarget, ServoJacobian]:
+        *, target: VisualServoTarget | None, jacobian: VisualServoJacobian | None
+    ) -> tuple[VisualServoTarget, VisualServoJacobian]:
         """普通动作的前置校验：必须在**打开任何设备之前**完成。
 
         返回缩窄后的 ``(target, jacobian)``：调用方拿到的就是非空值，不必在装配完成后
         再判一次空——那正是"缺标定却先开了设备"的入口。
         """
         if target is None:
-            raise ServoError("缺少 target；先运行现有设目标或示教工具")
+            raise VisualServoError("缺少 target；先运行现有设目标或示教工具")
         if jacobian is None:
-            raise ServoError("缺少 jacobian；先运行现有标定工具")
+            raise VisualServoError("缺少 jacobian；先运行现有标定工具")
         # 复用原有的奇异判据（pulses_for 自查行列式），不新增阈值。
         jacobian.pulses_for(0.0, 0.0)
         return target, jacobian
 
     # ------------------------------------------------------------- 动作
     @staticmethod
-    def _selector_for(want, default: ObjectSelector) -> ObjectSelector:
+    def _selector_for(want, default: MaterialSelector) -> MaterialSelector:
         """本次动作按哪个物块判别：``want`` 给了就用它，没给就用配置里的那一份。
 
         为什么要按次传：``eye_in_hand.json`` 里的 ``object`` 是**默认值**，而"一次
         main.py 里依次抓红、绿、蓝"要求判别条件每抓一个就换一次——写死在文件里就得
         抓一个改一次文件。``want`` 与 ``vision.locate("red")`` 是**同一套说法**
-        （类别名，或从 1 开始的编号），见 :meth:`ObjectSelector.from_want`。
+        （类别名，或从 1 开始的编号），见 :meth:`MaterialSelector.from_want`。
         """
         if want is None:
             return default
-        return ObjectSelector.from_want(want)
+        return MaterialSelector.from_want(want)
 
     def align_xy(
         self,
@@ -403,7 +403,7 @@ class Grasp:
         reading=None,
         want=None,
         tolerance_mm: float | None = None,
-    ) -> ServoResult:
+    ) -> VisualServoResult:
         """只做 x/y 对准：**默认一步都不动高度**，高度由调用方负责。
 
         只动平面（底座 + 伸缩），**不下降、不后缩**。
@@ -450,11 +450,11 @@ class Grasp:
         照旧能按最后读数收工。
         """
         arm, source = self._require_resources()
-        from modules.grasp.drive.eye_in_hand import align_x_y, hover_above_object
+        from modules.grasp.drive.eye_in_hand import align_x_y, hover_above_material
 
         selector = self._selector_for(want, self._selector)
         if hover and self._config.hover_z_mm is not None:
-            hover_above_object(
+            hover_above_material(
                 arm,
                 source,
                 selector,
@@ -470,7 +470,7 @@ class Grasp:
             lift_scale=self._lift_scale,
             on_message=self._say,
         )
-        # 门槛只改这一次：``ServoConfig`` 是 frozen 的，``replace`` 顺带跑它自己的校验
+        # 门槛只改这一次：``VisualServoConfig`` 是 frozen 的，``replace`` 顺带跑它自己的校验
         # （<=0 直接 ValueError），也顺带把由它派生的"停稳细档"（0.25×容差）一起改掉。
         config = (
             self._config
@@ -543,7 +543,7 @@ class Grasp:
         :param timeout: 等一帧的超时（秒）。
         :param scale_mm_per_px: 与 ``jacobian`` 一致的毫米/像素；给了就按它换算读数。
 
-        :raises ServoError: 画面里没有环、环心读数不可用（贴边 / 缺比例尺）、环号不符、
+        :raises VisualServoError: 画面里没有环、环心读数不可用（贴边 / 缺比例尺）、环号不符、
             比例尺对不上、雅可比奇异，或观测源不支持环心定位。
         """
         arm, source = self._require_resources()
@@ -563,7 +563,7 @@ class Grasp:
 
         ``readings`` 是 ``{环号: (x_mm, y_mm)}``，与 :meth:`plan_ring` 的读数是同一套
         单位（相机系毫米）。三环成排时"2 号环实测 + 一条直线"就能把 1/3 号的环心算
-        出来，再一次性解算三个落点——:func:`app.gripper.place_box_from_repo_to_floor_from_center_ring`
+        出来，再一次性解算三个落点——:func:`app.gripper.place_material_from_repo_to_floor_from_center_ring`
         就是这么用的；抓料/摆料之后拿 ``plan.apply(arm)`` 走到那个绝对位置。
 
         ``scale_source`` 是这批读数**来自那一帧**的比例尺来源
@@ -576,7 +576,7 @@ class Grasp:
         而且三份补偿不同会把"这三个落点该在一条直线上"直接搅乱（现场配的
         ``ring_offsets`` 各环差到 16 mm），所以一条直线上的三个点用同一个补偿号。
 
-        :raises ServoError: 比例尺不是物理毫米，或雅可比奇异。
+        :raises VisualServoError: 比例尺不是物理毫米，或雅可比奇异。
         """
         self._require_physical_ring_scale(scale_source, None)
         arm, _source = self._require_resources()
@@ -618,12 +618,12 @@ class Grasp:
         :param max_iterations: 最多走几步（默认 4）。
         :param gain: 每步取解算值的多少（默认 0.9，留一点余量防过冲）。
         :param tolerance_mm: 到位门槛；``None`` 用 ``eye_in_hand.json`` 的 ``tolerance_mm``。
-        :raises ServoError: 任何一步看不见环、解算失败；或响应比 ≤ 0（方向反了：
+        :raises VisualServoError: 任何一步看不见环、解算失败；或响应比 ≤ 0（方向反了：
             那是标定/接线问题，硬走只会越走越远）。
         """
         arm, source = self._require_resources()
         from modules.grasp.drive.ring_plan import RingAlignResult, RingAlignStep
-        from modules.grasp.drive.servo_motion import _move_axis
+        from modules.grasp.drive.visual_servo_motion import _move_axis
 
         wanted = tuple(axes)
         unknown = [name for name in wanted if name not in ("base", "extension")]
@@ -781,29 +781,29 @@ class Grasp:
         """
         locate = getattr(source, "locate_ring", None)
         if locate is None:
-            raise ServoError(
+            raise VisualServoError(
                 f"这个观测源没有环心定位（{type(source).__name__}）："
                 "环心是相机这一侧的能力，先确认会话用的是本机视觉源（Vision）"
             )
         target = locate(timeout=timeout, digit=require_digit)
         if target is None:
-            raise ServoError(
+            raise VisualServoError(
                 "画面里没有环：把靶标移到视野里、或确认模型类别表里有 tg1/tg2/tg3"
                 "（modules/vision/config.json 的 model.class_names）"
             )
         if target.reading() is None:
-            raise ServoError(self._unusable_ring_reason(target))
+            raise VisualServoError(self._unusable_ring_reason(target))
         if require_digit is not None and int(target.digit) != int(require_digit):
-            raise ServoError(
+            raise VisualServoError(
                 f"画面里的环是 {target.digit} 号，不是要求的 {require_digit} 号；"
                 "拿另一个环的角度去转，机械臂会朝 95 mm 外的位置动，而动作看起来完全正常"
             )
         return target
 
-    def _ring_target(self, digit: int | None = None) -> ServoTarget:
+    def _ring_target(self, digit: int | None = None) -> VisualServoTarget:
         """环心那一次伺服的**目标读数**：配置里的 ``target`` 加上落料补偿。
 
-        补偿只加在环心路径上（``ServoConfig.ring_offset``）：物料对准仍然对着
+        补偿只加在环心路径上（``VisualServoConfig.ring_offset``）：物料对准仍然对着
         ``self._target``。两边都加等于整体平移，料与环的相对偏差一点没变。
 
         闭环看不见"料落在环心的哪一侧"（镜头光轴与爪口有固定偏差、料在爪里也会
@@ -813,7 +813,7 @@ class Grasp:
         环上会差一个方向，因为回程要转过的角度不同。没配这个号就退回全局那一对。
         """
         offset_x, offset_y = self._config.ring_offset(digit)
-        return ServoTarget(
+        return VisualServoTarget(
             x_mm=self._target.x_mm + offset_x,
             y_mm=self._target.y_mm + offset_y,
         )
@@ -873,11 +873,11 @@ class Grasp:
         current = target.scale_mm_per_px
         if scale_mm_per_px is not None:
             if not scale_mm_per_px > 0:
-                raise ServoError(
+                raise VisualServoError(
                     f"scale_mm_per_px 必须是正数（毫米/像素），收到 {scale_mm_per_px!r}"
                 )
             if current is None or current <= 0:  # pragma: no cover - 读数为空时早已返回
-                raise ServoError("环心读数没有比例尺，换不了单位")
+                raise VisualServoError("环心读数没有比例尺，换不了单位")
             factor = float(scale_mm_per_px) / float(current)
             return (reading[0] * factor, reading[1] * factor)
         self._require_physical_ring_scale(target.scale_source, current)
@@ -895,7 +895,7 @@ class Grasp:
         if scale_source in PHYSICAL_RING_SCALES:
             return
         measured = "无" if scale_mm_per_px is None else f"{scale_mm_per_px:.4f} mm/px"
-        raise ServoError(
+        raise VisualServoError(
             f"环心读数的比例尺是 {scale_source or '未知'}（{measured}），"
             "不是物理毫米，而 jacobian 是按物理毫米标定的：直接算角度会整体差一个倍数，"
             "而计划看起来完全正常。\n"
@@ -952,7 +952,7 @@ class Grasp:
                     robot.grasp.align_and_descend(want=colour)
                     robot.gripper.close_jaws()
                     robot.gripper.set_position(250)      # 张开，放下一个
-        :raises ServoError: 任何一步失败；异常信息里会写清卡在哪一步。
+        :raises VisualServoError: 任何一步失败；异常信息里会写清卡在哪一步。
 
         高度自己管的一条典型用法（第 1 步整体让开，下降脉冲按现场改）::
 
@@ -965,7 +965,7 @@ class Grasp:
         from modules.grasp.drive.eye_in_hand import (
             align_x_y,
             descend_z,
-            hover_above_object,
+            hover_above_material,
             raise_before_rotating,
             retract_extension,
         )
@@ -979,7 +979,7 @@ class Grasp:
         else:
             say("① 不动高度：转底盘前的高度由调用方自己保证（低位转动会撞到台面上的物块）")
         hovered = (
-            hover_above_object(
+            hover_above_material(
                 arm, source, selector, self._config,
                 scale=self._lift_scale, on_message=say,
             )

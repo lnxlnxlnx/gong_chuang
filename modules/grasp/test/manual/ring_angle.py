@@ -36,7 +36,7 @@ MENU_ENTRY = (27, "环心 → 各轴绝对位置")
 
 import argparse
 
-from modules.grasp.drive.servo_model import ServoError
+from modules.grasp.drive.visual_servo_model import VisualServoError
 
 
 def parse_args() -> argparse.Namespace:
@@ -96,7 +96,7 @@ def run(scale_mm_per_px=None, require_digit=None) -> int:
                     result = grasp.align_ring(
                         require_digit=require_digit, scale_mm_per_px=scale_mm_per_px
                     )
-                except ServoError as error:
+                except VisualServoError as error:
                     print(f"  对准不了：{error}")
                     continue
                 for step in result.steps:
@@ -114,7 +114,7 @@ def run(scale_mm_per_px=None, require_digit=None) -> int:
                 plan = grasp.plan_ring(
                     require_digit=require_digit, scale_mm_per_px=scale_mm_per_px
                 )
-            except ServoError as error:
+            except VisualServoError as error:
                 print(f"  解算不了：{error}")
                 continue
             _report(plan)

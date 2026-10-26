@@ -29,12 +29,12 @@ LOADER_CONFIGS = (
     ("modules.arm.config", "DEFAULT_CONFIG_PATH", "modules/arm/config.json", "modules/arm/config.py"),
     ("modules.arm.config", "DEFAULT_HARDWARE_PATH", "modules/arm/hardware.json", "modules/arm/config.py"),
     ("modules.motor.config", "DEFAULT_HARDWARE_PATH", "modules/motor/hardware.json", "modules/motor/config.py"),
-    ("modules.lidar.config", "DEFAULT_CONFIG_PATH", "modules/lidar/config.json", "modules/lidar/config.py"),
+    ("modules.coin_d6.config", "DEFAULT_CONFIG_PATH", "modules/coin_d6/config.json", "modules/coin_d6/config.py"),
     (
-        "modules.laser_scan.drive.laser_scanner",
+        "modules.stp23l.drive.laser_scanner",
         "DEFAULT_CONFIG_PATH",
-        "modules/laser_scan/config.json",
-        "modules/laser_scan/drive/laser_scanner.py",
+        "modules/stp23l/config.json",
+        "modules/stp23l/drive/laser_scanner.py",
     ),
     (
         "modules.servo.config",

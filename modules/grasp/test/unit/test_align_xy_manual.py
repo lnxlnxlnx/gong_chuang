@@ -21,15 +21,15 @@ from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from modules.grasp.drive.servo_model import (
+from modules.grasp.drive.visual_servo_model import (
     GraspReadyResult,
     LiftScale,
-    ObjectSelector,
-    ServoConfig,
-    ServoError,
-    ServoJacobian,
-    ServoResult,
-    ServoTarget,
+    MaterialSelector,
+    VisualServoConfig,
+    VisualServoError,
+    VisualServoJacobian,
+    VisualServoResult,
+    VisualServoTarget,
     ZDescentResult,
 )
 from modules.grasp.test.manual import align_xy as menu
@@ -41,8 +41,8 @@ def sighting(x: float, y: float):
     return parse_sighting(f"物料 4: green物料（green），xyz=({x:.6f},{y:.6f},113.2) mm")
 
 
-def healthy_jacobian() -> ServoJacobian:
-    return ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+def healthy_jacobian() -> VisualServoJacobian:
+    return VisualServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
 
 
 class FakeArm:
@@ -121,9 +121,9 @@ class FakeGrasp:
     """
 
     def __init__(self, *, config=None, target=None, jacobian=None, result=None, error=None):
-        self._config = config if config is not None else ServoConfig()
-        self._selector = ObjectSelector()
-        self._target = target if target is not None else ServoTarget(x_mm=0.0, y_mm=0.0)
+        self._config = config if config is not None else VisualServoConfig()
+        self._selector = MaterialSelector()
+        self._target = target if target is not None else VisualServoTarget(x_mm=0.0, y_mm=0.0)
         self._jacobian = jacobian if jacobian is not None else healthy_jacobian()
         self._lift_scale = LiftScale(dz_per_pulse=0.0121)
         self.result = result
@@ -147,8 +147,8 @@ class FakeGrasp:
 def canned_result() -> GraspReadyResult:
     return GraspReadyResult(
         raised_pulses=250,
-        aligned=ServoResult(
-            target=ServoTarget(x_mm=0.0, y_mm=0.0),
+        aligned=VisualServoResult(
+            target=VisualServoTarget(x_mm=0.0, y_mm=0.0),
             readings=((0.3, -0.2),),
             error_x=0.3,
             error_y=-0.2,
@@ -169,9 +169,9 @@ def canned_result() -> GraspReadyResult:
     )
 
 
-def canned_align_result() -> ServoResult:
-    return ServoResult(
-        target=ServoTarget(x_mm=0.0, y_mm=0.0),
+def canned_align_result() -> VisualServoResult:
+    return VisualServoResult(
+        target=VisualServoTarget(x_mm=0.0, y_mm=0.0),
         readings=((0.3, -0.2),),
         error_x=0.3,
         error_y=-0.2,
@@ -191,14 +191,14 @@ class DescendZTests(unittest.TestCase):
             status = run_descend_z(
                 arm=arm,
                 source=FakeSource(x, y),
-                selector=ObjectSelector(),
-                config=ServoConfig(),
+                selector=MaterialSelector(),
+                config=VisualServoConfig(),
                 **overrides,
             )
         return status, arm, printed.getvalue()
 
     def test_the_z_step_descends_first_and_then_retracts(self) -> None:
-        config = ServoConfig()
+        config = VisualServoConfig()
         status, arm, printed = self.run_step()
         self.assertEqual(status, 0)
         # 脉冲数跟着配置走（现场会改这两个数），不写死具体值。
@@ -211,12 +211,12 @@ class DescendZTests(unittest.TestCase):
         self.assertIn(str(config.extension_retract_pulses), printed)
 
     def test_the_overrides_replace_both_counts_for_this_run_only(self) -> None:
-        before = ServoConfig()
+        before = VisualServoConfig()
         status, arm, _ = self.run_step(z_pulses=800, retract_pulses=20)
         self.assertEqual(status, 0)
         self.assertEqual(arm.calls, [("down", 800), ("back", 20)])
         # 覆盖不写回配置：下一次还是配置文件里的值。
-        after = ServoConfig()
+        after = VisualServoConfig()
         self.assertEqual(after.z_descend_pulses, before.z_descend_pulses)
         self.assertEqual(after.extension_retract_pulses, before.extension_retract_pulses)
 
@@ -264,7 +264,7 @@ class PickReadyTests(unittest.TestCase):
         self.assertEqual(grasp.descend_calls, [(None, None)])
 
     def test_a_failed_run_returns_one_and_prints_the_reason(self) -> None:
-        grasp = FakeGrasp(error=ServoError("平面还没对准就下降"))
+        grasp = FakeGrasp(error=VisualServoError("平面还没对准就下降"))
         status, printed = self.run_it(grasp)
 
         self.assertEqual(status, 1)
@@ -301,17 +301,17 @@ class AlignTests(unittest.TestCase):
 
     def test_the_hover_banner_only_appears_when_hover_is_configured(self) -> None:
         configured = FakeGrasp(
-            config=ServoConfig(hover_z_mm=105.0), result=canned_align_result()
+            config=VisualServoConfig(hover_z_mm=105.0), result=canned_align_result()
         )
         _status, printed = self.run_it(configured)
         self.assertIn("悬停高度", printed)
 
-        plain = FakeGrasp(config=ServoConfig(hover_z_mm=None), result=canned_align_result())
+        plain = FakeGrasp(config=VisualServoConfig(hover_z_mm=None), result=canned_align_result())
         _status, plain_printed = self.run_it(plain)
         self.assertNotIn("悬停高度", plain_printed)
 
     def test_a_failed_align_returns_one_and_prints_the_reason(self) -> None:
-        grasp = FakeGrasp(error=ServoError("稳定看到物块"))
+        grasp = FakeGrasp(error=VisualServoError("稳定看到物块"))
         status, printed = self.run_it(grasp)
 
         self.assertEqual(status, 1)
@@ -337,8 +337,8 @@ class MainTests(unittest.TestCase):
         模块属性会被还原，那时候再 ``menu.load_arm_config.return_value`` 就是真函数了。
         """
         mocks = dict(
-            load_servo_config=Mock(return_value=ServoConfig()),
-            load_object_selector=Mock(return_value=ObjectSelector()),
+            load_visual_servo_config=Mock(return_value=VisualServoConfig()),
+            load_material_selector=Mock(return_value=MaterialSelector()),
             load_target=Mock(return_value=target),
             load_jacobian=Mock(return_value=jacobian),
             load_lift_scale=Mock(return_value=None),
@@ -365,7 +365,7 @@ class MainTests(unittest.TestCase):
         arm = Mock() if arm is None else arm
         if source is None:
             source = Mock()
-        # ``_read_object`` 会读 ``link.error`` 拼错误信息；Mock 自动生成的属性是
+        # ``_read_material`` 会读 ``link.error`` 拼错误信息；Mock 自动生成的属性是
         # 真值，会让"没画面"那条分支以为链路报错了。
         source.error = None
         loaders = self.patch_loaders(target=target, jacobian=jacobian)
@@ -395,7 +395,7 @@ class MainTests(unittest.TestCase):
 
     def test_the_normal_branch_assembles_the_session_exactly_once(self) -> None:
         mocks = self.build_session(
-            target=ServoTarget(x_mm=0.0, y_mm=0.0), jacobian=healthy_jacobian()
+            target=VisualServoTarget(x_mm=0.0, y_mm=0.0), jacobian=healthy_jacobian()
         )
         with mocks["loaders"], mocks["vision"], mocks[
             "open_source"
@@ -417,7 +417,7 @@ class MainTests(unittest.TestCase):
         全局顺序——后者在同步代码里看不出"谁先建的设备"。
         """
         mocks = self.build_session(
-            target=ServoTarget(x_mm=0.0, y_mm=0.0), jacobian=healthy_jacobian()
+            target=VisualServoTarget(x_mm=0.0, y_mm=0.0), jacobian=healthy_jacobian()
         )
         observed: dict = {}
 
@@ -443,7 +443,7 @@ class MainTests(unittest.TestCase):
 
     def test_the_align_and_descend_branch_still_assembles_once(self) -> None:
         mocks = self.build_session(
-            target=ServoTarget(x_mm=0.0, y_mm=0.0), jacobian=healthy_jacobian()
+            target=VisualServoTarget(x_mm=0.0, y_mm=0.0), jacobian=healthy_jacobian()
         )
         with mocks["loaders"], mocks["vision"], mocks[
             "open_source"
@@ -526,7 +526,7 @@ class MainTests(unittest.TestCase):
         """
         # 用会如实上报动作时长的假臂，而不是裸 Mock：``run_descend_z`` 真的会发脉冲，
         # 并读动作报告里的 ``estimated_seconds``。
-        config = ServoConfig()
+        config = VisualServoConfig()
         pulses: list = []
         arm = arm_double(pulses)
         loaders = self.patch_loaders(target=None, jacobian=None)

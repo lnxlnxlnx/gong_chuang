@@ -539,12 +539,12 @@ class Robot:
         与 ``Grasp.from_modules`` 共用同一份参数校验，所以校验时机同样是**开设备之前**；
         ``require_action_ready`` 返回缩窄后的非空 target/jacobian，正是这份快照的类型要求。
         """
-        from modules.grasp.drive.servo_model import (
+        from modules.grasp.drive.visual_servo_model import (
             DEFAULT_CONFIG_PATH,
             load_jacobian,
             load_lift_scale,
-            load_object_selector,
-            load_servo_config,
+            load_material_selector,
+            load_visual_servo_config,
             load_target,
         )
         from modules.grasp.runtime import Grasp, GraspSettings
@@ -554,8 +554,8 @@ class Robot:
             target=load_target(path), jacobian=load_jacobian(path)
         )
         return GraspSettings(
-            config=load_servo_config(path),
-            selector=load_object_selector(path),
+            config=load_visual_servo_config(path),
+            selector=load_material_selector(path),
             target=target,
             jacobian=jacobian,
             lift_scale=load_lift_scale(path),

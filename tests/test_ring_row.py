@@ -269,10 +269,10 @@ class PlaceBoxFromRepoToFloorV3Tests(unittest.TestCase):
         }
 
         with patch.object(app_gripper, "move_axes_to") as move, \
-                patch.object(app_gripper, "_grab_box_from_car") as grab, \
+                patch.object(app_gripper, "_grab_material_from_car") as grab, \
                 patch("time.sleep"):
             move.return_value.wait.return_value = None
-            app_gripper.place_box_from_repo_to_floor_from_center_ring(robot, orders=orders)
+            app_gripper.place_material_from_repo_to_floor_from_center_ring(robot, orders=orders)
         return robot, [call.args[1] for call in move.call_args_list], grab
 
     def test_aligning_ring_two_then_the_three_placements_in_order(self) -> None:
@@ -306,7 +306,7 @@ class PlaceBoxFromRepoToFloorV3Tests(unittest.TestCase):
         robot = Mock()
         with patch.object(app_gripper, "move_axes_to") as move:
             with self.assertRaises(ValueError):
-                app_gripper.place_box_from_repo_to_floor_from_center_ring(robot, orders=(0, 4))
+                app_gripper.place_material_from_repo_to_floor_from_center_ring(robot, orders=(0, 4))
         move.assert_not_called()
 
 

@@ -14,18 +14,18 @@ import unittest
 from unittest.mock import Mock
 
 from modules.grasp.drive.ring_plan import RingBasePlan, plan_ring_base
-from modules.grasp.drive.servo_model import (
-    ObjectSelector,
-    ServoConfig,
-    ServoError,
-    ServoJacobian,
-    ServoTarget,
+from modules.grasp.drive.visual_servo_model import (
+    MaterialSelector,
+    VisualServoConfig,
+    VisualServoError,
+    VisualServoJacobian,
+    VisualServoTarget,
 )
 from modules.grasp.runtime import Grasp
 from modules.vision.drive.numbered_ring import RingTarget
 
 #: 实测雅可比（modules/grasp/eye_in_hand.json）。
-JACOBIAN = ServoJacobian(
+JACOBIAN = VisualServoJacobian(
     base_dx=-0.08174204217107724,
     base_dy=-0.007583697824866524,
     radial_dx=-0.0002735146342596506,
@@ -85,9 +85,9 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(positive.base_pulses, -negative.base_pulses)
 
     def test_singular_jacobian_is_refused(self) -> None:
-        singular = ServoJacobian(base_dx=0.01, base_dy=0.02, radial_dx=0.02, radial_dy=0.04)
+        singular = VisualServoJacobian(base_dx=0.01, base_dy=0.02, radial_dx=0.02, radial_dy=0.04)
         self.assertTrue(singular.is_singular)
-        with self.assertRaisesRegex(ServoError, "奇异"):
+        with self.assertRaisesRegex(VisualServoError, "奇异"):
             plan(reading=(1.0, 1.0), jacobian=singular)
 
     def test_bad_arguments_are_rejected_before_any_math(self) -> None:
@@ -163,12 +163,12 @@ class FakeSource:
 
 
 def make_grasp(
-    target, config: ServoConfig | None = None
+    target, config: VisualServoConfig | None = None
 ) -> tuple[Grasp, FakeArm, FakeSource]:
     grasp = Grasp(
-        config=config if config is not None else ServoConfig(),
-        selector=ObjectSelector(),
-        target=ServoTarget(x_mm=0.0, y_mm=0.0),
+        config=config if config is not None else VisualServoConfig(),
+        selector=MaterialSelector(),
+        target=VisualServoTarget(x_mm=0.0, y_mm=0.0),
         jacobian=JACOBIAN,
         lift_scale=None,
     )
@@ -191,7 +191,7 @@ class SessionPlanTests(unittest.TestCase):
 
     def test_the_target_reading_comes_from_the_session_config(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target(reading=(5.0, 0.0)))
-        grasp._target = ServoTarget(x_mm=5.0, y_mm=0.0)
+        grasp._target = VisualServoTarget(x_mm=5.0, y_mm=0.0)
         result = grasp.plan_ring()
         self.assertEqual(result.base_pulses, 0, "读数等于目标，不该动")
 
@@ -199,7 +199,7 @@ class SessionPlanTests(unittest.TestCase):
         """落料补偿：读数正好等于「target + 补偿」时不该再动（料会落在环心）。"""
         grasp, _arm, _source = make_grasp(
             ring_target(reading=(7.5, 0.0)),
-            config=ServoConfig(ring_offset_x_mm=7.5),
+            config=VisualServoConfig(ring_offset_x_mm=7.5),
         )
         # 补偿只加在环心那一次上：物料用的 target 一个数都没变。
         self.assertEqual((grasp._target.x_mm, grasp._target.y_mm), (0.0, 0.0))
@@ -218,9 +218,9 @@ class SessionPlanTests(unittest.TestCase):
         """补偿是相对 ``target`` 的偏移：重标 target 之后环心目标跟着走。"""
         grasp, _arm, _source = make_grasp(
             ring_target(reading=(5.0, 0.0)),
-            config=ServoConfig(ring_offset_x_mm=7.5),
+            config=VisualServoConfig(ring_offset_x_mm=7.5),
         )
-        grasp._target = ServoTarget(x_mm=-2.5, y_mm=0.0)
+        grasp._target = VisualServoTarget(x_mm=-2.5, y_mm=0.0)
         self.assertEqual(grasp._ring_target().x_mm, 5.0)
         self.assertEqual(
             grasp.plan_ring().base_pulses, 0, "读数等于 target + 补偿，不该动"
@@ -228,19 +228,19 @@ class SessionPlanTests(unittest.TestCase):
 
     def test_no_ring_in_view_is_an_error(self) -> None:
         grasp, _arm, _source = make_grasp(None)
-        with self.assertRaisesRegex(ServoError, "没有环"):
+        with self.assertRaisesRegex(VisualServoError, "没有环"):
             grasp.plan_ring()
 
     def test_clipped_ring_refuses_to_give_an_angle(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target(clipped=True))
-        with self.assertRaisesRegex(ServoError, "贴到画面边缘"):
+        with self.assertRaisesRegex(VisualServoError, "贴到画面边缘"):
             grasp.plan_ring()
 
     def test_missing_scale_refuses_to_give_an_angle(self) -> None:
         grasp, _arm, _source = make_grasp(
             ring_target(reading=None, scale_mm_per_px=None, scale_source="none")
         )
-        with self.assertRaisesRegex(ServoError, "比例尺"):
+        with self.assertRaisesRegex(VisualServoError, "比例尺"):
             grasp.plan_ring()
 
     def test_the_required_digit_filters_the_frame(self) -> None:
@@ -253,7 +253,7 @@ class SessionPlanTests(unittest.TestCase):
 
     def test_a_different_ring_number_is_refused(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target(digit=3))
-        with self.assertRaisesRegex(ServoError, "3 号"):
+        with self.assertRaisesRegex(VisualServoError, "3 号"):
             grasp.plan_ring(require_digit=2)
 
     def test_the_required_ring_number_passes(self) -> None:
@@ -272,7 +272,7 @@ class SessionPlanTests(unittest.TestCase):
         grasp, _arm, _source = make_grasp(
             ring_target(scale_mm_per_px=0.495, scale_source="station.mm_per_px")
         )
-        with self.assertRaisesRegex(ServoError, "station.mm_per_px"):
+        with self.assertRaisesRegex(VisualServoError, "station.mm_per_px"):
             grasp.plan_ring()
 
     def test_an_explicit_scale_rescales_the_reading(self) -> None:
@@ -287,13 +287,13 @@ class SessionPlanTests(unittest.TestCase):
 
     def test_a_bad_explicit_scale_is_rejected(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target())
-        with self.assertRaises(ServoError):
+        with self.assertRaises(VisualServoError):
             grasp.plan_ring(scale_mm_per_px=0.0)
 
     def test_a_source_without_ring_vision_says_so(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target())
         grasp._source = Mock(spec=["frame"])  # TCP 观测源：没有环心定位
-        with self.assertRaisesRegex(ServoError, "没有环心定位"):
+        with self.assertRaisesRegex(VisualServoError, "没有环心定位"):
             grasp.plan_ring()
 
     def test_a_closed_session_refuses(self) -> None:
@@ -345,7 +345,7 @@ class SimulatedPlantArm:
     一半，等价于"配置过期/尺不对"，闭环应当在线学出响应比并两三步入位。
     """
 
-    def __init__(self, plant: ServoJacobian, *, reading=(30.0, 20.0),
+    def __init__(self, plant: VisualServoJacobian, *, reading=(30.0, 20.0),
                  base_pulses=0, extension_pulses=0) -> None:
         self.plant = plant
         self.reading = [float(reading[0]), float(reading[1])]
@@ -409,7 +409,7 @@ class LiveRingSource:
 
 def make_closed_loop(plant_scale: float = 1.0):
     """配置雅可比 = JACOBIAN；真实灵敏度 = ``plant_scale`` × JACOBIAN。"""
-    plant = ServoJacobian(
+    plant = VisualServoJacobian(
         base_dx=JACOBIAN.base_dx * plant_scale,
         base_dy=JACOBIAN.base_dy * plant_scale,
         radial_dx=JACOBIAN.radial_dx * plant_scale,
@@ -417,9 +417,9 @@ def make_closed_loop(plant_scale: float = 1.0):
     )
     arm = SimulatedPlantArm(plant)
     grasp = Grasp(
-        config=ServoConfig(),
-        selector=ObjectSelector(),
-        target=ServoTarget(x_mm=0.0, y_mm=0.0),
+        config=VisualServoConfig(),
+        selector=MaterialSelector(),
+        target=VisualServoTarget(x_mm=0.0, y_mm=0.0),
         jacobian=JACOBIAN,
         lift_scale=None,
     )
@@ -442,7 +442,7 @@ class ClosedLoopTests(unittest.TestCase):
     def test_the_closed_loop_lands_on_the_compensated_target(self) -> None:
         """落料补偿改的是闭环的**终点**：读数停在「target + 补偿」，不是停在 0。"""
         grasp, arm = make_closed_loop(1.0)
-        grasp._config = ServoConfig(ring_offset_x_mm=7.5)
+        grasp._config = VisualServoConfig(ring_offset_x_mm=7.5)
         result = grasp.align_ring(gain=1.0)
         self.assertTrue(result.aligned, result.summary())
         # 脉冲要取整，落点差着半个脉冲的量级（0.036 mm），所以按 delta 比。
@@ -507,7 +507,7 @@ class ClosedLoopTests(unittest.TestCase):
     def test_a_closed_loop_without_ring_vision_says_so(self) -> None:
         grasp, _arm = make_closed_loop(1.0)
         grasp._source = Mock(spec=["frame"])
-        with self.assertRaisesRegex(ServoError, "没有环心定位"):
+        with self.assertRaisesRegex(VisualServoError, "没有环心定位"):
             grasp.align_ring()
 
 
@@ -577,7 +577,7 @@ class PlanRingReadingsTests(unittest.TestCase):
     def test_one_offset_digit_is_shared_by_every_point(self) -> None:
         """一条直线上的三个点共用 2 号环的落料补偿——各用各的会把那条直线搅乱。"""
         grasp, _arm, _source = make_grasp(ring_target())
-        grasp._config = ServoConfig(ring_offsets_mm=((-7.0, -3.0), (3.0, -4.0), (9.0, -4.0)))
+        grasp._config = VisualServoConfig(ring_offsets_mm=((-7.0, -3.0), (3.0, -4.0), (9.0, -4.0)))
         readings = {1: (-150.0, 0.0), 2: (0.0, 0.0), 3: (150.0, 0.0)}
 
         own = grasp.plan_ring_readings(readings, scale_source="ring box")
@@ -592,7 +592,7 @@ class PlanRingReadingsTests(unittest.TestCase):
     def test_a_scale_that_is_not_physical_millimetres_is_refused(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target())
 
-        with self.assertRaisesRegex(ServoError, "station.mm_per_px"):
+        with self.assertRaisesRegex(VisualServoError, "station.mm_per_px"):
             grasp.plan_ring_readings(
                 {2: (0.0, 0.0)}, scale_source="station.mm_per_px"
             )

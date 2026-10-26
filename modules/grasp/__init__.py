@@ -13,8 +13,8 @@ with Grasp.open(
 ```
 
 - :class:`~modules.grasp.runtime.Grasp` —— 拥有机械臂与视觉源的会话；
-- :class:`~modules.grasp.drive.servo_model.ServoResult` / ``GraspReadyResult`` —— 动作结果；
-- :class:`~modules.grasp.drive.servo_model.ServoError` —— 伺服无法继续。
+- :class:`~modules.grasp.drive.visual_servo_model.VisualServoResult` / ``GraspReadyResult`` —— 动作结果；
+- :class:`~modules.grasp.drive.visual_servo_model.VisualServoError` —— 伺服无法继续。
 
 "环心 → 底座绝对角度"的计划类型 :class:`~modules.grasp.drive.ring_plan.RingBasePlan`
 **不从这里导出**：``ring_plan`` 有自己的 ``python -m`` 自测入口，包导入时加载它会让
@@ -24,7 +24,7 @@ runpy 报 "found in sys.modules"。需要类型注解就从定义处导入。
 
 ``Grasp`` 的真实定义在 :mod:`modules.grasp.runtime`。这里显式再导出它，**不是**兼容壳：
 旧的门面函数没有留，消费者同一批迁到了类接口。工具装配（``load_*``）和全部内部助手
-（``_read_object`` / ``_move_axes`` / ``probe_jacobian`` …）**不从这里导出**——
+（``_read_material`` / ``_move_axes`` / ``probe_jacobian`` …）**不从这里导出**——
 需要它们的现场工具直接从定义处导入。
 
 导入本包**不读配置、不开设备**，也不会预加载 ``python -m modules.grasp.drive.eye_in_hand``
@@ -33,12 +33,12 @@ runpy 报 "found in sys.modules"。需要类型注解就从定义处导入。
 
 from __future__ import annotations
 
-from .drive.servo_model import GraspReadyResult, ServoError, ServoResult
+from .drive.visual_servo_model import GraspReadyResult, VisualServoError, VisualServoResult
 from .runtime import Grasp
 
 __all__ = [
     "Grasp",
     "GraspReadyResult",
-    "ServoError",
-    "ServoResult",
+    "VisualServoError",
+    "VisualServoResult",
 ]

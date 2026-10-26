@@ -1,0 +1,293 @@
+"""观测侧：观测源协议、物料选择，以及"这一帧值不值得信"的判据。
+
+这里全部是**关于观测**的事，一行机械臂动作都没有：
+
+- :class:`FrameSource`：观测源要提供的那一个方法（``CameraLink`` 与本机相机会话都满足它）；
+- :func:`select_material`：从一堆观测里认出"哪条是物块"；
+- :func:`_settled_sighting` / :func:`measure_settled`：等到画面**停稳**再取值；
+- :func:`_probe_visible`：抬升前后判断物块还在不在画面里。
+
+为什么"停稳"这么重要：机械臂刚停下的那一两帧里，运动模糊会把坐标读偏，而伺服容差
+只有几毫米。拿模糊帧去解算，下一步就会朝错误方向走。
+
+依赖方向见 :mod:`modules.grasp.drive.visual_servo_model` 的模块说明：本模块只依赖
+``visual_servo_model`` 和 vision 的观测类型，不导入控制器，也不导入脉冲原语。
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from typing import TYPE_CHECKING, Callable, Optional, Protocol, Sequence, Tuple
+
+from modules.grasp.drive.visual_servo_model import (
+    MaterialMissingError,
+    MaterialSelector,
+    VisualServoConfig,
+    VisualServoError,
+)
+
+if TYPE_CHECKING:
+    from modules.vision.drive.sighting import MaterialSighting
+
+
+class FrameSource(Protocol):
+    """观测源需要提供的那一件事：取一组观测。
+
+    故意只要这一个方法，于是两种来源都能插进来，而这里不需要知道是哪种：
+
+    - :class:`modules.camera_link.drive.link.CameraLink`（远端镜头走 TCP）；
+    - :class:`modules.vision.runtime.Vision`（本机 USB 摄像头 + 模型，默认走这条）。
+
+    ``min_received_at`` 是"只要不早于这个时刻的观测"——机械臂动完之后
+    **必须**带上它，否则可能读到动作**之前**的画面（详见模块开头）。
+    """
+
+    def frame(
+        self,
+        *,
+        timeout: Optional[float] = None,
+        max_age_seconds: Optional[float] = None,
+        min_received_at: Optional[float] = None,
+    ) -> Optional[Sequence[MaterialSighting]]: ...
+
+
+class ClosableFrameSource(FrameSource, Protocol):
+    """支持观测与关闭；**是否拥有资源仍由会话装配决定**。
+
+    会话持有的观测源需要在收尾时被关掉，所以比 :class:`FrameSource` 多一条 ``close``。
+    它能调 ``close`` 不等于它拥有那些资源：借来的源（例如 ``Grasp.from_modules`` 传进来的
+    ``Vision``）由装配者收尾，会话只解除自己的引用。
+
+    这样 :class:`modules.vision.runtime.Vision`、``CameraLink`` 与满足协议的离线替身都能
+    注入，工厂到字段之间也不会丢掉关闭能力；而动作算法仍然只要求 :class:`FrameSource`。
+    """
+
+    def close(self) -> None: ...
+
+
+def select_material(
+    sightings: Sequence[MaterialSighting], selector: MaterialSelector
+) -> MaterialSighting:
+    """从一帧里挑出物块。
+
+    没配判别条件（``selector.is_open``）而画面里又有多个物料时，取**离光轴最近**的那
+    个：相机装在爪上，光轴正下方就是爪口要去的地方，所以"最近"就是"要抓的那个"。
+    报错让现场去填 ``want`` 是更保守的做法，但那等于把一条按次决定的事推给人——同一段
+    程序里抓几个不同物料时，最近的那个本来就是对的。
+
+    :raises VisualServoError: 一个都没有。
+    """
+    matched = [item for item in sightings if selector.matches(item)]
+    if not matched:
+        listing = "、".join(
+            f"物料 {item.material_id}({item.color})" for item in sightings
+        ) or "（空）"
+        raise MaterialMissingError(
+            f"这一帧里没有物块（{selector.describe()}）；收到 {len(sightings)} 条：{listing}"
+        )
+    if len(matched) > 1 and selector.is_open:
+        # ponytail: 纯距离启发式——两个物料离光轴差不多近时会挑错，那时按次传 want。
+        return min(matched, key=lambda item: item.planar_distance_mm)
+    return matched[-1]
+
+
+def _read_material(link: FrameSource, selector: MaterialSelector, config: VisualServoConfig, *, after: Optional[float] = None) -> MaterialSighting:
+    """等一帧，并返回物块那一观测。``after`` 给出"只要不早于这个时刻"的过滤。"""
+    frame = link.frame(
+        timeout=config.frame_timeout_seconds,
+        min_received_at=after,
+    )
+    if frame is None:
+        error = getattr(link, "error", None)
+        raise VisualServoError(
+            "等不到新的观测"
+            + (f"；接收链路报错：{error}" if error else "；确认镜头端已连上并正在发数据")
+        )
+    return select_material(frame, selector)
+
+
+def measure_offset(
+    link: FrameSource,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
+    *,
+    after: Optional[float] = None,
+) -> Tuple[float, float]:
+    """读一帧，返回物块在相机系的水平偏移 ``(x, y)``（毫米）。"""
+    sighting = _read_material(link, selector, config, after=after)
+    return (sighting.x_mm, sighting.y_mm)
+
+
+def _settled_sighting(
+    link: FrameSource,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
+    *,
+    after: Optional[float] = None,
+    tolerance: Optional[float] = None,
+    include_depth: bool = True,
+    wait_for_first_target: bool = False,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> MaterialSighting:
+    """等到画面不再变，返回那一刻的整条观测（不只是坐标）。
+
+    返回观测而不只是 ``(x, y)``：调用方还要用 ``z_mm``（安全抬升、悬停、``align_z``
+    都按它判高度）和 ``diameter_px``（``align_z`` 用它发现"检测换了目标"）。
+    按像素直径判遮挡那条路已经从 ``align_x_y`` 去掉——真机上它总在误报，理由写在
+    :func:`modules.grasp.drive.eye_in_hand.align_x_y` 的 docstring 里。
+
+    ``tolerance`` 覆盖一致性判据：粗调阶段（离目标还有十几毫米）用
+    ``coarse_settle_tolerance_mm`` 就够，不必为了 0.4 mm 多等好几帧——每一帧都要跑一次
+    定位（主算路径实测 27–29 ms，辅助定位那一路 357–668 ms）。
+
+    ``include_depth=False`` 时一致性**只比平面内的 x/y**。x/y 对准（``align_x_y``）用这个：
+    它一个 z 都不参与解算，而 z 是按像素半径反推的（``z = f·D/2r``，本机约 0.42 mm/px），
+    1 px 的半径抖动就顶掉整个细档 0.4 mm——实测真机帧上连续两帧的 Δz 中位数是
+    1.7–2.7 mm（≤0.4 mm 的只占 13%），于是判据**永远不满足**，每次测量都要等满
+    ``settle_timeout_seconds``（默认 4 s）才拿最后读数走人。这就是"对准有时要等好几秒"
+    的全部来源。测 z 的步骤（抬升 / 悬停 / ``align_z``）保持三维判据不变。
+
+    ``wait_for_first_target`` 只改"一次都没测到物块"那一段的耐心：
+
+    - ``False``（默认）或 ``config.target_wait_seconds == 0``：保持旧语义，整次测量共用
+      一个 ``settle_timeout_seconds`` 截止时刻，"等物块出现"和"等它停稳"都算在里面；
+    - ``True`` 且 ``target_wait_seconds`` 为正数：最多等这么多秒让物块第一次出现；
+    - ``True`` 且 ``target_wait_seconds is None``：一直等它出现（Ctrl+C 可中断）。
+
+    后两种情况下，测到物块之后才从那一刻开始计 ``settle_timeout_seconds`` 等它停稳。
+    物块放在转盘上、调用时还没转进视野时用这个；**看见过又丢**的收工口不变
+    （仍按最后读数返回）。
+    """
+    say = on_message if on_message is not None else (lambda _message: None)
+    allowed = config.settle_tolerance_mm if tolerance is None else tolerance
+    started = time.monotonic()
+    #: 等物块第一次出现的截止时刻；``None`` = 一直等。
+    target_deadline: Optional[float]
+    #: 等读数停稳的截止时刻；``None`` = 还没测到过物块，测到之后才开始计。
+    settle_deadline: Optional[float]
+    if wait_for_first_target:
+        target_wait = config.target_wait_seconds
+        # 0 = 保持旧语义；None = 一直等；正数 = 只等这么多秒。
+        use_target_wait = target_wait != 0
+    else:
+        target_wait = 0
+        use_target_wait = False
+    if use_target_wait:
+        target_deadline = None if target_wait is None else started + target_wait
+        settle_deadline = None
+    else:
+        # 旧语义：一个截止时刻同时管"等出现"与"等停稳"。
+        target_deadline = started + config.settle_timeout_seconds
+        settle_deadline = target_deadline
+    #: 一直等物块出现时每隔这么久提醒一次现场；这不是超时，只是别让人以为程序卡死。
+    next_target_notice = started + config.settle_timeout_seconds
+    previous: Optional[Tuple[float, float]] = None
+    last: Optional[MaterialSighting] = None
+    #: 这段时间里**最后一次**"读不到"的原因。必须留着：最终那句"没能稳定看到物块"至少
+    #: 对应三种完全不同的情况（一个目标都没有 / 画面里有多个目标 / 等不到新观测），混成
+    #: 一句话现场只能靠猜；而且"一个目标都没有"还可能只是爪子挡住了光，处理方式完全不同。
+    last_error: Optional[VisualServoError] = None
+    while True:
+        try:
+            current = _read_material(link, selector, config, after=after)
+        except VisualServoError as error:
+            # 运动模糊时检不到物块是常态，不该当失败——接着等。
+            previous = None
+            last_error = error
+        else:
+            last = current
+            if settle_deadline is None:
+                # 第一次看见物块：停稳计时从这一刻开始，等转盘转过来的时间不占它。
+                settle_deadline = time.monotonic() + config.settle_timeout_seconds
+            point = (current.x_mm, current.y_mm, current.z_mm)
+            if previous is not None:
+                # ``include_depth=False`` 时把 z 那一项**置零**而不是换一个判据：
+                # 保持同一个 sqrt、同样三项，三维那条路的数值不变。
+                depth_delta = (point[2] - previous[2]) ** 2 if include_depth else 0.0
+                if math.sqrt(
+                    (point[0] - previous[0]) ** 2
+                    + (point[1] - previous[1]) ** 2
+                    + depth_delta
+                ) <= allowed:
+                    return current
+            previous = point
+        now = time.monotonic()
+        if last is None:
+            if target_deadline is not None and now >= target_deadline:
+                if use_target_wait:
+                    message = (
+                        f"等了 {config.target_wait_seconds:.1f} s 也没等到物块出现"
+                        "（转盘是不是还没转到？）；"
+                        f"这一段的最后一次失败是：{last_error}\n"
+                        "  物块不在视野里时：确认转盘会转到它，或先把转盘转到能看到它的位置；"
+                        "也可以把 modules/grasp/eye_in_hand.json 的 target_wait_seconds "
+                        "调大（null = 一直等）"
+                    )
+                else:
+                    # 超时的**类型**跟着最后一次失败走：调用方要能区分"一个目标都没有"（可能是
+                    # 爪子挡住了光，可以按最后一次读数收工）与"多个目标 / 链路超时"（必须报错）。
+                    message = (
+                        f"等了 {config.settle_timeout_seconds:.1f} s 也没能稳定看到物块；"
+                        f"这一段的最后一次失败是：{last_error}\n"
+                        "  一个目标都没有时：确认物块在画面里，没有被人、线材或爪子挡住"
+                    )
+                if isinstance(last_error, MaterialMissingError):
+                    raise MaterialMissingError(message) from last_error
+                raise VisualServoError(message) from last_error
+            if use_target_wait and now >= next_target_notice:
+                say(
+                    f"  还在等物块出现（已等 {now - started:.0f} s）："
+                    "转盘可能还没转到，或物块不在视野里；按 Ctrl+C 可以中止"
+                )
+                next_target_notice = now + config.settle_timeout_seconds
+        elif settle_deadline is not None and now >= settle_deadline:
+            say(
+                f"  等停稳超时（{config.settle_timeout_seconds:.1f} s）："
+                f"画面仍在变，先按最后读数 ({last.x_mm:+.2f}, {last.y_mm:+.2f}) mm 继续"
+            )
+            return last
+        time.sleep(config.settle_poll_seconds)
+
+
+def measure_settled(
+    link: FrameSource,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
+    *,
+    after: Optional[float] = None,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> Tuple[float, float]:
+    """测到画面**不再变**为止，返回那个读数。
+
+    为什么不能"按估算耗时等一等就读"：实测 ``wait=True`` 在 0.652 s 就返回了，
+    可读数在那之后还在大幅变化（``-23.65,+39.77`` → ``-33.38,+23.03``），
+    中间还反复因为运动模糊整个检不到物块。拿那种数去解算，等于用噪声当观测——
+    闭环会振荡，探针会把雅可比算大好几倍。
+
+    判据是**连续两次读数足够接近**：把"等多久"交给观测本身，而不是交给一个估算公式。
+    """
+    sighting = _settled_sighting(link, selector, config, after=after, on_message=on_message)
+    return (sighting.x_mm, sighting.y_mm)
+
+
+VISIBILITY_PROBE_FRAMES = 2
+
+
+def _probe_visible(link: FrameSource, selector: MaterialSelector, config: VisualServoConfig) -> bool:
+    """快速回答"物块在不在画面里"，**不等停稳**。
+
+    为什么可以不等：这一步只问"在不在"，不问"在哪"——差几毫米无所谓。而等停稳
+    （连续两帧一致）至少要两帧；看不到时还要一直等到 ``settle_timeout_seconds``
+    （默认 4 s）才认输，乘上"抬起来找"的步数就是几十秒。
+
+    代价是可能被一帧运动模糊骗到：所以连读 :data:`VISIBILITY_PROBE_FRAMES` 帧，
+    任何一帧认出来就算"在"。
+    """
+    for _ in range(VISIBILITY_PROBE_FRAMES):
+        try:
+            _read_material(link, selector, config)
+        except VisualServoError:
+            continue
+        return True
+    return False

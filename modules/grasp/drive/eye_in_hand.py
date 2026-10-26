@@ -18,7 +18,7 @@
 伺服要有"动多少"的量纲。用毫米就得先标定 ``mm_per_motor_rev``；用脉冲则**一个机器常数都不用**：
 只要知道"每脉冲让画面里的物块挪多少毫米"，就能算出让误差归零的脉冲数。
 
-那个量就是 2×2 雅可比 :class:`~modules.grasp.drive.servo_model.ServoJacobian`：
+那个量就是 2×2 雅可比 :class:`~modules.grasp.drive.visual_servo_model.VisualServoJacobian`：
 它是**实测出来**的（:func:`probe_jacobian`），所以相机怎么装的、歪多少度、朝哪个方向，
 全都不用假设。代价是标定一次。
 
@@ -32,9 +32,9 @@
 
 ## 本模块只留实际算法
 
-配置与数值模型在 :mod:`modules.grasp.drive.servo_model`，观测判据在
-:mod:`modules.grasp.drive.servo_observation`，脉冲原语在
-:mod:`modules.grasp.drive.servo_motion`。**主编排**（悬停 → 安全抬升 → x/y → 下降 →
+配置与数值模型在 :mod:`modules.grasp.drive.visual_servo_model`，观测判据在
+:mod:`modules.grasp.drive.visual_servo_observation`，脉冲原语在
+:mod:`modules.grasp.drive.visual_servo_motion`。**主编排**（悬停 → 安全抬升 → x/y → 下降 →
 后缩）已经移进 :class:`modules.grasp.runtime.Grasp` 的实例方法，这里不再保留同名的
 自由函数转发壳——那种壳会让"到底谁在编排"重新变得说不清。
 
@@ -63,47 +63,47 @@ import math
 import time
 from typing import Callable, List, Optional, Sequence, Tuple
 
-from modules.grasp.drive.servo_motion import (
+from modules.grasp.drive.visual_servo_motion import (
     _move_axes,
     _move_axis,
     _move_lift,
     _send_lift,
 )
-from modules.grasp.drive.servo_model import (
+from modules.grasp.drive.visual_servo_model import (
     BASE_AXIS,
     DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH,
     LIFT_AXIS,
     MIN_JACOBIAN_DETERMINANT,
-    ObjectMissingError,
+    MaterialMissingError,
     RADIAL_AXIS,
     GraspReadyResult,
     HoverResult,
     LiftScale,
-    ObjectSelector,
-    ServoConfig,
-    ServoError,
-    ServoJacobian,
-    ServoResult,
-    ServoTarget,
+    MaterialSelector,
+    VisualServoConfig,
+    VisualServoError,
+    VisualServoJacobian,
+    VisualServoResult,
+    VisualServoTarget,
     ZDescentResult,
     ZResult,
     load_jacobian,
     load_lift_scale,
-    load_object_selector,
-    load_servo_config,
+    load_material_selector,
+    load_visual_servo_config,
     load_target,
     load_z_target,
     save_calibration,
 )
-from modules.grasp.drive.servo_observation import (
+from modules.grasp.drive.visual_servo_observation import (
     FrameSource,
     VISIBILITY_PROBE_FRAMES,
     _probe_visible,
-    _read_object,
+    _read_material,
     _settled_sighting,
     measure_offset,
     measure_settled,
-    select_object,
+    select_material,
 )
 from modules.vision.drive.sighting import MaterialSighting
 
@@ -116,7 +116,7 @@ def _apply_minimum(step: int, wanted: float, minimum: float) -> int:
     再发一次同样的指令——表现为原地打转。抬到门槛之上才能真正推动它。
 
     ``minimum`` 是**按该轴灵敏度换算出来的脉冲数**（见
-    :meth:`ServoJacobian.minimum_pulses`），不是拍脑袋定的一串数。
+    :meth:`VisualServoJacobian.minimum_pulses`），不是拍脑袋定的一串数。
     """
     if step == 0:
         return 0
@@ -134,21 +134,21 @@ def _clamp_pulses(value: float, limit: int) -> int:
 def _plan_planar_step(
     error_x: float,
     error_y: float,
-    jacobian: ServoJacobian,
-    config: ServoConfig,
+    jacobian: VisualServoJacobian,
+    config: VisualServoConfig,
     *,
     limit: int,
 ) -> Tuple[int, int]:
     """**平面误差 → 这一步该走多少脉冲**；闭环与单帧一步共用这一处。
 
     ``limit`` 是这一档的单步上限（粗调/细调的分档由调用方按
-    :meth:`ServoConfig.step_limit_for` 定）。每个轴的门槛按**各自的灵敏度**换算
-    （:meth:`ServoJacobian.minimum_pulses`），并且不超过这个上限——安全优先。
+    :meth:`VisualServoConfig.step_limit_for` 定）。每个轴的门槛按**各自的灵敏度**换算
+    （:meth:`VisualServoJacobian.minimum_pulses`），并且不超过这个上限——安全优先。
 
-    这就是"逆运动解算"这一步的全部内容：``p = −J⁻¹·e``（:meth:`ServoJacobian.pulses_for`），
+    这就是"逆运动解算"这一步的全部内容：``p = −J⁻¹·e``（:meth:`VisualServoJacobian.pulses_for`），
     再夹到脉冲预算里。它本身是一瞬间的事；慢的从来不是它。
 
-    :raises ServoError: 两个轴都取整成 0，但误差还在（大不了调不动，不该静默收工）。
+    :raises VisualServoError: 两个轴都取整成 0，但误差还在（大不了调不动，不该静默收工）。
     """
     base_min, radial_min = jacobian.minimum_pulses(config.min_step_mm)
     base_wanted, radial_wanted = jacobian.pulses_for(error_x, error_y)
@@ -159,7 +159,7 @@ def _plan_planar_step(
         _clamp_pulses(radial_wanted, limit), radial_wanted, min(radial_min, limit)
     )
     if base_step == 0 and radial_step == 0:
-        raise ServoError(
+        raise VisualServoError(
             f"这一轮算出来要走的脉冲都取整成 0（想要 底座 {base_wanted:.2f}、"
             f"伸缩 {radial_wanted:.2f}），但误差还有 {math.hypot(error_x, error_y):.2f} mm。"
             "把 max_pulses_per_step 调大，或者雅可比标定得太小需要重标"
@@ -185,19 +185,19 @@ def _given_offset(reading) -> Tuple[float, float]:
 
 def _single_step(
     arm,
-    target: ServoTarget,
-    jacobian: ServoJacobian,
-    config: ServoConfig,
+    target: VisualServoTarget,
+    jacobian: VisualServoJacobian,
+    config: VisualServoConfig,
     offset: Tuple[float, float],
     say: Callable[[str], None],
-) -> ServoResult:
+) -> VisualServoResult:
     """**单帧一步**：拿这一帧的读数算一次脉冲、走一步就返回；动作之后不再测量。
 
     为什么要它：跟随（物体一直在动）时，"等画面停稳"是在等一个**永远等不到**的东西——
     下一帧物体又动了。跟随循环每一轮都会立刻重新测一次，所以这里再测一遍只是白花两帧
     （约 250 ms，而且是在 30 fps 上）。
 
-    代价写在 :attr:`~modules.grasp.drive.servo_model.ServoResult.unverified` 上：
+    代价写在 :attr:`~modules.grasp.drive.visual_servo_model.VisualServoResult.unverified` 上：
     结果里的读数与误差是**动作之前**那一次，不代表现在的位置。也正因为没有第二次测量，
     闭环里那两条"事后核对"的判据这里都没有：与雅可比预测方向相反、像素直径突变
     （爪子挡住物块）。单步幅度本来就被 ``step_limit_for`` 夹住，所以撞上去的风险不大，
@@ -209,7 +209,7 @@ def _single_step(
     say(f"单帧一步：物块 ({offset[0]:+.2f}, {offset[1]:+.2f}) mm，误差 {error:.2f} mm")
 
     def result(*, base_pulses: int, radial_pulses: int, resolution_limited: bool = False):
-        return ServoResult(
+        return VisualServoResult(
             target=target,
             readings=(offset,),
             error_x=error_x,
@@ -239,7 +239,7 @@ def _single_step(
     # 单帧一步没有"累计"可算，所以拿**整份预算**当这一步的上限：它拦不住慢慢磨，
     # 但拦得住"雅可比标反了于是想走几万脉冲"那种。
     if abs(base_step) > config.max_total_pulses or abs(radial_step) > config.max_total_pulses:
-        raise ServoError(
+        raise VisualServoError(
             f"这一步就要 底座 {base_step:+d}、伸缩 {radial_step:+d} 脉冲，超过单次预算 "
             f"{config.max_total_pulses}。这通常说明雅可比标反了或符号错了，先跑 --calibrate 重标"
         )
@@ -252,13 +252,13 @@ def _single_step(
 
 def _result_when_occluded(
     readings: List[Tuple[float, float]],
-    target: ServoTarget,
-    config: ServoConfig,
+    target: VisualServoTarget,
+    config: VisualServoConfig,
     *,
     base_pulses: int,
     radial_pulses: int,
     iterations: int,
-) -> Optional[ServoResult]:
+) -> Optional[VisualServoResult]:
     """物块看不见了，能不能按**已经测到**的那次读数收工；不能就返回 ``None``。
 
     这是"爪子已经悬到物块上方、自己把光挡住"的收工口。成立要同时满足两条：
@@ -280,7 +280,7 @@ def _result_when_occluded(
     error_y = readings[-1][1] - target.y_mm
     if math.hypot(error_x, error_y) > config.z_center_tolerance_mm:
         return None
-    return ServoResult(
+    return VisualServoResult(
         target=target,
         readings=tuple(readings),
         error_x=error_x,
@@ -294,11 +294,11 @@ def _result_when_occluded(
 
 
 def _step_is_reversed(
-    jacobian: ServoJacobian,
+    jacobian: VisualServoJacobian,
     *,
     step: Tuple[int, int],
     measured: Tuple[float, float],
-    config: ServoConfig,
+    config: VisualServoConfig,
 ) -> bool:
     """这一步的实测位移与雅可比预测是否**明显相反**。
 
@@ -315,14 +315,14 @@ def _step_is_reversed(
 
 
 def _reversed_step_error(
-    jacobian: ServoJacobian,
+    jacobian: VisualServoJacobian,
     *,
     step: Tuple[int, int],
     measured: Tuple[float, float],
-) -> ServoError:
+) -> VisualServoError:
     """连续两步都相反时的报错：把两个数都摆出来，并指向重探雅可比。"""
     predicted = jacobian.displacement_for(step[0], step[1])
-    return ServoError(
+    return VisualServoError(
         f"连着两步的实测画面位移都与雅可比预测**方向相反**：最后一次实测 "
         f"({measured[0]:+.2f}, {measured[1]:+.2f}) mm，预测 "
         f"({predicted[0]:+.2f}, {predicted[1]:+.2f}) mm"
@@ -337,11 +337,11 @@ def _reversed_step_error(
 def probe_jacobian(
     arm,
     link: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
     *,
     on_message: Optional[Callable[[str], None]] = None,
-) -> ServoJacobian:
+) -> VisualServoJacobian:
     """实测 2×2 雅可比：每个轴走两段**同向**位移，用第二段算斜率。
 
     为什么要走两段同向而不是"去一趟再回来"：反向的第一段位移会被**背隙**吃掉，
@@ -349,7 +349,7 @@ def probe_jacobian(
 
     测完把两个轴退回原位，所以这个过程不会把机械臂留在别处。
 
-    :raises ServoError: 探针脉冲为 0、看不到物块、或探出来的雅可比奇异。
+    :raises VisualServoError: 探针脉冲为 0、看不到物块、或探出来的雅可比奇异。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     pulses = config.probe_pulses
@@ -387,14 +387,14 @@ def probe_jacobian(
 
     base_slope = one_axis(BASE_AXIS, "底座")
     radial_slope = one_axis(RADIAL_AXIS, "伸缩")
-    jacobian = ServoJacobian(
+    jacobian = VisualServoJacobian(
         base_dx=base_slope[0],
         base_dy=base_slope[1],
         radial_dx=radial_slope[0],
         radial_dy=radial_slope[1],
     )
     if jacobian.is_singular:
-        raise ServoError(
+        raise VisualServoError(
             f"探出来的雅可比奇异（行列式 {jacobian.determinant:.3e}）："
             "底座与伸缩在画面里产生的位移方向几乎重合。"
             "请确认相机确实随伸缩轴一起移动，且两个轴的运动在画面里能分辨出方向差异"
@@ -405,10 +405,10 @@ def probe_jacobian(
 def align_x_y(
     arm,
     link: FrameSource,
-    selector: ObjectSelector,
-    target: ServoTarget,
-    jacobian: ServoJacobian,
-    config: ServoConfig,
+    selector: MaterialSelector,
+    target: VisualServoTarget,
+    jacobian: VisualServoJacobian,
+    config: VisualServoConfig,
     *,
     ensure_safe_height: bool = True,
     quick_safe_lift: bool = False,
@@ -416,7 +416,7 @@ def align_x_y(
     single_step: bool = False,
     reading: Optional[Sequence[float]] = None,
     on_message: Optional[Callable[[str], None]] = None,
-) -> ServoResult:
+) -> VisualServoResult:
     """闭环把物块伺服到 ``(tx, ty)``；只动 底座 与 伸缩，不碰高度。
 
     :param ensure_safe_height: 动手之前要不要先确认"已经抬到安全高度"（默认要）。
@@ -438,7 +438,7 @@ def align_x_y(
             robot.grasp.align_xy(reading=(report.best.x_mm, report.best.y_mm))
 
         放进循环就是跟随：每轮只取**一帧**、只走**一步**，中间没有第二次测量。
-    :raises ServoError: 看不到物块、雅可比奇异、脉冲预算用完，或迭代用尽仍未进容差。
+    :raises VisualServoError: 看不到物块、雅可比奇异、脉冲预算用完，或迭代用尽仍未进容差。
     :raises ValueError: ``reading`` 不是两个数。
 
     物块**中途看不见**分两种，处理方式不同：
@@ -449,7 +449,7 @@ def align_x_y(
     - 一次都没测到、或者还差得远 → 原样报错（物块可能被挪走、被手挡住、被爪子推开）。
 
     画面里有多个物料时按**离光轴最近**的那个对准（见
-    :func:`~modules.grasp.drive.servo_observation.select_object`），不算遮挡、也不报错。
+    :func:`~modules.grasp.drive.visual_servo_observation.select_material`），不算遮挡、也不报错。
 
     ## 为什么不按"像素直径突变"判遮挡
 
@@ -484,7 +484,7 @@ def align_x_y(
     对准本身很快，等的是这个。
 
     所以这里传 ``include_depth=False``，只比平面内的 x/y。测 z 的那几条路
-    （:func:`raise_before_rotating` / :func:`hover_above_object` / :func:`align_z`）
+    （:func:`raise_before_rotating` / :func:`hover_above_material` / :func:`align_z`）
     照旧比三维——那里的 z 就是被控量，抖动必须等它停下来。
 
     平面内的细档也不沿用 ``settle_tolerance_mm``（0.4 mm）：那个精度是给探针 / z 标定
@@ -522,7 +522,7 @@ def align_x_y(
             # 只取一帧，**不等停稳**：跟随的时候画面永远在变，等它停稳等于永远等下去。
             # 这一帧可能带运动模糊，但单步幅度本来就被 step_limit_for 夹住，
             # 而且下一步立刻会用新的一帧纠正回来。
-            sighting = _read_object(link, selector, config)
+            sighting = _read_material(link, selector, config)
             given = (sighting.x_mm, sighting.y_mm)
         return _single_step(arm, target, jacobian, config, given, say)
     readings: List[Tuple[float, float]] = []
@@ -572,7 +572,7 @@ def align_x_y(
                 # 要靠 settle_timeout_seconds 触发。
                 wait_for_first_target=not readings,
             )
-        except ObjectMissingError:
+        except MaterialMissingError:
             # 只有"一个目标都没有"走这条路：可能只是爪子悬到物块上方把光挡住了。
             # "多个目标"与"等不到新观测"是别的类型，会照旧往上抛——那两种必须问人。
             fallback = _result_when_occluded(
@@ -612,7 +612,7 @@ def align_x_y(
             f"误差 {error:.2f} mm（测量 {measure_seconds * 1000:.0f} ms）"
         )
         if error <= config.tolerance_mm:
-            return ServoResult(
+            return VisualServoResult(
                 target=target,
                 readings=tuple(readings),
                 error_x=error_x,
@@ -664,7 +664,7 @@ def align_x_y(
                 f"  误差 {error:.2f} mm 已小于背隙地板 {config.min_step_mm:.2f} mm，"
                 "再走只会跨过目标；按分辨率极限收工"
             )
-            return ServoResult(
+            return VisualServoResult(
                 target=target,
                 readings=tuple(readings),
                 error_x=error_x,
@@ -684,7 +684,7 @@ def align_x_y(
         if abs(total_base + base_step) > config.max_total_pulses or abs(
             total_radial + radial_step
         ) > config.max_total_pulses:
-            raise ServoError(
+            raise VisualServoError(
                 f"脉冲预算用完了（底座已走 {total_base}、伸缩已走 {total_radial}，"
                 f"上限 {config.max_total_pulses}），误差还有 {error:.2f} mm。"
                 "这通常说明雅可比标反了或符号错了，先跑 --calibrate 重标并核对方向"
@@ -705,7 +705,7 @@ def align_x_y(
         checkpoint = time.monotonic() + config.frame_margin_seconds
 
     last = readings[-1]
-    raise ServoError(
+    raise VisualServoError(
         f"x/y 伺服 {config.max_iterations} 次仍未进入容差 {config.tolerance_mm:.1f} mm；"
         f"最后读数 ({last[0]:+.2f}, {last[1]:+.2f}) mm、误差 "
         f"{math.hypot(last[0] - target.x_mm, last[1] - target.y_mm):.2f} mm。"
@@ -736,19 +736,19 @@ def _require_consistent_legs(
     first_len = math.hypot(*first_leg)
     second_len = math.hypot(*second_leg)
     if second_len <= 1e-9 and first_len <= 1e-9:
-        raise ServoError(
+        raise VisualServoError(
             f"探针 {label} 走了 {2 * pulses} 脉冲，画面却一点没动。"
             "这个轴没有驱动到画面（确认它真的接了、且方向没接反），或者物块没在视野里"
         )
     dot = first_leg[0] * second_leg[0] + first_leg[1] * second_leg[1]
     if second_len > 1e-9 and dot < 0:
-        raise ServoError(
+        raise VisualServoError(
             f"探针 {label} 两段同向位移却朝相反方向（第一段 {first_leg}、第二段 {second_leg}）："
             "说明测到的不是这个轴的运动。常见原因：物块被爪子推走了、物块移出画面后"
             "检测跳到了别的圆上。请把物块挪到画面中央再重试"
         )
     if first_len > second_len * 1.3 + 0.5:
-        raise ServoError(
+        raise VisualServoError(
             f"探针 {label} 第一段位移 ({first_leg}) 比第二段 ({second_leg}) 还大："
             "同向连走两段时第一段要吃掉背隙，只会更小。多半是画面还没停稳就开始读了，"
             "或者物块被推动了。"
@@ -756,11 +756,11 @@ def _require_consistent_legs(
         )
 
 
-def hover_above_object(
+def hover_above_material(
     arm,
     link: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
     *,
     scale: Optional[LiftScale] = None,
     on_message: Optional[Callable[[str], None]] = None,
@@ -788,7 +788,7 @@ def hover_above_object(
     并用这一段实测的 Δz/脉冲修正下一段——和 :func:`raise_before_rotating` 同一套做法。
 
     :param scale: 已标定的升降灵敏度；``None`` 表示没标定（那就只抬不降）。
-    :raises ServoError: 看不到物块（起手就要能看见它，否则悬停无从谈起）。
+    :raises VisualServoError: 看不到物块（起手就要能看见它，否则悬停无从谈起）。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     target = config.hover_z_mm
@@ -916,8 +916,8 @@ def hover_above_object(
 def raise_before_rotating(
     arm,
     link: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
     *,
     scale: Optional[LiftScale] = None,
     quick: bool = False,
@@ -957,8 +957,8 @@ def raise_before_rotating(
             # （实测约 0.54 s），而"还在不在安全高度"这件事用一帧就够——前提是留余量：
             # 运动模糊的一帧可能把 z **读大**，而"以为够高"正是低位转底盘的成因。
             try:
-                probe = _read_object(link, selector, config)
-            except ServoError:
+                probe = _read_material(link, selector, config)
+            except VisualServoError:
                 probe = None
             if (
                 probe is not None
@@ -985,7 +985,7 @@ def raise_before_rotating(
         for step in range(1, config.safe_lift_max_steps + 1):
             try:
                 sighting = _settled_sighting(link, selector, config)
-            except ServoError:
+            except VisualServoError:
                 say("  看不到物块，没法用 z 判安全高度；改用脉冲数抬升")
                 break
             z_mm = sighting.z_mm
@@ -1067,11 +1067,11 @@ def raise_before_rotating(
     return 0
 
 
-def find_object(
+def find_material(
     arm,
     link: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
     *,
     max_steps: Optional[int] = None,
     on_message: Optional[Callable[[str], None]] = None,
@@ -1100,8 +1100,8 @@ def find_object(
 def _try_lift_direction(
     arm,
     link: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
     direction: int,
     say: Callable[[str], None],
 ) -> Optional[LiftScale]:
@@ -1155,8 +1155,8 @@ def _try_lift_direction(
 def probe_lift_scale(
     arm,
     link: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
     *,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> LiftScale:
@@ -1178,7 +1178,7 @@ def probe_lift_scale(
     downward = _try_lift_direction(arm, link, selector, config, -1, say)
     if downward is not None:
         return downward
-    raise ServoError(
+    raise VisualServoError(
         f"抬升和下降两个方向都测不出 z 的变化（每段 {config.lift_probe_pulses} 脉冲）。"
         "常见原因：升降已经贴在行程端点上、脉冲被背隙吃掉（把 lift_probe_pulses 调大）、"
         "或者这个轴没接上。"
@@ -1186,7 +1186,7 @@ def probe_lift_scale(
 
 
 def _lift_step_within_guard(
-    *, z_mm: float, step: int, scale: LiftScale, config: ServoConfig
+    *, z_mm: float, step: int, scale: LiftScale, config: VisualServoConfig
 ) -> Tuple[int, bool]:
     """把这一步夹到"预测 z 不低于 ``z_min_mm``"；返回 ``(步长, 是否被夹)``。
 
@@ -1204,21 +1204,21 @@ def _lift_step_within_guard(
 def align_z(
     arm,
     link: FrameSource,
-    selector: ObjectSelector,
+    selector: MaterialSelector,
     target_mm: float,
     scale: LiftScale,
-    config: ServoConfig,
+    config: VisualServoConfig,
     *,
     search: bool = True,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> ZResult:
     """驱动升降，让物块深度伺服到 ``target_mm``（毫米）。
 
-    :raises ServoError: 看不到物块（且抬升也没找到）、撞上下降护栏、预算用完、迭代用尽。
+    :raises VisualServoError: 看不到物块（且抬升也没找到）、撞上下降护栏、预算用完、迭代用尽。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     if target_mm < config.z_min_mm:
-        raise ServoError(
+        raise VisualServoError(
             f"目标 z={target_mm:.1f} mm 低于下降护栏 z_min_mm={config.z_min_mm:.1f} mm；"
             "那样永远到不了。要么放宽 z_min_mm，要么把目标改大"
         )
@@ -1232,8 +1232,8 @@ def align_z(
     for attempt in range(1, config.max_iterations + 1):
         try:
             sighting = _settled_sighting(link, selector, config, after=checkpoint)
-        except ServoError:
-            if not search or not find_object(arm, link, selector, config, on_message=say):
+        except VisualServoError:
+            if not search or not find_material(arm, link, selector, config, on_message=say):
                 raise
             checkpoint = time.monotonic()
             continue
@@ -1247,7 +1247,7 @@ def align_z(
             else:
                 ratio = sighting.diameter_px / baseline_diameter
                 if ratio > 1.6 or ratio < 0.625:
-                    raise ServoError(
+                    raise VisualServoError(
                         f"画面里物块的像素直径从 {baseline_diameter:.0f} px 变成 "
                         f"{sighting.diameter_px:.0f} px（{ratio:.2f} 倍），一步之内变了这么多"
                         "只可能是**检测换了目标**——多半是真物块被推出了半径窗口"
@@ -1261,7 +1261,7 @@ def align_z(
         # 哪个位置无关——z 伺服看不见爪子有没有对准，不检查就会让爪子斜着压下去。
         planar = math.hypot(sighting.x_mm, sighting.y_mm)
         if planar > config.z_center_tolerance_mm:
-            raise ServoError(
+            raise VisualServoError(
                 f"物块离光轴 {planar:.1f} mm，超过下降前允许的 "
                 f"{config.z_center_tolerance_mm:.1f} mm。平面还没对准就下降会让爪子斜着"
                 "压到物块上。先做 x/y 对准（`--follow`，或直接跑一次无参数的菜单 21），"
@@ -1300,7 +1300,7 @@ def align_z(
                 stopped_by_guard=True,
             )
         if abs(total_pulses + step) > config.z_max_total_pulses:
-            raise ServoError(
+            raise VisualServoError(
                 f"升降脉冲预算用完了（已走 {total_pulses}，上限 {config.z_max_total_pulses}），"
                 f"z 还有 {error:+.2f} mm。多半是灵敏度标反了，重跑 z 标定"
             )
@@ -1315,7 +1315,7 @@ def align_z(
         checkpoint = time.monotonic() + config.frame_margin_seconds
 
     last = readings[-1]
-    raise ServoError(
+    raise VisualServoError(
         f"z 伺服 {config.max_iterations} 次仍未进入容差 {config.z_tolerance_mm:.1f} mm；"
         f"最后 z={last:.1f} mm、误差 {last - target_mm:+.2f} mm。"
         "如果每次都在同一处停住，先看是不是已经贴到物块了（护栏会拦住）"
@@ -1325,8 +1325,8 @@ def align_z(
 def descend_z(
     arm,
     link: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
     *,
     pulses: Optional[int] = None,
     scale: Optional[LiftScale] = None,
@@ -1337,7 +1337,7 @@ def descend_z(
     和 :func:`align_z` 的区别只有一句：这里不闭环。爪子压下去之后画面里就没有物块了
     （爪瓣挡住、也掉出工作距离窗口），z 这一段本来就拿不到反馈；现场真正好用的量是
     "从平面对准的高度到夹持高度走了多少脉冲"——那是机械安装常数，量一次就固定下来，
-    放在 :attr:`ServoConfig.z_descend_pulses` 里随时能改。换物块高度、换夹爪都只改这个数，
+    放在 :attr:`VisualServoConfig.z_descend_pulses` 里随时能改。换物块高度、换夹爪都只改这个数，
     不用重标任何东西。
 
     ## 唯一的护栏：平面已经对准
@@ -1348,17 +1348,17 @@ def descend_z(
 
     :param pulses: 覆盖配置里的脉冲数（现场试数用）；``None`` 表示用配置值。
     :param scale: 已标定的升降灵敏度，只用来说一句"预计降到多深"，**不参与决策**。
-    :raises ServoError: 看不到物块、平面还没对准、或覆盖的脉冲数不是正整数。
+    :raises VisualServoError: 看不到物块、平面还没对准、或覆盖的脉冲数不是正整数。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     count = config.z_descend_pulses if pulses is None else pulses
     if type(count) is not int or count < 1:
-        raise ServoError(f"下降脉冲数必须是正整数，拿到 {count!r}")
+        raise VisualServoError(f"下降脉冲数必须是正整数，拿到 {count!r}")
 
     sighting = _settled_sighting(link, selector, config)
     planar = math.hypot(sighting.x_mm, sighting.y_mm)
     if planar > config.z_center_tolerance_mm:
-        raise ServoError(
+        raise VisualServoError(
             f"物块离光轴 {planar:.1f} mm，超过下降前允许的 "
             f"{config.z_center_tolerance_mm:.1f} mm。平面还没对准就下降会让爪子斜着压到"
             "物块上。先做 x/y 对准（`--follow`，或直接跑一次无参数的菜单 21），再回来下降。"
@@ -1386,7 +1386,7 @@ def descend_z(
 
 def retract_extension(
     arm,
-    config: ServoConfig,
+    config: VisualServoConfig,
     *,
     pulses: Optional[int] = None,
     on_message: Optional[Callable[[str], None]] = None,
@@ -1397,15 +1397,15 @@ def retract_extension(
     爪子下面是什么：它**不检查**平面有没有对准（那是 :func:`descend_z` 的闸），发出去的就是
     一次水平位移。
 
-    这个数同样来自 :attr:`ServoConfig.extension_retract_pulses`：开环、可改、不用标定。
+    这个数同样来自 :attr:`VisualServoConfig.extension_retract_pulses`：开环、可改、不用标定。
 
     :param pulses: 覆盖配置里的脉冲数（现场试数用）；``None`` 表示用配置值。
-    :raises ServoError: 覆盖的脉冲数不是正整数。
+    :raises VisualServoError: 覆盖的脉冲数不是正整数。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     count = config.extension_retract_pulses if pulses is None else pulses
     if type(count) is not int or count < 1:
-        raise ServoError(f"后缩脉冲数必须是正整数，拿到 {count!r}")
+        raise VisualServoError(f"后缩脉冲数必须是正整数，拿到 {count!r}")
     say(f"  伸缩/7 号后缩 {count} 脉冲")
     seconds = _move_axis(arm, RADIAL_AXIS, -count)
     say(f"  后缩完成，耗时约 {seconds:.2f} s")
@@ -1417,7 +1417,7 @@ def _self_test() -> int:
     class FakeArm:
         """按真实雅可比把脉冲换算成画面位移；可选每次欠一个固定比例。"""
 
-        def __init__(self, jacobian: ServoJacobian, *, gain: float = 1.0) -> None:
+        def __init__(self, jacobian: VisualServoJacobian, *, gain: float = 1.0) -> None:
             self.jacobian = jacobian
             self.gain = gain
             self.offset = [-8.3, 1.8]
@@ -1478,7 +1478,7 @@ def _self_test() -> int:
             return (item,)
 
     # 一个物理上说得通的雅可比：底座让物块在画面里沿一个方向跑，伸缩沿另一个方向跑。
-    truth = ServoJacobian(
+    truth = VisualServoJacobian(
         base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091
     )
     assert not truth.is_singular, truth
@@ -1494,23 +1494,23 @@ def _self_test() -> int:
     assert truth.pulses_for(0.0, 0.0) == (0.0, 0.0)
 
     # --- 奇异必须拒绝 ---
-    singular = ServoJacobian(base_dx=0.01, base_dy=0.01, radial_dx=0.02, radial_dy=0.02)
+    singular = VisualServoJacobian(base_dx=0.01, base_dy=0.01, radial_dx=0.02, radial_dy=0.02)
     assert singular.is_singular
     try:
         singular.pulses_for(1.0, 1.0)
-    except ServoError as error:
+    except VisualServoError as error:
         assert "奇异" in str(error), error
     else:
-        raise AssertionError("奇异雅可比必须报 ServoError")
+        raise AssertionError("奇异雅可比必须报 VisualServoError")
 
     # --- 闭环收敛：目标 (0,0) 就是把物块调到相机轴上 ---
-    config = ServoConfig(
+    config = VisualServoConfig(
         tolerance_mm=0.5, max_iterations=12, max_pulses_per_step=2000, min_step_mm=0.1
     )
     arm = FakeArm(truth)
     link = FakeLink(arm)
-    target = ServoTarget(0.0, 0.0)
-    result = align_x_y(arm, link, ObjectSelector(material_id=4), target, truth, config)
+    target = VisualServoTarget(0.0, 0.0)
+    result = align_x_y(arm, link, MaterialSelector(material_id=4), target, truth, config)
     assert result.aligned, result
     assert result.iterations <= 4, result.iterations
     assert abs(result.readings[-1][0]) <= 0.5 and abs(result.readings[-1][1]) <= 0.5, result
@@ -1525,7 +1525,7 @@ def _self_test() -> int:
     # --- 闭环能修掉系统偏差（每次只走了 70%）---
     biased_arm = FakeArm(truth, gain=0.7)
     biased_link = FakeLink(biased_arm)
-    biased = align_x_y(biased_arm, biased_link, ObjectSelector(material_id=4), target, truth, config)
+    biased = align_x_y(biased_arm, biased_link, MaterialSelector(material_id=4), target, truth, config)
     assert biased.aligned, biased
     assert biased.iterations > result.iterations, (biased.iterations, result.iterations)
 
@@ -1533,24 +1533,24 @@ def _self_test() -> int:
     stuck_arm = FakeArm(truth, gain=0.02)
     stuck_link = FakeLink(stuck_arm)
     try:
-        align_x_y(stuck_arm, stuck_link, ObjectSelector(material_id=4), target, truth,
-                  ServoConfig(tolerance_mm=0.1, max_iterations=3, max_pulses_per_step=2000))
-    except ServoError as error:
+        align_x_y(stuck_arm, stuck_link, MaterialSelector(material_id=4), target, truth,
+                  VisualServoConfig(tolerance_mm=0.1, max_iterations=3, max_pulses_per_step=2000))
+    except VisualServoError as error:
         assert "3 次" in str(error), error
     else:
-        raise AssertionError("不收敛必须报 ServoError")
+        raise AssertionError("不收敛必须报 VisualServoError")
 
     # --- 脉冲预算用完要报错 ---
     budget_arm = FakeArm(truth, gain=0.05)
     budget_link = FakeLink(budget_arm)
     try:
-        align_x_y(budget_arm, budget_link, ObjectSelector(material_id=4), target, truth,
-                  ServoConfig(tolerance_mm=0.01, max_iterations=50, max_pulses_per_step=50,
+        align_x_y(budget_arm, budget_link, MaterialSelector(material_id=4), target, truth,
+                  VisualServoConfig(tolerance_mm=0.01, max_iterations=50, max_pulses_per_step=50,
                               max_total_pulses=100))
-    except ServoError as error:
+    except VisualServoError as error:
         assert "预算" in str(error), error
     else:
-        raise AssertionError("预算用完必须报 ServoError")
+        raise AssertionError("预算用完必须报 VisualServoError")
 
     # --- 看不到物块要报错 ---
     class EmptyLink:
@@ -1561,14 +1561,14 @@ def _self_test() -> int:
 
     try:
         align_x_y(
-            FakeArm(truth), EmptyLink(), ObjectSelector(material_id=4), target, truth,
+            FakeArm(truth), EmptyLink(), MaterialSelector(material_id=4), target, truth,
             # 停稳超时调小：这里测的是"看不到物块要报错"，不该真等 4 秒。
-            ServoConfig(tolerance_mm=0.5, settle_timeout_seconds=0.2, settle_poll_seconds=0.02),
+            VisualServoConfig(tolerance_mm=0.5, settle_timeout_seconds=0.2, settle_poll_seconds=0.02),
         )
-    except ServoError as error:
+    except VisualServoError as error:
         assert "稳定看到物块" in str(error), error
     else:
-        raise AssertionError("看不到物块必须报 ServoError")
+        raise AssertionError("看不到物块必须报 VisualServoError")
 
     # --- 等停稳：读数还在变的时候不能拿它当观测 ---
     class DriftingLink:
@@ -1594,8 +1594,8 @@ def _self_test() -> int:
 
     drifting = DriftingLink()
     settled = measure_settled(
-        drifting, ObjectSelector(material_id=4),
-        ServoConfig(settle_timeout_seconds=2.0, settle_poll_seconds=0.01),
+        drifting, MaterialSelector(material_id=4),
+        VisualServoConfig(settle_timeout_seconds=2.0, settle_poll_seconds=0.01),
     )
     assert settled == (42.0, 8.0), settled
     assert drifting.reads == 4, drifting.reads
@@ -1604,33 +1604,33 @@ def _self_test() -> int:
     from modules.vision.drive.sighting import parse_sighting
 
     one = (parse_sighting("物料 4: 绿色物料（green），xyz=(1,2,100) mm"),)
-    assert select_object(one, ObjectSelector()).material_id == 4
-    assert select_object(one, ObjectSelector(color="green")).material_id == 4
-    assert select_object(one, ObjectSelector(material_id=4)).material_id == 4
+    assert select_material(one, MaterialSelector()).material_id == 4
+    assert select_material(one, MaterialSelector(color="green")).material_id == 4
+    assert select_material(one, MaterialSelector(material_id=4)).material_id == 4
     two = one + (parse_sighting("物料 5: 蓝色物料（blue），xyz=(3,4,100) mm"),)
     try:
-        select_object(two, ObjectSelector())
-    except ServoError as error:
+        select_material(two, MaterialSelector())
+    except VisualServoError as error:
         assert "多个目标" in str(error), error
     else:
-        raise AssertionError("没配判别条件且有多个目标时必须报 ServoError")
+        raise AssertionError("没配判别条件且有多个目标时必须报 VisualServoError")
     # 配了就选得出来。
-    assert select_object(two, ObjectSelector(material_id=5)).material_id == 5
-    assert select_object(two, ObjectSelector(color="green")).material_id == 4
+    assert select_material(two, MaterialSelector(material_id=5)).material_id == 5
+    assert select_material(two, MaterialSelector(color="green")).material_id == 4
     try:
-        select_object(two, ObjectSelector(material_id=99))
-    except ServoError as error:
+        select_material(two, MaterialSelector(material_id=99))
+    except VisualServoError as error:
         assert "没有物块" in str(error), error
     else:
-        raise AssertionError("配了编号但画面里没有它时必须报 ServoError")
+        raise AssertionError("配了编号但画面里没有它时必须报 VisualServoError")
 
     # --- 探针：两个轴各走两段同向位移，最后必须回到原位 ---
     probe_arm = FakeArm(truth)
     probe_link = FakeLink(probe_arm)
     start = list(probe_arm.offset)
     probed = probe_jacobian(
-        probe_arm, probe_link, ObjectSelector(material_id=4),
-        ServoConfig(probe_pulses=800),
+        probe_arm, probe_link, MaterialSelector(material_id=4),
+        VisualServoConfig(probe_pulses=800),
     )
     for field in ("base_dx", "base_dy", "radial_dx", "radial_dy"):
         assert abs(getattr(probed, field) - getattr(truth, field)) < 1e-12, (field, probed, truth)
@@ -1640,17 +1640,17 @@ def _self_test() -> int:
     # 探出来奇异的机器要报错（两个轴在画面里同向）。
     # **必须**用同一个假臂喂给探针和链路：两个不同的 FakeArm 会让链路读到一个永远
     # 不动的假臂，"画面没动"会被零位移检查抓出来。
-    flat_truth = ServoJacobian(base_dx=0.01, base_dy=0.01, radial_dx=0.02, radial_dy=0.02)
+    flat_truth = VisualServoJacobian(base_dx=0.01, base_dy=0.01, radial_dx=0.02, radial_dy=0.02)
     flat_arm = FakeArm(flat_truth)
     try:
         probe_jacobian(
             flat_arm, FakeLink(flat_arm),
-            ObjectSelector(material_id=4), ServoConfig(probe_pulses=800),
+            MaterialSelector(material_id=4), VisualServoConfig(probe_pulses=800),
         )
-    except ServoError as error:
+    except VisualServoError as error:
         assert "奇异" in str(error), error
     else:
-        raise AssertionError("探出奇异雅可比必须报 ServoError")
+        raise AssertionError("探出奇异雅可比必须报 VisualServoError")
 
     print(f"eye-in-hand 伺服自测通过：{result.summary()}")
     print(f"  {truth.summary()}")
