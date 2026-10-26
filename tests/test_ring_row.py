@@ -20,7 +20,6 @@ import numpy as np
 
 import app.gripper as app_gripper
 from modules.vision.drive.numbered_ring import (
-    RingRow,
     RingTarget,
     RingTargetLocator,
     derive_ring_row,
@@ -176,6 +175,8 @@ def make_row_robot(plant: RowPlant, **kwargs) -> Mock:
 class SquareChassisToRingRowTests(unittest.TestCase):
     def run_it(self, plant: RowPlant, **kwargs) -> float:
         robot = make_row_robot(plant)
+        # 目标偏置是现场标定量（会被改），用例里固定成 0，跟那个数无关。
+        kwargs.setdefault("yaw_offset_deg", 0.0)
         with patch("time.sleep"):
             return app_gripper.square_chassis_to_ring_row(robot, **kwargs)
 
@@ -231,7 +232,7 @@ class SquareChassisToRingRowTests(unittest.TestCase):
         robot = make_row_robot(plant, blanks=2)
 
         with patch("time.sleep"):
-            residual = app_gripper.square_chassis_to_ring_row(robot)
+            residual = app_gripper.square_chassis_to_ring_row(robot, yaw_offset_deg=0.0)
 
         self.assertLessEqual(abs(residual), app_gripper.RING_ROW_SQUARE_TOLERANCE_DEG)
         self.assertGreaterEqual(len(plant.moves), 1)
@@ -249,12 +250,15 @@ class SquareChassisToRingRowTests(unittest.TestCase):
 class PlaceBoxFromRepoToFloorV3Tests(unittest.TestCase):
     def run_it(self, orders):
         robot = Mock()
-        row = RingRow(
-            yaw_deg=0.0,
-            centers_mm={1: (-150.0, 0.0), 2: (0.0, 0.0), 3: (150.0, 0.0)},
-            measured_span_mm=300.0,
+        robot.vision.ring_center_spacing_mm = 150.0
+        robot.grasp.align_ring.return_value = SimpleNamespace(
+            aligned=True,
+            final_reading=(0.0, 0.0),
+            final_error_mm=0.5,
+            scale_source="ring box",
+            response=None,
+            note="",
         )
-        middle = Mock(scale_source="ring box")
         robot.grasp.plan_ring_readings.return_value = {
             digit: SimpleNamespace(
                 base=10.0 * digit,
@@ -264,24 +268,31 @@ class PlaceBoxFromRepoToFloorV3Tests(unittest.TestCase):
             for digit in (1, 2, 3)
         }
 
-        with patch.object(app_gripper, "_read_ring_row", return_value=(row, middle)), \
-                patch.object(app_gripper, "_move_axes_to") as move, \
-                patch.object(app_gripper, "_grab_box_from_car") as grab:
+        with patch.object(app_gripper, "_move_axes_to") as move, \
+                patch.object(app_gripper, "_grab_box_from_car") as grab, \
+                patch("time.sleep"):
             move.return_value.wait.return_value = None
-            app_gripper.place_box_from_repo_to_floor_v3(
-                robot, orders=orders, observe=None
-            )
-        return robot, row, middle, [call.args[1] for call in move.call_args_list], grab
+            app_gripper.place_box_from_repo_to_floor_v3(robot, orders=orders)
+        return robot, [call.args[1] for call in move.call_args_list], grab
 
-    def test_one_frame_then_the_three_placements_in_order(self) -> None:
-        robot, row, middle, targets, grab = self.run_it((3, 1, 2))
+    def test_aligning_ring_two_then_the_three_placements_in_order(self) -> None:
+        robot, targets, grab = self.run_it((3, 1, 2))
 
+        robot.grasp.align_ring.assert_called_once()
+        self.assertIn("require_digit", robot.grasp.align_ring.call_args.kwargs)
         robot.grasp.plan_ring_readings.assert_called_once_with(
-            row.centers_mm, scale_source=middle.scale_source
+            {
+                1: (-150.0, 0.0),
+                2: (0.0, 0.0),
+                3: (150.0, 0.0),
+            },
+            scale_source="ring box",
+            offset_digit=2,
         )
         self.assertEqual(
             targets,
             [
+                app_gripper.RING2_APPROACH_POSE,
                 {"extension": 60.0, "base": 30.0},
                 {"extension": 20.0, "base": 10.0},
                 {"extension": 40.0, "base": 20.0},

@@ -317,6 +317,9 @@ class RingAlignResult:
     final_error_mm: Optional[float] = None
     tolerance_mm: float = 0.0
     digit: Optional[int] = None
+    #: 最后一次那一帧环心读数的比例尺来源（``depth/focal`` / ``ring box`` 等）。
+    #: 之后要拿"这个读数 ± 偏移"去解算别的点时，比例尺得跟它同一把尺。
+    scale_source: str = ""
     #: 最后一次估计出来的"实测/预测"比（``None`` = 一步都没走成）。
     response: Optional[float] = None
     #: 收敛时那一份计划：各轴绝对位置、残差、备注都在这上面。

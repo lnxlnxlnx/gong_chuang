@@ -154,7 +154,7 @@ class FakeVision:
         self.ring_target = ring_target()
         self.ring_target_calls = 0
 
-    def locate_ring(self, *, timeout=None):
+    def locate_ring(self, *, timeout=None, digit=None):
         self.ring_target_calls += 1
         return self.ring_target
 

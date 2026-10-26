@@ -170,7 +170,7 @@ ROW_ROTATE_MAX_PULSES = 2000
 #: 一帧看清三环、随后一次性放完三个环之前要摆的姿态（``lift``/``extension``/``base``，
 #: 电机角度）：伸缩比逐环对准时短一点、镜头离地面远一些，整排 2×150 mm 才进得了画面。
 #: 现场按取景改这一份；换场地只需要动它和 ``station.center_spacing_mm``。
-RING_ROW_OBSERVE_POSE = {"lift": 760, "extension": 400, "base": -32}
+RING_ROW_OBSERVE_POSE = {"lift": 960, "extension": 550, "base": -32}
 
 
 def _read_ring(robot: Robot, *, digit: int | None = None, attempts: int = RING_READ_ATTEMPTS):
@@ -778,37 +778,63 @@ def place_box_from_repo_to_floor_v2(
     _move_axes_to(robot, SAFE_RETRACT).wait()
 
 
+#: 放料前先把臂摆到 2 号环前的姿态（``base``/``lift``/``extension``，电机角度）。
+#: 取 v2 ``RING_POSITION`` 里 2 号环那一份：相机在这个姿态下看得到 2 号环，
+#: ``align_ring`` 从这里开始闭环；``ring_offsets`` 的那个补偿也是在这个高度上标出来的。
+RING2_APPROACH_POSE = {"base": -32, "lift": 600, "extension": 540}
+
+
 def place_box_from_repo_to_floor_v3(
     robot: Robot,
     *,
     orders: tuple[int, int, int] = (1, 2, 3),
-    observe: dict[str, float] | None = RING_ROW_OBSERVE_POSE,
     place_lift: float = 95.0,
+    tolerance_mm: float = 2.0,
+    offset_digit: int = 2,
 ):
-    """把物料从仓库放到地面圆环里：**一帧看清三环，算完三个落点，一趟放完**。
+    """把物料从仓库放到地面圆环里：**先闭环对准 2 号环，再按 150 mm 算出 1/3 号**。
 
-    动作与 v2 一样（去仓库抓料 → 走到落点 → 降到 ``place_lift`` 松爪 → 抬起），差别只在
-    "环在哪"从哪来：
+    前提由调用方先做（车头与环排垂直、车横向对到 2 号环）。有了这两条，三环就是
+    "中间那个实测、两端各偏一格间距"：
 
-    1. 摆到 ``observe`` 读**一帧**：2 号环心实测，三环连线的倾角给出方向，两侧环心 =
-       中间环心 ∓ ``station.center_spacing_mm``（现场 150 mm）沿直线外推；
-    2. 三个环心**一次性**解算成三份各轴绝对位置（:meth:`Grasp.plan_ring_readings`）；
-    3. 三趟之间不再拍帧、不再逐环对准，车也不动。
+    1. 摆到 :data:`RING2_APPROACH_POSE`，``align_ring(require_digit=2)`` 闭环对准
+       —— 2 号环的位置是**量出来**的；
+    2. 1/3 号环心 = 对准后的读数 ∓ 间距（``station.center_spacing_mm``，现场 150 mm）
+       沿画面横向（±x），一次解算成三份各轴绝对位置；三份共用 2 号环的落料补偿
+       （``offset_digit``），否则三份补偿不同会把"三个落点该在一条直线上"搅乱；
+    3. 按 ``orders`` 一趟一趟放：去仓库抓料 → 走到该环绝对位置 → 降到 ``place_lift``
+       松爪 → 抬起。车不动，中间也不再拍帧。
 
-    解算是**一次线性化**：观察姿态与落点姿态差得远时雅可比会变，``plan.residual_mm``
-    就是预测残差。真放不进环就退回 v2 的闭环（``align_ring``，每步重拍重算）。
-
-    ``observe=None`` = 调用方已经在这一姿态上（省一次往返）；``orders`` 是**放置顺序**。
+    1/3 号是**一次线性化**解出来的（雅可比在大角度下会变），``plan.residual_mm`` 是预测
+    残差；真放不准就退回 v2 的逐环闭环（``align_ring``，每步重拍重算）。
     """
     digits = _check_order(orders)
-    robot.arm.move_axis_to_motor_degrees("lift", 400)
-    _go_home(robot, observe)
+    robot.arm.move_axis_to_motor_degrees("lift", 760)
+    _move_axes_to(robot, RING2_APPROACH_POSE).wait()
+    time.sleep(1)  # 与 v2 一样：先让臂停稳再看
     try:
-        row, middle = _read_ring_row(robot)
-        print(row.summary())
-        # 中间环的比例尺来源就是这一帧的尺：外推出的 1/3 号环心与它同一把尺。
+        aligned = robot.grasp.align_ring(
+            require_digit=2, tolerance_mm=tolerance_mm, max_iterations=6
+        )
+        if not aligned.aligned or aligned.final_reading is None:
+            raise RuntimeError(
+                "2 号环没对准，不敢往下算："
+                + (aligned.note or f"残差 {aligned.final_error_mm} mm")
+            )
+        anchor = aligned.final_reading
+        spacing = float(robot.vision.ring_center_spacing_mm)
         plans = robot.grasp.plan_ring_readings(
-            row.centers_mm, scale_source=middle.scale_source
+            {
+                1: (anchor[0] - spacing, anchor[1]),
+                2: anchor,
+                3: (anchor[0] + spacing, anchor[1]),
+            },
+            scale_source=aligned.scale_source,
+            offset_digit=offset_digit,
+        )
+        print(
+            f"2 号环已对准（残差 {aligned.final_error_mm:.1f} mm），"
+            f"1/3 号按 {spacing:.0f} mm 推出"
         )
         for digit in digits:
             plan = plans[digit]

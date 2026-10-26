@@ -153,9 +153,12 @@ class FakeSource:
     def __init__(self, target) -> None:
         self._target = target
         self.calls = 0
+        #: 每次定位收到的 ``digit`` —— 检查"按号筛框"有没有真的下传。
+        self.digits: list = []
 
-    def locate_ring(self, *, timeout=None):
+    def locate_ring(self, *, timeout=None, digit=None):
         self.calls += 1
+        self.digits.append(digit)
         return self._target
 
 
@@ -239,6 +242,14 @@ class SessionPlanTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ServoError, "比例尺"):
             grasp.plan_ring()
+
+    def test_the_required_digit_filters_the_frame(self) -> None:
+        """一帧里可能同时有好几个环：按号筛框，而不是"取分最高的那个再看是不是它"。"""
+        grasp, _arm, source = make_grasp(ring_target(digit=2))
+        grasp.plan_ring(require_digit=2)
+        grasp.plan_ring()
+
+        self.assertEqual(source.digits, [2, None])
 
     def test_a_different_ring_number_is_refused(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target(digit=3))
@@ -380,7 +391,7 @@ class LiveRingSource:
         self.arm = arm
         self.calls = 0
 
-    def locate_ring(self, *, timeout=None):
+    def locate_ring(self, *, timeout=None, digit=None):
         self.calls += 1
         return RingTarget(
             center_px=(640.0, 360.0),
@@ -510,7 +521,7 @@ class RingSettleTests(unittest.TestCase):
             self.readings = list(readings)
             self.calls = 0
 
-        def locate_ring(self, *, timeout=None):
+        def locate_ring(self, *, timeout=None, digit=None):
             x_mm, y_mm = self.readings[min(self.calls, len(self.readings) - 1)]
             self.calls += 1
             return ring_target(reading=(x_mm, y_mm))
@@ -562,6 +573,21 @@ class PlanRingReadingsTests(unittest.TestCase):
         self.assertAlmostEqual(
             plans[1].base_pulses, -plans[3].base_pulses, delta=1
         )
+
+    def test_one_offset_digit_is_shared_by_every_point(self) -> None:
+        """一条直线上的三个点共用 2 号环的落料补偿——各用各的会把那条直线搅乱。"""
+        grasp, _arm, _source = make_grasp(ring_target())
+        grasp._config = ServoConfig(ring_offsets_mm=((-7.0, -3.0), (3.0, -4.0), (9.0, -4.0)))
+        readings = {1: (-150.0, 0.0), 2: (0.0, 0.0), 3: (150.0, 0.0)}
+
+        own = grasp.plan_ring_readings(readings, scale_source="ring box")
+        shared = grasp.plan_ring_readings(
+            readings, scale_source="ring box", offset_digit=2
+        )
+
+        self.assertNotEqual(own[1].target, own[3].target)
+        self.assertEqual(shared[1].target, shared[2].target)
+        self.assertEqual(shared[3].target, shared[2].target)
 
     def test_a_scale_that_is_not_physical_millimetres_is_refused(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target())

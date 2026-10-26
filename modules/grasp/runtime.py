@@ -530,8 +530,8 @@ class Grasp:
         都满足；``station.mm_per_px`` 不满足（那是给固定相机标的值，装在臂上差好几倍）。
         这一档会**核对并报错**；确实知道换算关系时用 ``scale_mm_per_px`` 直接给。
 
-        :param require_digit: 只接受指定环号（1/2/3）；画面里是别的号就报错，
-            **不回退**到另一个环（拿错环的角度去转，机械臂会朝 95 mm 外的位置动）。
+        :param require_digit: 只接受指定环号（1/2/3）：**定位器按号筛框**（一帧里有好几个
+            环也不会挑错），画面里确实没有这个号才报错，**不回退**到另一个环。
         :param timeout: 等一帧的超时（秒）。
         :param scale_mm_per_px: 与 ``jacobian`` 一致的毫米/像素；给了就按它换算读数。
 
@@ -549,6 +549,7 @@ class Grasp:
         readings: "dict[int, tuple[float, float]]",
         *,
         scale_source: str = "",
+        offset_digit: int | None = None,
     ) -> "dict[int, RingBasePlan]":
         """一批**已经算好的**环心读数 → ``{环号: 各轴绝对位置}``；一帧都不拍。
 
@@ -562,12 +563,20 @@ class Grasp:
         :meth:`plan_ring` 完全一样：非物理毫米的来源在这里同样拒绝，而不是给一个
         像样的错角度。
 
+        ``offset_digit`` 让这几份位置**共用同一个环号的落料补偿**（``ring_offsets``）。
+        默认各用各的——那适合"每个环都是自己量出来的"。外推出来的点没有自己的补偿表，
+        而且三份补偿不同会把"这三个落点该在一条直线上"直接搅乱（现场配的
+        ``ring_offsets`` 各环差到 16 mm），所以一条直线上的三个点用同一个补偿号。
+
         :raises ServoError: 比例尺不是物理毫米，或雅可比奇异。
         """
         self._require_physical_ring_scale(scale_source, None)
         arm, _source = self._require_resources()
+        offset = None if offset_digit is None else int(offset_digit)
         return {
-            int(digit): self._plan_from_reading(arm, reading, digit=int(digit))
+            int(digit): self._plan_from_reading(
+                arm, reading, digit=int(digit), offset_digit=offset
+            )
             for digit, reading in readings.items()
         }
 
@@ -627,6 +636,7 @@ class Grasp:
         final_reading: tuple[float, float] | None = None
         digit: int | None = None
         final_plan = None
+        final_source = ""
         for attempt in range(1, max(1, int(max_iterations)) + 1):
             target = self._locate_ring_for_plan(
                 source, timeout=timeout, require_digit=require_digit, settle=True
@@ -635,6 +645,7 @@ class Grasp:
             digit = plan.digit
             final_reading = plan.reading
             final_plan = plan
+            final_source = str(target.scale_source)
             error = math.hypot(plan.error_mm[0], plan.error_mm[1])
             step = RingAlignStep(
                 attempt=attempt,
@@ -709,6 +720,7 @@ class Grasp:
             final_error_mm=final_error,
             tolerance_mm=tolerance,
             digit=digit,
+            scale_source=final_source,
             response=response,
             # 收敛时那一份计划：字段与 ``plan_ring()`` 完全同一套，可以直接存下来
             # （"先对准、之后回到这个绝对位置"就靠它）。
@@ -753,14 +765,19 @@ class Grasp:
         return target
 
     def _validated_ring(self, source, *, timeout, require_digit):
-        """一帧环心 + 三项校验（有环 / 读数可用 / 环号对得上）。"""
+        """一帧环心 + 三项校验（有环 / 读数可用 / 环号对得上）。
+
+        ``require_digit`` **下传给定位器**，让它只在这个号里挑框：一帧里同时有 1/2/3 号环
+        是正常取景，按"取分最高的那个再看是不是它"会随机报"画面里是 1 号，不是 2 号"——
+        分最高的那个通常就不是你要的那个。后面那道环号检查留着，兜住不认 ``digit`` 的源。
+        """
         locate = getattr(source, "locate_ring", None)
         if locate is None:
             raise ServoError(
                 f"这个观测源没有环心定位（{type(source).__name__}）："
                 "环心是相机这一侧的能力，先确认会话用的是本机视觉源（Vision）"
             )
-        target = locate(timeout=timeout)
+        target = locate(timeout=timeout, digit=require_digit)
         if target is None:
             raise ServoError(
                 "画面里没有环：把靶标移到视野里、或确认模型类别表里有 tg1/tg2/tg3"
@@ -802,11 +819,15 @@ class Grasp:
             arm, reading, digit=int(target.digit), score=float(target.score)
         )
 
-    def _plan_from_reading(self, arm, reading, *, digit, score=None):
-        """读数**已经与雅可比同一把尺**（比例尺由调用方核过）→ 各轴绝对位置。"""
+    def _plan_from_reading(self, arm, reading, *, digit, score=None, offset_digit=None):
+        """读数**已经与雅可比同一把尺**（比例尺由调用方核过）→ 各轴绝对位置。
+
+        ``offset_digit`` 给了就用那个环号的落料补偿（一条直线上的几个点共用一份）；
+        ``digit`` 仍然是这份计划自己的环号，写进结果里给人看。
+        """
         from modules.grasp.drive.ring_plan import plan_ring_base
 
-        ring_target = self._ring_target(digit)
+        ring_target = self._ring_target(digit if offset_digit is None else offset_digit)
         plan = plan_ring_base(
             reading=reading,
             target=(ring_target.x_mm, ring_target.y_mm),
