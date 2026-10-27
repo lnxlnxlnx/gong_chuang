@@ -148,7 +148,7 @@ def _drive_to_ring(chassis, targets, digit: int, *, rpm: int) -> None:
 
 
 #: 车横向校准的门槛（毫米，相机系 x：右为正）。比臂的 2 mm 松一点：臂那边还会再对准一次。
-RING_LATERAL_TOLERANCE_MM = 3.0
+RING_LATERAL_TOLERANCE_MM = 4.0
 #: 还不知道"每脉冲挪多少毫米"时的第一步试走量（脉冲）。
 LATERAL_TRIAL_PULSES = 300
 #: 单步最多走多少脉冲：离得再远也别一脚油门扫过去。
@@ -162,7 +162,7 @@ RING_ROW_SQUARE_TOLERANCE_DEG = 1.0
 #: 车头与"相机画面水平轴"的固定差角（度）。装出来的臂不是正对车头时补这个。
 #: 它等于**车头摆正时**该量到的直线倾角：人眼把车头摆到与环排垂直，跑一次
 #: :func:`square_chassis_to_ring_row` 读打印出来的倾角，把那个数填这里。
-ROW_SQUARE_YAW_OFFSET_DEG = 3.05
+ROW_SQUARE_YAW_OFFSET_DEG = 13.97
 #: 还不知道"每脉冲让倾角变多少度"时的第一步试转量（脉冲）。
 ROW_ROTATE_TRIAL_PULSES = 300
 #: 单步最多转多少脉冲：离得再远也别一把扫过去。
@@ -189,7 +189,7 @@ def center_chassis_on_ring(
     *,
     require_digit: int | None = None,
     tolerance_mm: float = RING_LATERAL_TOLERANCE_MM,
-    max_iterations: int = 4,
+    max_iterations: int = 7,
     rpm: int = 30,
 ) -> float:
     """把**车**横向对到圆环正前方：读环心 x，按实测响应比解出该走多少轮脉冲。
