@@ -4,6 +4,7 @@
   },
   "jetson": {
     "port": "auto"
+    "port": "/dev/ttyUSB0"
   },
   "bus": {
     "baudrate": 115200,

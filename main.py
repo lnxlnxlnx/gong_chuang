@@ -44,26 +44,15 @@ def main() -> None:
     with Robot.open(grasp=True, gripper=True, turntable=True, chassis=True) as robot:
         robot.gripper.set_position(350)
         robot.turntable.go_home()
-        _move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
-        _move_axes_to(robot, {"lift": 950, "base": -32}).wait()  # 先让环进视野
-        ############
-        # robot.arm.move_axis_to_motor_degrees("lift", 980)
-        # residual = center_chassis_on_ring(robot, require_digit=2) 
-        # input(f"环心对准，残差 {residual:+.1f} mm，按回车继续")
-        # square_chassis_to_ring_row(robot)
-        # time.sleep(0.1)
-        # center_chassis_on_ring(robot, require_digit=2, max_iterations = 6)
-        place_box_from_repo_to_floor_v3(robot)
-        input("环心对准，按回车继续")
-        #############
-        grab_box_from_turntable_to_repo_v2(robot)
-        input("抓取完成，按回车继续")
-        grab_box_from_floor_to_repo_v2(robot)
-        place_box_from_repo_to_floor_v2(robot)
-        input("放置完成，按回车继续")
-        place_box_to_box_v2(robot)
-        # grab_box_from_floor_to_repo_v2(robot)
-        input("结束!!!!!!!!!!!")
+        _move_axes_to(robot, {"lift": 495, "extension": 550, "base": 0}).wait()
+        print("初始状态移动完毕")
+        grab_box_from_floor_to_repo(robot, want_colors= ["red", "blue", "green"])
+        place_box_to_box(robot, _want = "blue")
+        place_box_to_box(robot, _want = "red")
+        return
+        grab_box_from_turntable_to_repo(robot, want_colors= ["red", "blue", "green"])
+        input("抓完了，回车继续：")
+        place_box_from_repo_to_floor(robot, verbose=True)
 
 
 def locate_material(*, config_path=None) -> None:
