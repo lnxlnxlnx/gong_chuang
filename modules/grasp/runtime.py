@@ -498,6 +498,34 @@ class Grasp:
             **options,
         )
 
+    def align_xy_for_turntable(
+        self,
+        *,
+        want=None,
+        tolerance_mm: float | None = None,
+    ) -> VisualServoResult:
+        """转盘抓料用的快速 x/y 对准：**单帧一步、大步、1 s 预算**，到点停在误差最小的位置。
+
+        与 :meth:`align_xy` 的差别全在
+        :func:`modules.grasp.drive.eye_in_hand.align_xy_for_turntable`；这里只负责挑判别
+        条件、把这次的容差传下去。与 ``align_xy`` 的默认值一致：**不动高度**，高度由调用方
+        负责。返回值可能 ``aligned=False``——那是 1 s 内已知最好的位置，不是失败。
+        """
+        arm, source = self._require_resources()
+        from modules.grasp.drive.eye_in_hand import align_xy_for_turntable
+
+        selector = self._selector_for(want, self._selector)
+        return align_xy_for_turntable(
+            arm,
+            source,
+            selector,
+            self._target,
+            self._jacobian,
+            self._config,
+            tolerance_mm=tolerance_mm,
+            on_message=self._say,
+        )
+
     def plan_ring(
         self,
         *,

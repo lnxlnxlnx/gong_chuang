@@ -605,14 +605,24 @@ def _grab_material_from_turntable(
 
     停稳那一道闸在 :func:`grab_material_from_turntable_to_repo` 的循环里、对准之前做；这里只把
     已经对准的爪子落到物块上再合爪。
+
+    对准走 :meth:`~modules.grasp.runtime.Grasp.align_xy_for_turntable`：转盘只停一会儿，
+    所以它单帧一步、大步、1 s 预算；预算到了没进容差就停在**这次测到过的最小误差**位置，
+    照样下降（这是"抢时间"的代价，误差写在日志里）。
     """
 
     try:
-        robot.grasp.align_xy(want = want_color)
+        result = robot.grasp.align_xy_for_turntable(want=want_color)
     except Exception as e:
         print(f"Error occurred while aligning the gripper: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()
         return
+
+    print(f"  {result.summary()}")
+    if not result.aligned:
+        print(
+            f"  1 s 内没进容差：已按误差最小的位置停在 {result.error_mm:.1f} mm 处，继续下降"
+        )
 
 
     robot.arm.move_axis_to_motor_degrees("lift", 550, rpm=120)

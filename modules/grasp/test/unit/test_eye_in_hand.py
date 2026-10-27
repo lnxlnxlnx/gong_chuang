@@ -45,6 +45,7 @@ from modules.grasp.drive import visual_servo_model as model
 from modules.grasp.drive import visual_servo_motion as motion
 from modules.grasp.drive import visual_servo_observation as observation
 from modules.grasp.drive.eye_in_hand import (
+    align_xy_for_turntable,
     align_x_y,
     descend_z,
     find_material,
@@ -1050,6 +1051,96 @@ class SingleStepTests(unittest.TestCase):
                     math.hypot(*reading), config.tolerance_mm,
                     "循环转几轮之后，画面里的偏移应当被收进容差",
                 )
+
+
+class FakeClock:
+    """只推进时间的假钟：每次 ``monotonic()`` 前进 ``step`` 秒。
+
+    1 s 预算那一路不能拿真钟测（会真的睡/真的到点），这里把 ``eye_in_hand.time``
+    整个换掉，时间走向由测试决定。
+    """
+
+    def __init__(self, step: float = 0.4) -> None:
+        self.now = 0.0
+        self.step = step
+
+    def monotonic(self) -> float:
+        value = self.now
+        self.now += self.step
+        return value
+
+
+class ScriptedLink:
+    """按脚本把 ``push`` 叠加到假机械臂的真实位移上（模拟物块被推走/画面跳目标）。"""
+
+    error = None
+
+    def __init__(self, arm: FakeArm, pushes: List[Tuple[float, float]]) -> None:
+        self.arm = arm
+        self.pushes = list(pushes)
+        self.reads = 0
+
+    def frame(self, **_kwargs):
+        push = self.pushes[min(self.reads, len(self.pushes) - 1)]
+        self.reads += 1
+        return (
+            sighting(
+                4,
+                self.arm.offset[0] + push[0],
+                self.arm.offset[1] + push[1],
+                stamp=time.monotonic(),
+            ),
+        )
+
+
+class TurntableAlignTests(unittest.TestCase):
+    """``align_xy_for_turntable``：单帧一步、大步、1 s 预算，到点停在误差最小的位置。"""
+
+    JACOBIAN = SingleStepTests.JACOBIAN
+    CONFIG = SingleStepTests.config()
+
+    def call(self, arm, link, **kwargs):
+        return align_xy_for_turntable(
+            arm,
+            link,
+            MaterialSelector(),
+            VisualServoTarget(x_mm=0.0, y_mm=0.0),
+            self.JACOBIAN,
+            self.CONFIG,
+            **kwargs,
+        )
+
+    def test_one_big_step_is_not_clamped_by_the_normal_tier(self) -> None:
+        """误差 60 mm 时一步就吃掉：单步上限是整份预算，不是 ``coarse_max_pulses_per_step``。"""
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [60.0, 0.0]
+        link = JumpyDepthLink(arm=arm)
+
+        result = self.call(arm, link)
+
+        self.assertTrue(result.aligned)
+        self.assertEqual(link.reads, 2, "每轮只取一帧：第一帧测、第二帧验证")
+        self.assertGreater(
+            abs(result.base_pulses), self.CONFIG.coarse_max_pulses_per_step
+        )
+
+    def test_the_budget_stops_at_the_smallest_error_seen(self) -> None:
+        """预算到点、而且之后更差时：退回误差最小的那一次，读数也按"最终位置"排列。"""
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [0.0, 0.0]
+        link = ScriptedLink(arm, [(12.0, -7.0), (40.0, 30.0)])
+        clock = FakeClock()
+
+        with patch.object(algorithms, "time", clock):
+            result = self.call(arm, link, seconds=1.0)
+
+        self.assertFalse(result.aligned)
+        self.assertEqual(arm.net_pulses, (0, 0), "应当退回第一帧那个位置")
+        self.assertEqual(result.readings[-1], (12.0, -7.0), "最小误差那次排最后")
+        self.assertAlmostEqual(result.readings[0][0], 28.0, delta=0.05)
+        self.assertAlmostEqual(result.readings[0][1], 37.0, delta=0.05)
+        self.assertAlmostEqual(result.error_mm, math.hypot(12.0, -7.0))
+        self.assertEqual((result.base_pulses, result.radial_pulses), (0, 0))
 
 
 class ProbeJacobianTests(unittest.TestCase):

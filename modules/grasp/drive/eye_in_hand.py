@@ -713,6 +713,142 @@ def align_x_y(
     )
 
 
+def align_xy_for_turntable(
+    arm,
+    link: FrameSource,
+    selector: MaterialSelector,
+    target: VisualServoTarget,
+    jacobian: VisualServoJacobian,
+    config: VisualServoConfig,
+    *,
+    seconds: float = 1.0,
+    max_iterations: int = 3,
+    tolerance_mm: Optional[float] = None,
+    step_limit: Optional[int] = None,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> VisualServoResult:
+    """转盘抓料用的 x/y 对准：**单帧一步、大步、按秒收工**，没进容差就停在误差最小的位置。
+
+    与 :func:`align_x_y` 只差三处，都是为"转盘只停一会儿、1 s 内必须动手"换来的：
+
+    - **不等停稳**：每一轮只取一帧。等停稳要连取两帧、多等一次判据（实测 0.35–0.6 s），
+      而停稳已经由调用方（``vision.wait_scene_stable``）保证。
+    - **步长不按档位夹**：``step_limit`` 默认就是整份脉冲预算，一次把解算值走完，
+      大误差也只拆一两轮。
+    - **按墙上时间收工**：等的是 ``seconds``（默认 1 s），不是迭代次数。到点就退回到
+      **这次测到过的误差最小位置**（脉冲是逐轮累计出来的），所以返回值可能
+      ``aligned=False``——那是"已知最好"，不是失败；调用方据此决定要不要照样下降。
+
+    每一轮都带 ``after=checkpoint`` 过滤旧帧：动作很快时队列里还压着动作**之前**的
+    画面，读到它就会以为没动过、再发一次同样的指令（表现为来回振荡）。
+
+    :param seconds: 对准预算（秒），从第一帧之前开始计。
+    :param max_iterations: 最多取几帧；时间预算先到时以时间预算为准。
+    :param tolerance_mm: 这一次的到位门槛；``None`` 用 ``config.tolerance_mm``。
+    :param step_limit: 单轴单步脉冲上限；``None`` 用 ``config.max_total_pulses``。
+    :raises VisualServoError: 一帧都测不到、脉冲预算用完；中途物块看不见时按已知最好位置收工。
+    """
+    say = on_message if on_message is not None else (lambda _message: None)
+    tolerance = config.tolerance_mm if tolerance_mm is None else float(tolerance_mm)
+    if tolerance <= 0:
+        raise ValueError("tolerance_mm 必须是正数")
+    limit = config.max_total_pulses if step_limit is None else int(step_limit)
+    budget = max(0.0, float(seconds))
+    started = time.monotonic()
+    deadline = started + budget
+
+    #: ``(误差, 偏移, 累计底座脉冲, 累计伸缩脉冲)``，按测量顺序。退回时按误差挑最小的那次。
+    history: List[Tuple[float, Tuple[float, float], int, int]] = []
+    total_base = 0
+    total_radial = 0
+    checkpoint: Optional[float] = None
+
+    for attempt in range(1, max_iterations + 1):
+        try:
+            sighting = _read_material(link, selector, config, after=checkpoint)
+        except MaterialMissingError:
+            if not history:
+                raise
+            say("  物块看不见了：按已知误差最小的位置收工")
+            break
+        offset = (sighting.x_mm, sighting.y_mm)
+        error_x = offset[0] - target.x_mm
+        error_y = offset[1] - target.y_mm
+        error = math.hypot(error_x, error_y)
+        history.append((error, offset, total_base, total_radial))
+        say(
+            f"第 {attempt} 次（{time.monotonic() - started:.2f} s）："
+            f"物块 ({offset[0]:+.2f}, {offset[1]:+.2f}) mm，误差 {error:.2f} mm"
+        )
+        if error <= tolerance:
+            return VisualServoResult(
+                target=target,
+                readings=tuple(item[1] for item in history),
+                error_x=error_x,
+                error_y=error_y,
+                base_pulses=total_base,
+                radial_pulses=total_radial,
+                iterations=attempt,
+                tolerance_mm=tolerance,
+            )
+        if error < config.min_step_mm:
+            say(
+                f"  误差 {error:.2f} mm 已小于背隙地板 {config.min_step_mm:.2f} mm，"
+                "再走只会跨过目标；按分辨率极限收工"
+            )
+            return VisualServoResult(
+                target=target,
+                readings=tuple(item[1] for item in history),
+                error_x=error_x,
+                error_y=error_y,
+                base_pulses=total_base,
+                radial_pulses=total_radial,
+                iterations=attempt,
+                tolerance_mm=tolerance,
+                resolution_limited=True,
+            )
+        if time.monotonic() >= deadline:
+            say(f"  {budget:.1f} s 预算用完：按已知误差最小的位置收工")
+            break
+        base_step, radial_step = _plan_planar_step(
+            error_x, error_y, jacobian, config, limit=limit
+        )
+        if abs(total_base + base_step) > config.max_total_pulses or abs(
+            total_radial + radial_step
+        ) > config.max_total_pulses:
+            raise VisualServoError(
+                f"脉冲预算用完了（底座已走 {total_base}、伸缩已走 {total_radial}，"
+                f"上限 {config.max_total_pulses}），误差还有 {error:.2f} mm。"
+                "先跑 --calibrate 重标雅可比并核对方向"
+            )
+        say(f"  走（大步，单轴上限 {limit}）：底座 {base_step:+d}、伸缩 {radial_step:+d} 脉冲")
+        _move_axes(arm, base_step, radial_step, config)
+        total_base += base_step
+        total_radial += radial_step
+        checkpoint = time.monotonic() + config.frame_margin_seconds
+
+    best = min(history, key=lambda item: item[0])
+    best_error, best_offset, best_base, best_radial = best
+    retreat_base = best_base - total_base
+    retreat_radial = best_radial - total_radial
+    if retreat_base or retreat_radial:
+        say(f"  退回误差最小那一次：底座 {retreat_base:+d}、伸缩 {retreat_radial:+d} 脉冲")
+        _move_axes(arm, retreat_base, retreat_radial, config)
+    best_index = [item[0] for item in history].index(best_error)
+    readings = [item[1] for index, item in enumerate(history) if index != best_index]
+    readings.append(best_offset)
+    return VisualServoResult(
+        target=target,
+        readings=tuple(readings),
+        error_x=best_offset[0] - target.x_mm,
+        error_y=best_offset[1] - target.y_mm,
+        base_pulses=best_base,
+        radial_pulses=best_radial,
+        iterations=len(history),
+        tolerance_mm=tolerance,
+    )
+
+
 def _require_consistent_legs(
     first_leg: Tuple[float, float],
     second_leg: Tuple[float, float],

@@ -5,9 +5,21 @@ from __future__ import annotations
 import io
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import Mock
 
 from modules.chassis.test.manual import chassis as chassis_motion, wheels as individual_wheels
-from modules.chassis.drive.mecanum import WHEEL_ORDER, WheelPosition
+from modules.chassis.drive.mecanum import WHEEL_ORDER, MecanumDrive, WheelPosition
+
+
+class RealDriveLifecycleTests(unittest.TestCase):
+    def test_the_scripts_initialize_call_works_on_the_real_drive(self) -> None:
+        """菜单 3/4 的 run_hardware_test 第一步就是 car.initialize()。
+
+        假件上一直有这个方法，真 ``MecanumDrive`` 曾经被当成"空操作"删掉，
+        于是真机上直接 AttributeError。这里对真类钉住入口。
+        """
+        car = MecanumDrive("/dev/ttyUSB0", serial_port=Mock())
+        self.assertIs(car.initialize(), car)
 
 
 class FakeMecanumDrive:
