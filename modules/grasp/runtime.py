@@ -700,6 +700,10 @@ class Grasp:
     #: 等环心读数停稳时最多连读几帧。3 帧够滤掉底座摆完的那点余振，又不会在
     #: "一直等不到稳定"时卡住——等不到就用最后一帧，和现在完全一样。
     RING_SETTLE_READS = 3
+    #: 一帧读不出可用的环时连读几帧再认输。模型偶尔会把相邻两个环读成同一号
+    #: （``RingTargetLocator._digit_clash`` 会让整帧编号作废），而下一帧通常就正常；
+    #: 单帧失败不该让整段闭环从头再来。
+    RING_FRAME_ATTEMPTS = 3
 
     def _locate_ring_for_plan(
         self, source, *, timeout, require_digit, settle: bool = False
@@ -734,11 +738,15 @@ class Grasp:
         return target
 
     def _validated_ring(self, source, *, timeout, require_digit):
-        """一帧环心 + 三项校验（有环 / 读数可用 / 环号对得上）。
+        """一帧环心 + 三项校验（有环 / 读数可用 / 环号对得上）；坏帧会重读几帧。
 
         ``require_digit`` **下传给定位器**，让它只在这个号里挑框：一帧里同时有 1/2/3 号环
         是正常取景，按"取分最高的那个再看是不是它"会随机报"画面里是 1 号，不是 2 号"——
         分最高的那个通常就不是你要的那个。后面那道环号检查留着，兜住不认 ``digit`` 的源。
+
+        读不到 / 编号自相矛盾 / 环号不符时**连读几帧**（``RING_FRAME_ATTEMPTS``）：
+        模型偶尔会把相邻两个环读成同一号，定位器据此判整帧作废，而下一帧通常就正常；
+        一帧坏掉就把整段闭环抛出去，现场看起来就是"随机失败一次"。
         """
         locate = getattr(source, "locate_ring", None)
         if locate is None:
@@ -746,24 +754,32 @@ class Grasp:
                 f"这个观测源没有环心定位（{type(source).__name__}）："
                 "环心是相机这一侧的能力，先确认会话用的是本机视觉源（Vision）"
             )
-        target = locate(timeout=timeout, digit=require_digit)
-        if target is None:
-            detail = getattr(source, "last_ring_diagnosis", "")
-            extra = ""
-            if isinstance(detail, str) and detail:
-                extra = f"；最近一次：{detail}"
-            raise VisualServoError(
-                "画面里没有环：把靶标移到视野里、或确认模型类别表里有 tg1/tg2/tg3"
-                "（modules/vision/config.json 的 model.class_names）" + extra
-            )
-        if target.reading() is None:
-            raise VisualServoError(self._unusable_ring_reason(target))
-        if require_digit is not None and int(target.digit) != int(require_digit):
-            raise VisualServoError(
-                f"画面里的环是 {target.digit} 号，不是要求的 {require_digit} 号；"
-                "拿另一个环的角度去转，机械臂会朝 95 mm 外的位置动，而动作看起来完全正常"
-            )
-        return target
+        failure: VisualServoError | None = None
+        for attempt in range(max(1, int(self.RING_FRAME_ATTEMPTS))):
+            if attempt:
+                time.sleep(self._config.inter_frame_seconds)
+            target = locate(timeout=timeout, digit=require_digit)
+            if target is None:
+                detail = getattr(source, "last_ring_diagnosis", "")
+                extra = ""
+                if isinstance(detail, str) and detail:
+                    extra = f"；最近一次：{detail}"
+                failure = VisualServoError(
+                    "画面里没有环：把靶标移到视野里、或确认模型类别表里有 tg1/tg2/tg3"
+                    "（modules/vision/config.json 的 model.class_names）" + extra
+                )
+                continue
+            if target.reading() is None:
+                failure = VisualServoError(self._unusable_ring_reason(target))
+                continue
+            if require_digit is not None and int(target.digit) != int(require_digit):
+                failure = VisualServoError(
+                    f"画面里的环是 {target.digit} 号，不是要求的 {require_digit} 号；"
+                    "拿另一个环的角度去转，机械臂会朝 95 mm 外的位置动，而动作看起来完全正常"
+                )
+                continue
+            return target
+        raise failure if failure is not None else VisualServoError("读不到环")
 
     def _ring_target(self, digit: int | None = None) -> VisualServoTarget:
         """环心那一次伺服的**目标读数**：配置里的 ``target`` 加上落料补偿。

@@ -9,12 +9,12 @@ from __future__ import annotations
 import time
 
 from app.gripper import (
-    move_axes_to,
     center_chassis_on_ring,  # 车横向对到圆环正前方
     grab_material_from_floor_to_repo,
     grab_material_from_floor_to_repo_by_xy,
     grab_material_from_turntable_to_repo,  # 圆盘->仓库
     grab_material_from_turntable_to_repo_follow,  # 圆盘->仓库（跟着料走）
+    move_axes_to,
     place_material_from_repo_to_floor,  # 仓库->地面圆环
     place_material_from_repo_to_floor_by_pose,  # 仓库->地面圆环
     place_material_from_repo_to_floor_from_center_ring,  # 仓库->地面圆环
@@ -48,8 +48,9 @@ def main() -> None:
         # square_chassis_to_ring_row(robot)
         # input("对齐角度")
         # center_chassis_on_ring(robot, require_digit=2)
-        # place_material_from_repo_to_floor_from_center_ring(robot)
-        place_material_from_repo_to_floor_by_pose(robot)
+        place_material_from_repo_to_floor_from_center_ring(robot)
+        input("放置完成，按回车继续")
+        # place_material_from_repo_to_floor_by_pose(robot)
         grab_material_from_floor_to_repo_by_xy(robot)
         input("环心对准，按回车继续")
         # grab_material_from_turntable_to_repo_follow(robot)

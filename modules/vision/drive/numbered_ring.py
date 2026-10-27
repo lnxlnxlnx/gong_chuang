@@ -63,10 +63,6 @@ if TYPE_CHECKING:
 #: 框贴到画面边缘多少像素以内就当作"被裁掉"。
 BORDER_TOLERANCE_PX = 1.0
 
-#: 同一环号的两个框相距超过框长边的这个比例，就当成落在**两个不同的环**上。
-#: 同一个环偶尔漏过 NMS 出两个框时中心几乎重合，那不算矛盾。
-CLASH_APART_RATIO = 0.5
-
 
 @dataclass(frozen=True)
 class RingTarget:
@@ -306,24 +302,15 @@ class RingTargetLocator:
         同时看得见两个环时，模型给分高的那个未必是你要找的——校准"2 号环"的时候按分数
         挑到 3 号，后面的 ``require_digit`` 检查只会报"是 3 号不是 2 号"，而 2 号其实
         就在画面里。
-
-        同一帧里有**两个框拿到同一个环号**时返回 ``None``（原因写进
-        ``last_diagnosis``）：那说明模型把相邻的环读成了同一号，这一帧的编号已经不可信，
-        按分数挑一个就是在赌。实测会这样：数字被料挡住、框贴边、离得太远时，
-        三个环会读出 ``tg1/tg1/tg2`` 这种结果，于是"要 2 号"落到了 3 号身上。
         """
         if frame is None:
             raise ValueError("frame 不能是 None")
         height, width = frame.shape[:2]
-        rings = [hit for hit in self.detector.detect(frame) if hit.name in self.digits]
-        clash = self._digit_clash(rings)
-        if clash:
-            self.last_diagnosis = clash
-            return None
         hits = [
             hit
-            for hit in rings
-            if digit is None or self.digits[hit.name] == int(digit)
+            for hit in self.detector.detect(frame)
+            if hit.name in self.digits
+            and (digit is None or self.digits[hit.name] == int(digit))
         ]
         if not hits:
             wanted = (
@@ -373,34 +360,6 @@ class RingTargetLocator:
         return " / ".join(names) or "未配置"
 
     # ------------------------------------------------------------- 内部
-    def _digit_clash(self, rings) -> str:
-        """同一环号落在两处时返回一句人话，否则空字符串。
-
-        一个环号只可能有一个环。模型把**相邻的环**读成同一号的那一帧，编号整体不可信：
-        拿它去横向对正，车就会停在隔壁那一格前面，而动作看起来完全正常。
-        这一句只做"确认矛盾"，不猜哪个框才对——猜错了更糟。
-        """
-        groups: Dict[int, list] = {}
-        for hit in rings:
-            groups.setdefault(int(self.digits[hit.name]), []).append(hit)
-        for number, group in sorted(groups.items()):
-            for index, first in enumerate(group):
-                for second in group[index + 1 :]:
-                    gap = math.hypot(
-                        first.center[0] - second.center[0],
-                        first.center[1] - second.center[1],
-                    )
-                    size = min(
-                        max(first.width, first.height), max(second.width, second.height)
-                    )
-                    if gap > CLASH_APART_RATIO * size:
-                        return (
-                            f"同一帧里 {number} 号环出现了 {len(group)} 次"
-                            f"（相距 {gap:.0f} px）：模型把相邻的环读成了同一号，"
-                            "这一帧的环号不可信；换一眼再看（拉远些、别让料挡住数字）"
-                        )
-        return ""
-
     @staticmethod
     def _rank(hit: "Detection", width: int, height: int) -> Tuple[int, float]:
         """先看框有没有被裁掉，再比置信度。"""

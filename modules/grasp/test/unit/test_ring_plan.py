@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from modules.grasp.drive.ring_plan import RingBasePlan, plan_ring_base
 from modules.grasp.drive.visual_servo_model import (
@@ -301,6 +301,39 @@ class SessionPlanTests(unittest.TestCase):
         grasp._closed = True
         with self.assertRaises(RuntimeError):
             grasp.plan_ring()
+
+
+class RingFrameRetryTests(unittest.TestCase):
+    """模型偶尔把相邻两个环读成同一号、整帧编号作废：坏帧要重读，别整段失败。"""
+
+    class _Flaky:
+        def __init__(self, blanks: int) -> None:
+            self.blanks = blanks
+            self.calls = 0
+
+        def locate_ring(self, *, timeout=None, digit=None):
+            self.calls += 1
+            return None if self.calls <= self.blanks else ring_target()
+
+    def _grasp_with(self, source):
+        grasp, _arm, _source = make_grasp(ring_target())
+        grasp._source = source
+        return grasp
+
+    def test_a_bad_frame_is_retried(self) -> None:
+        source = self._Flaky(blanks=1)
+        with patch("time.sleep"):
+            plan = self._grasp_with(source).plan_ring(require_digit=2)
+
+        self.assertEqual(source.calls, 2)
+        self.assertEqual(plan.digit, 2)
+
+    def test_it_gives_up_after_the_attempts(self) -> None:
+        source = self._Flaky(blanks=99)
+        with patch("time.sleep"), self.assertRaisesRegex(VisualServoError, "没有环"):
+            self._grasp_with(source).plan_ring()
+
+        self.assertEqual(source.calls, Grasp.RING_FRAME_ATTEMPTS)
 
 
 class AbsolutePositionTests(unittest.TestCase):
