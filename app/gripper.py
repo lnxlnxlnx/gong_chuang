@@ -437,8 +437,8 @@ def grab_material_from_turntable_to_repo(
     robot: Robot,
     want_colors=("red", "green", "blue"),
     *,
-    home: dict[str, float] | None = {"lift": 830, "extension": 90.0, "base": 420}
-):
+    home: dict[str, float] | None = {"lift": 830, "extension": 90.0, "base": 390}
+):  # 420是中心位置
     """把物料从转盘上抓下来，放到仓库里。不需要处理初始状态
     从转盘上抓料：等它看满最小等待还静止 → 对准 → 下降 → 合爪。
 
@@ -455,7 +455,7 @@ def grab_material_from_turntable_to_repo(
         robot.arm.move_axis_to_motor_degrees("lift", 460)
     _go_home(robot, home)
 
-    input("继续")
+    # input("继续")
     try:
         for color in want_colors :
             # wait_scene_stable 返回 True = 看满最小等待（3.5 s）之后画面仍然静止，可以抓；
