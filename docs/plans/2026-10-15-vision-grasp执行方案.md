@@ -1,5 +1,8 @@
 # 视觉与抓取接口重构执行说明
 
+> **2026-10-24 现状提醒**：本文是当时的快照，不随代码更新。机械臂绝对圆柱 / XYZ 坐标那套（`move_cylindrical` / `move_to` / `move_by` / `home_all` / `move_all_to_zero` / `arm_state` / `motion_plan`）与两个 YOLO 辅助检出器（`material_presence` / `material_distance`）已从代码移除；**不要再按本文逐项执行**：其中涉及的符号与文件已不复存在；当前接口见 `README.md` 与 `modules/*/docs/`。
+
+
 > **给执行 agent：**按本文逐项完成并验证。可使用 `superpowers:executing-plans`；不得把文档中的未来命令当成本轮已执行的结果。
 
 **Goal：**让上层只传现有配置，通过 `Vision` / `Grasp` 对象使用视觉定位与抓取前就位，设备由对象管理。

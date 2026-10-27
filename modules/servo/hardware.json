@@ -1,0 +1,28 @@
+{
+  "windows": {
+    "port": "COM35"
+  },
+  "jetson": {
+    "port": "auto"
+    "port": "/dev/ttyUSB0"
+  },
+  "bus": {
+    "baudrate": 115200,
+    "timeout_seconds": 0.1
+  },
+  "gripper": {
+    "servo_id": 1,
+    "open_position": 350,
+    "closed_position": 30
+  },
+  "turntable": {
+    "servo_id": 2,
+    "travel_degrees": 240.0,
+    "position_tolerance_units": 30,
+    "stations": {
+      "home": 0,
+      "station_2": 500,
+      "station_3": 1000
+    }
+  }
+}

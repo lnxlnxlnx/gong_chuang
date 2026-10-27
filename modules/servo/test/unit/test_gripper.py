@@ -18,10 +18,10 @@ from modules.servo.test.manual.gripper import run_manual
 class GripperConfigTests(unittest.TestCase):
     def test_project_config_loads_gripper_positions(self) -> None:
         config = load_gripper_config()
-        # 80 / 10 是现场量出来的：爪子从 80 走到 10 正好闭合夹住物块。
+        # 与 modules/servo/hardware.json 保持一致：张开 200、闭合 0、时长 1000 ms。
         self.assertEqual(
             (config.servo_id, config.open_position, config.closed_position, config.duration_ms),
-            (1, 80, 10, 1000),
+            (1, 200, 0, 1000),
         )
 
     def test_endpoint_outside_the_protocol_range_is_rejected(self) -> None:
@@ -36,7 +36,7 @@ class GripperConfigTests(unittest.TestCase):
                 },
             }), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "closed_position"):
-                load_gripper_config(path)
+                load_gripper_config(path, hardware_path=path)
 
     def test_identical_open_and_closed_positions_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -50,7 +50,7 @@ class GripperConfigTests(unittest.TestCase):
                 },
             }), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "不能相同"):
-                load_gripper_config(path)
+                load_gripper_config(path, hardware_path=path)
 
 
 class GripperManualTests(unittest.TestCase):

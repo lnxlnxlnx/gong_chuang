@@ -78,8 +78,9 @@ class ObjectSelector:
     - ``material_id``：按编号认（最稳）；
     - ``color``：按颜色认。
 
-    两个都不给时要求**画面里只有一个目标**：多于一个就直接报错，
-    因为猜错目标会让机械臂朝错误的方向动，而动作本身看起来完全正常。
+    两个都不给时**画面里有几个就挑离光轴最近的那个**（见
+    :func:`modules.grasp.drive.servo_observation.select_object`）——相机装在爪上，
+    光轴正下方就是爪口要去的地方。要抓的不是最近的那个时，按次传 ``want``。
     """
 
     material_id: Optional[int] = None
@@ -124,7 +125,7 @@ class ObjectSelector:
 
     def describe(self) -> str:
         if self.is_open:
-            return "物块 = 画面里唯一的目标"
+            return "物块 = 离光轴最近的目标"
         parts = []
         if self.material_id is not None:
             parts.append(f"编号 {self.material_id}")
@@ -350,6 +351,19 @@ class ServoConfig:
     coarse_settle_tolerance_mm: float = 3.0
     #: 等画面停稳的最长时间（秒）；超时就拿最后一次读到的值，并让调用方知道。
     settle_timeout_seconds: float = 4.0
+    #: **等物块第一次出现**的最长时间（秒）；``None`` = 一直等下去，``0`` = 不做额外等待。
+    #:
+    #: 物块放在转盘上时，调用 ``align_xy`` 的那一刻它**可能还没转到视野里**：转盘要再走
+    #: 一会儿，物块才会出现。原来的做法是"等不到就在 ``settle_timeout_seconds`` 之后
+    #: 报错"（默认 4 s），在这种场景里是误伤——物块不是丢了，只是还没转过来。
+    #:
+    #: - ``0``（默认）：保持旧语义，整次测量共用一个 ``settle_timeout_seconds`` 截止时刻；
+    #: - 正数：最多等这么多秒让物块出现；
+    #: - ``None``：一直看着画面等（Ctrl+C 可以中断），转盘转过一整圈也等。
+    #:
+    #: 它只作用于 ``align_x_y`` 的**第一次**测量：一旦测到过物块，之后每一次测量仍按
+    #: ``settle_timeout_seconds`` 收工——"看见过又被爪子挡住"的收工口不能跟着变成无限等。
+    target_wait_seconds: Optional[float] = 0.0
     #: **转底盘前要抬到多高**：测到的 ``z``（镜头到物块顶面的距离）至少要有这么多毫米。
     #:
     #: 为什么用 z 而不是脉冲数：这台机器上**移动 x/y 就是旋转底盘**，而低位转过去会撞到
@@ -385,6 +399,30 @@ class ServoConfig:
     safe_lift_pulses: int = 0
     #: 转底盘的角度超过这么多度时，就必须先抬升。
     safe_lift_angle_degrees: float = 1.0
+
+    # ------------------------------------------------------ 环心对准的落料补偿
+    #
+    # 闭环只保证"环心读数 = 目标读数"，它看不见料落在环心的哪一侧：镜头光轴与爪口
+    # 之间有固定偏差，抓料后料在爪里也会偏一侧。于是读数对准了、料却固定偏开。
+    # 这两个数就是**料实际偏离环心的量**，加在环心那一次的伺服目标上抵消掉。
+
+    #: 落料补偿的 x（毫米，相机系：**向右为正**）。料往环心右边偏多少就写多少。
+    #:
+    #: 落点误差 = 补偿量 − 实际偏移：照着现场看到的症状填，放一次看残差微调即可
+    #: （符号写反就是两倍偏差，一眼看得出）。只作用于环心路径
+    #: （:meth:`modules.grasp.runtime.Grasp.plan_ring` 与 ``align_ring``）；
+    #: 物料对准（``align_xy``）仍然对着 ``target``，否则两边一起平移、
+    #: 相对偏差一点没变。``0`` 表示不补偿，与加这个字段之前的行为完全一致。
+    ring_offset_x_mm: float = 0.0
+    #: 落料补偿的 y（毫米，相机系：**向下为正**），同 :attr:`ring_offset_x_mm`。
+    ring_offset_y_mm: float = 0.0
+    #: **按环号**的落料补偿：``((x1, y1), (x2, y2), (x3, y3))``，第 n 项给 n 号环用。
+    #:
+    #: 为什么要按环分开：补偿量里混着"镜头光轴偏爪口"和"回头路吃掉的间隙"，后者随底座
+    #: 转过的角度变——同一个数放在 1 号环对，放到 3 号环就偏一个方向。空元组 = 全部用
+    #: :attr:`ring_offset_x_mm` / :attr:`ring_offset_y_mm`（与加这个字段之前完全一致）；
+    #: 只写了前几项也行，没写的号照样退回那一对。
+    ring_offsets_mm: Tuple[Tuple[float, float], ...] = ()
     #: 两条位置帧之间的最小间隔（秒）。
     #: **不能省。** 实测这台机器的 CH340 上，两条 ``FD`` 位置帧背靠背连发（间隔 0 ms）
     #: 会让**两帧都失效**——不是丢一帧，是两个轴都不动，而且驱动器 ``Response=None``
@@ -397,12 +435,6 @@ class ServoConfig:
     #: 白等 50 ms，而一次停稳测量至少要轮询两次。别调成 0——那样会在没新帧时打转空转
     #: CPU，也失去了"等一帧"的语义。
     settle_poll_seconds: float = 0.01
-    #: 画面里物块的**像素直径**相对第一次测量变化超过这个比例就判为"被遮挡了"。
-    #:
-    #: 为什么用直径：相机在臂上时，爪瓣扫过物块会把它挡住一部分，可见区域从整圆变成
-    #: 月牙，等效半径随之变小——而测距公式按直径反推距离，于是会被算成"物块突然远了
-    #: 几十毫米"。那正是"爪子挡住了物块"的签名，而且它看起来完全像一次正常的观测。
-    diameter_change_limit_ratio: float = 0.25
 
     def __post_init__(self) -> None:
         # 与 load_servo_config 的判据保持一致：容差、超时、粗调门槛为 0 都没有意义
@@ -418,6 +450,12 @@ class ServoConfig:
         ):
             if not getattr(self, name) > 0:
                 raise ValueError(f"{name} 必须是正数")
+        if self.target_wait_seconds is not None:
+            if (
+                not math.isfinite(self.target_wait_seconds)
+                or self.target_wait_seconds < 0
+            ):
+                raise ValueError("target_wait_seconds 必须是非负数或 null")
         if self.frame_margin_seconds < 0:
             raise ValueError("frame_margin_seconds 不能是负数")
         if self.settle_tolerance_mm < 0:
@@ -429,8 +467,6 @@ class ServoConfig:
                 "coarse_settle_tolerance_mm 不能小于 settle_tolerance_mm："
                 "粗调档只该更宽松，不该更严"
             )
-        if self.diameter_change_limit_ratio <= 0:
-            raise ValueError("diameter_change_limit_ratio 必须是正数")
         if self.inter_frame_seconds < 0:
             raise ValueError("inter_frame_seconds 不能是负数")
         if self.safe_lift_pulses < 0:
@@ -474,6 +510,27 @@ class ServoConfig:
                 raise ValueError(f"{name} 必须是正数")
         if self.z_min_mm >= self.z_max_mm:
             raise ValueError("z_min_mm 必须小于 z_max_mm")
+        # 落料补偿可以是负数（往左/往上偏），但不能是 NaN/inf：那会让目标读数变成 NaN，
+        # 于是"误差"全成了 NaN、比较恒为假，闭环永远走不到容差也不会报错。
+        for name in ("ring_offset_x_mm", "ring_offset_y_mm"):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} 必须是有限数")
+        for index, pair in enumerate(self.ring_offsets_mm, start=1):
+            try:
+                values = tuple(float(value) for value in pair)
+            except (TypeError, ValueError):
+                values = ()
+            if len(values) != 2 or not all(math.isfinite(value) for value in values):
+                raise ValueError(
+                    f"ring_offsets 第 {index} 项要写成 (x, y) 两个有限数，收到 {pair!r}"
+                )
+
+    def ring_offset(self, digit: Optional[int] = None) -> Tuple[float, float]:
+        """这个环号的落料补偿 ``(x_mm, y_mm)``；没配这个号、或不知道环号时用全局那一对。"""
+        if digit is not None and 1 <= int(digit) <= len(self.ring_offsets_mm):
+            x_mm, y_mm = self.ring_offsets_mm[int(digit) - 1]
+            return (float(x_mm), float(y_mm))
+        return (float(self.ring_offset_x_mm), float(self.ring_offset_y_mm))
 
     def step_limit_for(self, error_mm: float) -> int:
         """当前误差该用哪一档的单步上限。"""
@@ -735,13 +792,13 @@ def load_servo_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ServoConfig:
             document.get("settle_timeout_seconds", defaults.settle_timeout_seconds),
             "settle_timeout_seconds",
         ),
+        target_wait_seconds=_optional_non_negative(
+            document.get("target_wait_seconds", defaults.target_wait_seconds),
+            "target_wait_seconds",
+        ),
         settle_poll_seconds=_positive(
             document.get("settle_poll_seconds", defaults.settle_poll_seconds),
             "settle_poll_seconds",
-        ),
-        diameter_change_limit_ratio=_positive(
-            document.get("diameter_change_limit_ratio", defaults.diameter_change_limit_ratio),
-            "diameter_change_limit_ratio",
         ),
         inter_frame_seconds=_non_negative(
             document.get("inter_frame_seconds", defaults.inter_frame_seconds),
@@ -814,7 +871,42 @@ def load_servo_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ServoConfig:
         find_max_steps=_integer(
             document.get("find_max_steps", defaults.find_max_steps), "find_max_steps"
         ),
+        # 落料补偿：用 _number 而不是 _positive —— 往左/往上偏时是负数。
+        ring_offset_x_mm=_number(
+            document.get("ring_offset_x_mm", defaults.ring_offset_x_mm),
+            "ring_offset_x_mm",
+        ),
+        ring_offset_y_mm=_number(
+            document.get("ring_offset_y_mm", defaults.ring_offset_y_mm),
+            "ring_offset_y_mm",
+        ),
+        # 按环号那一份：写成 [[x1,y1],[x2,y2],[x3,y3]]，缺省就用上面那一对。
+        ring_offsets_mm=_ring_offsets(
+            document.get("ring_offsets", defaults.ring_offsets_mm)
+        ),
     )
+
+
+def _ring_offsets(value) -> Tuple[Tuple[float, float], ...]:
+    """``[[x, y], ...]`` → 元组；形状不对当场报错，别让它变成一个永远对不上的补偿。"""
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__iter__"):
+        raise ServoError(f"ring_offsets 要写成 [[x, y], ...]，收到 {value!r}")
+    pairs = []
+    for index, pair in enumerate(value, start=1):
+        try:
+            numbers = tuple(float(number) for number in pair)
+        except (TypeError, ValueError):
+            raise ServoError(
+                f"ring_offsets 第 {index} 项要写成 [x, y] 两个数，收到 {pair!r}"
+            ) from None
+        if len(numbers) != 2 or not all(math.isfinite(number) for number in numbers):
+            raise ServoError(
+                f"ring_offsets 第 {index} 项要写成 [x, y] 两个有限数，收到 {pair!r}"
+            )
+        pairs.append(numbers)
+    return tuple(pairs)
 
 
 def load_object_selector(config_path: Path = DEFAULT_CONFIG_PATH) -> ObjectSelector:
@@ -973,3 +1065,14 @@ def _optional_positive(value: object, name: str) -> Optional[float]:
     if value is None:
         return None
     return _positive(value, name)
+
+
+def _optional_non_negative(value: object, name: str) -> Optional[float]:
+    """非负数或 ``null``；``0`` 与 ``null`` 是两种不同的"不用"。
+
+    ``target_wait_seconds`` 用这个：``0`` = 保持旧语义（不加额外等待），
+    ``null`` = 一直等下去。两者混成一个值会让"转盘场景"和"普通场景"没法区分。
+    """
+    if value is None:
+        return None
+    return _non_negative(value, name)

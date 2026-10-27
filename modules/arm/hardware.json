@@ -1,0 +1,39 @@
+{
+  "axes": {
+    "base": {
+      "motor_id": 5,
+      "reduction_ratio": 5,
+      "expect_ack": false
+    },
+    "lift": {
+      "motor_id": 6,
+      "mm_per_motor_rev": 61.0,
+      "expect_ack": false
+    },
+    "extension": {
+      "motor_id": 7,
+      "mm_per_motor_rev": 61.0,
+      "expect_ack": false
+    }
+  },
+  "initial_motor_degrees": {
+    "base": 0.0,
+    "lift": 0.0,
+    "extension": 270.0
+  },
+  "homing": {
+    "mode": "nearest",
+    "expected_seconds": 12.0,
+    "settle_seconds": 0.5
+  },
+  "limits": {
+    "base_degrees": [-180.0, 180.0],
+    "radial_mm": [180.0, 359.1],
+    "height_mm": [10.0, 183.5]
+  },
+  "safe_pose": {
+    "base_degrees": null,
+    "radial_mm": null,
+    "height_mm": null
+  }
+}

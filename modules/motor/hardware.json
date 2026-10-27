@@ -1,0 +1,13 @@
+{
+  "windows": {
+    "port": "COM36"
+  },
+  "jetson": {
+    "port": "auto"
+  },
+  "bus": {
+    "baudrate": 115200,
+    "pulses_per_revolution": 3200,
+    "timeout_seconds": 0.1
+  }
+}

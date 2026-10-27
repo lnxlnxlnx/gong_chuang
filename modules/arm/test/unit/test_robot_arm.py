@@ -106,6 +106,10 @@ class FakeSerial:
         del self._receive_buffer[:size]
         return data
 
+    def reset_input_buffer(self) -> None:
+        """驱动每次发包前都会清缓冲：应答是 :meth:`write` 里当场产生的，这里没东西可清。"""
+        self._receive_buffer.clear()
+
     def close(self) -> None:
         self.is_open = False
 
@@ -126,9 +130,10 @@ class ArmTestCase(unittest.TestCase):
             bus=self.serial,
             sleep=self.sleep,
         )
-        # 装配时已经使能三个轴（3 条 0xF3 帧）；本类只看之后的动作帧，使能本身由
-        # RobotArmConstructionTests 与 enable 用例单独断言。
+        # 装配时已经使能三个轴（3 条 0xF3 帧，帧间也留了间隔）；本类只看之后的动作帧，
+        # 使能本身由 RobotArmConstructionTests 与 enable 用例单独断言。
         self.serial.writes.clear()
+        self.sleep.calls.clear()
         return self.arm
 
 
@@ -364,6 +369,8 @@ class RobotArmInPositionWaitTests(unittest.TestCase):
             sleep=self.sleep,
             wait_mode=WAIT_ESTIMATE,
         )
+        # 装配阶段已经使能三轴（帧间也留了间隔）；这里只看这一次动作的等待。
+        self.sleep.calls.clear()
 
         report = arm.move_up(pulses=1000)
 
@@ -379,6 +386,36 @@ class RobotArmInPositionWaitTests(unittest.TestCase):
                 bus=FakeSerial(),
                 wait_mode="whatever",
             )
+
+
+class ReadAbsStateTests(ArmTestCase):
+    """``read_abs_state``：一根轴现在在哪（里程表口径，与绝对定位同一把尺）。"""
+
+    def test_it_reports_where_the_axis_was_told_to_go(self) -> None:
+        arm = self.make_arm()
+        before = arm.read_abs_state("lift").pulses
+
+        arm.move_up(pulses=1000)
+        state = arm.read_abs_state("lift")
+
+        self.assertEqual(state.pulses - before, 1000)
+        self.assertAlmostEqual(
+            state.motor_degrees, state.pulses * 360.0 / PULSES_PER_REVOLUTION
+        )
+        self.assertIn("lift", state.summary())
+
+    def test_moving_back_reduces_the_same_number(self) -> None:
+        arm = self.make_arm()
+        before = arm.read_abs_state("lift").pulses
+        arm.move_up(pulses=500)
+        arm.move_down(pulses=200)
+
+        self.assertEqual(arm.read_abs_state("lift").pulses - before, 300)
+
+    def test_an_unknown_axis_is_rejected(self) -> None:
+        arm = self.make_arm()
+        with self.assertRaises(KeyError):
+            arm.read_abs_state("gripper")
 
 
 class RobotArmAxisMappingTests(ArmTestCase):
@@ -434,7 +471,7 @@ class RobotArmConstructionTests(unittest.TestCase):
     """
 
     def test_assembly_enables_every_axis_without_moving(self) -> None:
-        """装配完就是"已使能、没动过"：三条使能帧，没有动作帧，位姿仍是未知。"""
+        """装配完就是"已使能、没动过"：三条使能帧，没有动作帧，账上也还是 0。"""
         serial = FakeSerial()
 
         arm = RobotArm._from_settings(
@@ -445,7 +482,7 @@ class RobotArmConstructionTests(unittest.TestCase):
             serial.writes,
             [torque_frame(motor_id=motor_id, enabled=True) for motor_id in (5, 6, 7)],
         )
-        self.assertIsNone(arm.pose, "装配不做任何运动，位姿必须未知")
+        self.assertEqual(arm.turns_state.of("base").pulses, 0, "装配不做任何运动")
 
     def test_motor_failure_closes_the_serial_the_assembly_opened(self) -> None:
         serial = FakeSerial()

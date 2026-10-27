@@ -26,13 +26,14 @@ import numpy as np
 
 #: 内置类别表，索引即训练时的类别顺序。
 #:
-#: 当前物料模型（``models/best.onnx``，四类）在 ONNX 元数据里写的是
-#: ``{0: 'red', 1: 'yellow', 2: 'blue', 3: 'green'}``，也就是"1 红 2 黄 3 蓝 4 绿"，
-#: 这张表必须一字不差地对上：**框的坐标由模型给出，类名由这张表按索引查**，
-#: 表错了框还是准的、类名会整体错位。
+#: 随包的 ``models/best.onnx`` 现在是**七类**：``{0: 'red', 1: 'yellow', 2: 'blue',
+#: 3: 'green', 4: 'tg1', 5: 'tg2', 6: 'tg3'}``（四色物料 + 三个带数字的靶标）。
+#: 完整类别表写在 ``modules/vision/config.json`` 的 ``model.class_names`` 里；这里
+#: 保留的只是**没有配置时的兜底**，而且刻意只列四个颜色：靶标一旦被当成物料，
+#: 抓取链路就会去抓靶标，那是比"类名错位"更难发现的错。
 #:
-#: 换模型优先改 ``modules/vision/config.json`` 的 ``model.class_names``；
-#: 这里只是没有配置（以及 ONNX 里也没有元数据）时的兜底。
+#: 换模型优先改 ``config.json`` 的 ``model.class_names``（ONNX 元数据里有 ``names``
+#: 时也会被读出来）；改了模型就跟着改这张表，别让它和模型的索引对不上。
 DEFAULT_CLASS_NAMES = ["red", "yellow", "blue", "green"]
 
 #: Decode thresholds used when not overridden by the caller.
@@ -364,6 +365,27 @@ class YOLOv8Detector:
         self.output_shape = out_shape
         _, _, self.input_height, self.input_width = in_shape
         self.input_size = self.input_height
+        if out_shape is not None and len(out_shape) == 3:
+            self._check_output_channels(out_shape[1], source=f"TensorRT 引擎 {engine_path}")
+
+    def _check_output_channels(self, channels: int, *, source: str) -> None:
+        """输出通道数必须等于 ``4 + 类别数``：换模型没同步类别表时在这里拦下来。
+
+        这是"换了模型但配置/引擎没跟上"最容易踩的坑：框的坐标照样是对的，只是每个框
+        的类别索引按旧表解释，画面上打出来的名字整体错位——看起来像模型坏了。板上更隐蔽：
+        ``.engine`` 里只有张量名和形状，旧引擎还带着旧模型的类别数，而 ``class_names``
+        来自 ``config.json``，两者不会自动对齐。
+        """
+        expected = 4 + len(self.class_names)
+        if int(channels) == expected:
+            return
+        detected = int(channels) - 4
+        raise ValueError(
+            f"{source} 输出 {detected} 个类别（4 + {detected} = {int(channels)} 个通道），"
+            f"但类别表有 {len(self.class_names)} 个：{list(self.class_names)}。"
+            "换模型时要一起改 modules/vision/config.json 的 model.class_names；"
+            "Jetson 上的 .engine 绑着导出时的类别数，换模型后必须 build_engine --force 重建"
+        )
 
     def _alloc_buffers(self) -> None:
         """Allocate page-locked host buffers, GPU memory and a CUDA stream."""
@@ -554,7 +576,10 @@ class YOLOv8ONNXDetector(YOLOv8Detector):
         if blob.shape != (1, 3, self.input_size, self.input_size):
             raise ValueError(f"unexpected ONNX input shape: {blob.shape}")
         self.net.setInput(blob)
-        return self.net.forward()
+        raw = self.net.forward()
+        if getattr(raw, "ndim", 0) == 3:
+            self._check_output_channels(raw.shape[1], source=f"ONNX 模型 {self.model_path}")
+        return raw
 
     def close(self) -> None:
         """Release the OpenCV network reference."""

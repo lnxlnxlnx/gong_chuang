@@ -35,7 +35,7 @@ class ArmPoseConfigTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "arm.json"
             write_config(path, **overrides)
-            return load_arm_config(path)
+            return load_arm_config(path, hardware_path=path)
 
 
 class ArmLimitConfigTests(ArmPoseConfigTestCase):
@@ -159,6 +159,74 @@ class ArmLinearCalibrationConfigTests(ArmPoseConfigTestCase):
             )
 
 
+class ArmInitialStateConfigTests(ArmPoseConfigTestCase):
+    """``initial_motor_degrees``：程序启动那一刻每根轴在哪（状态声明，不是传动常数）。"""
+
+    def test_a_missing_block_means_every_axis_starts_on_the_origin(self) -> None:
+        config = self.load()
+        self.assertEqual(dict(config.initial_motor_degrees), {})
+        for axis in ("base", "lift", "extension"):
+            with self.subTest(axis=axis):
+                self.assertEqual(config.initial_motor_pulses(axis), 0)
+
+    def test_the_declared_angle_is_read_and_converted_to_pulses(self) -> None:
+        """换爪子之后 7 号轴的机械初始位在 270°，也就是 2400 脉冲。"""
+        config = self.load(initial_motor_degrees={"extension": 270.0})
+        self.assertEqual(config.initial_motor_degrees["extension"], 270.0)
+        self.assertEqual(config.initial_motor_pulses("extension"), 2400)
+        self.assertEqual(config.initial_motor_pulses("base"), 0)
+
+    def test_a_negative_angle_is_kept_signed(self) -> None:
+        """同一圈上 -90° 是另一个位置（-800 脉冲），不做归一。"""
+        config = self.load(initial_motor_degrees={"extension": -90.0})
+        self.assertEqual(config.initial_motor_pulses("extension"), -800)
+
+    def test_an_unknown_axis_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "initial_motor_degrees"):
+            self.load(initial_motor_degrees={"nope": 90.0})
+
+    def test_a_non_number_reading_is_rejected(self) -> None:
+        for bad in ("270", True, None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    self.load(initial_motor_degrees={"extension": bad})
+
+    def test_a_reading_beyond_the_axis_travel_is_rejected(self) -> None:
+        """伸缩行程 179.1 mm / 61 mm 每圈 = 1057°；声明 1200° 对应不到真实位置。"""
+        with self.assertRaisesRegex(ValueError, "行程"):
+            self.load(
+                axes={
+                    "base": {"motor_id": 5, "reduction_ratio": 5},
+                    "lift": {"motor_id": 6, "mm_per_motor_rev": 61.0},
+                    "extension": {"motor_id": 7, "mm_per_motor_rev": 61.0},
+                },
+                limits={
+                    "base_degrees": [-180.0, 180.0],
+                    "radial_mm": [180.0, 359.1],
+                    "height_mm": [10.0, 183.5],
+                },
+                initial_motor_degrees={"extension": 1200.0},
+            )
+
+    def test_the_travel_endpoint_itself_is_still_allowed(self) -> None:
+        """边界：正好等于总行程（底座 360° × g = 5 → 1800°）不算超。"""
+        config = self.load(
+            limits={"base_degrees": [-180.0, 180.0]},
+            initial_motor_degrees={"base": 1800.0},
+        )
+        self.assertEqual(config.initial_motor_pulses("base"), 16000)
+
+    def test_an_uncalibrated_axis_skips_the_upper_bound_check(self) -> None:
+        """缺行程标定就无从判断，跳过——与 ``limits`` 缺失等于没有保护的既有约定一致。"""
+        config = self.load(initial_motor_degrees={"extension": 5000.0})
+        self.assertGreater(config.initial_motor_pulses("extension"), 0)
+
+    def test_an_unknown_axis_name_is_reported_by_the_accessor(self) -> None:
+        config = self.load()
+        with self.assertRaises(KeyError):
+            config.initial_motor_pulses("nope")
+
+
 class ProjectArmConfigTests(unittest.TestCase):
     """仓库配置里已经**实测**填上的标定值。
 
@@ -203,6 +271,17 @@ class ProjectArmConfigTests(unittest.TestCase):
             )
             with self.subTest(axis=axis):
                 self.assertLessEqual(config.max_pulses, travel_pulses)
+
+    def test_the_repository_config_declares_the_extension_starting_angle(self) -> None:
+        """2026-10-18 换了爪子：7 号轴的机械初始位在原点外 270° = 2400 脉冲 = 45.75 mm。
+
+        这是**状态声明**（程序启动那一刻轴在哪），不是标定常数：回零 / 绝对归零把原点
+        重新定义之后它就失效了。机构改回"启动即在原点"时，把这里改回 0 即可。
+        """
+        config = load_arm_config()
+        self.assertEqual(config.initial_motor_pulses("extension"), 2400)
+        self.assertEqual(config.initial_motor_pulses("base"), 0)
+        self.assertEqual(config.initial_motor_pulses("lift"), 0)
 
     def test_safe_pose_is_still_honest_about_being_unmeasured(self) -> None:
         """``safe_pose`` 只能由相机测出零点姿态后填，不许默认一个值。"""

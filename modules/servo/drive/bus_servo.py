@@ -24,18 +24,23 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Dict, Final, Mapping, Optional, Protocol, Sequence, Tuple
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.json"
+DEFAULT_HARDWARE_PATH = Path(__file__).resolve().parents[1] / "hardware.json"
 
 
 @dataclass(frozen=True)
 class BusServoConfig:
-    """Port and servo identity read from ``modules/servo/config.json``."""
+    """Port, baud rate and serial timeout read from ``modules/servo/hardware.json``.
+
+    ``servo_id`` **不在这里**：总线上没有"总线级身份"，每个舵机用自己的 ID
+    （``gripper.servo_id`` / ``turntable.servo_id``）。旧的 ``bus.servo_id`` 是个死键，
+    已随这次拆分删除。
+    """
 
     port: str
     baudrate: int
-    servo_id: int
+    timeout_seconds: float = 0.1
 
 
 def _config_integer(section: dict, name: str, minimum: int, maximum: int) -> int:
@@ -45,29 +50,195 @@ def _config_integer(section: dict, name: str, minimum: int, maximum: int) -> int
     return value
 
 
+#: ``port`` 写这个值 = "哪条口上是舵机总线，开之前自己探"。
+#: 和步进总线同一个毛病：两块 CH340 都没有序列号，Jetson 每次上电给它们的 ``ttyUSB``
+#: 编号都可能互换（Windows 的 COM 号跟着设备实例走，不会变），所以不能认端口名。
+AUTO_PORT: Final = "auto"
+
+#: 探测的 ID 取自同一份 hardware.json：总线上没有"总线级身份"，
+#: 这条线上有谁，只有夹爪和转盘各自的 ``servo_id`` 说了算。
+PROBE_ID_SECTIONS: Final = ("gripper", "turntable")
+
+#: ``POS_READ`` 的回复固定 8 字节：``55 55 id 05 1C 位置(2B) 校验``。
+PROBE_REPLY_LENGTH: Final = 8
+
+#: 探测结果按 (波特率, 候选端口) 缓存：夹爪与转盘在一次运行里都会调它，
+#: 缓存也保证它们拿到**同一条**总线。
+_DETECTED_PORTS: Dict[Tuple[int, Tuple[str, ...]], str] = {}
+
+
+class ProbedPort(Protocol):
+    """探测一条串口只用这几个方法；测试给个假的就行，不必装 pyserial。"""
+
+    def reset_input_buffer(self) -> None: ...
+
+    def write(self, data: bytes) -> int: ...
+
+    def flush(self) -> None: ...
+
+    def read(self, size: int) -> bytes: ...
+
+    def close(self) -> None: ...
+
+
+def _probe_servo_ids(document: Mapping[str, object]) -> Tuple[int, ...]:
+    """配置里那两个舵机 ID，探测时按顺序问它们。"""
+    ids = []
+    for section in PROBE_ID_SECTIONS:
+        value = document.get(section)
+        if isinstance(value, dict) and type(value.get("servo_id")) is int:
+            ids.append(value["servo_id"])
+    if not ids:
+        raise ValueError(
+            "port 写的是 auto，但 hardware.json 里没有 gripper.servo_id / "
+            "turntable.servo_id，不知道该问哪个舵机"
+        )
+    return tuple(dict.fromkeys(ids))
+
+
+def usb_serial_candidates() -> Tuple[str, ...]:
+    """本机所有的 **USB** 串口，按名字排序——顺序固定，探测结果才可复现。
+
+    与 ``modules/motor/config.py`` 同一套做法：只看 ``hwid`` 里带 ``USB`` 的口，
+    Jetson 上那些 ``ttyS*``/``ttyTHS*`` 板载串口挨个打开又慢又没意义。
+    """
+    try:
+        from serial.tools import list_ports
+    except ImportError as error:
+        raise RuntimeError(
+            "auto 端口要先装 pyserial 才能枚举串口；装不了就把 hardware.json 里的 "
+            "port 写成具体设备名"
+        ) from error
+    return tuple(
+        sorted(
+            port.device for port in list_ports.comports() if "USB" in (port.hwid or "").upper()
+        )
+    )
+
+
+def _serial_opener(baudrate: int, timeout_seconds: float) -> Callable[[str], ProbedPort]:
+    from modules.serial_link import open_serial
+
+    def open_port(port: str) -> ProbedPort:
+        return open_serial(port, baudrate=baudrate, timeout=timeout_seconds)
+
+    return open_port
+
+
+def _servo_probe_frame(servo_id: int) -> bytes:
+    """一问一答的只读帧：``55 55 id 03 1C 校验``。"""
+    body = bytes((servo_id, 3, BusServo.POS_READ))
+    return BusServo.HEADER + body + bytes(((~sum(body)) & 0xFF,))
+
+
+def _is_position_reply(packet: bytes, servo_id: int) -> bool:
+    """回包必须是**帧头/ID/长度/指令码都对**的 8 字节整帧。"""
+    return (
+        len(packet) == PROBE_REPLY_LENGTH
+        and packet[:2] == BusServo.HEADER
+        and packet[2] == servo_id
+        and packet[3] == 5
+        and packet[4] == BusServo.POS_READ
+    )
+
+
+def _port_answers_servo(
+    port: str,
+    *,
+    open_port: Callable[[str], ProbedPort],
+    servo_ids: Sequence[int],
+) -> bool:
+    """这条口上有没有舵机回**读位置**帧。只发只读命令，不会让舵机动作。"""
+    serial_port = open_port(port)
+    try:
+        for servo_id in servo_ids:
+            # 每条命令前清空输入缓冲：上一条迟到的回包不能算到下一条头上。
+            serial_port.reset_input_buffer()
+            serial_port.write(_servo_probe_frame(servo_id))
+            serial_port.flush()
+            if _is_position_reply(serial_port.read(PROBE_REPLY_LENGTH), servo_id):
+                return True
+        return False
+    finally:
+        serial_port.close()
+
+
+def resolve_bus_port(
+    configured_port: str,
+    *,
+    baudrate: int,
+    timeout_seconds: float,
+    probe_ids: Sequence[int] = (),
+    candidates: Optional[Sequence[str]] = None,
+    opener: Optional[Callable[[str], ProbedPort]] = None,
+) -> str:
+    """把配置里的端口解析成真正要打开的那一条。
+
+    ``configured_port`` 不是 :data:`AUTO_PORT` 时原样返回，写死端口的老配置一点都不变。
+    """
+    if configured_port != AUTO_PORT:
+        return configured_port
+
+    ports = tuple(candidates) if candidates is not None else usb_serial_candidates()
+    key = (baudrate, ports)
+    if key in _DETECTED_PORTS:
+        return _DETECTED_PORTS[key]
+
+    open_port = opener if opener is not None else _serial_opener(baudrate, timeout_seconds)
+    attempts = []
+    for port in ports:
+        try:
+            replied = _port_answers_servo(port, open_port=open_port, servo_ids=probe_ids)
+        except OSError as error:
+            # 打不开的口（被占用、刚拔掉）不是总线，继续看下一个。
+            attempts.append(f"{port}（打不开：{error}）")
+            continue
+        if replied:
+            _DETECTED_PORTS[key] = port
+            return port
+        attempts.append(f"{port}（无应答）")
+
+    raise RuntimeError(
+        f"port 写的是 {AUTO_PORT}，但没有任何串口回舵机的读位置帧；"
+        "请检查舵机转接板的电源与 USB 接线。已经试过："
+        + ("、".join(attempts) if attempts else "本机没有枚举到 USB 串口")
+    )
+
+
 def load_bus_config(
     platform: str | None = None,
-    config_path: Path = DEFAULT_CONFIG_PATH,
+    hardware_path: Path = DEFAULT_HARDWARE_PATH,
 ) -> BusServoConfig:
-    """Read the bus servo port, baud rate and ID from the shared servo file."""
+    """Read the bus servo port, baud rate and serial timeout from the hardware file."""
     platform = platform or ("windows" if os.name == "nt" else "jetson")
     try:
-        document = json.loads(config_path.read_text(encoding="utf-8"))
+        document = json.loads(hardware_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"无法读取舵机配置：{config_path}") from error
+        raise ValueError(f"无法读取舵机硬件配置：{hardware_path}") from error
     if not isinstance(document, dict):
-        raise ValueError("舵机配置必须是 JSON 对象")
+        raise ValueError("舵机硬件配置必须是 JSON 对象")
     profile = document.get(platform)
     if not isinstance(profile, dict) or not isinstance(profile.get("port"), str) or not profile["port"].strip():
-        raise ValueError(f"请先填写 {config_path} 中的 {platform}.port")
+        raise ValueError(f"请先填写 {hardware_path} 中的 {platform}.port")
     bus = document.get("bus")
     if not isinstance(bus, dict):
-        raise ValueError("bus 必须是 JSON 对象")
+        raise ValueError(f"{hardware_path} 缺少 bus 段（波特率与串口超时）")
+    timeout = bus.get("timeout_seconds")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not float(timeout) > 0:
+        raise ValueError(f"{hardware_path} 的 bus.timeout_seconds 必须是正数")
+    port = profile["port"].strip()
+    # 协议默认 115200；允许配置覆盖，便于换用其它半双工转接板
+    baudrate = _config_integer(bus, "baudrate", 1, 4000000)
     return BusServoConfig(
-        port=profile["port"].strip(),
-        # 协议固定 115200；允许配置覆盖，便于换用其它半双工转接板
-        baudrate=_config_integer(bus, "baudrate", 1, 4000000),
-        servo_id=_config_integer(bus, "servo_id", 1, 253),
+        # auto 时才去配置里取"问哪个舵机"：写死端口的老配置连这两个键都不需要。
+        port=resolve_bus_port(
+            port,
+            baudrate=baudrate,
+            timeout_seconds=float(timeout),
+            probe_ids=_probe_servo_ids(document) if port == AUTO_PORT else (),
+        ),
+        baudrate=baudrate,
+        timeout_seconds=float(timeout),
     )
 
 
@@ -117,6 +288,7 @@ class BusServo:
         baudrate: int = BAUDRATE,
         timeout: float = 0.1,
         serial_port: SerialPort | None = None,
+        owns_serial: bool | None = None,
     ) -> None:
         # 地址为 0 时代表广播(所有舵机)，因此允许 0..253
         if not 0 <= servo_id <= 253:
@@ -129,6 +301,9 @@ class BusServo:
         self.timeout = timeout
         # 测试时可注入一个 FakeSerial，避免真正打开串口
         self._serial = serial_port
+        # 借来的连接（同一个会话里夹爪与转盘共用一条舵机总线）不归本对象关闭：
+        # 擅自关掉会切断另一个舵机的通路。默认按"是不是自己开的"判断。
+        self._owns_serial = (serial_port is None) if owns_serial is None else bool(owns_serial)
 
     def initialize(self) -> "BusServo":
         """Open the configured serial port at the protocol baud rate."""
@@ -137,10 +312,22 @@ class BusServo:
         return self
 
     def close(self) -> None:
-        """Close the serial port if it has been initialized."""
-        if self._serial is not None:
-            self._serial.close()
-            self._serial = None
+        """Detach the serial port; only close it physically when this object owns it.
+
+        借来的连接（``owns_serial=False``）只让自身失效，**不物理关闭**——夹爪与转盘
+        挂的是同一条半双工总线，谁先关谁的都会让另一个哑掉。
+        """
+        serial_port, self._serial = self._serial, None
+        if serial_port is None:
+            return
+        if not self._owns_serial:
+            return
+        serial_port.close()
+
+    @property
+    def owns_serial(self) -> bool:
+        """这条总线是不是本对象打开的；借来的不归它关。"""
+        return self._owns_serial
 
     def set_position(self, position: int, duration_ms: int) -> None:
         """Move to ``position`` (0..1000) within ``duration_ms`` (0..30000)."""
@@ -175,13 +362,9 @@ class BusServo:
         return int.from_bytes(packet[5:7], "little", signed=True)
 
     def _open_serial(self) -> SerialPort:
-        try:
-            import serial
-        except ImportError as error:
-            raise RuntimeError(
-                "pyserial is required on Jetson. Install it in the target Python environment first."
-            ) from error
-        return serial.Serial(self.port, baudrate=self.baudrate, timeout=self.timeout)
+        from modules.serial_link import open_serial
+
+        return open_serial(self.port, baudrate=self.baudrate, timeout=self.timeout)
 
     def _write(self, command: int, parameters: bytes = b"") -> None:
         serial_port = self._require_serial()

@@ -48,14 +48,19 @@ python modules/vision/training/train.py --export-onnx
 python -c "import onnx; m=onnx.load('models/best.onnx'); print([(i.name,[d.dim_value for d in i.type.tensor_type.shape.dim]) for i in m.graph.input]); print({p.key:p.value for p in m.metadata_props if p.key in ('names','imgsz')})"
 ```
 
-当前物料模型（2026-10-03 训练）读到的是：
+当前随包模型（2026-10-20 训练，"四色 + 三个靶标"）读到的是：
 
 ```
 输入  images  [1, 3, 320, 320]
-names {0: 'red', 1: 'yellow', 2: 'blue', 3: 'green'}      # 1 红 2 黄 3 蓝 4 绿
+names {0: 'red', 1: 'yellow', 2: 'blue', 3: 'green',
+       4: 'tg1', 5: 'tg2', 6: 'tg3'}      # 四色物料 + 三个带数字的靶标
 imgsz [320, 320]
-输出  output0 [1, 8, 2100]                                 # 4 + 4 类
+输出  output0 [1, 11, 2100]                # 4 + 7 类
 ```
+
+> 换模型（尤其是从四类换成七类）之后，``models/best.engine`` **必须重新构建**：
+> engine 里只有张量名和形状，ONNX 的 ``names`` 元数据不会跟过去。板上要正确的类名，
+> 只能靠 ``config.json`` 的 ``model.class_names``，所以换模型时那两处要一起改。
 
 ### 2. 拷到板子
 
@@ -116,7 +121,7 @@ $PY -m modules.vision.training.build_engine --check --image models/top_pic_2.jpg
 | 不用 trtexec，走 TensorRT Python API | `python -m modules.vision.training.build_engine --python-builder` |
 | 只检查已有 engine | `python -m modules.vision.training.build_engine --check` |
 | 检查 + 真实图片端到端 | `python -m modules.vision.training.build_engine --check --image models/top_pic_2.jpg` |
-| 指定类别表验收 | `... --check --class-names red,yellow,blue,green` |
+| 指定类别表验收 | `... --check --class-names red,yellow,blue,green,tg1,tg2,tg3` |
 
 ## 换模型的完整流程
 
@@ -135,9 +140,11 @@ engine 和板子上的 TensorRT 或 GPU 架构对不上。``--force`` 在板上�
 
 **类名和实际颜色对不上（框是准的，字是错的）**
 模型的输出通道数是 ``4 + 类别数``，拿它跟配置里的类别表对一下就能发现：4 类的模型是 8 个
-通道，``--check`` 会在对不上时直接报出来。类别表在 ``modules/vision/config.json`` 的
-``model.class_names``；顺序错了就是整体错位（例如 4 类模型索引 3 是 green，写成年份久的
-``obj-yellow`` 就会把绿色的物料报成黄色）。
+通道、7 类是 11 个，``--check`` 会在对不上时直接报出来。类别表在
+``modules/vision/config.json`` 的 ``model.class_names``；顺序错了就是整体错位（例如 7 类
+模型索引 3 是 green，写成旧表的某一项就会把绿色物料报成别的类）。
+随包七类模型的 ``tg1`` / ``tg2`` / ``tg3`` 是带数字的靶标，**不要**把它们加进
+``model.materials``：那会让抓取链路把靶标当物料去抓。
 
 **``ModuleNotFoundError: No module named 'pycuda'``**
 用了系统 ``python3``。换成 ``/home/pi/miniforge3/envs/tensorrt/bin/python``。

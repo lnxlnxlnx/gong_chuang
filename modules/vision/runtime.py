@@ -26,6 +26,14 @@ with Vision.open(config_path="modules/vision/config.json") as vision:
 
 两者共用一次 :meth:`Vision._read_report`，所以"一次调用只读一帧、只推理一次"只有一处实现。
 
+## 画面停稳（抓取前）
+
+:meth:`Vision.scene_stability` / :meth:`Vision.scene_stable` 连拍几帧、比**像素差**，
+回答"整幅画面这一刻静止没有"。它不依赖检测：画面里没有物料也能回答，所以适合在
+"爪子要往下走"之前做最后一道确认——物块在转盘上时，对准成功不等于它已经停稳。
+只想等一小会儿直到静止用 :meth:`Vision.wait_scene_stable`；判据与阈值见
+:mod:`modules.vision.drive.scene_stability`。
+
 ## 一次会话只装配一次
 
 ``open()`` 校验配置与相机编号、加载模型、打开相机；``locate()`` 只是读帧和推理。
@@ -41,15 +49,22 @@ with Vision.open(config_path="modules/vision/config.json") as vision:
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple
 
 from modules.vision.config import VisionConfig
 # 这两个默认值只定义一次，就住在 sequence 里（那里是判据的出处）；本模块转发它们，
 # 免得"停止判据"在两个地方各写一个数。
 from modules.vision.drive.sequence import DEFAULT_MIN_SAMPLES, DEFAULT_STILL_MM
+from modules.vision.drive.scene_stability import (
+    DEFAULT_MAX_CHANGED_RATIO,
+    DEFAULT_MAX_MEAN_DIFF,
+    DEFAULT_PIXEL_DIFF_THRESHOLD,
+    DEFAULT_STABLE_FRAMES,
+)
 
 #: 一次多帧融合连拍几帧。实测本机一帧定位约 178 ms，7 帧约 1.25 s——
 #: 短到转盘转过的那点角度可以用直线近似，长到够剔掉一两个野值。
@@ -64,11 +79,35 @@ DEFAULT_SETTLE_MM = 1.0
 #: 的耐心不该有两个数。
 DEFAULT_SETTLE_TIMEOUT_SECONDS = 4.0
 
+#: :meth:`Vision.wait_scene_stable` 默认最多等几秒。转盘停稳通常在一两秒内，
+#: 给到 5 s 是为了挡住"画面一直在动"时不至于无限等下去；"从头到尾没见它动过"
+#: 也由这个上限收尾。
+DEFAULT_SCENE_STABLE_WAIT_SECONDS = 5.0
+
+#: :meth:`Vision.wait_scene_stable` 两次判断之间的间隔（秒）。
+#:
+#: 判一次要连拍 4 帧（约 130 ms），所以 0.3 s 的间隔意味着大约每 0.3 s 看一次、
+#: 每次看 130 ms——采样密度够抓到"刚停下"，又不会把 CPU 全占在取帧上。
+DEFAULT_SCENE_STABLE_POLL_SECONDS = 0.3
+
+#: :meth:`Vision.wait_scene_stable` 至少看这么久（秒）才允许放行。
+#:
+#: 一次判断只连拍 4 帧（约 130 ms），"这一眼没动"太便宜：转盘刚接到转动指令、物块正要
+#: 被带走之前，画面也能看着是静的，照这一眼放行就会跑过去扑空。所以头几眼的静止一律
+#: 不作数，看满这段窗口——足够把"物块要被带走"那次运动等出来，再等它停下来。
+DEFAULT_SCENE_STABLE_MIN_SECONDS = 3.5
+
 if TYPE_CHECKING:
     from modules.vision.drive.camera import USBCamera as Camera
     from modules.vision.drive.material_locate import MaterialLocator
+    from modules.vision.drive.motion_gate import MotionGate
+    from modules.vision.drive.numbered_ring import RingTarget, RingTargetLocator
+    from modules.vision.drive.pixel_measure import MillimetreMeasurement, PixelMeasurement
+    from modules.vision.drive.ring_station import RingStationDetector, RingStationDetection
+    from modules.vision.drive.scene_stability import SceneStability
     from modules.vision.drive.sequence import Fusion, TimedPoint
     from modules.vision.drive.sighting import MaterialSighting
+    from modules.vision.drive.stacked_ring import StackedRingDetector, StackedRingDetection
     from modules.vision.reports import MaterialReport, RegionReport
 
 
@@ -147,7 +186,10 @@ def _new_camera(camera_id: int):
     """只构造 1280×720 相机，**不**调用 ``initialize``（打开设备是调用方的事）。"""
     from modules.vision.drive.camera import USBCamera
 
-    return USBCamera(camera_id, width=1280, height=720)
+    # 60 fps：像素差分那条路（``scene_stability``）要的是同一个观察窗口里对比组更多，
+    # 30 fps 下 4 帧就是 100 ms，判断本身要 130–150 ms，帧率是白等的那一段。
+    # 再高没用：YOLO 主算路径一帧 27–29 ms，超过 60 fps 之后限速的是推理不是相机。
+    return USBCamera(camera_id, width=1280, height=720, fps=60)
 
 
 def _override_settings(
@@ -339,6 +381,36 @@ def _timed_point_from_report(
     )
 
 
+def _motion_position(fusion: "Fusion") -> "Tuple[float, float]":
+    """一次融合结果 → 门控用的位置，**单位毫米**（取 x/y，忽略深度）。
+
+    这里刻意只用 x/y：深度对"动没动"没有发言权，而且它是最不可靠的那个读数
+    （README 明确写了"由框反推的深度偏近"）。
+
+    **单位说明**：:class:`~modules.vision.drive.motion_gate.MotionGate` 的阈值默认按
+    像素/秒给（它本来就是为画面位移设计的）。走会话这条路径时喂进去的是**毫米**，
+    所以要么传一个按毫米标定的门控，要么用
+    :data:`DEFAULT_SETTLED_MOTION_MM_S` 这两个默认值——它们就是按毫米/秒定的。
+    刻意**不做**毫米↔像素的自动换算：那需要焦距，而焦距标定目前还是粗标定值，
+    拿它去换单位等于把一个不确定的数引进"动没动"这个判断里。
+    """
+    point = fusion.point
+    return (point.x_mm, point.y_mm)
+
+
+#: 会话路径上"确实在动 / 已经停下"的速度阈值（毫米/秒），见 :func:`_motion_position`。
+#: 数值取 30 / 25 mm/s：与门控模块的像素阈值同量级，在 0.5 mm/px 的画幅上大致相当。
+DEFAULT_SETTLED_MOTION_MM_S = (30.0, 25.0)
+
+
+def _settled_motion_gate() -> "MotionGate":
+    """建一个按**毫米/秒**标定的门控，供 :meth:`Vision.measure_settled` 使用。"""
+    from modules.vision.drive.motion_gate import MotionGate
+
+    moving, near_stop = DEFAULT_SETTLED_MOTION_MM_S
+    return MotionGate(moving_speed_px_s=moving, near_stop_speed_px_s=near_stop)
+
+
 class Vision:
     """一次视觉会话：拥有相机与定位器（含模型），可重复定位。
 
@@ -351,6 +423,15 @@ class Vision:
         #: :meth:`_require_resources` 缩窄成非空，动作里只用那个局部变量。
         self._camera: Optional[Camera] = None
         self._locator: Optional[MaterialLocator] = None
+        #: 工位识别的两个检测器。它们在 ``open`` 之后**懒建**（第一次调用才构造），
+        #: 因为纯经典 CV 的检测器不需要模型，也不该在"只做物料定位"的会话里被建出来。
+        #: 建好就缓存：配置在 ``open`` 时已定死，检测器内部的跨帧稳定窗口要连续。
+        self._station: Optional["RingStationDetector"] = None
+        self._stacked: Optional["StackedRingDetector"] = None
+        #: 视野里那**一个**环（窄视野，相机装臂上时的常用入口）。
+        #: 它**不拥有**模型：检测器由物料定位器持有，这里只借同一个实例（见
+        #: :meth:`_ring_target_locator`）。
+        self._ring_target: Optional["RingTargetLocator"] = None
         self._closed = False
         self._clock: Callable[[], float] = time.monotonic
         #: 读帧前丢掉几帧缓冲。摄像头没有队列，这是既有的启发式新鲜度处理。
@@ -359,6 +440,12 @@ class Vision:
         self.frames = 0
         #: 累计读失败次数；连续失败说明摄像头掉线。
         self.misses = 0
+        #: 最近一次 :meth:`scene_stability` 的结论（诊断用）。
+        #:
+        #: 等停稳超时之后，"是阈值太紧还是等得太短"只能靠**判据当时看到的实测值**判断；
+        #: 事后复测往往已经停了，两个数对不上就说明是等得不够长。只作观测记录，
+        #: 不影响任何判定。
+        self.last_scene_stability: Optional["SceneStability"] = None
 
     # ------------------------------------------------------------- 创建
     @classmethod
@@ -558,6 +645,8 @@ class Vision:
         still_mm: float = DEFAULT_STILL_MM,
         settle_mm: float = DEFAULT_SETTLE_MM,
         min_samples: int = DEFAULT_MIN_SAMPLES,
+        require_motion: bool = False,
+        motion: "Optional[MotionGate]" = None,
     ) -> "Optional[Fusion]":
         """反复连拍，直到拿到一次"已停稳"的融合（或者超时，返回最后一次）。
 
@@ -568,7 +657,21 @@ class Vision:
 
         读不到画面（相机掉线）不算"还在动"：连续读失败会一直重试到超时，
         与 :func:`modules.grasp.drive.servo_observation.measure_settled` 的取舍一致。
+
+        ``require_motion`` / ``motion`` 补的是**另一件事**：:attr:`Fusion.confident`
+        只说明"这一批读数内部一致"，它答不了"转盘到底转过没有"。画面本来就静止时，
+        读数连续几批都一样，看起来和"转完停稳了"完全一致——于是上一轮的残留状态会被
+        当成这一轮的结果。给 ``require_motion=True`` 就要求**先看见它真的动过**
+        （判据见 :mod:`modules.vision.drive.motion_gate`），没动过就一直等到超时。
+
+        ``motion`` 可以传一个自己的门控进来跨调用累积状态（转盘一个完整周期跨多次
+        ``measure_settled`` 时用得上）；不给就现建一个。**只有 ``require_motion``
+        为真时才会用到它。**
         """
+        gate = motion
+        if require_motion and gate is None:
+            gate = _settled_motion_gate()
+
         deadline = self._clock() + max(0.0, timeout)
         last = None
         while True:
@@ -579,9 +682,433 @@ class Vision:
             if current is not None:
                 last = current
                 if current.confident:
-                    return current
+                    if not require_motion:
+                        return current
+                    # 门控喂的是**毫米**位置（见 _motion_position 的单位说明）。
+                    verdict = gate.observe(
+                        _motion_position(current),
+                        current.point.stamp,
+                        key=current.point.color,
+                    )
+                    if verdict.report_now:
+                        return current
             if self._clock() >= deadline:
                 return last
+
+    # ------------------------------------------------------------- 画面级停稳
+    def scene_stability(
+        self,
+        *,
+        frames: int = DEFAULT_STABLE_FRAMES,
+        pixel_threshold: int = DEFAULT_PIXEL_DIFF_THRESHOLD,
+        max_mean_diff: float = DEFAULT_MAX_MEAN_DIFF,
+        max_changed_ratio: float = DEFAULT_MAX_CHANGED_RATIO,
+        timeout: Optional[float] = None,
+    ) -> "SceneStability":
+        """连拍几帧，量**整幅画面**的像素差，回答"现在画面静止没有"。
+
+        与 :meth:`measure_settled` 的分工：那个看**检测到的物料位置**稳不稳（没有目标
+        就答不了），这个只看像素（画面里有没有物料都能回答）。抓取前"下降的那几百毫秒
+        里物块会不会跟着转盘走掉"就是后者要回答的问题::
+
+            if robot.vision.scene_stable():
+                robot.arm.move_axis_to_motor_degrees("lift", 530)
+                robot.gripper.close_jaws()
+
+        只比**相邻帧**：``frames`` 帧产生 ``frames - 1`` 组比较，每一组都要小于阈值。
+        只比首尾两帧会被"转过去又转回来"骗过去。
+
+        :param frames: 连拍几帧（至少 2）。
+        :param pixel_threshold: 逐像素灰度差超过它才算"变了"（0–255）。
+        :param max_mean_diff: 整幅图平均灰度差的允许上限。
+        :param max_changed_ratio: 变化像素占比的允许上限（0–1）。
+        :param timeout: 整段连拍的读取超时（秒）；``None`` = 不设总时限。
+        :raises RuntimeError: 会话未就绪 / 已关闭，或读不到摄像头画面。
+        :raises ValueError: 帧数或阈值不合法。
+        """
+        from modules.vision.drive.scene_stability import evaluate_stability
+
+        burst = self._read_burst(frames, timeout=timeout)
+        result = evaluate_stability(
+            burst,
+            pixel_threshold=pixel_threshold,
+            max_mean_diff=max_mean_diff,
+            max_changed_ratio=max_changed_ratio,
+        )
+        # 留一份给诊断：等停稳超时后要能报出"判据当时差了多少"，而不是只报一句还在动。
+        self.last_scene_stability = result
+        return result
+
+    def scene_stable(
+        self,
+        *,
+        frames: int = DEFAULT_STABLE_FRAMES,
+        pixel_threshold: int = DEFAULT_PIXEL_DIFF_THRESHOLD,
+        max_mean_diff: float = DEFAULT_MAX_MEAN_DIFF,
+        max_changed_ratio: float = DEFAULT_MAX_CHANGED_RATIO,
+        timeout: Optional[float] = None,
+    ) -> bool:
+        """布尔简写：**整幅画面静止**（可以下降）时返回 ``True``。
+
+        参数与 :meth:`scene_stability` 完全相同；要实测值（差多少灰阶、多少像素变了）
+        用那个，不要在这里改判据。
+        """
+        return self.scene_stability(
+            frames=frames,
+            pixel_threshold=pixel_threshold,
+            max_mean_diff=max_mean_diff,
+            max_changed_ratio=max_changed_ratio,
+            timeout=timeout,
+        ).stable
+
+    def wait_scene_stable(
+        self,
+        *,
+        timeout: float = DEFAULT_SCENE_STABLE_WAIT_SECONDS,
+        interval: float = DEFAULT_SCENE_STABLE_POLL_SECONDS,
+        min_seconds: float = DEFAULT_SCENE_STABLE_MIN_SECONDS,
+        frames: int = DEFAULT_STABLE_FRAMES,
+        pixel_threshold: int = DEFAULT_PIXEL_DIFF_THRESHOLD,
+        max_mean_diff: float = DEFAULT_MAX_MEAN_DIFF,
+        max_changed_ratio: float = DEFAULT_MAX_CHANGED_RATIO,
+    ) -> bool:
+        """等到画面**看满最小等待之后仍然静止**；返回是否等到了。
+
+        进来那一眼"静止"一律不作数：一次判断只连拍 4 帧（约 130 ms），"这一眼没动"
+        太便宜——转盘刚接到转动指令、物块正要被带走之前，画面也能看着是静的，
+        照这一眼放行就会"跑过去扑空"（现场遇到的就是这个）。
+
+        所以每隔 ``interval`` 秒看一眼，**两条同时满足**才放行：
+
+        - 从进来算起已经看了至少 ``min_seconds`` 秒（默认 3.5 s，头几眼的静止不作数）；
+        - 这一眼没有大变化（画面静止）。
+
+        最小等待之内、或哪一眼还在动，就接着看；到 ``timeout`` 还没等到返回 ``False``——
+        宁可让调用方不下降，也不要落下去扑空::
+
+            if not robot.vision.wait_scene_stable(timeout=8.0):
+                raise RuntimeError("还没停稳，先别下降")
+
+        ``min_seconds`` 只管"最早什么时候允许放行"，不改变判据；它比 ``timeout`` 大时
+        按 ``timeout`` 算（等待上限由调用方定，这个函数不擅自延长）。判一次要连拍几帧
+        （默认 4 帧，约 130 ms），所以 ``interval`` 是**两次判断开始之间**的间隔
+        （判一次比它久时，下一次立刻开始，不再叠加等待）。
+
+        返回 ``False`` 时，:attr:`last_scene_stability` 留着最后一次判断的实测值：
+        "明明已经停了却报还在动"要先分清是阈值太紧（只超一点）还是等得太短
+        （事后复测已经很小）。
+
+        :raises ValueError: ``timeout`` / ``interval`` / ``min_seconds`` 为负，
+            或其他参数不合法。
+        """
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError(f"timeout 必须是非负的有限数，收到 {timeout!r}")
+        if not math.isfinite(interval) or interval < 0:
+            raise ValueError(f"interval 必须是非负的有限数，收到 {interval!r}")
+        if not math.isfinite(min_seconds) or min_seconds < 0:
+            raise ValueError(f"min_seconds 必须是非负的有限数，收到 {min_seconds!r}")
+
+        started_at = self._clock()
+        deadline = started_at + timeout
+        # 头 min_seconds 秒内的"静止"不作数：那可能只是物块被带走前的一瞬间。
+        # 上限是 timeout——等多久由调用方定，这里不擅自延长。
+        hold_until = started_at + min(min_seconds, timeout)
+        while True:
+            started = self._clock()
+            if (
+                self.scene_stable(
+                    frames=frames,
+                    pixel_threshold=pixel_threshold,
+                    max_mean_diff=max_mean_diff,
+                    max_changed_ratio=max_changed_ratio,
+                    timeout=max(0.0, deadline - started),
+                )
+                and self._clock() >= hold_until
+            ):
+                return True
+            if self._clock() >= deadline:
+                return False
+            # 间隔按"上次开始判 → 下次开始判"算：判一次本身要连拍几帧，不再叠加。
+            pause = max(0.0, interval - (self._clock() - started))
+            # 别睡过 deadline：到点之后再判一眼就下结论，不白等。
+            time.sleep(min(pause, max(0.0, deadline - self._clock())))
+
+    # ------------------------------------------------------------- 两点像素测量
+    def pixel_distance(self, start, end) -> "PixelMeasurement":
+        """量画面上两点之间的 ΔX / ΔY（有符号）与直线距离，单位像素。
+
+        **不读帧、不开设备**：只是算术，所以会话没开相机也能用（``open`` 之前就可用）。
+        画面尺寸取自配置里本平台的相机画幅，用来判断端点是否落在画外。
+
+        想连毫米一起要，见 :meth:`pixel_distance_mm`；点从鼠标来还是从别的检测器来，
+        由调用方决定——本方法不猜。
+
+        :raises ValueError: 端点写法不合法（不是两元素数字坐标）。
+        """
+        from modules.vision.config import current_platform
+        from modules.vision.drive.pixel_measure import pixel_distance
+
+        return pixel_distance(start, end, image_size=self._frame_size())
+
+    def pixel_distance_mm(
+        self,
+        start,
+        end,
+        *,
+        working_distance_mm: Optional[float] = None,
+        focal_px: Optional[float] = None,
+    ) -> "MillimetreMeasurement":
+        """同 :meth:`pixel_distance`，再按针孔模型换算成毫米。
+
+        ``working_distance_mm`` 是**被测平面**到镜头的距离；不给就用
+        ``calibration.json`` 的 ``table_depth_mm``。两者都没有时**报错**而不是猜一个数——
+        比例尺错一个倍数，量出来的毫米就是错的，而它看起来完全正常。
+
+        ``focal_px`` 不给就用本会话的焦距（``calibration.json`` 的标定值，或粗标定兜底）。
+
+        :raises ValueError: 焦距或工作距离没标定、或取值不合法。
+        """
+        from modules.vision.config import current_platform
+        from modules.vision.drive.pixel_measure import to_millimetres
+
+        measured = self.pixel_distance(start, end)
+        distance = (
+            self._settings.table_depth_mm
+            if working_distance_mm is None
+            else float(working_distance_mm)
+        )
+        if distance is None:
+            raise ValueError(
+                "没有工作距离，量不出毫米：传 working_distance_mm，"
+                "或先用 python -m modules.vision.test.manual.calibrate_vision 写入 "
+                "calibration.json 的 table_depth_mm"
+            )
+        return to_millimetres(
+            measured,
+            focal_px=self._effective_focal_px(focal_px),
+            working_distance_mm=distance,
+        )
+
+    def _frame_size(self) -> "Tuple[int, int]":
+        """本平台相机的画幅 ``(宽, 高)``。相机没开时也能答（配置里就写着）。"""
+        camera = self._camera
+        if camera is not None:
+            width = getattr(camera, "width", None)
+            height = getattr(camera, "height", None)
+            if width and height:
+                return (int(width), int(height))
+        return (1280, 720)
+
+    def _effective_focal_px(self, override: Optional[float] = None) -> float:
+        """本会话实际用的像素焦距：显式覆盖 > 标定值 > 粗标定兜底。
+
+        ``resolve_focal_px`` 要画幅才能把"1280 宽时的粗焦距"等比换算到本画幅，
+        所以这里必须把 ``_frame_size()`` 传进去——漏传会直接 ``TypeError``
+        （这个入口在没有显式焦距时就会被走到）。
+        """
+        from modules.vision.drive.pinhole import resolve_focal_px
+
+        if override is not None:
+            if override <= 0:
+                raise ValueError("focal_px must be positive")
+            return float(override)
+        width, height = self._frame_size()
+        return float(resolve_focal_px(width, height, self._settings.focal_px))
+
+    # ------------------------------------------------------------- 工位识别
+    def detect_ring_station(self, *, timeout: Optional[float] = None) -> "RingStationDetection":
+        """读一帧，找三圆环工位，返回圆心、偏角与偏差。
+
+        **与 :meth:`locate` 的语义差异是有意的**：``locate`` 读不到画面就抛
+        ``RuntimeError``（那是业务失败）；这里**画面里没有工位是正常结果**
+        （``detection.detected is False``，``detail`` 说明原因），而读不到画面仍然抛
+        ``RuntimeError``——两种情况不该用同一个返回值表达。
+
+        检测器按会话缓存（配置在 ``open`` 时就定死了），所以跨帧的稳定窗口是连续的。
+
+        :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
+        """
+        frame = self._read_frame(timeout=timeout)
+        return self._ring_station_detector().detect(frame)
+
+    def detect_stacked_ring(self, *, timeout: Optional[float] = None) -> "StackedRingDetection":
+        """读一帧，找叠放位（中环 + 上下基准线），返回圆心、偏角与偏差。
+
+        语义与 :meth:`detect_ring_station` 一致：没识别到是正常结果，
+        读不到画面才抛 ``RuntimeError``。
+
+        :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
+        """
+        frame = self._read_frame(timeout=timeout)
+        return self._stacked_ring_detector().detect(frame)
+
+    def _read_frame(self, *, timeout: Optional[float] = None):
+        """丢缓冲、读一帧 BGR；读不到抛 ``RuntimeError``（与 :meth:`locate` 一致）。
+
+        与 :meth:`_read_report` 的区别是**只读帧、不推理**：工位识别用的是经典 CV，
+        不该为了它把 YOLO 也叫起来。
+        """
+        camera, _locator = self._require_resources()
+        for _ in range(max(1, self._drain_frames)):
+            camera.read()
+        deadline = None if timeout is None else self._clock() + max(0.0, timeout)
+        while True:
+            frame = camera.read()
+            if frame is not None:
+                self.frames += 1
+                return frame
+            self.misses += 1
+            if deadline is None or self._clock() >= deadline:
+                raise RuntimeError("读不到摄像头画面")
+
+    def _read_burst(
+        self, count: int, *, timeout: Optional[float] = None
+    ) -> "Tuple[object, ...]":
+        """先丢一次缓冲，再**连续**读 ``count`` 帧（中间不再丢帧）。
+
+        :meth:`_read_frame` 每次只取一帧、每次都要丢缓冲，适合单帧定位；这里要的是
+        时间上相邻的几帧，所以只在开头丢一次。默认 4 帧约 130 ms（30 fps），正好是
+        "看一小段时间里画面动没动"的窗口。
+        """
+        camera, _locator = self._require_resources()
+        if type(count) is not int or count < 2:
+            raise ValueError(f"至少需要两帧才能比较（收到 {count!r}）")
+        for _ in range(max(1, self._drain_frames)):
+            camera.read()
+        deadline = None if timeout is None else self._clock() + max(0.0, timeout)
+        frames: list = []
+        while len(frames) < count:
+            frame = camera.read()
+            if frame is not None:
+                frames.append(frame)
+                self.frames += 1
+                continue
+            self.misses += 1
+            if deadline is not None and self._clock() >= deadline:
+                raise RuntimeError("读不到摄像头画面")
+            time.sleep(0.01)
+        return tuple(frames)
+
+    def _ring_station_detector(self) -> "RingStationDetector":
+        """懒建并缓存三圆环检测器：配置在 ``open`` 时就定死了，中途不会回读文件。"""
+        from modules.vision.drive.ring_station import RingStationDetector
+
+        if self._station is None:
+            self._station = RingStationDetector(
+                geometry=self._settings.station_geometry,
+                detection=self._settings.station_detection,
+                reference=self._settings.station_reference,
+            )
+        return self._station
+
+    def _stacked_ring_detector(self) -> "StackedRingDetector":
+        """懒建并缓存叠放位检测器。
+
+        中环参考圆心取 ``station.ring_centers_px`` 的**中间那个**：叠放位的中环和
+        三圆环的中间环是同一个工位位置，配两份只会让它们漂移。
+        """
+        from modules.vision.drive.stacked_ring import StackedRingDetector
+
+        if self._stacked is None:
+            self._stacked = StackedRingDetector(
+                stacked=self._settings.stacked_ring,
+                geometry=self._settings.station_geometry,
+                middle_reference_px=self._settings.station_reference.ring_centers_px[1],
+            )
+        return self._stacked
+
+    # ------------------------------------------------------------- 视野里的那一个环
+    def locate_ring(
+        self, *, timeout: Optional[float] = None, digit: Optional[int] = None
+    ) -> "Optional[RingTarget]":
+        """读一帧，找出**视野里那一个环**的环心（像素 + 相机系毫米 + 环号）。
+
+        为"相机视野装不下整排环"的场合准备：相机装在臂上、镜头离纸很近时，画面里
+        通常只有一个环，而"只看到一个环"是**正常取景**，不是错误。
+
+        环心与环号都来自模型（``models/best.onnx`` 的 ``tg1`` / ``tg2`` / ``tg3``
+        三类），所以这条路径**看不到模型就什么也给不出**——它不再是一套独立的经典 CV。
+
+        ``digit`` 给了就只找**这个环号**：画面里同时看得见两个环时，模型给分高的那个
+        未必是你要的（校准 2 号环时按分数挑到 3 号，`require_digit` 只会报"是 3 号"，
+        而 2 号就在画面里）。没给则照旧"整框可见优先、再比置信度"。
+
+        与 :meth:`locate` 相同的取舍：
+
+        - 读不到画面抛 ``RuntimeError``（设备问题）；
+        - 画面里**没有环**是正常结果，返回 ``None``（不是异常）；
+        - 框被画面裁掉、或没有比例尺时照样返回，但
+          :meth:`RingTarget.reading` 返回 ``None``——不拿偏过的框心冒充环心。
+
+        选哪个框：优先"整框都在画面里"的那个（只有它才可能给出真环心），再比置信度。
+
+        :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
+        """
+        frame = self._read_frame(timeout=timeout)
+        return self._ring_target_locator().detect(frame, digit=digit)
+
+    def locate_rings(
+        self, *, timeout: Optional[float] = None
+    ) -> "Dict[int, RingTarget]":
+        """读**一帧**，把画面里每个环号各取一个：``{环号: RingTarget}``。
+
+        与 :meth:`locate_ring` 的区别是"全都要"：三环同框时用这三条读数定出那条直线
+        （中间环实测、两端按已知间距外推），比逐环各拍一帧省两次取帧，也不会因为
+        机械臂动了半步就换了一套坐标系。
+
+        语义与 :meth:`locate_ring` 一致：画面里一个环都没有是正常结果（空字典），
+        读不到画面才抛 ``RuntimeError``；贴边 / 没比例尺的环照样返回，只是
+        ``RingTarget.reading()`` 为 ``None``。
+
+        :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
+        """
+        frame = self._read_frame(timeout=timeout)
+        return self._ring_target_locator().detect_all(frame)
+
+    @property
+    def ring_center_spacing_mm(self) -> float:
+        """相邻两个地面圆环的圆心间距（毫米，``station.center_spacing_mm``）。
+
+        三环成排时两端环心就是"中间环沿直线退/进这么远"，是**装好的物理真值**，
+        不该在业务代码里再写一份常量。
+        """
+        return float(self._settings.station_geometry.center_spacing_mm)
+
+    def ring_center(self, *, timeout: Optional[float] = None) -> "Optional[Tuple[float, float]]":
+        """视野里那个环的**相机系中心** ``(x_mm, y_mm)``，可直接喂 ``align_xy(reading=...)``。
+
+        画面里没有环、没有比例尺、或检测框被画面裁掉时返回 ``None``——与
+        :meth:`locate_ring` 一致，不拿像素坐标冒充毫米，也不拿偏过的框心冒充环心。
+
+        :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
+        """
+        target = self.locate_ring(timeout=timeout)
+        return None if target is None else target.reading()
+
+    def _ring_target_locator(self) -> "RingTargetLocator":
+        """懒建并缓存单环定位器：配置在 ``open`` 时就定死了。
+
+        检测器**借**物料定位器那一个（``locator.yolo.detector``）：同一个会话只该加载
+        一次模型，靶标与物料跑的是同一份权重。单环定位器自己不持有、也不关闭它——
+        关闭由会话统一收尾。
+        """
+        from modules.vision.drive.numbered_ring import RingTargetLocator
+
+        if self._ring_target is None:
+            _, locator = self._require_resources()
+            self._ring_target = RingTargetLocator(
+                locator.yolo.detector,
+                settings=self._settings.ring_target,
+                geometry=self._settings.station_geometry,
+                # 精修沿用 station 那一套 Canny/椭圆阈值：同一台相机、同一种图案，
+                # 另配一份只会在两处漂移。
+                detection=self._settings.station_detection,
+                # 针孔标定优先：环心读数必须与 RegionReport 的毫米同一套单位，
+                # align_xy 的目标点（tx, ty）才对得上。
+                focal_px=self._effective_focal_px(),
+                table_depth_mm=self._settings.table_depth_mm,
+            )
+        return self._ring_target
 
     # ------------------------------------------------------------- 收尾
     def close(self) -> None:

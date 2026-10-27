@@ -18,7 +18,7 @@ CONFIG = TurntableConfig(
     duration_ms=1500,
     stations={"home": 0, "station_2": 500, "station_3": 1000},
 )
-BUS = BusServoConfig(port="COM14", baudrate=115200, servo_id=1)
+BUS = BusServoConfig(port="COM14", baudrate=115200, timeout_seconds=0.1)
 
 
 def make_turntable(readings) -> tuple[TurntableServo, Mock]:

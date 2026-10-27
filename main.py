@@ -8,7 +8,22 @@ from __future__ import annotations
 
 import time
 
-from modules.arm.drive.kinematics import CylindricalPose
+from app.gripper import (
+    _move_axes_to,
+    center_chassis_on_ring,  # 车横向对到圆环正前方
+    grab_box_from_floor_to_repo,
+    grab_box_from_floor_to_repo_v2,
+    grab_box_from_turntable_to_repo,  # 圆盘->仓库
+    grab_box_from_turntable_to_repo_v2,  # 圆盘->仓库（跟着料走）
+    place_box_from_repo_to_floor,  # 仓库->地面圆环
+    place_box_from_repo_to_floor_v2,  # 仓库->地面圆环
+    place_box_from_repo_to_floor_v3,  # 仓库->地面圆环
+    place_box_to_box,  # 物料到物料
+    place_box_to_box_v2,  # 物料到物料（按 order 依次放三个位置）
+    square_chassis_to_ring_row,  # 车纵向对到圆环正前方
+)
+
+SCENE_STABLE_TIMEOUT_SECONDS = 20.0
 
 # 预览演示的**模块级**导入：``demo_material`` 只定义函数、不开设备，真正的装配发生在
 # 它内部（读配置 + ``Vision._open_config``）；保持模块级也让既有入口用例能直接替换它。
@@ -25,7 +40,19 @@ def main() -> None:
     **上层调用的样子**见 :func:`locate_material`、:func:`pick_ready` 与
     :func:`pick_manual`：一条 ``with`` 完成装配，动作一行一个，收尾交给 ``Robot``。
     """
-    demo_material()
+    # demo_material()
+    with Robot.open(grasp=True, gripper=True, turntable=True, chassis=True) as robot:
+        robot.gripper.set_position(350)
+        robot.turntable.go_home()
+        _move_axes_to(robot, {"lift": 495, "extension": 550, "base": 0}).wait()
+        print("初始状态移动完毕")
+        grab_box_from_floor_to_repo(robot, want_colors= ["red", "blue", "green"])
+        place_box_to_box(robot, _want = "blue")
+        place_box_to_box(robot, _want = "red")
+        return
+        grab_box_from_turntable_to_repo(robot, want_colors= ["red", "blue", "green"])
+        input("抓完了，回车继续：")
+        place_box_from_repo_to_floor(robot, verbose=True)
 
 
 def locate_material(*, config_path=None) -> None:
@@ -48,97 +75,60 @@ def locate_material(*, config_path=None) -> None:
             print("画面里没有通过校验的物料")
 
 
-def pick_ready(*, grasp_config_path=None, vision_config_path=None) -> None:
-    """**抓取就位的例子**：抓取借用同一个 arm 与 vision，是否闭爪由业务显式决定。
-
-    ``grasp=True`` 已经包含 arm 与 vision，不会再开第二份设备。
-    """
-    with Robot.open(
-        grasp=True,
-        gripper=True,
-        grasp_config_path=grasp_config_path,
-        vision_config_path=vision_config_path,
-    ) as robot:
-        result = robot.grasp.align_and_descend()
-        print(result.summary())
-        # 就位成功不等于夹到了物料：闭不闭爪是业务的显式动作。
-        robot.gripper.close_jaws()
-
 def pick_manual() -> None:
-    with Robot.open(grasp=True, gripper=True) as robot:
-        robot.gripper.set_position(250)
-        robot.arm.move_up(pulses=3200)
+    with Robot.open(grasp=True, gripper=True, turntable=True) as robot:
+        robot.gripper.set_position(280)
+        robot.turntable.go_home()
+        # robot.arm.move_up(pulses=6000)          # 675度
+        robot.arm.move_axis_to_motor_degrees("lift", 675)
         robot.arm.move_forward(3200)
+        grab_box_from_turntable_to_repo(robot)
         
-        report = robot.vision.locate()
-        if report.best is None:
-            print("画面里没有通过校验的物料")
-            robot.arm.move_axis_to_motor_degrees("extension", 0)
-            return
-        material = report.best
-        print(
-            f"物料：{material.name or '未知'}，"
-            f"相机系 xyz=({material.x_mm:.1f}, {material.y_mm:.1f}, "
-            f"{material.z_mm:.1f}) mm"
-        )
 
-        # # x/y 对准 → 下降 → 后缩；一次都不动高度（除了这一次开环下降）。
+def _place_box(robot: Robot):
+    try:
+        report = robot.vision.locate()
+    except Exception as e:
+        print("视觉识别失败", e)
+        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+        return
+        
+    if report.best is None:
+        print("画面里没有通过校验的物料")
+        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+        return
+    material = report.best
+    print(
+        f"物料：{material.name or '未知'}，"
+        f"相机系 xyz=({material.x_mm:.1f}, {material.y_mm:.1f}, "
+        f"{material.z_mm:.1f}) mm"
+    )
+
+    try:
         robot.grasp.align_xy()
-        robot.arm.move_down(pulses= 800)
-        # grab_box(robot)
-        place_box(robot)
-        robot.arm.move_axis_to_motor_degrees("extension", 0)
-
-def test_place_box() -> None:
-    with Robot.open(grasp=True, gripper=True) as robot:
-        place_box(robot)
-
-def grab_box(robot):
-        robot.gripper.set_position(250)
-        # robot.arm.rotate_cw(pulses=1000)
-        # robot.arm.move_down(pulses=800)
-        robot.gripper.set_position(0)
-        robot.arm.move_up(pulses=1000)
-        robot.arm.rotate_ccw(pulses=1000)
-        
-def place_box(robot: Robot):
-    robot.gripper.set_position(0)
-    robot.arm.move_axis_to_motor_degrees("lift", 528.7)
-    robot.arm.move_axis_to_motor_degrees("extension", 100)
+    except Exception as e:
+        print("对准失败", e)
+        robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+        return
+    
+    # 下降进行抓取
+    robot.arm.move_axis_to_motor_degrees("lift", 563)
+    robot.gripper.set_position(40)
+    # 抬起物料，放进仓库
+    robot.arm.move_axis_to_motor_degrees("lift", 900)
+    robot.arm.move_axis_to_motor_degrees("extension", 10)
     robot.arm.move_axis_to_motor_degrees("base", 1048)
-    robot.gripper.set_position(250)
+    robot.gripper.set_position(280)
+    # 回到初始位置
+    robot.arm.move_axis_to_motor_degrees("extension", 270.0)
+    robot.arm.move_axis_to_motor_degrees("base", 0)
+    robot.arm.move_axis_to_motor_degrees("lift", 675)
+    robot.arm.move_forward(3200)
 
-def adjust_arm_align():
-    with Robot.open(grasp=True, gripper=True) as robot:
-        robot.gripper.set_position(250)
-        robot.arm.move_up(pulses=5000)
-        robot.arm.move_forward(3200)
-        time.sleep(1)
-        report = robot.vision.locate()
-        if report.best is None:
-            print("画面里没有通过校验的物料")
-            return
-        material = report.best
-        print(
-            f"物料：{material.name or '未知'}，"
-            f"相机系 xyz=({material.x_mm:.1f}, {material.y_mm:.1f}, "
-            f"{material.z_mm:.1f}) mm"
-        )
-        # robot.arm.move_by(x_mm=- material.x_mm, y_mm= - material.y_mm)
-
-def test_vision():
-    with Robot.open(vision=True, gripper=True) as robot:
-        report = robot.vision.locate()
-        robot.gripper.set_position(200)
-        if report.best is None:
-            print("画面里没有通过校验的物料")
-            return
-        print("z =", report.best.z_mm)      # 必须在 55–160 之间，最好 80–120
-        print("坐标:", report.best.x_mm, report.best.y_mm, report.best.z_mm)
 
 if __name__ == "__main__":
-    # main()
-    pick_manual()
+    main()
+    # pick_manual()
     # test_place_box()
     # test_vision()
     # adjust_arm_align()

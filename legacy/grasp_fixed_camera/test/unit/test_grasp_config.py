@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from modules.grasp.config import CorrectionSettings, GraspConfig, load_grasp_config
+from legacy.grasp_fixed_camera.config import CorrectionSettings, GraspConfig, load_grasp_config
 
 
 def write_config(path: Path, document: object) -> None:

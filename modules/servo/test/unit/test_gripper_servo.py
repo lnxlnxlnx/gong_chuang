@@ -55,15 +55,14 @@ class GripperLifecycleTests(unittest.TestCase):
         ) as load_bus, patch(
             "modules.servo.runtime.BusServo", return_value=servo
         ) as bus_servo:
-            load_bus.return_value = Mock(port="COM7", baudrate=115200, servo_id=1)
+            load_bus.return_value = Mock(port="COM7", baudrate=115200, timeout_seconds=0.1)
             gripper = GripperServo.open()
 
-        # 两个加载器读的是同一份配置路径。
+        # 两个加载器各自读自己那份文件：调参读 config.json，端口/ID 读 hardware.json。
         load_gripper.assert_called_once()
         load_bus.assert_called_once()
-        self.assertEqual(
-            load_gripper.call_args.args[0], load_bus.call_args.kwargs["config_path"]
-        )
+        hardware = load_bus.call_args.kwargs["hardware_path"]
+        self.assertEqual(load_gripper.call_args.args[1], hardware)
         bus_servo.assert_called_once_with("COM7", CONFIG.servo_id, baudrate=115200)
         servo.initialize.assert_called_once_with()
         servo.set_torque.assert_called_once_with(True)
@@ -191,15 +190,36 @@ class GripperMotionTests(unittest.TestCase):
         gripper, _, _ = make_gripper([500 - DEFAULT_POSITION_TOLERANCE - 1])
         self.assertFalse(gripper.close_jaws().reached)
 
-    def test_wait_false_sends_the_command_without_sleeping_or_claiming_arrival(self) -> None:
-        gripper, servo, slept = make_gripper([412])
+    def test_wait_false_hands_back_a_ticket_instead_of_a_report(self) -> None:
+        """``wait=False`` 只发命令：不睡、**也不读回**，结论要等票据到点才有。"""
+        now = [0.0]
+        slept: list = []
 
-        report = gripper.close_jaws(wait=False)
+        def sleep(seconds: float) -> None:
+            slept.append(seconds)
+            now[0] += seconds
+
+        servo = Mock()
+        servo.read_position.side_effect = [412]
+        gripper = GripperServo(
+            config=CONFIG,
+            port="FAKE",
+            servo=servo,
+            sleep=sleep,
+            clock=lambda: now[0],
+            settle_seconds=0.2,
+        )
+
+        ticket = gripper.close_jaws(wait=False)
 
         servo.set_position.assert_called_once_with(500, 1000)
+        servo.read_position.assert_not_called()
         self.assertEqual(slept, [])
+
+        report = ticket.wait()
         self.assertFalse(report.reached)
         self.assertEqual(report.position, 412)
+        self.assertAlmostEqual(sum(slept), 1.2, places=9)
 
     def test_set_position_drives_a_raw_value_for_calibration(self) -> None:
         gripper, servo, _ = make_gripper([420])

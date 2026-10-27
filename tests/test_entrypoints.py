@@ -78,6 +78,40 @@ class EntryPointTests(unittest.TestCase):
         self.assertIn("17. D6 点云实时显示", output.getvalue())
         import_module.assert_called_once_with("modules.lidar.test.manual.coin_d6_live")
 
+    def _assert_menu_dispatches(self, choice: str, label: str, module: str) -> None:
+        """选 ``choice`` 之后，菜单应当 import ``module`` 并调用它的 main()。"""
+        with patch("builtins.input", side_effect=[choice, "0"]):
+            with patch.object(test_launcher.importlib, "import_module") as import_module:
+                with redirect_stdout(io.StringIO()) as output:
+                    test_launcher.main()
+        self.assertIn(f"{choice}. {label}", output.getvalue())
+        import_module.assert_called_once_with(module)
+
+    def test_menu_dispatches_ring_station(self) -> None:
+        self._assert_menu_dispatches(
+            "22", "三圆环工位识别", "modules.vision.test.manual.ring_station"
+        )
+
+    def test_menu_dispatches_stacked_ring(self) -> None:
+        self._assert_menu_dispatches(
+            "23", "叠放位识别", "modules.vision.test.manual.stacked_ring"
+        )
+
+    def test_menu_dispatches_pixel_measure(self) -> None:
+        self._assert_menu_dispatches(
+            "24", "两点像素测量", "modules.vision.test.manual.pixel_measure"
+        )
+
+    def test_menu_dispatches_vision_calibration(self) -> None:
+        self._assert_menu_dispatches(
+            "25", "视觉标定（焦距/台面深度）", "modules.vision.test.manual.calibrate_vision"
+        )
+
+    def test_menu_dispatches_numbered_ring(self) -> None:
+        self._assert_menu_dispatches(
+            "26", "环内数字环心", "modules.vision.test.manual.numbered_ring"
+        )
+
     def test_vision_demo_selects_the_local_model_format(self) -> None:
         """模型路径来自 config.json 的 model 块，不是代码里的 os.name 分支。"""
         model_path = default_model_path()
@@ -136,6 +170,14 @@ class EntryPointTests(unittest.TestCase):
         for module in (
             "modules.vision.drive.hough_lock",
             "modules.vision.drive.material_locate",
+            # 工位识别与两点测量也是"既能 import、又能 python -m"的模块，
+            # 一起钉住：包出口一旦急切导入它们，这几条会立刻红。
+            "modules.vision.drive.ring_station",
+            "modules.vision.drive.stacked_ring",
+            "modules.vision.drive.pixel_measure",
+            "modules.vision.drive.motion_gate",
+            # 环内数字也是"既能 import、又能 python -m"：它的自测在合成帧上跑。
+            "modules.vision.drive.numbered_ring",
         ):
             with self.subTest(module=module):
                 result = subprocess.run(

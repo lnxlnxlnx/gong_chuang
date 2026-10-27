@@ -172,9 +172,14 @@ class BackendTests(TempConfigTestCase):
 class ProjectConfigTests(unittest.TestCase):
     """工程里那份 ``config.json`` 本身也要对得上当前模型。"""
 
-    def test_deployed_config_describes_the_four_class_material_model(self) -> None:
+    def test_deployed_config_describes_the_seven_class_model(self) -> None:
+        """随包的 ``best.onnx`` 是"四色 + 三个靶标"七类；靶标**不算物料**。"""
         settings = load_model_settings()
-        self.assertEqual(settings.class_names, ("red", "yellow", "blue", "green"))
+        self.assertEqual(
+            settings.class_names,
+            ("red", "yellow", "blue", "green", "tg1", "tg2", "tg3"),
+        )
+        self.assertEqual(settings.materials, ("red", "yellow", "blue", "green"))
         self.assertEqual(settings.input_size, 320)
         self.assertEqual(settings.onnx_path.name, "best.onnx")
         self.assertEqual(settings.engine_path.name, "best.engine")

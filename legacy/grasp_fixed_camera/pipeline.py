@@ -56,8 +56,8 @@ from modules.arm.drive.kinematics import (
     require_reachable,
     shortest_angle_delta_degrees,
 )
-from modules.grasp.config import GraspConfig, load_grasp_config
-from modules.grasp.drive.perception import CellObservation
+from legacy.grasp_fixed_camera.config import GraspConfig, load_grasp_config
+from legacy.grasp_fixed_camera.perception import CellObservation
 from modules.servo.runtime import GripperReport
 
 #: 小于这个角度就当作"角度没变"，不必绕安全廊道。
@@ -483,8 +483,8 @@ def _self_test() -> int:
     """不需要硬件或摄像头：用假机械臂/假夹爪/脚本化观测跑通整条流程。"""
     from modules.arm.config import AxisConfig
     from modules.arm.drive.kinematics import TravelLimit
-    from modules.grasp.config import CorrectionSettings, GraspConfig
-    from modules.grasp.drive.perception import CellObservation
+    from legacy.grasp_fixed_camera.config import CorrectionSettings, GraspConfig
+    from legacy.grasp_fixed_camera.perception import CellObservation
     from modules.servo.runtime import CLOSE_COMMAND, OPEN_COMMAND, GripperReport
 
     safe_radial = 40.0

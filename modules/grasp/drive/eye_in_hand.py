@@ -448,13 +448,33 @@ def align_x_y(
       爪子悬到物块正上方、自己把光挡住就是这个现象，收工口正是为它留的；
     - 一次都没测到、或者还差得远 → 原样报错（物块可能被挪走、被手挡住、被爪子推开）。
 
-    "画面里有多个目标"和"等不到新观测"**不属于遮挡**（那是
-    :class:`~modules.grasp.drive.servo_model.ObjectMissing` 之外的类型），永远报错。
+    画面里有多个物料时按**离光轴最近**的那个对准（见
+    :func:`~modules.grasp.drive.servo_observation.select_object`），不算遮挡、也不报错。
+
+    ## 为什么不按"像素直径突变"判遮挡
+
+    z 是按像素半径反推的（``z = f·D/2r``），所以直径一变，算出来的距离就跟着变。
+    曾经在这里按"直径相对第一次测量变化超过 25%"判"爪子挡住了物块"并**直接报错**
+    （``diameter_change_limit_ratio``），但真机上它总在误报：实测一次对准里直径从
+    272 px 变成 397 px（1.46 倍，f=1012 px、顶面 30 mm，等价于 z 从 112 mm 报成 77 mm）。
+    那次根本没有遮挡——报错文字说的"被遮住一部分 → 可见区域变小"是反方向。
+
+    它也不是本函数的正确性问题：x/y 由像素**圆心**直接决定
+    （``x = (u-cx)·z/f``），目标是画面中心时把 x 驱动到 0 就是 ``u→cx``，与 z 的尺度
+    无关。尺度错了只影响**每一步走多远**、以及"进容差"实际有多严（差 1.46 倍就是 4 mm
+    容差实际 5.8 mm），下一步重新测量就纠正回来，不会把爪子带到别处去。所以这条判据
+    去掉了，闭环需要的反馈一点没少。
+
+    "转底盘之前必须先够高"仍由 :func:`raise_before_rotating`（``ensure_safe_height``，
+    按 **z** 判安全高度）负责——那是机械结构上的硬约束，与像素尺度无关。
+
+    :func:`align_z` 里那条直径判据留着：那里升降**确实**按设计改变距离，而"检测换了
+    目标"是另一回事（真物块被推出半径窗口后检测会锁到画面里别的东西上）。
 
     ## 为什么停稳判据不看 z
 
     每一次测量都要求"连续两帧读数一致"，而那个判据默认是**三维**的。本函数只用
-    ``x_mm`` / ``y_mm``（另加像素直径做干涉判据），z 一个数都不进解算——可 z 恰恰是
+    ``x_mm`` / ``y_mm``，z 一个数都不进解算——可 z 恰恰是
     最不稳的那个：它按像素半径反推（``z = f·D/2r``，本机约 0.42 mm/px），1 px 的半径
     抖动就顶掉整个细档 0.4 mm。
 
@@ -466,6 +486,19 @@ def align_x_y(
     所以这里传 ``include_depth=False``，只比平面内的 x/y。测 z 的那几条路
     （:func:`raise_before_rotating` / :func:`hover_above_object` / :func:`align_z`）
     照旧比三维——那里的 z 就是被控量，抖动必须等它停下来。
+
+    平面内的细档也不沿用 ``settle_tolerance_mm``（0.4 mm）：那个精度是给探针 / z 标定
+    用的，对准的验收容差是 ``tolerance_mm``，读数噪声只要比它小一大截就够。这里取
+    ``tolerance_mm / 4``（不低于 ``settle_tolerance_mm``、不高于粗档），于是"读数抖动
+    1 mm 就等满 4 s"的那一段被去掉，每次测量回到"两帧收工"。
+
+    ## 物块还没转进视野时（转盘）
+
+    第一次测量把 ``config.target_wait_seconds`` 当作"等物块出现"的上限
+    （``null`` = 一直等，``0`` = 保持旧语义），而不是沿用 ``settle_timeout_seconds`` 的
+    4 s：转盘还没把物块转到镜头前时，本函数会一直看着画面等它出现，出现之后才按 4 s
+    等它停稳。之后的每一次测量仍按 4 s 收工——"看见过又丢"要能按最后读数收工
+    （``occluded=True``），不能被无限等待卡住。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     if reading is not None:
@@ -505,11 +538,21 @@ def align_x_y(
     previous_step: Optional[Tuple[int, int]] = None
     #: 连续几步方向相反。**一步不算**（物块被推动、检测跳目标都会这样）。
     contradictions = 0
-    #: 第一次测到的像素直径，用来发现"物块被挡住了"。
-    baseline_diameter: Optional[float] = None
+    #: 细档判"停稳"用的一致性门槛。**不直接用** ``settle_tolerance_mm``（0.4 mm）：
+    #: 那个数是给探针 / z 标定用的——那里的斜率就是被控量，0.4 mm 的读数噪声已经
+    #: 足够把雅可比算歪。x/y 对准不需要那么严：它的验收容差是 ``tolerance_mm``，
+    #: 读数噪声只要比它小一大截就够。而真机上连续两帧的 Δxy 尾巴会到 1 mm 以上
+    #: （中位数 0.02–0.26 mm），按 0.4 mm 判就会每步都等满 ``settle_timeout_seconds``
+    #: （默认 4 s）才拿最后读数走人——每多等一帧就是一次定位。
+    #: 所以取"验收容差的四分之一"，下限仍是标定过的 ``settle_tolerance_mm``，
+    #: 上限是粗档：细档不该比粗档更松。
+    fine_settle_tolerance = min(
+        config.coarse_settle_tolerance_mm,
+        max(config.settle_tolerance_mm, 0.25 * config.tolerance_mm),
+    )
     #: 这一轮判"停稳"用的一致性门槛。第一次用细档（要判"是不是已经对准了"），
-    #: 之后误差还大就换粗档——粗档少等几帧，而每帧都要跑一次 178 ms 的定位。
-    settle_tolerance = config.settle_tolerance_mm
+    #: 之后误差还大就换粗档——粗档少等几帧，而每帧都要跑一次定位。
+    settle_tolerance = fine_settle_tolerance
 
     for attempt in range(1, config.max_iterations + 1):
         started = time.monotonic()
@@ -524,6 +567,10 @@ def align_x_y(
                 # "为什么停稳判据不看 z"）。z 那一路的抖动会把每次测量拖到
                 # settle_timeout_seconds 才收工，实测那是"对准要等好几秒"的唯一来源。
                 include_depth=False,
+                # 第一次测量：物块可能还在转盘上没转进视野，按 target_wait_seconds 等它出现
+                # （null = 一直等）。测到过之后不再无限等——"看见过又被爪子挡住"的收工口
+                # 要靠 settle_timeout_seconds 触发。
+                wait_for_first_target=not readings,
             )
         except ObjectMissing:
             # 只有"一个目标都没有"走这条路：可能只是爪子悬到物块上方把光挡住了。
@@ -549,23 +596,8 @@ def align_x_y(
         offset = (sighting.x_mm, sighting.y_mm)
         readings.append(offset)
 
-        # 物块被挡住时，可见区域从整圆变成月牙，等效半径变小——测距公式按直径反推距离，
-        # 于是会报成"物块突然远了几十毫米"。那看起来完全像一次正常观测，其实与机械臂
-        # 位置毫无关系；照着它解算只会让闭环空转。这里把它变成一句说人话的报错。
-        if sighting.diameter_px:
-            if baseline_diameter is None:
-                baseline_diameter = sighting.diameter_px
-            else:
-                ratio = sighting.diameter_px / baseline_diameter
-                if abs(ratio - 1.0) > config.diameter_change_limit_ratio:
-                    raise ServoError(
-                        f"画面里物块的像素直径从 {baseline_diameter:.0f} px 变成 "
-                        f"{sighting.diameter_px:.0f} px（{ratio:.2f} 倍），"
-                        f"距镜头 {sighting.z_mm:.0f} mm。多半是**爪子或别的结构挡住了物块**"
-                        "（被遮住一部分时可见区域变小，测距就会把它算成变远）。\n"
-                        "  x/y 对准必须让爪子**高于**物块，否则转动底座时爪瓣会从物块上扫过去。"
-                        "先把升降抬起来（或用菜单 2 的「机械臂向上」点动几下）再试。"
-                    )
+        # 这里**不再**按"像素直径突变"判遮挡：真机上它总在误报，而 x/y 由像素圆心
+        # 直接决定、与 z 的尺度无关（见 docstring 的"为什么不按像素直径突变判遮挡"）。
         error_x = offset[0] - target.x_mm
         error_y = offset[1] - target.y_mm
         error = math.hypot(error_x, error_y)
@@ -573,7 +605,7 @@ def align_x_y(
         settle_tolerance = (
             config.coarse_settle_tolerance_mm
             if error > config.coarse_error_mm
-            else config.settle_tolerance_mm
+            else fine_settle_tolerance
         )
         say(
             f"第 {attempt} 次测量：物块 ({offset[0]:+.2f}, {offset[1]:+.2f}) mm，"
@@ -1424,12 +1456,11 @@ def _self_test() -> int:
         def __init__(self, arm: FakeArm) -> None:
             self.arm = arm
             self.error = None
-            self._published: Optional[Tuple[float, float, float]] = None
             self.guarded_reads = 0
             self.unguarded_reads = 0
 
-        def _publish(self, stamp: float) -> None:
-            self._published = (self.arm.offset[0], self.arm.offset[1], stamp)
+        def _publish(self, stamp: float) -> Tuple[float, float, float]:
+            return (self.arm.offset[0], self.arm.offset[1], stamp)
 
         def frame(self, *, timeout=None, max_age_seconds=None, min_received_at=None):
             from modules.vision.drive.sighting import parse_sighting
@@ -1439,8 +1470,7 @@ def _self_test() -> int:
             else:
                 self.guarded_reads += 1
             # 每次都发布当前真实位姿（真摄像头每次读都是一帧新画面）。
-            self._publish(max(time.monotonic(), min_received_at or 0.0))
-            x, y, stamp = self._published
+            x, y, stamp = self._publish(max(time.monotonic(), min_received_at or 0.0))
             item = parse_sighting(
                 f"物料 4: @(566,376) 绿色物料（green），xyz=({x:.4f},{y:.4f},113.2) mm",
                 received_at=stamp,

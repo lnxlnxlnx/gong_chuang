@@ -15,7 +15,7 @@ from collections.abc import Callable
 
 from modules.servo.config import HOME_STATION, TurntableConfig, load_turntable_config
 from modules.servo.drive.bus_servo import BusServo, BusServoConfig, load_bus_config
-from modules.servo.drive.turntable import DEGREES_PER_UNIT, TurntableServo
+from modules.servo.drive.turntable import TurntableServo
 
 
 def station_order(config: TurntableConfig) -> tuple[str, ...]:
@@ -47,7 +47,7 @@ def run_manual(
         answer = (
             prompt(
                 f"转盘将转到工位 {name}（位置 {position}，"
-                f"约 {position * DEGREES_PER_UNIT:.1f}°，耗时 {config.duration_ms} 毫秒）。"
+                f"约 {position * config.degrees_per_unit:.1f}°，耗时 {config.duration_ms} 毫秒）。"
                 "确认转盘有活动空间、机械臂已让开之后按回车执行，输入 q 结束，其他输入跳过："
             )
             .strip()

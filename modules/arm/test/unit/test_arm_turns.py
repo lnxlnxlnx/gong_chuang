@@ -42,6 +42,10 @@ class FakeSerial:
     def read(self, size: int) -> bytes:
         return b""
 
+    def reset_input_buffer(self) -> None:
+        """只写不读的假总线：没有应答可清，保留方法是为了满足 SerialPort 协议。"""
+        pass
+
     def close(self) -> None:
         self.is_open = False
 
@@ -56,7 +60,7 @@ class RecordingSleep:
         self.calls.append(seconds)
 
 
-def turns_config() -> ArmConfig:
+def turns_config(*, initial_motor_degrees=None) -> ArmConfig:
     """A fully calibrated arm so the absolute-planning path is usable too."""
     return ArmConfig(
         pulses_per_revolution=PULSES_PER_REVOLUTION,
@@ -74,6 +78,9 @@ def turns_config() -> ArmConfig:
         height_limit=TravelLimit(10.0, 183.5),
         # 绝对规划要先有一个安全位（转角度前回到它），所以夹具也得给。
         safe_pose=CylindricalPose(0.0, 200.0, 100.0),
+        initial_motor_degrees=(
+            {} if initial_motor_degrees is None else dict(initial_motor_degrees)
+        ),
     )
 
 
@@ -87,6 +94,59 @@ class MotorTurnsStateTests(unittest.TestCase):
         for axis in ("base", "lift", "extension"):
             with self.subTest(axis=axis):
                 self.assertEqual(self.turns.of(axis).pulses, 0)
+
+    def test_a_declared_starting_reading_is_kept_for_the_named_axis(self) -> None:
+        """启程读数：结构上这根轴不在原点时**如实声明**，而不是继续假装它是 0。
+
+        现场例子：换过爪子之后 7 号轴的机械初始位在原点外 270° = 2400 脉冲。
+        """
+        turns = MotorTurnsState(
+            PULSES_PER_REVOLUTION,
+            ("base", "lift", "extension"),
+            initial_pulses={"extension": 2400},
+        )
+
+        self.assertEqual(turns.of("extension").pulses, 2400)
+        self.assertEqual(turns.of("extension").motor_degrees, 270.0)
+        self.assertEqual(turns.of("base").pulses, 0)
+        self.assertEqual(turns.of("lift").pulses, 0)
+
+    def test_the_starting_reading_can_be_negative(self) -> None:
+        """270° 与 -90° 在同一圈上方向相反：声明的是带符号读数，不做归一。"""
+        turns = MotorTurnsState(
+            PULSES_PER_REVOLUTION, ("extension",), initial_pulses={"extension": -800}
+        )
+
+        self.assertEqual(turns.of("extension").pulses, -800)
+        self.assertEqual(turns.of("extension").motor_degrees, -90.0)
+
+    def test_an_unknown_axis_in_the_starting_reading_is_rejected(self) -> None:
+        with self.assertRaises(KeyError):
+            MotorTurnsState(
+                PULSES_PER_REVOLUTION, ("base",), initial_pulses={"nope": 100}
+            )
+
+    def test_a_non_integer_starting_reading_is_rejected(self) -> None:
+        for bad in (1.5, True, "2400"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    MotorTurnsState(
+                        PULSES_PER_REVOLUTION,
+                        ("extension",),
+                        initial_pulses={"extension": bad},  # type: ignore[dict-item]
+                    )
+
+    def test_marking_the_origin_clears_a_declared_starting_reading(self) -> None:
+        """回零 / 绝对归零把原点重新定义在这根轴上，启程读数随之作废。"""
+        turns = MotorTurnsState(
+            PULSES_PER_REVOLUTION,
+            ("base", "extension"),
+            initial_pulses={"extension": 2400},
+        )
+
+        turns.mark_origin("extension")
+
+        self.assertEqual(turns.of("extension").pulses, 0)
 
     def test_a_full_motor_revolution_is_360_degrees(self) -> None:
         reading = self.turns.record("lift", PULSES_PER_REVOLUTION)
@@ -202,30 +262,11 @@ class RobotArmTurnsTests(unittest.TestCase):
         self.assertEqual(self.arm.turns_state.of("lift").pulses, 500)
 
     def test_a_unit_converted_move_advances_by_the_actual_pulses(self) -> None:
-        """``move_lift_mm`` 传的是毫米，记的必须是**换算后的整数脉冲**。"""
-        report = self.arm.move_lift_mm(61.0)
+        """``move_axis_to_motor_degrees`` 传的是角度，记的必须是**换算后的整数脉冲**。"""
+        report = self.arm.move_axis_to_motor_degrees("lift", 360.0)
 
         self.assertEqual(report.pulses, PULSES_PER_REVOLUTION)
         self.assertEqual(self.arm.turns_state.of("lift").pulses, PULSES_PER_REVOLUTION)
-
-    def test_equally_named_methods_do_not_double_count(self) -> None:
-        """毫米版内部调的是 ``_signed_move``；上一层的名字不该再记一遍。"""
-        report = self.arm.move_radial_mm(61.0)
-
-        self.assertEqual(self.arm.turns_state.of("extension").pulses, report.pulses)
-
-    def test_the_planned_absolute_path_uses_the_same_counter(self) -> None:
-        """绝对规划走 ``_execute_frame``，但它同样经过 ``_send`` —— 账只有一本。
-
-        这条如果红了，说明有人把累计挪到了上一层，绝对定位那条路就会漏记。
-        """
-        self.arm.record_measurement(CylindricalPose(0.0, 200.0, 100.0))
-
-        self.arm.move_cylindrical(base_degrees=30.0, radial_mm=200.0, height_mm=100.0)
-
-        self.assertEqual(
-            self.arm.turns_state.of("base").pulses, base_pulses_for(30.0)
-        )
 
     def test_a_rejected_move_is_not_counted(self) -> None:
         """越界的脉冲在发帧之前就被拒了，账上不该多出来。"""
@@ -245,21 +286,6 @@ class RobotArmTurnsTests(unittest.TestCase):
         self.assertEqual(report.turns.pulses, 800)
         self.assertEqual(self.arm.turns_state.of("lift").pulses, 800)
 
-    def test_absolute_zeroing_puts_the_axis_back_on_the_origin(self) -> None:
-        """绝对归位和回零停在同一个物理点（驱动器计数器 0），所以原点同此。"""
-        self.arm.move_up(pulses=800)
-
-        self.arm.move_axis_to_zero("lift")
-
-        self.assertEqual(self.arm.turns_state.of("lift").pulses, 0)
-
-    def test_an_unwaited_move_still_counts_because_the_frame_was_sent(self) -> None:
-        """``wait=False`` 不推进位姿（不知道走没走到），但帧确实发出去了。"""
-        self.arm.move_up(pulses=800, wait=False)
-
-        self.assertFalse(self.arm.pose_state.is_known)
-        self.assertEqual(self.arm.turns_state.of("lift").pulses, 800)
-
     def test_direction_uses_the_same_axis_as_the_physical_primitive(self) -> None:
         self.arm.rotate_cw(pulses=4000)
         self.arm.rotate_ccw(pulses=1000)
@@ -268,6 +294,54 @@ class RobotArmTurnsTests(unittest.TestCase):
         self.assertEqual(reading.pulses, 3000)
         self.assertEqual(reading.motor_degrees, 337.5)
 
+
+class RobotArmInitialTurnsTests(unittest.TestCase):
+    """配置里声明的启程读数，就是装配后里程表的第一个读数。
+
+    现场用法：换过爪子之后 7 号轴的机械初始位在原点外 270°（2400 脉冲 = 45.75 mm），
+    于是 ``move_axis_to_motor_degrees("extension", 0)`` 会把那 2400 脉冲老老实实收回去，
+    而不是因为"读数是 0"一帧都不发。
+    """
+
+    def setUp(self) -> None:
+        self.serial = FakeSerial()
+        self.sleep = RecordingSleep()
+        self.arm = RobotArm._from_settings(
+            config=turns_config(initial_motor_degrees={"extension": 270.0}),
+            port="/dev/ttyUSB0",
+            bus=self.serial,
+            sleep=self.sleep,
+        )
+        self.serial.writes.clear()
+
+    def test_the_declared_starting_angle_is_the_first_reading(self) -> None:
+        reading = self.arm.turns_state.of("extension")
+
+        self.assertEqual(reading.pulses, 2400)
+        self.assertEqual(reading.motor_degrees, 270.0)
+        # 没声明的轴照旧从 0 起。
+        self.assertEqual(self.arm.turns_state.of("lift").pulses, 0)
+
+    def test_walking_back_to_the_origin_retracts_the_declared_angle(self) -> None:
+        report = self.arm.move_axis_to_motor_degrees("extension", 0)
+
+        self.assertEqual(report.pulses, 2400)
+        self.assertEqual(self.arm.turns_state.of("extension").pulses, 0)
+        self.assertEqual(len(self.serial.writes), 1)
+
+    def test_the_declared_angle_itself_is_already_reached(self) -> None:
+        report = self.arm.move_axis_to_motor_degrees("extension", 270.0)
+
+        self.assertEqual(report.pulses, 0)
+        self.assertEqual(self.serial.writes, [])
+
+    def test_relative_moves_add_on_top_of_the_declared_reading(self) -> None:
+        self.arm.move_forward(PULSES_PER_REVOLUTION)
+
+        self.assertEqual(
+            self.arm.turns_state.of("extension").pulses,
+            2400 + PULSES_PER_REVOLUTION,
+        )
 
 class RobotArmAbsoluteMotorPositionTests(unittest.TestCase):
     """``move_axis_to_motor_pulses`` / ``move_axis_to_motor_degrees``：

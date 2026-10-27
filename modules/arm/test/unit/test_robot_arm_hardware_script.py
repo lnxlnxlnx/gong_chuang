@@ -10,7 +10,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from modules.arm.test.manual import arm as position_motion
-from modules.motor.config import load_bus_config
 from modules.arm.runtime import MotionReport
 from modules.arm.config import ArmConfig, AxisConfig
 
@@ -77,17 +76,25 @@ class ArmPositionMotionScriptTests(unittest.TestCase):
             },
         )
 
-        with patch("sys.argv", ["arm.py"]):
-            args = position_motion.parse_args(config)
+        # 端口默认值来自 load_bus_config；这里把它钉死，单测不因为有 auto 就去真开串口。
+        # （argparse 建 parser 时就会求值这个默认值，即使 --port 会覆盖它，所以两次都要钉。）
+        with patch.object(
+            position_motion, "load_bus_config", return_value=SimpleNamespace(port="COM29")
+        ):
+            with patch("sys.argv", ["arm.py"]):
+                args = position_motion.parse_args(config)
 
-        self.assertEqual(args.pulses, 1200)
-        self.assertEqual(args.port, load_bus_config().port)
-        error_output = StringIO()
-        with patch("sys.argv", ["position_motion.py", "--port", "COM29", "--pulses", "5001"]):
-            with redirect_stderr(error_output), self.assertRaises(SystemExit):
-                position_motion.parse_args(config)
-        self.assertIn("must be in 1..5000", error_output.getvalue())
-        self.assertNotIn("choose from", error_output.getvalue())
+            self.assertEqual(args.pulses, 1200)
+            self.assertEqual(args.port, "COM29")
+
+            error_output = StringIO()
+            with patch(
+                "sys.argv", ["position_motion.py", "--port", "COM29", "--pulses", "5001"]
+            ):
+                with redirect_stderr(error_output), self.assertRaises(SystemExit):
+                    position_motion.parse_args(config)
+            self.assertIn("must be in 1..5000", error_output.getvalue())
+            self.assertNotIn("choose from", error_output.getvalue())
 
     def test_sequence_sends_each_confirmed_axis_direction_with_one_safe_pulse_count(self) -> None:
         arm = FakeRobotArm()

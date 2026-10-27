@@ -1,0 +1,20 @@
+{
+  "vehicle": {
+    "motor_ids": {
+      "FL": 1,
+      "FR": 2,
+      "RL": 3,
+      "RR": 4
+    },
+    "wheel_signs": {
+      "FL": 1,
+      "FR": 1,
+      "RL": 1,
+      "RR": 1
+    },
+    "expect_ack": true,
+    "pattern": "X",
+    "motion_transform": "calibrated",
+    "mm_per_wheel_rev": null
+  }
+}

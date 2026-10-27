@@ -11,6 +11,12 @@
 个绝对参考（回零，或相机测量），同一个物理姿态永远对应同一组 ``(θ, r, h)``，绝对安全位
 就是可复现的。
 
+``initial_motor_degrees`` 也是可选的，缺省等于"程序启动那一刻三根轴都在原点上"。它描述的
+是**状态**（此刻轴在哪），不是传动常数：换了爪子、重新对齿或重装电机之后，某根轴的机械
+初始位可能离原点一整个角度（例如伸缩轴停在 270° = 2400 脉冲）。单位与
+``move_axis_to_motor_degrees`` 相同（``3200 脉冲 = 360°``），在这里如实声明它。回零 /
+绝对归零会重新定义原点，这条声明随之失效（见 :meth:`ArmConfig.initial_motor_pulses`）。
+
 ## 回零（``homing``）
 
 ``homing`` 也是可选的。它的语义是「三个轴各自回到驱动器里存的那个零点」，所以**零点必须
@@ -25,14 +31,24 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
 
-from modules.arm.drive.kinematics import CylindricalPose, TravelLimit
+from modules.arm.drive.kinematics import (
+    CylindricalPose,
+    TravelLimit,
+    motor_pulses_for_degrees,
+)
+from modules.motor.config import DEFAULT_HARDWARE_PATH as DEFAULT_BUS_HARDWARE_PATH
+from modules.motor.config import load_pulses_per_revolution
 from modules.motor.drive.emm42 import Emm42Driver, HomeMode
 
+#: 运动调参（rpm / acceleration / 脉冲上限）：手改。
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
+
+#: 硬件事实（轴地址、减速比、导程、行程、安全位、回零方式）：换机器/换接线时改。
+DEFAULT_HARDWARE_PATH = Path(__file__).resolve().parent / "hardware.json"
 AXIS_NAMES = ("base", "lift", "extension")
 
 #: ``limits`` / ``safe_pose`` 里三个量的名字，对应 ``CylindricalPose`` 的字段。
@@ -84,6 +100,10 @@ class AxisConfig:
     motor_id: int
     reduction_ratio: Optional[int] = None
     mm_per_motor_rev: Optional[float] = None
+    #: 这台驱动器的 ``Response`` 菜单是否会回 4 字节 ACK。``False`` 就是"发完不管"。
+    #: 它是**每台驱动器的菜单状态**，不是协议事实，所以必须在 hardware.json 里如实声明；
+    #: 这个默认值只服务于手工构造的夹具，加载器在没有该键时会直接报错。
+    expect_ack: bool = False
 
 
 @dataclass(frozen=True)
@@ -101,6 +121,9 @@ class ArmConfig:
     height_limit: Optional[TravelLimit] = None
     safe_pose: Optional[CylindricalPose] = None
     homing: Optional[HomingConfig] = None
+    #: 程序启动那一刻每根轴相对**原点**的电机角度；没写的轴按 0。
+    #: 见 :meth:`initial_motor_pulses`：它是状态声明，不是传动常数。
+    initial_motor_degrees: Mapping[str, float] = field(default_factory=dict)
 
     def motor_id(self, axis_name: str) -> int:
         """Return the configured Emm42 address for a named axis."""
@@ -190,6 +213,23 @@ class ArmConfig:
             )
         return self.safe_pose
 
+    # ------------------------------------------------------- 启程读数（初始电机角）
+    def initial_motor_pulses(self, axis_name: str) -> int:
+        """该轴在**程序启动那一刻**相对原点的电机角，换算成带符号脉冲；没配就是 0。
+
+        给 :class:`modules.arm.arm_state.MotorTurnsState` 用的启程读数。它是"此刻轴在哪"
+        的**声明**（例如换爪子后伸缩停在 270° = 2400 脉冲），不是传动常数、也不是动作——
+        声明错了，这条路上所有绝对目标就会整体偏一个常数。回零 / 绝对归零会重新定义原点。
+        """
+        if axis_name not in self.axes:
+            raise KeyError(
+                f"{axis_name!r} 不是已知的轴；已知的是 {sorted(self.axes)}"
+            )
+        return motor_pulses_for_degrees(
+            self.initial_motor_degrees.get(axis_name, 0.0),
+            pulses_per_revolution=self.pulses_per_revolution,
+        )
+
     # ------------------------------------------------------- 绝对参考的唯一性
     def motor_turn_span(self, axis_name: str) -> Optional[float]:
         """一个**电机圈**对应这个轴的多少物理量（度 / 毫米）。
@@ -214,6 +254,47 @@ class ArmConfig:
             "lift": self.height_limit,
             "extension": self.radial_limit,
         }.get(axis_name)
+
+    def travel_motor_degrees(self, axis_name: str) -> Optional[float]:
+        """该轴的总行程折成**电机角度**；缺标定时返回 ``None``。
+
+        与 :meth:`motor_turn_span` 互为倒数关系：那个说"一个电机圈值多少物理量"，
+        这个说"整段行程值多少电机角度"。绝对值大于它的初始电机角不可能对应真实位置。
+        """
+        limit = self.axis_travel_span(axis_name)
+        if limit is None:
+            return None
+        span = limit.maximum - limit.minimum
+        if axis_name == "base":
+            try:
+                reduction = self.base_reduction
+            except ValueError:
+                return None
+            return abs(span) * reduction
+        per_revolution = self.mm_per_motor_rev(axis_name)
+        if per_revolution is None or per_revolution <= 0:
+            return None
+        return abs(span) / per_revolution * 360.0
+
+    def initial_state_problems(self) -> Tuple[str, ...]:
+        """启程读数与行程是否自洽；空元组表示可以这么声明。
+
+        只做**上界**检查：原点落在行程里的哪儿并不由这份配置给出（那是 ``safe_pose`` 与
+        现场核对的事），所以这里只能要求 ``|初始电机角|`` 不超过该轴总行程。缺行程标定的
+        轴跳过（与 ``limits`` 缺失等于没有软件保护的既有约定一致）。
+        """
+        labels = {"base": "底座", "lift": "升降", "extension": "伸缩"}
+        problems = []
+        for axis_name, degrees in sorted(self.initial_motor_degrees.items()):
+            span = self.travel_motor_degrees(axis_name)
+            if span is None:
+                continue
+            if abs(degrees) > span + 1e-9:
+                problems.append(
+                    f"{labels[axis_name]}（{axis_name}）的初始电机角 {degrees:.1f}° "
+                    f"超过该轴总行程 {span:.1f}°：这个启程读数对应不到任何真实位置"
+                )
+        return tuple(problems)
 
     def homing_reference_problems(self) -> Tuple[str, ...]:
         """建立**绝对参考**之前必须满足的条件；空元组表示可以建立。
@@ -287,31 +368,42 @@ class ArmConfig:
         return tuple(problems)
 
 
-def load_arm_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ArmConfig:
-    """Load one JSON file and reject settings outside the supported protocol range."""
-    try:
-        document = json.loads(config_path.read_text(encoding="utf-8"))
-    except OSError as error:
-        raise ValueError(f"cannot read configuration: {config_path}") from error
-    except json.JSONDecodeError as error:
-        raise ValueError(f"invalid JSON configuration: {config_path}") from error
+def load_arm_config(
+    config_path: Path = DEFAULT_CONFIG_PATH,
+    hardware_path: Path = DEFAULT_HARDWARE_PATH,
+    bus_hardware_path: Optional[Path] = None,
+) -> ArmConfig:
+    """Read **tuning** from ``config.json`` and **hardware** from ``hardware.json``.
 
-    root = _mapping(document, "root")
-    motion = _mapping(root.get("motion"), "motion")
-    axes_document = _mapping(root.get("axes"), "axes")
+    - ``rpm`` / ``acceleration`` / ``default_pulses`` / ``max_pulses`` 是调参，留在
+      ``config.json`` 的 ``motion`` 段；
+    - 轴地址、减速比、导程、启程读数（`initial_motor_degrees`）是**硬件事实**，全在
+      ``hardware.json``；``limits`` / ``safe_pose`` / ``homing`` 只剩加载校验，
+      代码不再用它们做运动决策（见 ``modules/arm/docs/机械臂Emm42三轴控制说明.md``）；
+    - 脉冲/圈是驱动器细分，只有一份，读 ``modules/motor/hardware.json``（``bus`` 段）。
+
+    返回值仍然是**合并后的** :class:`ArmConfig` 快照：``runtime`` /
+    测试都不需要知道它来自两个文件，只有写配置的人需要。
+
+    任何一项缺失都报出具体的**文件与键名**，不退回代码默认值——默认值会让"漏写"看起来
+    像"跑通了"。
+    """
+    tuning = _read_json(config_path)
+    hardware = _read_json(hardware_path)
+    pulses_per_revolution = load_pulses_per_revolution(
+        DEFAULT_BUS_HARDWARE_PATH if bus_hardware_path is None else bus_hardware_path
+    )
+
+    motion = _mapping(tuning.get("motion"), "motion")
+    axes_document = _mapping(hardware.get("axes"), "axes")
     if set(axes_document) != set(AXIS_NAMES):
         raise ValueError(f"axes must define exactly: {', '.join(AXIS_NAMES)}")
 
-    limits = root.get("limits")
+    limits = hardware.get("limits")
     limits = {} if limits is None else _mapping(limits, "limits")
 
     config = ArmConfig(
-        pulses_per_revolution=_integer(
-            motion.get("pulses_per_revolution"),
-            "modules.motor.drive.motion.pulses_per_revolution",
-            minimum=1,
-            maximum=0xFFFFFFFF,
-        ),
+        pulses_per_revolution=pulses_per_revolution,
         rpm=_integer(motion.get("rpm"), "modules.motor.drive.motion.rpm", minimum=0, maximum=Emm42Driver.MAX_RPM),
         acceleration=_integer(
             motion.get("acceleration"), "modules.motor.drive.motion.acceleration", minimum=0, maximum=255),
@@ -337,14 +429,33 @@ def load_arm_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ArmConfig:
         base_limit=_optional_limit(limits, "base_degrees"),
         radial_limit=_optional_limit(limits, "radial_mm"),
         height_limit=_optional_limit(limits, "height_mm"),
-        safe_pose=_optional_safe_pose(root.get("safe_pose")),
-        homing=_optional_homing(root.get("homing")),
+        safe_pose=_optional_safe_pose(hardware.get("safe_pose")),
+        homing=_optional_homing(hardware.get("homing")),
+        initial_motor_degrees=_initial_motor_degrees(
+            hardware.get("initial_motor_degrees")
+        ),
     )
     if config.default_pulses > config.max_pulses:
         raise ValueError("modules.motor.drive.motion.default_pulses must not exceed modules.motor.drive.motion.max_pulses")
     if len({axis.motor_id for axis in config.axes.values()}) != len(AXIS_NAMES):
         raise ValueError("axes motor_id values must be unique")
+    problems = config.initial_state_problems()
+    if problems:
+        raise ValueError(
+            "initial_motor_degrees 与行程不自洽：" + "；".join(problems)
+        )
     return config
+
+
+def _read_json(path: Path) -> Mapping[str, object]:
+    """读一个配置文件并保证顶层是对象；错误信息带上文件名。"""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ValueError(f"无法读取配置：{path}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"配置不是合法 JSON：{path}") from error
+    return _mapping(document, str(path))
 
 
 def _axis_config(document: Mapping[str, object], axis_name: str) -> AxisConfig:
@@ -369,7 +480,16 @@ def _axis_config(document: Mapping[str, object], axis_name: str) -> AxisConfig:
         motor_id=_integer(document.get("motor_id"), f"axes.{axis_name}.motor_id", minimum=1, maximum=255),
         reduction_ratio=reduction_ratio,
         mm_per_motor_rev=mm_per_motor_rev,
+        expect_ack=_boolean(
+            document.get("expect_ack", False), f"axes.{axis_name}.expect_ack"
+        ),
     )
+
+
+def _boolean(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} 必须是 true 或 false，实际 {value!r}")
+    return value
 
 
 def _optional_homing(value: object) -> Optional[HomingConfig]:
@@ -397,6 +517,29 @@ def _optional_homing(value: object) -> Optional[HomingConfig]:
             document.get("settle_seconds", 0.5), "homing.settle_seconds"
         ),
     )
+
+
+def _initial_motor_degrees(value: object) -> Mapping[str, float]:
+    """Read the optional ``initial_motor_degrees`` block (轴名 -> 电机角度)。
+
+    没写这个块就等于"三根轴都在原点上"，所以返回**空映射**而不是 ``None``：调用方不必
+    再判空，缺的轴由 :meth:`ArmConfig.initial_motor_pulses` 按 0 处理。
+    """
+    if value is None:
+        return {}
+    document = _mapping(value, "initial_motor_degrees")
+    unknown = sorted(set(document) - set(AXIS_NAMES))
+    if unknown:
+        raise ValueError(
+            "initial_motor_degrees 只能给这些轴："
+            + "、".join(AXIS_NAMES)
+            + "；多出来的是 "
+            + "、".join(unknown)
+        )
+    return {
+        axis_name: _number(item, f"initial_motor_degrees.{axis_name}")
+        for axis_name, item in document.items()
+    }
 
 
 def _optional_limit(document: Mapping[str, object], field: str) -> Optional[TravelLimit]:

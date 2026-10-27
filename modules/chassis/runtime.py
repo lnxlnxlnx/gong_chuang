@@ -29,11 +29,16 @@ Robot 会话
 
 借用者 ``close`` 只让自身失效，**不切断**别人的总线：只有创建者才物理关闭。
 
-## 门面方法的三选一参数与机械臂一致
+## 门面方法的"给哪个单位"与机械臂一致
 
-- ``pulses=N``  ：位置模式，按逆运动学比例走 N 个脉冲；
+- ``pulses=N``  ：位置模式，按逆运动学比例走 N 个脉冲（量的是峰值轮）；
+- ``mm=D``      ：位置模式，**车心**沿运动方向走 D 毫米（要 ``mm_per_wheel_rev`` 标定）；
 - ``duration=T``：速度模式，跑 T 秒后自动停止；
 - 都不给        ：速度模式持续运动，直到 ``stop()``。
+
+三个位移/计时参数只能给一个，多给直接报错。``rpm`` 可以省略——省略时用
+``modules/chassis/config.json`` 的 ``vehicle.rpm``；调用方显式给的 ``rpm`` 永远优先。
+旋转（``rotate_cw`` / ``rotate_ccw``）不收 ``mm``：旋转不改变车心在 X/Y 上的位置。
 """
 
 from __future__ import annotations
@@ -43,13 +48,17 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from modules.chassis.config import DEFAULT_CONFIG_PATH, HardwareProfile, load_profile
+from modules.chassis.config import (
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_HARDWARE_PATH,
+    HardwareProfile,
+    load_profile,
+)
 from modules.chassis.drive.mecanum import (
     MecanumDrive,
     SerialPort,
-    WheelPosition,
 )
-from modules.motor.config import DEFAULT_CONFIG_PATH as MOTOR_CONFIG_PATH
+from modules.motor.config import DEFAULT_HARDWARE_PATH as MOTOR_HARDWARE_PATH
 from modules.motor.config import load_bus_config
 
 
@@ -67,6 +76,7 @@ class MecanumChassis:
         cls,
         *,
         config_path: Optional[Path] = None,
+        hardware_path: Optional[Path] = None,
         motor_config_path: Optional[Path] = None,
         bus: Optional[SerialPort] = None,
         owns_bus: Optional[bool] = None,
@@ -75,27 +85,34 @@ class MecanumChassis:
     ) -> "MecanumChassis":
         """读 chassis 配置 + 总线配置，建驱动并使能四轮。
 
-        :param config_path: chassis 的硬件 profile 配置；``None`` 用模块默认路径。
-        :param motor_config_path: 步进总线配置；``None`` 用 motor 模块的默认路径。
+        :param config_path: 运动调参（``config.json``）；``None`` 用模块默认路径。
+        :param hardware_path: 硬件事实（``hardware.json``）；``None`` 用模块默认路径。
+        :param motor_config_path: 步进总线硬件配置；``None`` 用 motor 模块的默认路径。
         :param bus: 由调用方**已经打开**的共享连接（``Robot`` 装配 arm+chassis 时用）。
             给了就借用，不再自己开第二条、也不会在 ``close`` 里关掉它。
         :param owns_bus: 显式声明这条 ``bus`` 归不归本底盘；默认"不是自己开的就是借的"。
         """
-        profile = cls.load_hardware_profile(config_path)
-        path = MOTOR_CONFIG_PATH if motor_config_path is None else Path(motor_config_path)
+        profile = cls.load_hardware_profile(config_path, hardware_path)
+        path = MOTOR_HARDWARE_PATH if motor_config_path is None else Path(motor_config_path)
         # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
-        port = load_bus_config(config_path=path).port
+        port = load_bus_config(hardware_path=path).port
         return cls._from_settings(
             profile=profile, port=port, bus=bus, owns_bus=owns_bus,
             sleep=sleep, settle_seconds=settle_seconds,
         )
 
     @classmethod
-    def load_hardware_profile(cls, config_path: Optional[Path] = None) -> HardwareProfile:
+    def load_hardware_profile(
+        cls,
+        config_path: Optional[Path] = None,
+        hardware_path: Optional[Path] = None,
+    ) -> HardwareProfile:
         """按当前平台读并校验 chassis 配置；``Robot`` 在开设备前用它做预校验。"""
         platform = "windows" if os.name == "nt" else "jetson"
         return load_profile(
-            platform, DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
+            platform,
+            DEFAULT_CONFIG_PATH if config_path is None else Path(config_path),
+            DEFAULT_HARDWARE_PATH if hardware_path is None else Path(hardware_path),
         )
 
     @classmethod
@@ -126,8 +143,12 @@ class MecanumChassis:
             pattern=profile.pattern,
             rotation_gain=profile.rotation_gain,
             motion_transform=profile.motion_transform,
+            expect_ack=profile.expect_ack,
+            pulses_per_revolution=profile.pulses_per_revolution,
             serial_port=bus,
             sleep=sleep,
+            default_rpm=profile.rpm,
+            mm_per_wheel_rev=profile.mm_per_wheel_rev,
             **kwargs,
         )
         if borrowing:
@@ -135,7 +156,6 @@ class MecanumChassis:
             drive._owns_serial = bool(owns_bus)
         session = cls(drive)
         try:
-            drive.initialize()
             drive.enable_all(True)
         except BaseException as primary:
             try:
@@ -200,128 +220,75 @@ class MecanumChassis:
         self._require_open()
         self.drive.enable_all()
 
-    def enable_all(self) -> None:
-        self.enable()
-
     def disable(self) -> None:
         self._require_open()
         self.drive.disable_all()
 
-    def disable_all(self) -> None:
-        self.disable()
-
-    def wheel(self, wheel: WheelPosition):
-        """返回底层单轮对象，供回零等维护操作使用。"""
-        self._require_open()
-        return self.drive.get_wheel(wheel)
-
-    def set_wheel_speed(self, wheel: WheelPosition, signed_rpm: int, acceleration: int | None = None) -> None:
-        self._require_open()
-        self.drive.set_wheel_speed(wheel, signed_rpm, acceleration)
-
     # ------------------------------------------------------------- 整车动作
-    def drive_pulses(
-        self,
-        vx: float,
-        vy: float,
-        omega: float,
-        pulses: int,
-        rpm: int,
-        acceleration: int | None = None,
-        *,
-        wait: bool = True,
-    ) -> list[int] | None:
-        """逆运动学 + 脉冲数：任意方向走固定距离。"""
+    def _direction(self, name: str, rpm, acceleration, duration, *, pulses, mm=None, wait):
         self._require_open()
-        return self.drive.drive_pulses(vx, vy, omega, pulses, rpm, acceleration, wait=wait)
+        # 只有平移方向方法收 ``mm``：rotate_* 根本没有这个关键字，别把 None 递过去。
+        extra = {} if mm is None else {"mm": mm}
+        return getattr(self.drive, name)(
+            rpm, acceleration, duration, pulses=pulses, wait=wait, **extra
+        )
 
-    def _direction(self, name: str, rpm: int, acceleration, duration, *, pulses, wait):
-        self._require_open()
-        return getattr(self.drive, name)(rpm, acceleration, duration, pulses=pulses, wait=wait)
-
-    def forward(self, rpm: int, acceleration: int | None = None,
+    def forward(self, rpm: int | None = None, acceleration: int | None = None,
                 duration: float | None = None, *, pulses: int | None = None,
-                wait: bool = True) -> list[int] | None:
-        return self._direction("forward", rpm, acceleration, duration, pulses=pulses, wait=wait)
+                mm: float | None = None, wait: bool = True) -> list[int] | None:
+        return self._direction("forward", rpm, acceleration, duration, pulses=pulses, mm=mm, wait=wait)
 
-    def backward(self, rpm: int, acceleration: int | None = None,
+    def backward(self, rpm: int | None = None, acceleration: int | None = None,
                  duration: float | None = None, *, pulses: int | None = None,
-                 wait: bool = True) -> list[int] | None:
-        return self._direction("backward", rpm, acceleration, duration, pulses=pulses, wait=wait)
+                 mm: float | None = None, wait: bool = True) -> list[int] | None:
+        return self._direction("backward", rpm, acceleration, duration, pulses=pulses, mm=mm, wait=wait)
 
-    def left(self, rpm: int, acceleration: int | None = None,
+    def left(self, rpm: int | None = None, acceleration: int | None = None,
              duration: float | None = None, *, pulses: int | None = None,
-             wait: bool = True) -> list[int] | None:
-        return self._direction("strafe_left", rpm, acceleration, duration, pulses=pulses, wait=wait)
+             mm: float | None = None, wait: bool = True) -> list[int] | None:
+        return self._direction("strafe_left", rpm, acceleration, duration, pulses=pulses, mm=mm, wait=wait)
 
-    def right(self, rpm: int, acceleration: int | None = None,
+    def right(self, rpm: int | None = None, acceleration: int | None = None,
               duration: float | None = None, *, pulses: int | None = None,
-              wait: bool = True) -> list[int] | None:
-        return self._direction("strafe_right", rpm, acceleration, duration, pulses=pulses, wait=wait)
+              mm: float | None = None, wait: bool = True) -> list[int] | None:
+        return self._direction("strafe_right", rpm, acceleration, duration, pulses=pulses, mm=mm, wait=wait)
 
-    def strafe_left(self, rpm: int, acceleration: int | None = None,
+    def strafe_left(self, rpm: int | None = None, acceleration: int | None = None,
                     duration: float | None = None, *, pulses: int | None = None,
-                    wait: bool = True) -> list[int] | None:
-        return self.left(rpm, acceleration, duration, pulses=pulses, wait=wait)
+                    mm: float | None = None, wait: bool = True) -> list[int] | None:
+        return self.left(rpm, acceleration, duration, pulses=pulses, mm=mm, wait=wait)
 
-    def strafe_right(self, rpm: int, acceleration: int | None = None,
+    def strafe_right(self, rpm: int | None = None, acceleration: int | None = None,
                      duration: float | None = None, *, pulses: int | None = None,
-                     wait: bool = True) -> list[int] | None:
-        return self.right(rpm, acceleration, duration, pulses=pulses, wait=wait)
+                     mm: float | None = None, wait: bool = True) -> list[int] | None:
+        return self.right(rpm, acceleration, duration, pulses=pulses, mm=mm, wait=wait)
 
-    def rotate_cw(self, rpm: int, acceleration: int | None = None,
+    def rotate_cw(self, rpm: int | None = None, acceleration: int | None = None,
                   duration: float | None = None, *, pulses: int | None = None,
                   wait: bool = True) -> list[int] | None:
         return self._direction("rotate_cw", rpm, acceleration, duration, pulses=pulses, wait=wait)
 
-    def rotate_ccw(self, rpm: int, acceleration: int | None = None,
+    def rotate_ccw(self, rpm: int | None = None, acceleration: int | None = None,
                    duration: float | None = None, *, pulses: int | None = None,
                    wait: bool = True) -> list[int] | None:
         return self._direction("rotate_ccw", rpm, acceleration, duration, pulses=pulses, wait=wait)
 
-    def forward_left(self, rpm: int, acceleration: int | None = None,
+    def forward_left(self, rpm: int | None = None, acceleration: int | None = None,
                      duration: float | None = None, *, pulses: int | None = None,
-                     wait: bool = True) -> list[int] | None:
-        return self._direction("forward_left", rpm, acceleration, duration, pulses=pulses, wait=wait)
+                     mm: float | None = None, wait: bool = True) -> list[int] | None:
+        return self._direction("forward_left", rpm, acceleration, duration, pulses=pulses, mm=mm, wait=wait)
 
-    def forward_right(self, rpm: int, acceleration: int | None = None,
+    def forward_right(self, rpm: int | None = None, acceleration: int | None = None,
                       duration: float | None = None, *, pulses: int | None = None,
-                      wait: bool = True) -> list[int] | None:
-        return self._direction("forward_right", rpm, acceleration, duration, pulses=pulses, wait=wait)
+                      mm: float | None = None, wait: bool = True) -> list[int] | None:
+        return self._direction("forward_right", rpm, acceleration, duration, pulses=pulses, mm=mm, wait=wait)
 
-    def backward_left(self, rpm: int, acceleration: int | None = None,
+    def backward_left(self, rpm: int | None = None, acceleration: int | None = None,
                       duration: float | None = None, *, pulses: int | None = None,
-                      wait: bool = True) -> list[int] | None:
-        return self._direction("backward_left", rpm, acceleration, duration, pulses=pulses, wait=wait)
+                      mm: float | None = None, wait: bool = True) -> list[int] | None:
+        return self._direction("backward_left", rpm, acceleration, duration, pulses=pulses, mm=mm, wait=wait)
 
-    def backward_right(self, rpm: int, acceleration: int | None = None,
+    def backward_right(self, rpm: int | None = None, acceleration: int | None = None,
                        duration: float | None = None, *, pulses: int | None = None,
-                       wait: bool = True) -> list[int] | None:
-        return self._direction("backward_right", rpm, acceleration, duration, pulses=pulses, wait=wait)
-
-    # ------------------------------------------------------------- 四轮直控
-    def move_wheels_relative(self, fl: float, fr: float, rl: float, rr: float,
-                             rpm: int, acceleration: int | None = None,
-                             synchronized: bool = True) -> None:
-        self._require_open()
-        self.drive.move_wheels_relative(fl, fr, rl, rr, rpm, acceleration, synchronized)
-
-    def move_wheels_absolute(self, fl: float, fr: float, rl: float, rr: float,
-                             rpm: int, acceleration: int | None = None,
-                             synchronized: bool = True) -> None:
-        self._require_open()
-        self.drive.move_wheels_absolute(fl, fr, rl, rr, rpm, acceleration, synchronized)
-
-    def move_wheels_relative_pulses(self, fl: int, fr: int, rl: int, rr: int,
-                                    rpm: int, acceleration: int | None = None,
-                                    synchronized: bool = True) -> None:
-        """四轮位置模式：直接给脉冲数，正数=该轮前进方向。"""
-        self._require_open()
-        self.drive.move_wheels_relative_pulses(fl, fr, rl, rr, rpm, acceleration, synchronized)
-
-    def move_wheels_absolute_pulses(self, fl: int, fr: int, rl: int, rr: int,
-                                    rpm: int, acceleration: int | None = None,
-                                    synchronized: bool = True) -> None:
-        """四轮位置模式：直接给绝对脉冲位置。"""
-        self._require_open()
-        self.drive.move_wheels_absolute_pulses(fl, fr, rl, rr, rpm, acceleration, synchronized)
+                       mm: float | None = None, wait: bool = True) -> list[int] | None:
+        return self._direction("backward_right", rpm, acceleration, duration, pulses=pulses, mm=mm, wait=wait)

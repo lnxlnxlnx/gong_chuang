@@ -14,7 +14,7 @@
 `enable_all()`，**给三轴加力矩**。要做"纯读"，直接用这些脚本，它们绕开 `RobotArm`，
 自己开总线、自己按地址建 `Emm42Driver`。
 
-三个脚本都用 `modules/motor/config.json` 里当前平台的 `port`（Windows 是 `COM35`）。
+三个脚本都用 `modules/motor/hardware.json` 里当前平台的 `port`（Windows 是 `COM35`）。
 要换端口就改那个文件，不要在脚本里硬编码。
 
 ---
@@ -46,7 +46,7 @@ python only_for_test/read_driver_config.py
 
 | 列 | 为什么要看 |
 |---|---|
-| `MSTEP` | 不是 `0x10`（16 细分）的话，`modules/arm/config.json` 里的 `pulses_per_revolution: 3200` 就是错的，**所有脉冲↔毫米换算全废**。这个假设从第一天起没验证过 |
+| `MSTEP` | 不是 `0x10`（16 细分）的话，`modules/motor/hardware.json` 的 `bus.pulses_per_revolution: 3200` 就是错的，**所有脉冲↔毫米换算全废**。这个假设从第一天起没验证过 |
 | `RESPONSE` | 顺带**实测验证**了"读命令不受 `Response` 影响"——这个脚本能读出东西本身就是证据 |
 | `STALL_PROTECT` | **ON 表示撞到东西时该轴会直接掉力矩**。做任何碰撞实验之前必须先看到这一列 |
 | `in_position_win` | "到位"判据有多严（手册 8.1 说默认 0.3°，示例帧却是 `0x0001` = 0.1°，两处打架） |
@@ -93,6 +93,31 @@ python only_for_test/read_driver_config.py
 
 ---
 
+## 第 2.5 步 · 核对启动姿态（换爪子、重新对齿、重装电机之后做）
+
+`modules/arm/hardware.json` 的 `initial_motor_degrees` 声明的是"**程序启动那一刻**每根轴
+相对原点在哪"。它只在"不回零、直接靠机械初始位开工"的流程里生效（回零 / 绝对归零会把它
+清掉，见 `modules/arm/docs/机械臂Emm42三轴控制说明.md` 第 9 节）。声明错了不会有任何报错，
+只会让按里程表走的绝对动作整体偏一个常数，所以现场核一次：
+
+```
+1. 不发运动帧（本目录的脚本本来就不发），把机械**用手**摆到程序启动时的那个姿态
+2. python only_for_test/read_axes.py --axes 7
+3. 看 0x36 的 position + rev_idx，并与机械位移对照
+```
+
+| 要核的 | 怎么核 |
+|---|---|
+| 大小 | 伸缩 45.75 mm 对应 2400 脉冲（`mm × 3200 / 61`）；用卡尺/卷尺量"收回位到启动位"的距离 |
+| 符号 | **正数 = `move_forward` 方向（前伸）**，负数 = 后缩 |
+| 别用 `0x31` 判符号 | 单圈编码器（0–65535）报的 270° 与 −90° 差**整整一圈**（3200 脉冲 = 61 mm），是两个不同的位置 |
+
+> 这个步骤**不改驱动器零点**。如果目标其实是"让回零落在这个姿态"，那要动的是驱动器的
+> 单圈零点（`O_Set → Set O` 或 `0x93`），不是这一项配置——`0x9A` 会让机械臂动，本目录
+> 的脚本坚持不发它。
+
+---
+
 ## 第 3 步 · 读不到东西时
 
 ```powershell
@@ -100,7 +125,7 @@ python only_for_test/scan_bus.py --first 1 --last 8
 ```
 
 - 地址 1–4 应答、5–7 不应答 → **机械臂不在你插的这条总线上**。
-  旧的 `docs/机械臂Emm42三轴控制说明.md` 记的是 COM29，而 `modules/motor/config.json`
+  旧的 `docs/机械臂Emm42三轴控制说明.md` 记的是 COM29，而 `modules/motor/hardware.json`
   里现在是 COM35，这两个对不上就要先查线。
 - 有地址回**不成帧**的数据 → 多半是**两个驱动器共用一个地址**，两条应答叠在总线上了。
   逐个拔掉再扫可以定位。

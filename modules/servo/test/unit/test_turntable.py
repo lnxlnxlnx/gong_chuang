@@ -5,20 +5,21 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock
 
-from modules.servo.config import TurntableConfig
+from modules.servo.config import POSITION_UNITS, TurntableConfig
 from modules.servo.drive.bus_servo import BusServoConfig
-from modules.servo.drive.turntable import (
-    DEFAULT_POSITION_TOLERANCE,
-    DEGREES_PER_UNIT,
-    TurntableServo,
-)
+from modules.servo.drive.turntable import TurntableServo
+
+#: 与 ``modules/servo/hardware.json`` 的 turntable 段一致；测试夹具直接把这两个值写死，
+#: 免得每改一次配置就得改一遍夹具。
+DEFAULT_POSITION_TOLERANCE = 30
+DEGREES_PER_UNIT = 240.0 / POSITION_UNITS
 
 CONFIG = TurntableConfig(
     servo_id=2,
     duration_ms=1500,
     stations={"home": 0, "station_2": 500, "station_3": 1000},
 )
-BUS = BusServoConfig(port="FAKE", baudrate=115200, servo_id=1)
+BUS = BusServoConfig(port="FAKE", baudrate=115200, timeout_seconds=0.1)
 
 
 def make_turntable(positions, **overrides) -> tuple[TurntableServo, Mock, list]:
@@ -129,16 +130,38 @@ class TurntableStationTests(unittest.TestCase):
 
         self.assertEqual(slept, [2.0])
 
-    def test_wait_false_sends_the_command_without_sleeping_or_claiming_arrival(self) -> None:
-        turntable, servo, slept = make_turntable([480])
+    def test_wait_false_hands_back_a_ticket_instead_of_a_report(self) -> None:
+        """``wait=False`` 只发命令：不睡、**也不读回**，结论要等票据到点才有。"""
+        now = [0.0]
+        slept: list = []
 
-        report = turntable.go_to_station("station_2", wait=False)
+        def sleep(seconds: float) -> None:
+            slept.append(seconds)
+            now[0] += seconds
+
+        servo = Mock()
+        servo.read_position.side_effect = [460]
+        turntable = TurntableServo(
+            "",
+            config=CONFIG,
+            bus_config=BUS,
+            servo=servo,
+            sleep=sleep,
+            clock=lambda: now[0],
+            settle_seconds=0.2,
+        )
+
+        ticket = turntable.go_to_station("station_2", wait=False)
 
         servo.set_position.assert_called_once_with(500, 1500)
+        servo.read_position.assert_not_called()
         self.assertEqual(slept, [])
+
+        # 到点读回 460：差目标 40，出了容差 → 没转到位（这是测量结论，不是异常）。
+        report = ticket.wait()
         self.assertFalse(report.reached)
-        # 读回的是"命令前"的位置，如实带回来而不是丢掉。
-        self.assertEqual(report.position, 480)
+        self.assertEqual(report.position, 460)
+        self.assertAlmostEqual(sum(slept), 1.7, places=9)
 
 
 class TurntableArrivalTests(unittest.TestCase):

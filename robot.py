@@ -1,10 +1,11 @@
-"""项目总入口：一个会话里装配 arm / gripper / vision / chassis，需要时再挂上 grasp。
+"""项目总入口：一个会话里装配 arm / gripper / turntable / vision / chassis，需要时再挂上 grasp。
 
 ## 为什么要它
 
 每个模块都有自己的 ``open``，但**同一台设备只能被打开一次**：
 
 - arm 与 chassis 用的是**同一根** Emm42 步进总线（``modules/motor/config.json`` 的端口）；
+- gripper 与 turntable 用的是**同一根**舵机总线（``modules/servo/config.json`` 的端口）；
 - grasp 需要 arm 与 vision，而它不该再开第二份。
 
 所以"上层只写一条 with"这件事必须由一个**总所有者**来做。这就是 ``Robot``：
@@ -19,9 +20,13 @@ with Robot.open(arm=True, gripper=True) as robot:
     robot.arm.move_up(pulses=800)
     robot.gripper.open_jaws()
 
-with Robot.open(grasp=True, gripper=True) as robot:
-    result = robot.grasp.align_and_descend()
-    robot.gripper.close_jaws()          # 是否闭爪由业务显式决定
+# 多个模块同时动：各自发命令，一个 join 点收尾
+with Robot.open_all() as robot:
+    batch = robot.motion.begin()
+    batch.add(robot.arm.move_axes({"lift": 4000, "extension": -8000}, wait=False))
+    batch.add(robot.gripper.set_position(40, wait=False))
+    batch.add(robot.turntable.go_to_station("station_2", wait=False))
+    batch.wait()
 ```
 
 ## 资源关系
@@ -31,21 +36,26 @@ Robot 会话（总所有者）
 ├─ 一条 Emm42 步进连接         ← 由 Robot 打开，最后关闭
 │  ├─ arm     借用（地址 5/6/7）
 │  └─ chassis 借用（配置里的四轮地址）
-├─ gripper：独立舵机连接
+├─ 一条舵机总线连接            ← 由 Robot 打开，最后关闭
+│  ├─ gripper   借用（舵机 ID 1）
+│  └─ turntable 借用（舵机 ID 2）
 ├─ vision：一个相机 + 一个模型
-└─ grasp：借用上面同一个 arm 与 vision，不新开设备
+├─ grasp：借用上面同一个 arm 与 vision，不新开设备
+└─ motion：动作组入口，不持有设备，只负责"一起等"
 ```
 
 ## 它不做什么
 
 - **不自动回零、不移动、不开闭爪**：这些是明确的动作，由上层调用；
-- 不做"USB 失败就换 TCP"一类的自动降级，也没有设备注册表或线程池；
-- 没有总配置文件：每个模块的路径单独具名，``None`` 表示用那个模块自己的默认文件。
+- 不做"USB 失败就换 TCP"一类的自动降级，也没有设备注册表；
+- 没有总配置文件：每个模块的路径单独具名，``None`` 表示用那个模块自己的默认文件；
+- 不自己起线程：动作在硬件上并行，join 在调用线程上（见 ``modules.motion``）。
 
-## 一次会话只读一次 motor 配置
+## 一次会话只读一次配置
 
-``motor_config_path`` 只读一次，arm 与 chassis 共用那一个端口快照；两者的电机地址
-不能冲突——冲突会在**打开第一条连接之前**报出来。
+``motor_config_path`` 只读一次，arm 与 chassis 共用那一个端口快照；``servo_config_path``
+同样只读一次，gripper 与 turntable 共用它（两个舵机的 ID 必须不同，配置加载时会核对）。
+两者的电机地址不能冲突——冲突会在**打开第一条连接之前**报出来。
 """
 
 from __future__ import annotations
@@ -70,13 +80,16 @@ if TYPE_CHECKING:
     from modules.chassis.runtime import MecanumChassis
     from modules.grasp.runtime import Grasp, GraspSettings
     from modules.motor.drive.emm42 import SerialPort
+    from modules.motion import MotionController
+    from modules.servo.drive.bus_servo import SerialPort as ServoSerialPort
+    from modules.servo.drive.turntable import TurntableServo
     from modules.servo.runtime import GripperServo
     from modules.vision.config import VisionConfig
     from modules.vision.runtime import Vision
 T = TypeVar("T")
 
-#: 本轮的"全部"模块：四个设备模块 + 抓取流程。grasp 借用 arm/vision，不额外开设备。
-ALL_MODULES: Tuple[str, ...] = ("arm", "gripper", "vision", "chassis", "grasp")
+#: 本轮的"全部"模块：五个设备模块 + 抓取流程。grasp 借用 arm/vision，不额外开设备。
+ALL_MODULES: Tuple[str, ...] = ("arm", "gripper", "turntable", "vision", "chassis", "grasp")
 
 
 class Closable(Protocol):
@@ -97,23 +110,36 @@ class Robot:
         *,
         arm: Optional["RobotArm"] = None,
         gripper: Optional["GripperServo"] = None,
+        turntable: Optional["TurntableServo"] = None,
         vision: Optional["Vision"] = None,
         chassis: Optional["MecanumChassis"] = None,
         grasp: Optional["Grasp"] = None,
+        motion: Optional["MotionController"] = None,
         bus: Optional["SerialPort"] = None,
+        servo_bus: Optional["ServoSerialPort"] = None,
     ) -> None:
         """只保存**已经装配好的**模块；本构造器不做设备 I/O。
 
-        ``bus`` 是那条共享的步进连接（如果有模块用到它），由 :meth:`close` 最后关闭。
-        字段类型如实是 ``Optional[具体模块类]``：本次会话确实可能没启用某个模块。
+        ``bus`` / ``servo_bus`` 是那两条共享连接（如果有模块用到它们），由 :meth:`close`
+        最后关闭。字段类型如实是 ``Optional[具体模块类]``：本次会话确实可能没启用某个模块。
+
+        ``motion`` 是动作组入口：它**不持有设备**，所以总是可用，未注入时按默认时钟建一个。
         """
         self._arm: Optional[RobotArm] = arm
         self._gripper: Optional[GripperServo] = gripper
+        self._turntable: Optional[TurntableServo] = turntable
         self._vision: Optional[Vision] = vision
         self._chassis: Optional[MecanumChassis] = chassis
         self._grasp: Optional[Grasp] = grasp
         self._bus: Optional[SerialPort] = bus
+        self._servo_bus: Optional[ServoSerialPort] = servo_bus
         self._owns_bus = bus is not None
+        self._owns_servo_bus = servo_bus is not None
+        if motion is None:
+            from modules.motion import MotionController
+
+            motion = MotionController()
+        self._motion: MotionController = motion
         self._closed = False
 
     # ------------------------------------------------------------- 属性
@@ -145,6 +171,19 @@ class Robot:
         return self._module("gripper", self._gripper)
 
     @property
+    def turntable(self) -> "TurntableServo":
+        """转盘模块实例；未启用时抛 ``RuntimeError``。"""
+        return self._module("turntable", self._turntable)
+
+    @property
+    def motion(self) -> "MotionController":
+        """动作组入口：``robot.motion.begin()`` 拿一个动作组。
+
+        它不打开设备、也不随 ``close`` 失效，所以这里**不用** :meth:`_module`。
+        """
+        return self._motion
+
+    @property
     def vision(self) -> "Vision":
         """视觉模块实例；未启用时抛 ``RuntimeError``。"""
         return self._module("vision", self._vision)
@@ -166,6 +205,7 @@ class Robot:
         for name, value in (
             ("arm", self._arm),
             ("gripper", self._gripper),
+            ("turntable", self._turntable),
             ("vision", self._vision),
             ("chassis", self._chassis),
             ("grasp", self._grasp),
@@ -186,6 +226,7 @@ class Robot:
         *,
         arm: bool = False,
         gripper: bool = False,
+        turntable: bool = False,
         vision: bool = False,
         chassis: bool = False,
         grasp: bool = False,
@@ -206,17 +247,18 @@ class Robot:
         所有被选模块的配置**先全部校验完**，再打开第一个设备：这样"配置写错"不会
         留下半开的连接。任何一项目开启失败，已经开好的都会被清理，不返回半就绪对象。
 
-        路径语义见模块文档；``servo_config_path`` 同时给夹爪参数与舵机总线两个加载器，
+        路径语义见模块文档；``servo_config_path`` 同时给夹爪、转盘与舵机总线三个加载器，
         ``motor_config_path`` 是 arm/chassis 共用的那一份步进总线配置。
         """
         from modules.arm.config import DEFAULT_CONFIG_PATH as arm_default
         from modules.arm.config import load_arm_config
-        from modules.motor.config import DEFAULT_CONFIG_PATH as motor_default
+        from modules.motor.config import DEFAULT_HARDWARE_PATH as motor_default
         from modules.motor.config import load_bus_config
 
-        if not any((arm, gripper, vision, chassis, grasp)):
+        if not any((arm, gripper, turntable, vision, chassis, grasp)):
             raise ValueError(
-                "Robot.open 至少要明确选择一个模块（arm / gripper / vision / chassis / grasp）"
+                "Robot.open 至少要明确选择一个模块"
+                "（arm / gripper / turntable / vision / chassis / grasp）"
             )
         # grasp 需要 arm 与 vision：显式打开它们，并让本次会话共用同一份。
         if grasp:
@@ -228,7 +270,10 @@ class Robot:
         # 用**实际值**判空缩窄，不靠另一个布尔变量替它们担保。
         arm_config: Optional[ArmConfig] = None
         port: Optional[str] = None
+        bus_baudrate: Optional[int] = None
         chassis_profile: Optional[HardwareProfile] = None
+        servo_port: Optional[str] = None
+        servo_baudrate: Optional[int] = None
         vision_settings: Optional[VisionConfig] = None
         grasp_settings: Optional[GraspSettings] = None
 
@@ -238,7 +283,9 @@ class Robot:
         if arm or chassis:
             motor_path = motor_default if motor_config_path is None else Path(motor_config_path)
             # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
-            port = load_bus_config(config_path=motor_path).port
+            bus_settings = load_bus_config(hardware_path=motor_path)
+            port = bus_settings.port
+            bus_baudrate = bus_settings.baudrate
 
         if chassis:
             from modules.chassis.runtime import MecanumChassis
@@ -247,15 +294,22 @@ class Robot:
             if arm_config is not None and chassis_profile is not None:
                 cls._require_distinct_motor_addresses(arm_config, chassis_profile)
 
-        if gripper:
-            # 只**校验**夹爪那份配置（夹爪参数 + 舵机总线）；真正的装配在开启阶段。
+        if gripper or turntable:
+            # 只**校验**舵机那份配置（夹爪段 / 转盘段 + 舵机总线）；真正的装配在开启阶段。
+            # 两个模块读的是同一个文件：转盘那边还会核对两段不会用同一个 servo_id。
             from modules.servo.config import DEFAULT_CONFIG_PATH as servo_default
-            from modules.servo.config import load_gripper_config
+            from modules.servo.config import load_gripper_config, load_turntable_config
             from modules.servo.drive.bus_servo import load_bus_config as load_servo_bus
 
             servo_path = servo_default if servo_config_path is None else Path(servo_config_path)
-            load_gripper_config(servo_path)
-            load_servo_bus(config_path=servo_path)
+            if gripper:
+                load_gripper_config(servo_path)
+            if turntable:
+                load_turntable_config(servo_path)
+            # 端口、波特率、两个舵机 ID 与行程都在 hardware.json 里；这里只读那一份。
+            servo_settings = load_servo_bus()
+            servo_port = servo_settings.port
+            servo_baudrate = servo_settings.baudrate
 
         vision_settings = None
         if vision:
@@ -275,9 +329,14 @@ class Robot:
                 if port is None:
                     raise RuntimeError(
                         "选了 arm/chassis 却没有可用的步进总线端口；"
-                        "请检查 modules/motor/config.json 的端口配置"
+                        "请检查 modules/motor/hardware.json 的端口配置"
                     )
-                session._bus = session._open_shared_bus(port)
+                if bus_baudrate is None:
+                    raise RuntimeError(
+                        "选了 arm/chassis 却没有读到步进总线波特率；"
+                        "请检查 modules/motor/hardware.json 的 bus.baudrate"
+                    )
+                session._bus = session._open_shared_bus(port, baudrate=bus_baudrate)
                 # 这条连接是**本会话开的**，所以由本会话最后关闭。
                 session._owns_bus = True
 
@@ -310,11 +369,38 @@ class Robot:
                     owns_bus=False,
                 )
 
+            if gripper or turntable:
+                # 夹爪与转盘挂的是**同一条**半双工舵机总线（同一个 COM 口开两次会失败），
+                # 所以这条连接由本会话开一次、两个舵机各自借用。
+                if servo_port is None:
+                    raise RuntimeError(
+                        "选了 gripper/turntable 却没有可用的舵机总线端口；"
+                        "请检查 modules/servo/hardware.json 的端口配置"
+                    )
+                if servo_baudrate is None:
+                    raise RuntimeError(
+                        "选了 gripper/turntable 却没有读到舵机总线波特率；"
+                        "请检查 modules/servo/hardware.json 的 bus.baudrate"
+                    )
+                session._servo_bus = session._open_servo_bus(
+                    servo_port, baudrate=servo_baudrate
+                )
+                session._owns_servo_bus = True
+
             if gripper:
                 from modules.servo.runtime import GripperServo
 
-                # 走夹爪自己的唯一装配：读同一份 servo 配置、开总线、上扭矩。
-                session._gripper = GripperServo.open(config_path=servo_config_path)
+                # 走夹爪自己的唯一装配：读同一份 servo 配置、借用总线、上扭矩。
+                session._gripper = GripperServo.open(
+                    config_path=servo_config_path, bus=session._servo_bus
+                )
+
+            if turntable:
+                from modules.servo.drive.turntable import TurntableServo
+
+                session._turntable = TurntableServo.open(
+                    config_path=servo_config_path, bus=session._servo_bus
+                )
 
             if vision:
                 from modules.vision.runtime import Vision
@@ -360,7 +446,7 @@ class Robot:
         grasp_config_path: Optional[Path] = None,
         on_message: Optional[Callable[[str], None]] = None,
     ) -> "Robot":
-        """一键开启本轮的全部五项；配置参数与 :meth:`open` 同名同义。
+        """一键开启本轮的全部六项；配置参数与 :meth:`open` 同名同义。
 
         内部复用 :meth:`open` 的**唯一装配**，不复制初始化逻辑。
         "全部"要求每一项的启动配置都有效（含抓取 target / Jacobian）；任一项失败就
@@ -369,6 +455,7 @@ class Robot:
         return cls.open(
             arm=True,
             gripper=True,
+            turntable=True,
             vision=True,
             chassis=True,
             grasp=True,
@@ -397,22 +484,39 @@ class Robot:
             )
 
     @staticmethod
-    def _open_shared_bus(port: str) -> "SerialPort":
+    def _open_shared_bus(port: str, *, baudrate: Optional[int] = None) -> "SerialPort":
         """打开那条共享的 Emm42 连接（arm 与 chassis 时序复用同一条）。
+
+        波特率来自 ``modules/motor/hardware.json`` 的 ``bus.baudrate``；没给时退回
+        驱动器族的常见值，只用于直接调用本方法的测试。
 
         返回值标成 :class:`~modules.motor.drive.emm42.SerialPort`：上层只依赖这个窄协议，
         真实实现仍是 pyserial 的 ``Serial``（它的 ``write`` 与协议声明一致，见那里的说明）。
         """
         from modules.motor.drive.emm42 import Emm42Driver, SerialPort as _SerialPort
+        from modules.serial_link import open_serial
 
-        try:
-            import serial
-        except ImportError as error:  # pragma: no cover - 板子上的环境问题
-            raise RuntimeError(
-                "pyserial is required on Jetson. Install it in the target Python environment first."
-            ) from error
-        opened: _SerialPort = serial.Serial(
-            port, baudrate=Emm42Driver.BAUDRATE, timeout=0.1
+        opened: _SerialPort = open_serial(
+            port,
+            baudrate=Emm42Driver.BAUDRATE if baudrate is None else baudrate,
+            timeout=0.1,
+        )
+        return opened
+
+    @staticmethod
+    def _open_servo_bus(port: str, *, baudrate: Optional[int] = None) -> "ServoSerialPort":
+        """打开那条共享的舵机总线（gripper 与 turntable 时序复用同一条）。
+
+        波特率来自 ``modules/servo/hardware.json`` 的 ``bus.baudrate``。半双工舵机总线
+        **同一个串口不能被打开两次**，所以夹爪与转盘必须共用这一条。
+        """
+        from modules.serial_link import open_serial
+        from modules.servo.drive.bus_servo import BusServo
+
+        opened: "ServoSerialPort" = open_serial(
+            port,
+            baudrate=BusServo.BAUDRATE if baudrate is None else baudrate,
+            timeout=0.1,
         )
         return opened
 
@@ -453,39 +557,46 @@ class Robot:
 
         1. 先让**借用的**抓取会话失效——它借的是 arm 与 vision，不能比它们晚；
         2. 再按取得资源的**逆序**逐个调用模块 ``close``；
-        3. 最后关闭那条共享的步进连接（如果本次开了）。
+        3. 最后关闭那两条共享连接（如果本次开了）。
 
         第一项失败不阻断其他项；全部试完才报告，错误清单含每个失败阶段。
-        重复调用不再发命令。**不自动开闭爪。**
+        重复调用不再发命令。**不自动开闭爪、不自动转盘。**
         """
         if self._closed:
             return
         self._closed = True
-        grasp, vision, gripper, chassis, arm = (
+        grasp, vision, turntable, gripper, chassis, arm = (
             self._grasp,
             self._vision,
+            self._turntable,
             self._gripper,
             self._chassis,
             self._arm,
         )
-        self._grasp = self._vision = self._gripper = self._chassis = self._arm = None
+        self._grasp = self._vision = self._turntable = None
+        self._gripper = self._chassis = self._arm = None
         bus, self._bus = self._bus, None
+        servo_bus, self._servo_bus = self._servo_bus, None
 
         errors: List[Tuple[str, Exception]] = []
         if grasp is not None:
             self._attempt(errors, "grasp.close", grasp.close)
-        # 逆序：后取得的先放。
+        # 逆序：后取得的先放（转盘比夹爪后装配，所以先放它）。
         for name, module in (
             ("vision.close", vision),
+            ("turntable.close", turntable),
             ("gripper.close", gripper),
             ("chassis.close", chassis),
             ("arm.close", arm),
         ):
             if module is not None:
                 self._attempt(errors, name, module.close)
+        if servo_bus is not None and self._owns_servo_bus:
+            self._attempt(errors, "servo_bus.close", servo_bus.close)
         if bus is not None and self._owns_bus:
             self._attempt(errors, "bus.close", bus.close)
         self._owns_bus = False
+        self._owns_servo_bus = False
 
         if errors:
             details = "; ".join(f"{stage}: {error}" for stage, error in errors)
