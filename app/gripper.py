@@ -437,7 +437,7 @@ def grab_material_from_turntable_to_repo(
     robot: Robot,
     want_colors=("red", "green", "blue"),
     *,
-    home: dict[str, float] | None = {"lift": 830, "extension": 90.0, "base": 390}
+    home: dict[str, float] | None = {"lift": 830, "extension": 90.0, "base": 420}
 ):  # 420是中心位置
     """把物料从转盘上抓下来，放到仓库里。不需要处理初始状态
     从转盘上抓料：等它看满最小等待还静止 → 对准 → 下降 → 合爪。
@@ -608,7 +608,7 @@ def _grab_material_from_turntable(
     """
 
     try:
-        robot.grasp.align_xy(want = want_color)
+        robot.grasp.align_xy(want = want_color, tolerance_mm=6)
     except Exception as e:
         print(f"Error occurred while aligning the gripper: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()

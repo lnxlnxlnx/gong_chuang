@@ -146,23 +146,24 @@ def run_map():
         
         
         ###################
-        # robot.chassis.forward_left(rpm = 60, pulses=4800)      # 90
-        # robot.chassis.forward(rpm=60, pulses=11500)     # 240
+        robot.chassis.forward_left(rpm = 60, pulses=4000)      # 90
+        robot.chassis.forward(rpm=60, pulses=11500)     # 240
 
         # 抓取物料
         # grab_material_from_turntable_to_repo(robot)     # 已完成
-        # robot.chassis.rotate_ccw(rpm= 60, pulses=ROTATE_PULSE)
+        robot.chassis.rotate_ccw(rpm= 60, pulses=ROTATE_PULSE)
         
         # 移动到粗加工区
-        # robot.chassis.forward(rpm= 60, pulses=23500)
-        # robot.chassis.left(rpm= 60, pulses=1600)
-        # move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
-        # move_axes_to(robot, {"lift": 950, "base": -80}).wait()  # 先让环进视野
-        # square_chassis_to_ring_row(robot)
-        # center_chassis_on_ring(robot, require_digit=2)
-        # robot.chassis.left(pulses=500)
-        # place_material_from_repo_to_floor_by_pose(robot)
-        # grab_material_from_floor_to_repo_by_xy(robot)
+        time.sleep(0.3)
+        robot.chassis.forward(rpm= 60, pulses=22500)
+        robot.chassis.left(rpm= 60, pulses=1600)
+        move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
+        move_axes_to(robot, {"lift": 950, "base": -80}).wait()  # 先让环进视野
+        square_chassis_to_ring_row(robot)
+        center_chassis_on_ring(robot, require_digit=2)
+        robot.chassis.left(pulses=500)
+        place_material_from_repo_to_floor_by_pose(robot)
+        grab_material_from_floor_to_repo_by_xy(robot)
         
         # 到细加工区
         # robot.chassis.right(rpm = 60, pulses=13200)
