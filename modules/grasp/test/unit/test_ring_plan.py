@@ -153,15 +153,20 @@ class FakeSource:
     def __init__(self, target) -> None:
         self._target = target
         self.calls = 0
+        #: 每次定位收到的 ``digit`` —— 检查"按号筛框"有没有真的下传。
+        self.digits: list = []
 
-    def locate_ring(self, *, timeout=None):
+    def locate_ring(self, *, timeout=None, digit=None):
         self.calls += 1
+        self.digits.append(digit)
         return self._target
 
 
-def make_grasp(target) -> tuple[Grasp, FakeArm, FakeSource]:
+def make_grasp(
+    target, config: ServoConfig | None = None
+) -> tuple[Grasp, FakeArm, FakeSource]:
     grasp = Grasp(
-        config=ServoConfig(),
+        config=config if config is not None else ServoConfig(),
         selector=ObjectSelector(),
         target=ServoTarget(x_mm=0.0, y_mm=0.0),
         jacobian=JACOBIAN,
@@ -190,6 +195,37 @@ class SessionPlanTests(unittest.TestCase):
         result = grasp.plan_ring()
         self.assertEqual(result.base_pulses, 0, "读数等于目标，不该动")
 
+    def test_the_ring_offset_shifts_the_ring_target_only(self) -> None:
+        """落料补偿：读数正好等于「target + 补偿」时不该再动（料会落在环心）。"""
+        grasp, _arm, _source = make_grasp(
+            ring_target(reading=(7.5, 0.0)),
+            config=ServoConfig(ring_offset_x_mm=7.5),
+        )
+        # 补偿只加在环心那一次上：物料用的 target 一个数都没变。
+        self.assertEqual((grasp._target.x_mm, grasp._target.y_mm), (0.0, 0.0))
+        self.assertEqual(grasp._ring_target().x_mm, 7.5)
+        self.assertEqual(
+            grasp.plan_ring().base_pulses, 0, "读数等于补偿后的目标，不该动"
+        )
+
+    def test_without_an_offset_the_same_reading_still_moves(self) -> None:
+        """不配补偿（默认 0）时行为与加这个字段之前完全一致。"""
+        grasp, _arm, _source = make_grasp(ring_target(reading=(7.5, 0.0)))
+        self.assertEqual(grasp._ring_target().x_mm, 0.0)
+        self.assertNotEqual(grasp.plan_ring().base_pulses, 0)
+
+    def test_the_offset_follows_a_retaught_target(self) -> None:
+        """补偿是相对 ``target`` 的偏移：重标 target 之后环心目标跟着走。"""
+        grasp, _arm, _source = make_grasp(
+            ring_target(reading=(5.0, 0.0)),
+            config=ServoConfig(ring_offset_x_mm=7.5),
+        )
+        grasp._target = ServoTarget(x_mm=-2.5, y_mm=0.0)
+        self.assertEqual(grasp._ring_target().x_mm, 5.0)
+        self.assertEqual(
+            grasp.plan_ring().base_pulses, 0, "读数等于 target + 补偿，不该动"
+        )
+
     def test_no_ring_in_view_is_an_error(self) -> None:
         grasp, _arm, _source = make_grasp(None)
         with self.assertRaisesRegex(ServoError, "没有环"):
@@ -206,6 +242,14 @@ class SessionPlanTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ServoError, "比例尺"):
             grasp.plan_ring()
+
+    def test_the_required_digit_filters_the_frame(self) -> None:
+        """一帧里可能同时有好几个环：按号筛框，而不是"取分最高的那个再看是不是它"。"""
+        grasp, _arm, source = make_grasp(ring_target(digit=2))
+        grasp.plan_ring(require_digit=2)
+        grasp.plan_ring()
+
+        self.assertEqual(source.digits, [2, None])
 
     def test_a_different_ring_number_is_refused(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target(digit=3))
@@ -347,7 +391,7 @@ class LiveRingSource:
         self.arm = arm
         self.calls = 0
 
-    def locate_ring(self, *, timeout=None):
+    def locate_ring(self, *, timeout=None, digit=None):
         self.calls += 1
         return RingTarget(
             center_px=(640.0, 360.0),
@@ -394,6 +438,17 @@ class ClosedLoopTests(unittest.TestCase):
         self.assertEqual(len(arm.moves), 2, arm.moves)   # 底座 + 伸缩，各一次
         self.assertAlmostEqual(result.response or 0.0, 1.0, places=6)
         self.assertLess(result.final_error_mm, 1.0)
+
+    def test_the_closed_loop_lands_on_the_compensated_target(self) -> None:
+        """落料补偿改的是闭环的**终点**：读数停在「target + 补偿」，不是停在 0。"""
+        grasp, arm = make_closed_loop(1.0)
+        grasp._config = ServoConfig(ring_offset_x_mm=7.5)
+        result = grasp.align_ring(gain=1.0)
+        self.assertTrue(result.aligned, result.summary())
+        # 脉冲要取整，落点差着半个脉冲的量级（0.036 mm），所以按 delta 比。
+        self.assertAlmostEqual(arm.reading[0], 7.5, delta=0.1)
+        self.assertAlmostEqual(arm.reading[1], 0.0, delta=0.1)
+        self.assertLess(result.final_error_mm, 0.1, "残差要跟补偿后的目标同一口径")
 
     def test_a_half_sensitive_machine_converges_by_learning_the_response(self) -> None:
         """真机只有配置的一半灵敏：闭环按实测算出响应比 0.5，第二步就补上了。"""
@@ -454,6 +509,99 @@ class ClosedLoopTests(unittest.TestCase):
         grasp._source = Mock(spec=["frame"])
         with self.assertRaisesRegex(ServoError, "没有环心定位"):
             grasp.align_ring()
+
+
+class RingSettleTests(unittest.TestCase):
+    """底座摆完还在抖：读数没稳就拿来算步长，抖动会被放大成来回摆。"""
+
+    class Jittery:
+        """前几帧读数在抖，之后稳住；每帧都记一次调用。"""
+
+        def __init__(self, readings) -> None:
+            self.readings = list(readings)
+            self.calls = 0
+
+        def locate_ring(self, *, timeout=None, digit=None):
+            x_mm, y_mm = self.readings[min(self.calls, len(self.readings) - 1)]
+            self.calls += 1
+            return ring_target(reading=(x_mm, y_mm))
+
+    def locate(self, source):
+        grasp, _arm, _source = make_grasp(ring_target())
+        return grasp._locate_ring_for_plan(
+            source, timeout=None, require_digit=None, settle=True
+        )
+
+    def test_two_matching_frames_end_the_wait(self) -> None:
+        source = self.Jittery([(3.0, 0.0)])
+        target = self.locate(source)
+
+        self.assertEqual(source.calls, 2)   # 两帧一致就收工，不读第三次
+        self.assertAlmostEqual(target.reading()[0], 3.0, places=6)
+
+    def test_it_reads_through_a_jittering_frame(self) -> None:
+        source = self.Jittery([(3.0, 0.0), (5.0, 0.0), (5.05, 0.02)])
+        target = self.locate(source)
+
+        self.assertEqual(source.calls, 3)
+        self.assertAlmostEqual(target.reading()[0], 5.05, places=6)
+
+    def test_never_settling_still_stops_at_the_read_limit(self) -> None:
+        source = self.Jittery([(1.0, 0.0), (50.0, 0.0), (100.0, 0.0)])
+        target = self.locate(source)
+
+        self.assertEqual(source.calls, 3)   # 有上限：等不到稳定就用最后一帧
+        self.assertAlmostEqual(target.reading()[0], 100.0, places=6)
+
+
+class PlanRingReadingsTests(unittest.TestCase):
+    """一批**已经算好的**读数（三环外推出来的那三个）→ 三份绝对位置，一帧都不拍。"""
+
+    def test_it_plans_every_ring_without_taking_a_frame(self) -> None:
+        grasp, _arm, source = make_grasp(ring_target())
+
+        plans = grasp.plan_ring_readings(
+            {1: (-150.0, 0.0), 2: (0.0, 0.0), 3: (150.0, 0.0)},
+            scale_source="ring box",
+        )
+
+        self.assertEqual(source.calls, 0, "读数已经算好了，不该再取帧")
+        self.assertEqual(sorted(plans), [1, 2, 3])
+        self.assertEqual(plans[2].base_pulses, 0, "读数等于目标，不该动")
+        # 三环等距：两端的偏差大小相同、方向相反（同一个雅可比下）。
+        self.assertGreater(abs(plans[1].base_pulses), 0)
+        self.assertAlmostEqual(
+            plans[1].base_pulses, -plans[3].base_pulses, delta=1
+        )
+
+    def test_one_offset_digit_is_shared_by_every_point(self) -> None:
+        """一条直线上的三个点共用 2 号环的落料补偿——各用各的会把那条直线搅乱。"""
+        grasp, _arm, _source = make_grasp(ring_target())
+        grasp._config = ServoConfig(ring_offsets_mm=((-7.0, -3.0), (3.0, -4.0), (9.0, -4.0)))
+        readings = {1: (-150.0, 0.0), 2: (0.0, 0.0), 3: (150.0, 0.0)}
+
+        own = grasp.plan_ring_readings(readings, scale_source="ring box")
+        shared = grasp.plan_ring_readings(
+            readings, scale_source="ring box", offset_digit=2
+        )
+
+        self.assertNotEqual(own[1].target, own[3].target)
+        self.assertEqual(shared[1].target, shared[2].target)
+        self.assertEqual(shared[3].target, shared[2].target)
+
+    def test_a_scale_that_is_not_physical_millimetres_is_refused(self) -> None:
+        grasp, _arm, _source = make_grasp(ring_target())
+
+        with self.assertRaisesRegex(ServoError, "station.mm_per_px"):
+            grasp.plan_ring_readings(
+                {2: (0.0, 0.0)}, scale_source="station.mm_per_px"
+            )
+
+    def test_a_closed_session_refuses(self) -> None:
+        grasp, _arm, _source = make_grasp(ring_target())
+        grasp._closed = True
+        with self.assertRaises(RuntimeError):
+            grasp.plan_ring_readings({2: (0.0, 0.0)}, scale_source="ring box")
 
 
 if __name__ == "__main__":

@@ -53,7 +53,7 @@ import math
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple
 
 from modules.vision.config import VisionConfig
 # 这两个默认值只定义一次，就住在 sequence 里（那里是判据的出处）；本模块转发它们，
@@ -186,7 +186,10 @@ def _new_camera(camera_id: int):
     """只构造 1280×720 相机，**不**调用 ``initialize``（打开设备是调用方的事）。"""
     from modules.vision.drive.camera import USBCamera
 
-    return USBCamera(camera_id, width=1280, height=720)
+    # 60 fps：像素差分那条路（``scene_stability``）要的是同一个观察窗口里对比组更多，
+    # 30 fps 下 4 帧就是 100 ms，判断本身要 130–150 ms，帧率是白等的那一段。
+    # 再高没用：YOLO 主算路径一帧 27–29 ms，超过 60 fps 之后限速的是推理不是相机。
+    return USBCamera(camera_id, width=1280, height=720, fps=60)
 
 
 def _override_settings(
@@ -1015,7 +1018,9 @@ class Vision:
         return self._stacked
 
     # ------------------------------------------------------------- 视野里的那一个环
-    def locate_ring(self, *, timeout: Optional[float] = None) -> "Optional[RingTarget]":
+    def locate_ring(
+        self, *, timeout: Optional[float] = None, digit: Optional[int] = None
+    ) -> "Optional[RingTarget]":
         """读一帧，找出**视野里那一个环**的环心（像素 + 相机系毫米 + 环号）。
 
         为"相机视野装不下整排环"的场合准备：相机装在臂上、镜头离纸很近时，画面里
@@ -1023,6 +1028,10 @@ class Vision:
 
         环心与环号都来自模型（``models/best.onnx`` 的 ``tg1`` / ``tg2`` / ``tg3``
         三类），所以这条路径**看不到模型就什么也给不出**——它不再是一套独立的经典 CV。
+
+        ``digit`` 给了就只找**这个环号**：画面里同时看得见两个环时，模型给分高的那个
+        未必是你要的（校准 2 号环时按分数挑到 3 号，`require_digit` 只会报"是 3 号"，
+        而 2 号就在画面里）。没给则照旧"整框可见优先、再比置信度"。
 
         与 :meth:`locate` 相同的取舍：
 
@@ -1036,7 +1045,34 @@ class Vision:
         :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
         """
         frame = self._read_frame(timeout=timeout)
-        return self._ring_target_locator().detect(frame)
+        return self._ring_target_locator().detect(frame, digit=digit)
+
+    def locate_rings(
+        self, *, timeout: Optional[float] = None
+    ) -> "Dict[int, RingTarget]":
+        """读**一帧**，把画面里每个环号各取一个：``{环号: RingTarget}``。
+
+        与 :meth:`locate_ring` 的区别是"全都要"：三环同框时用这三条读数定出那条直线
+        （中间环实测、两端按已知间距外推），比逐环各拍一帧省两次取帧，也不会因为
+        机械臂动了半步就换了一套坐标系。
+
+        语义与 :meth:`locate_ring` 一致：画面里一个环都没有是正常结果（空字典），
+        读不到画面才抛 ``RuntimeError``；贴边 / 没比例尺的环照样返回，只是
+        ``RingTarget.reading()`` 为 ``None``。
+
+        :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
+        """
+        frame = self._read_frame(timeout=timeout)
+        return self._ring_target_locator().detect_all(frame)
+
+    @property
+    def ring_center_spacing_mm(self) -> float:
+        """相邻两个地面圆环的圆心间距（毫米，``station.center_spacing_mm``）。
+
+        三环成排时两端环心就是"中间环沿直线退/进这么远"，是**装好的物理真值**，
+        不该在业务代码里再写一份常量。
+        """
+        return float(self._settings.station_geometry.center_spacing_mm)
 
     def ring_center(self, *, timeout: Optional[float] = None) -> "Optional[Tuple[float, float]]":
         """视野里那个环的**相机系中心** ``(x_mm, y_mm)``，可直接喂 ``align_xy(reading=...)``。

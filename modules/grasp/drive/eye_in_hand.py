@@ -448,8 +448,8 @@ def align_x_y(
       爪子悬到物块正上方、自己把光挡住就是这个现象，收工口正是为它留的；
     - 一次都没测到、或者还差得远 → 原样报错（物块可能被挪走、被手挡住、被爪子推开）。
 
-    "画面里有多个目标"和"等不到新观测"**不属于遮挡**（那是
-    :class:`~modules.grasp.drive.servo_model.ObjectMissing` 之外的类型），永远报错。
+    画面里有多个物料时按**离光轴最近**的那个对准（见
+    :func:`~modules.grasp.drive.servo_observation.select_object`），不算遮挡、也不报错。
 
     ## 为什么不按"像素直径突变"判遮挡
 

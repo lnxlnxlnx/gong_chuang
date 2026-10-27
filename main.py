@@ -10,10 +10,17 @@ import time
 
 from app.gripper import (
     _move_axes_to,
+    center_chassis_on_ring,  # 车横向对到圆环正前方
     grab_box_from_floor_to_repo,
+    grab_box_from_floor_to_repo_v2,
     grab_box_from_turntable_to_repo,  # 圆盘->仓库
+    grab_box_from_turntable_to_repo_v2,  # 圆盘->仓库（跟着料走）
     place_box_from_repo_to_floor,  # 仓库->地面圆环
+    place_box_from_repo_to_floor_v2,  # 仓库->地面圆环
+    place_box_from_repo_to_floor_v3,  # 仓库->地面圆环
     place_box_to_box,  # 物料到物料
+    place_box_to_box_v2,  # 物料到物料（按 order 依次放三个位置）
+    square_chassis_to_ring_row,  # 车纵向对到圆环正前方
 )
 
 SCENE_STABLE_TIMEOUT_SECONDS = 20.0
@@ -34,18 +41,29 @@ def main() -> None:
     :func:`pick_manual`：一条 ``with`` 完成装配，动作一行一个，收尾交给 ``Robot``。
     """
     # demo_material()
-    with Robot.open(grasp=True, gripper=True, turntable=True) as robot:
-        robot.gripper.set_position(280)
+    with Robot.open(grasp=True, gripper=True, turntable=True, chassis=True) as robot:
+        robot.gripper.set_position(350)
         robot.turntable.go_home()
-        _move_axes_to(robot, {"lift": 495, "extension": 550, "base": 0}).wait()
-        print("初始状态移动完毕")
-        grab_box_from_floor_to_repo(robot, want_colors= ["red", "blue", "green"])
-        place_box_to_box(robot, _want = "blue")
-        place_box_to_box(robot, _want = "red")
-        return
-        grab_box_from_turntable_to_repo(robot, want_colors= ["red", "blue", "green"])
-        input("抓完了，回车继续：")
-        place_box_from_repo_to_floor(robot, verbose=True)
+        _move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
+        _move_axes_to(robot, {"lift": 950, "base": -32}).wait()  # 先让环进视野
+        ############
+        # robot.arm.move_axis_to_motor_degrees("lift", 980)
+        # residual = center_chassis_on_ring(robot, require_digit=2) 
+        # input(f"环心对准，残差 {residual:+.1f} mm，按回车继续")
+        # square_chassis_to_ring_row(robot)
+        # time.sleep(0.1)
+        # center_chassis_on_ring(robot, require_digit=2, max_iterations = 6)
+        place_box_from_repo_to_floor_v3(robot)
+        input("环心对准，按回车继续")
+        #############
+        grab_box_from_turntable_to_repo_v2(robot)
+        input("抓取完成，按回车继续")
+        grab_box_from_floor_to_repo_v2(robot)
+        place_box_from_repo_to_floor_v2(robot)
+        input("放置完成，按回车继续")
+        place_box_to_box_v2(robot)
+        # grab_box_from_floor_to_repo_v2(robot)
+        input("结束!!!!!!!!!!!")
 
 
 def locate_material(*, config_path=None) -> None:

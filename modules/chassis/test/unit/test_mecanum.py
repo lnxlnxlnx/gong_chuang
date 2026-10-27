@@ -5,8 +5,11 @@ from __future__ import annotations
 import unittest
 
 from modules.chassis.drive.mecanum import MecanumDrive, WheelPosition, WHEEL_ORDER
-from modules.motor.drive.motion import estimate_move_seconds
-from modules.motor.drive.emm42 import Direction, HomeMode
+from modules.motor.drive.motion import DEFAULT_INTER_FRAME_SECONDS, estimate_move_seconds
+from modules.motor.drive.emm42 import Direction
+
+#: 两帧之间该留的静默；断言里逐条列出来，表示"帧间有空隙"这件事是被测试守住的。
+GAP = DEFAULT_INTER_FRAME_SECONDS
 
 
 class FakeSerial:
@@ -28,6 +31,10 @@ class FakeSerial:
         data = bytes(self._receive_buffer[:size])
         del self._receive_buffer[:size]
         return data
+
+    def reset_input_buffer(self) -> None:
+        """驱动每次发包前都会清缓冲：应答是 :meth:`write` 里当场产生的，这里没东西可清。"""
+        self._receive_buffer.clear()
 
     def close(self) -> None:
         self.is_open = False
@@ -228,32 +235,6 @@ class ConvenienceMethodTests(MecanumDriveTests):
 
 
 class LowLevelApiTests(MecanumDriveTests):
-    def test_move_wheels_relative_sends_four_position_frames(self) -> None:
-        self.car.move_wheels_relative(90, -90, 180, -180, rpm=120, acceleration=5)
-        self.assertEqual([frame[0] for frame in self.serial.writes[:4]], [1, 2, 3, 4])
-        self.assertEqual([frame[1] for frame in self.serial.writes[:4]], [0xFD] * 4)
-        self.assertEqual([frame[-2] for frame in self.serial.writes[:4]], [1] * 4)
-        self.assertEqual(self.serial.writes[4], bytes.fromhex("00 FF 66 6B"))
-
-    def test_move_wheels_absolute_sends_four_position_frames(self) -> None:
-        self.car.move_wheels_absolute(90, 90, 90, 90, rpm=120, acceleration=5)
-        self.assertEqual([frame[0] for frame in self.serial.writes[:4]], [1, 2, 3, 4])
-        self.assertEqual([frame[1] for frame in self.serial.writes[:4]], [0xFD] * 4)
-        self.assertEqual([frame[-2] for frame in self.serial.writes[:4]], [1] * 4)
-        self.assertEqual(self.serial.writes[4], bytes.fromhex("00 FF 66 6B"))
-
-    def test_set_speeds_direct(self) -> None:
-        self.car.set_speeds(10, -20, 30, -40)
-        self.assertEqual(
-            self.serial.writes,
-            [
-                bytes.fromhex("01 F6 00 00 0A 0A 00 6B"),
-                bytes.fromhex("02 F6 01 00 14 0A 00 6B"),
-                bytes.fromhex("03 F6 00 00 1E 0A 00 6B"),
-                bytes.fromhex("04 F6 01 00 28 0A 00 6B"),
-            ],
-        )
-
     def test_enable_all_sends_four_enable_frames(self) -> None:
         self.car.enable_all(True)
         self.assertEqual(
@@ -271,17 +252,6 @@ class LowLevelApiTests(MecanumDriveTests):
     def test_stop_wheel_sends_single_estop(self) -> None:
         self.car.stop_wheel(WheelPosition.RL)
         self.assertEqual(self.serial.writes, [bytes.fromhex("03 FE 98 00 6B")])
-
-    def test_move_wheel_relative_passthrough(self) -> None:
-        self.car.move_wheel_relative(WheelPosition.FL, degrees=-360.0, rpm=1500, acceleration=0)
-        self.assertEqual(
-            self.serial.writes,
-            [bytes.fromhex("01 FD 01 05 DC 00 00 00 0C 80 00 00 6B")],
-        )
-
-    def test_home_wheel_passthrough(self) -> None:
-        self.car.home_wheel(WheelPosition.RR, HomeMode.MULTI_TURN_COLLISION)
-        self.assertEqual(self.serial.writes, [bytes.fromhex("04 9A 02 00 6B")])
 
     def test_get_wheel_returns_underlying_driver(self) -> None:
         self.assertIs(self.car.get_wheel(WheelPosition.FL), self.car.wheels[WheelPosition.FL])
@@ -335,7 +305,9 @@ class PulseModeTests(unittest.TestCase):
         self.assertEqual(counts, [3200, 3200, 3200, 3200])
         self.assertEqual(
             self.sleep.calls,
-            [estimate_move_seconds(3200, 200, self.car.pulses_per_revolution, 10)],
+            # 4 条帧之间 + 触发帧之前各留一个帧间隔，最后才是等待走完的估算
+            [GAP] * 4
+            + [estimate_move_seconds(3200, 200, self.car.pulses_per_revolution, 10)],
         )
 
     def test_diagonal_pulses_skip_wheels_that_do_not_move(self) -> None:
@@ -345,7 +317,8 @@ class PulseModeTests(unittest.TestCase):
         self.assertEqual(counts, [1600, 0, 1600, 0])
         self.assertEqual([frame[0] for frame in self.serial.writes[:2]], [1, 3])
         self.assertEqual(self.serial.writes[-1], bytes.fromhex("00 FF 66 6B"))
-        self.assertEqual(self.sleep.calls, [])
+        # 只发 2 条帧：帧间 1 个间隔 + 触发帧之前 1 个
+        self.assertEqual(self.sleep.calls, [GAP, GAP])
 
     def test_rotate_ccw_pulses_use_opposite_directions_per_wheel(self) -> None:
         counts = self.car.rotate_ccw(rpm=100, pulses=800, wait=False)
@@ -370,26 +343,14 @@ class PulseModeTests(unittest.TestCase):
         self.assertEqual([frame[2] for frame in self.serial.writes[:2]], [int(Direction.CW), int(Direction.CCW)])
         self.assertEqual(self.serial.writes[2], bytes.fromhex("00 FF 66 6B"))
 
-    def test_move_wheels_absolute_pulses_encodes_absolute_mode(self) -> None:
-        self.car.move_wheels_absolute_pulses(0, 3200, -3200, 0, rpm=200, acceleration=5)
-
-        # FL/RR 是 0 脉冲，不下发；帧尾两字节 = [绝对模式标志, 同步标志]。
-        self.assertEqual([frame[0] for frame in self.serial.writes[:2]], [2, 3])
-        self.assertEqual(
-            [frame[2] for frame in self.serial.writes[:2]],
-            [int(Direction.CW), int(Direction.CCW)],
-        )
-        self.assertEqual([frame[-3] for frame in self.serial.writes[:2]], [1, 1])
-        self.assertEqual([frame[-2] for frame in self.serial.writes[:2]], [1, 1])
-        self.assertEqual(self.serial.writes[2], bytes.fromhex("00 FF 66 6B"))
-
     def test_zero_kinematics_stops_instead_of_moving(self) -> None:
         counts = self.car.drive_pulses(0.0, 0.0, 0.0, pulses=1000, rpm=60)
 
         self.assertIsNone(counts)
         self.assertEqual(len(self.serial.writes), 4)
         self.assertEqual({frame[1] for frame in self.serial.writes}, {0xFE})
-        self.assertEqual(self.sleep.calls, [])
+        # 四条停止帧之间同样要留间隔
+        self.assertEqual(self.sleep.calls, [GAP] * 3)
 
     def test_pulses_and_duration_cannot_be_combined(self) -> None:
         with self.assertRaises(ValueError):
@@ -404,6 +365,120 @@ class PulseModeTests(unittest.TestCase):
                 self.car.forward(rpm=100, pulses=pulses)  # type: ignore[arg-type]
 
         self.assertEqual(self.serial.writes, [])
+
+
+class MillimetreModeTests(unittest.TestCase):
+    """车心位移模式：``mm`` 按**车心**走的距离换算成四轮脉冲。"""
+
+    MM_PER_WHEEL_REV = 160.0
+
+    def setUp(self) -> None:
+        self.serial = FakeSerial()
+        self.sleep = RecordingSleep()
+        self.car = MecanumDrive(
+            "/dev/ttyUSB0",
+            serial_port=self.serial,
+            sleep=self.sleep,
+            mm_per_wheel_rev=self.MM_PER_WHEEL_REV,
+            default_rpm=60,
+        )
+
+    def pulses_of(self, frame: bytes) -> int:
+        """位置帧：``[id, FD, dir, rpm(2), accel, pulses(4), absolute, sync, 6B]``。"""
+        return int.from_bytes(frame[6:10], "big")
+
+    def test_forward_mm_moves_the_centre_by_the_calibrated_distance(self) -> None:
+        # 一圈 = 160 mm = 3200 脉冲：直行 160 mm 就是每轮转一圈。
+        counts = self.car.forward(mm=self.MM_PER_WHEEL_REV)
+
+        self.assertEqual(counts, [3200, 3200, 3200, 3200])
+        self.assertEqual([frame[0] for frame in self.serial.writes[:4]], [1, 2, 3, 4])
+        self.assertEqual([frame[1] for frame in self.serial.writes[:4]], [0xFD] * 4)
+        self.assertEqual([self.pulses_of(frame) for frame in self.serial.writes[:4]], [3200] * 4)
+        self.assertEqual(self.serial.writes[4], bytes.fromhex("00 FF 66 6B"))
+        # 默认轮速（60）在没有传 rpm 时生效。
+        self.assertEqual([int.from_bytes(frame[3:5], "big") for frame in self.serial.writes[:4]], [60] * 4)
+        self.assertEqual(
+            self.sleep.calls,
+            [GAP] * 4
+            + [estimate_move_seconds(3200, 60, self.car.pulses_per_revolution, 10)],
+        )
+
+    def test_diagonal_mm_is_root_two_wheel_travel(self) -> None:
+        """X 排布走 45°：只有两只轮子滚，它们各滚 √2 倍车心位移。"""
+        counts = self.car.forward_left(mm=self.MM_PER_WHEEL_REV, rpm=200, wait=False)
+
+        expected = round(2**0.5 * 3200)
+        self.assertEqual(counts, [expected, 0, expected, 0])
+        self.assertEqual([frame[0] for frame in self.serial.writes[:2]], [1, 3])
+        self.assertEqual(self.sleep.calls, [GAP, GAP])
+
+    def test_strafe_mm_keeps_the_centre_distance(self) -> None:
+        counts = self.car.strafe_left(mm=80.0, rpm=200, wait=False)
+
+        # vy 列四个系数都是 ±1：车心横移 80 mm，四只轮子各滚 80 mm = 半圈。
+        self.assertEqual(counts, [1600, -1600, 1600, -1600])
+
+    def test_wheel_signs_flip_the_millimetre_direction(self) -> None:
+        self.car.wheel_signs[WheelPosition.FR] = -1
+
+        counts = self.car.forward(mm=self.MM_PER_WHEEL_REV, rpm=200, wait=False)
+
+        self.assertEqual(counts, [3200, -3200, 3200, 3200])
+
+    def test_a_missing_calibration_rejects_mm_but_not_pulses(self) -> None:
+        serial = FakeSerial()
+        car = MecanumDrive("/dev/ttyUSB0", serial_port=serial, sleep=lambda _seconds: None)
+
+        with self.assertRaisesRegex(ValueError, "mm_per_wheel_rev"):
+            car.forward(mm=100.0, rpm=200)
+        self.assertEqual(serial.writes, [])
+
+        # 同一台没标定的车，脉冲动作照旧可用。
+        self.assertEqual(car.forward(rpm=200, pulses=100, wait=False), [100, 100, 100, 100])
+
+    def test_mm_pulses_and_duration_are_mutually_exclusive(self) -> None:
+        for kwargs in ({"mm": 100.0, "pulses": 100}, {"mm": 100.0, "duration": 1.0}):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, "只能给一个"):
+                self.car.forward(rpm=200, **kwargs)
+
+        self.assertEqual(self.serial.writes, [])
+        self.assertEqual(self.sleep.calls, [])
+
+    def test_rejects_invalid_millimetres_before_writing(self) -> None:
+        for mm in (0, -1, float("inf"), "5"):
+            with self.subTest(mm=mm), self.assertRaises(ValueError):
+                self.car.forward(mm=mm, rpm=200)  # type: ignore[arg-type]
+
+        self.assertEqual(self.serial.writes, [])
+
+    def test_a_distance_shorter_than_half_a_pulse_sends_nothing(self) -> None:
+        counts = self.car.forward(mm=0.01, rpm=200)
+
+        self.assertEqual(counts, [0, 0, 0, 0])
+        self.assertEqual(self.serial.writes, [], "全轮取整为 0 时连同步广播都不发")
+        self.assertEqual(self.sleep.calls, [])
+
+    def test_drive_mm_zero_direction_stops_instead_of_moving(self) -> None:
+        counts = self.car.drive_mm(0.0, 0.0, 160.0, rpm=60)
+
+        self.assertIsNone(counts)
+        self.assertEqual(len(self.serial.writes), 4)
+        self.assertEqual({frame[1] for frame in self.serial.writes}, {0xFE})
+        self.assertEqual(self.sleep.calls, [GAP] * 3)
+
+    def test_missing_rpm_and_missing_default_is_reported(self) -> None:
+        car = MecanumDrive("/dev/ttyUSB0", serial_port=FakeSerial(), mm_per_wheel_rev=160.0)
+
+        with self.assertRaisesRegex(ValueError, "rpm"):
+            car.forward(mm=160.0)
+
+    def test_drive_mm_is_the_general_arbitrary_angle_entry(self) -> None:
+        # 任意方向（3-4-5 三角）：系数仍是矩阵给的，位移量的是车心。
+        counts = self.car.drive_mm(3.0, 4.0, self.MM_PER_WHEEL_REV, rpm=200, wait=False)
+
+        # X 排布：FL=vx+vy=7, FR=vx-vy=-1, RL=7, RR=-1；除以车心速度 5 再乘 3200。
+        self.assertEqual(counts, [4480, -640, 4480, -640])
 
 
 class PatternOTests(unittest.TestCase):

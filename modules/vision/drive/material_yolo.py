@@ -1,8 +1,8 @@
 """YOLO 推理物料候选：把一帧（或锁定区域）变成"这里有哪些框"。
 
-职责单一：只做 **帧 → 检测框**。不判断"有没有物料"（``modules.vision.drive.material_presence``）、
+职责单一：只做 **帧 → 检测框**。不判断"有没有物料"（那是 ``MaterialLocator`` 的事）、
 不判断"是哪一种物料"（``modules.vision.drive.material_class``）、不算距离
-（``modules.vision.drive.material_distance``）。串起来用见 ``modules.vision.drive.material_locate``。
+（那是 ``material_face`` + 针孔模型的事）。串起来用见 ``modules.vision.drive.material_locate``。
 
 两种用法：
 

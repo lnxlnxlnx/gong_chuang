@@ -7,6 +7,9 @@
     "x_mm": 0.0,
     "y_mm": 0.0
   },
+  "ring_offset_x_mm": 5.5,
+  "ring_offset_y_mm": -4.5,
+  "ring_offsets": [[-7, -3], [3, -4], [9, -4]],
   "jacobian": {
     "base_dx": -0.08174204217107724,
     "base_dy": -0.007583697824866524,
@@ -26,7 +29,7 @@
   "frame_margin_seconds": 0.0,
   "settle_tolerance_mm": 0.4,
   "coarse_settle_tolerance_mm": 3.0,
-  "settle_timeout_seconds": 4.0,
+  "settle_timeout_seconds": 1.0,
   "target_wait_seconds": null,
   "settle_poll_seconds": 0.01,
   "inter_frame_seconds": 0.03,

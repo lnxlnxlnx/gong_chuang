@@ -494,14 +494,9 @@ class Robot:
         真实实现仍是 pyserial 的 ``Serial``（它的 ``write`` 与协议声明一致，见那里的说明）。
         """
         from modules.motor.drive.emm42 import Emm42Driver, SerialPort as _SerialPort
+        from modules.serial_link import open_serial
 
-        try:
-            import serial
-        except ImportError as error:  # pragma: no cover - 板子上的环境问题
-            raise RuntimeError(
-                "pyserial is required on Jetson. Install it in the target Python environment first."
-            ) from error
-        opened: _SerialPort = serial.Serial(
+        opened: _SerialPort = open_serial(
             port,
             baudrate=Emm42Driver.BAUDRATE if baudrate is None else baudrate,
             timeout=0.1,
@@ -515,15 +510,10 @@ class Robot:
         波特率来自 ``modules/servo/hardware.json`` 的 ``bus.baudrate``。半双工舵机总线
         **同一个串口不能被打开两次**，所以夹爪与转盘必须共用这一条。
         """
+        from modules.serial_link import open_serial
         from modules.servo.drive.bus_servo import BusServo
 
-        try:
-            import serial
-        except ImportError as error:  # pragma: no cover - 板子上的环境问题
-            raise RuntimeError(
-                "pyserial is required on Jetson. Install it in the target Python environment first."
-            ) from error
-        opened: "ServoSerialPort" = serial.Serial(
+        opened: "ServoSerialPort" = open_serial(
             port,
             baudrate=BusServo.BAUDRATE if baudrate is None else baudrate,
             timeout=0.1,

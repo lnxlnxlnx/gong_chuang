@@ -160,9 +160,17 @@ class ObjectSelectorTests(unittest.TestCase):
         self.assertTrue(selector.is_open)
         self.assertEqual(select_object((self.green,), selector).material_id, 4)
 
-    def test_open_selector_refuses_ambiguity(self) -> None:
-        with self.assertRaisesRegex(ServoError, "多个目标"):
-            select_object((self.green, self.blue), ObjectSelector())
+    def test_open_selector_takes_the_nearest_target(self) -> None:
+        """没配判别条件、画面里又有多个时：离光轴最近的那个就是爪口下的那个。"""
+        self.assertEqual(
+            select_object((self.blue, self.green), ObjectSelector()).material_id, 4
+        )
+        self.assertEqual(
+            select_object(
+                (self.green, sighting(9, -0.5, 0.2, "red")), ObjectSelector()
+            ).material_id,
+            9,
+        )
 
     def test_material_id_selects(self) -> None:
         selector = ObjectSelector(material_id=5)
@@ -186,14 +194,6 @@ class ObjectSelectorTests(unittest.TestCase):
         with self.assertRaises(ServoError) as caught:
             select_object((self.green,), ObjectSelector(material_id=99))
         self.assertIn("物料 4", str(caught.exception))
-
-    def test_the_ambiguity_error_names_both_ways_out(self) -> None:
-        """报错要说清两条路：按次传（推荐），或者填默认值。"""
-        with self.assertRaises(ServoError) as caught:
-            select_object((self.green, self.blue), ObjectSelector())
-        message = str(caught.exception)
-        self.assertIn("want=", message)
-        self.assertIn("eye_in_hand.json", message)
 
     def test_from_want_speaks_the_same_language_as_locate(self) -> None:
         """``locate("red")`` 与 ``align_xy(want="red")`` 必须是同一套说法。"""
@@ -239,6 +239,24 @@ class ServoConfigTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ServoConfig(**kwargs)
 
+    def test_per_ring_offsets_override_the_single_pair(self) -> None:
+        """同一个补偿放到不同环上会差一个方向，所以每个环号可以有自己的 (x, y)。"""
+        config = ServoConfig(
+            ring_offset_x_mm=5.5,
+            ring_offset_y_mm=-4.5,
+            ring_offsets_mm=((1.0, -1.0), (2.0, -2.0)),
+        )
+        self.assertEqual(config.ring_offset(1), (1.0, -1.0))
+        self.assertEqual(config.ring_offset(2), (2.0, -2.0))
+        # 没配的号、以及不知道环号时，退回全局那一对（不会静默变成 0）。
+        self.assertEqual(config.ring_offset(3), (5.5, -4.5))
+        self.assertEqual(config.ring_offset(None), (5.5, -4.5))
+
+    def test_bad_ring_offsets_are_rejected(self) -> None:
+        for bad in (((1.0,),), ((1.0, 2.0, 3.0),), ((math.nan, 0.0),)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                ServoConfig(ring_offsets_mm=bad)
+
 
 class ConfigFileTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -270,6 +288,31 @@ class ConfigFileTests(unittest.TestCase):
         self.assertIn("target_wait_seconds", document)
         self.assertIsNone(document["target_wait_seconds"])
         self.assertIsNone(load_servo_config().target_wait_seconds)
+
+    def test_the_ring_offset_is_written_in_the_project_config(self) -> None:
+        """落料补偿是现场量出来手改的数：两个键必须真的落在配置文件里。"""
+        document = json.loads(model.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        self.assertIn("ring_offset_x_mm", document)
+        self.assertIn("ring_offset_y_mm", document)
+        config = load_servo_config()
+        self.assertTrue(math.isfinite(config.ring_offset_x_mm))
+        self.assertTrue(math.isfinite(config.ring_offset_y_mm))
+
+    def test_the_ring_offset_defaults_to_zero_and_reads_back(self) -> None:
+        """不配 = 0，与加这个字段之前的行为一致；配了（含负数）原样读回来。"""
+        self.assertEqual(ServoConfig().ring_offset_x_mm, 0.0)
+        self.assertEqual(ServoConfig().ring_offset_y_mm, 0.0)
+        self.write({"ring_offset_x_mm": 7.5, "ring_offset_y_mm": -2.25})
+        config = load_servo_config(self.path)
+        self.assertEqual(config.ring_offset_x_mm, 7.5)
+        self.assertEqual(config.ring_offset_y_mm, -2.25)
+
+    def test_a_non_numeric_ring_offset_is_rejected(self) -> None:
+        for document in ({"ring_offset_x_mm": "7.5"}, {"ring_offset_y_mm": None}):
+            with self.subTest(document=document):
+                self.write(document)
+                with self.assertRaises(ServoError):
+                    load_servo_config(self.path)
 
     def test_target_wait_zero_keeps_the_old_semantics(self) -> None:
         """``0`` 与 ``null`` 是两件事：0 = 不加额外等待，null = 一直等。"""
@@ -2035,6 +2078,29 @@ class GraspAlignXYSessionTests(unittest.TestCase):
             session.grasp.align_xy()
             self.assertTrue(session.mock("align").call_args.args[2].is_open)
 
+    def test_a_per_call_tolerance_reaches_align_x_y_only_for_that_call(self) -> None:
+        """误差门槛按次生效：配置文件一个字都不改，下一次调用还是配置里那份。"""
+        rig = self.build(hover_z_mm=None)
+        with rig as session:
+            session.grasp.align_xy(tolerance_mm=1.5)
+            self.assertEqual(session.mock("align").call_args.args[5].tolerance_mm, 1.5)
+
+            # 不传就回到配置里那份（``replaced`` 不会泄漏到下一次）。
+            session.mock("align").reset_mock()
+            session.grasp.align_xy()
+            self.assertEqual(
+                session.mock("align").call_args.args[5].tolerance_mm,
+                session.grasp._config.tolerance_mm,
+            )
+
+    def test_a_non_positive_tolerance_is_rejected_before_anything_moves(self) -> None:
+        rig = self.build(hover_z_mm=None)
+        with rig as session:
+            for bad in (0.0, -1.0):
+                with self.subTest(tolerance_mm=bad), self.assertRaises(ValueError):
+                    session.grasp.align_xy(tolerance_mm=bad)
+            session.mock("align").assert_not_called()
+
     def test_a_per_call_want_reaches_every_step_of_align_and_descend(self) -> None:
         """整轮就位（悬停 → 安全高度 → x/y → 下降）每一步都得看同一个 want。
 
@@ -2328,25 +2394,32 @@ class OcclusionTests(unittest.TestCase):
                 ensure_safe_height=False,
             )
 
-    def test_several_targets_are_never_treated_as_occlusion(self) -> None:
-        """画面里有两个目标时**不能**当遮挡收工：那会朝错的目标走，必须问人。"""
+    def test_several_targets_align_to_the_nearest_one(self) -> None:
+        """画面里多一个远处的物料不该打断对准：挑离光轴最近的那个继续走。"""
 
         class TwoTargets:
             error = None
 
+            def __init__(self, arm: "FakeArm") -> None:
+                self.arm = arm
+
             def frame(self, **_kwargs):
                 stamp = time.monotonic()
                 return (
-                    sighting(1, 30.0, 0.0, stamp=stamp),
-                    sighting(2, -30.0, 0.0, stamp=stamp),
+                    sighting(
+                        1, self.arm.offset[0] + 300.0, self.arm.offset[1], stamp=stamp
+                    ),
+                    sighting(2, self.arm.offset[0], self.arm.offset[1], stamp=stamp),
                 )
 
-        arm = FakeArm(self.TRUTH)
-        with self.assertRaisesRegex(ServoError, "多个目标"):
-            align_x_y(
-                arm, TwoTargets(), ObjectSelector(), self.TARGET, self.TRUTH, self.config(),
-                ensure_safe_height=False,
-            )
+        arm = FakeArm(self.TRUTH, gain=0.6)
+        result = align_x_y(
+            arm, TwoTargets(arm), ObjectSelector(), self.TARGET, self.TRUTH, self.config(),
+            ensure_safe_height=False,
+        )
+
+        self.assertFalse(result.occluded)
+        self.assertLess(result.error_mm, 6.0)
 
     def test_the_timeout_message_carries_the_last_inner_reason(self) -> None:
         """超时那句必须带上最后一次内层原因——否则三种成因长得一模一样。"""

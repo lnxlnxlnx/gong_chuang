@@ -416,6 +416,10 @@ class FakeSerialPort:
     def read(self, size: int) -> bytes:
         return bytes(size)
 
+    def reset_input_buffer(self) -> None:
+        """驱动每次发包前都会清缓冲；这条假总线不回包，没有残留可清。"""
+        pass
+
     def close(self) -> None:
         self.is_open = False
 

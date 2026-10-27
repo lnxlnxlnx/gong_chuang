@@ -92,6 +92,11 @@ class GraspSettings(TypedDict):
     lift_scale: LiftScale | None
 
 
+#: 环心读数**可以当物理毫米用**的比例尺来源。雅可比是按物理毫米标定的，其余来源
+#: （``station.mm_per_px`` 是给固定相机标的值）会整体差一个倍数，而计划看起来完全正常。
+PHYSICAL_RING_SCALES = ("depth/focal", "ring box")
+
+
 def _new_arm(port: str, arm_config) -> RobotArm:
     """真实构造机械臂的唯一位置；测试在这里注入假臂。
 
@@ -389,6 +394,7 @@ class Grasp:
         single_step: bool = False,
         reading=None,
         want=None,
+        tolerance_mm: float | None = None,
     ) -> ServoResult:
         """只做 x/y 对准：**默认一步都不动高度**，高度由调用方负责。
 
@@ -413,6 +419,10 @@ class Grasp:
 
             每轮只取**一帧**、只走**一步**；``reading`` 给了就等于 ``single_step``。
             结果里的 ``unverified`` 为真——读数说的是动作**之前**那一次。
+        :param tolerance_mm: 这一次的到位门槛（毫米）；``None`` 用
+            ``eye_in_hand.json`` 的 ``tolerance_mm``（你那份是 6.0）。**比配置更严**时
+            多用几步，更松时可能一步就收工；``max_iterations`` 和单步脉冲上限都不变，
+            所以收得太严会以"没进容差"报错，而不是一直磨。负数 / 0 直接报错。
         :param want: 这一次要抓**哪一个**物料：类别名（``"red"``）或从 1 开始的编号，
             与 ``vision.locate(want)`` 同一套说法。**不传就用 ``eye_in_hand.json`` 里
             ``object`` 那一份**（那份只是默认值）。一次程序里依次抓多种物料就靠它::
@@ -452,6 +462,13 @@ class Grasp:
             lift_scale=self._lift_scale,
             on_message=self._say,
         )
+        # 门槛只改这一次：``ServoConfig`` 是 frozen 的，``replace`` 顺带跑它自己的校验
+        # （<=0 直接 ValueError），也顺带把由它派生的"停稳细档"（0.25×容差）一起改掉。
+        config = (
+            self._config
+            if tolerance_mm is None
+            else replace(self._config, tolerance_mm=float(tolerance_mm))
+        )
         if not ensure_safe_height:
             return align_x_y(
                 arm,
@@ -459,7 +476,7 @@ class Grasp:
                 selector,
                 self._target,
                 self._jacobian,
-                self._config,
+                config,
                 ensure_safe_height=False,
                 **options,
             )
@@ -469,7 +486,7 @@ class Grasp:
             selector,
             self._target,
             self._jacobian,
-            self._config,
+            config,
             **options,
         )
 
@@ -513,8 +530,8 @@ class Grasp:
         都满足；``station.mm_per_px`` 不满足（那是给固定相机标的值，装在臂上差好几倍）。
         这一档会**核对并报错**；确实知道换算关系时用 ``scale_mm_per_px`` 直接给。
 
-        :param require_digit: 只接受指定环号（1/2/3）；画面里是别的号就报错，
-            **不回退**到另一个环（拿错环的角度去转，机械臂会朝 95 mm 外的位置动）。
+        :param require_digit: 只接受指定环号（1/2/3）：**定位器按号筛框**（一帧里有好几个
+            环也不会挑错），画面里确实没有这个号才报错，**不回退**到另一个环。
         :param timeout: 等一帧的超时（秒）。
         :param scale_mm_per_px: 与 ``jacobian`` 一致的毫米/像素；给了就按它换算读数。
 
@@ -526,6 +543,42 @@ class Grasp:
             source, timeout=timeout, require_digit=require_digit
         )
         return self._plan_for_ring(arm, target, scale_mm_per_px=scale_mm_per_px)
+
+    def plan_ring_readings(
+        self,
+        readings: "dict[int, tuple[float, float]]",
+        *,
+        scale_source: str = "",
+        offset_digit: int | None = None,
+    ) -> "dict[int, RingBasePlan]":
+        """一批**已经算好的**环心读数 → ``{环号: 各轴绝对位置}``；一帧都不拍。
+
+        ``readings`` 是 ``{环号: (x_mm, y_mm)}``，与 :meth:`plan_ring` 的读数是同一套
+        单位（相机系毫米）。三环成排时"2 号环实测 + 一条直线"就能把 1/3 号的环心算
+        出来，再一次性解算三个落点——:func:`app.gripper.place_box_from_repo_to_floor_v3`
+        就是这么用的；抓料/摆料之后拿 ``plan.apply(arm)`` 走到那个绝对位置。
+
+        ``scale_source`` 是这批读数**来自那一帧**的比例尺来源
+        （``RingTarget.scale_source``）。它与雅可比必须是同一把尺，这条不变式与
+        :meth:`plan_ring` 完全一样：非物理毫米的来源在这里同样拒绝，而不是给一个
+        像样的错角度。
+
+        ``offset_digit`` 让这几份位置**共用同一个环号的落料补偿**（``ring_offsets``）。
+        默认各用各的——那适合"每个环都是自己量出来的"。外推出来的点没有自己的补偿表，
+        而且三份补偿不同会把"这三个落点该在一条直线上"直接搅乱（现场配的
+        ``ring_offsets`` 各环差到 16 mm），所以一条直线上的三个点用同一个补偿号。
+
+        :raises ServoError: 比例尺不是物理毫米，或雅可比奇异。
+        """
+        self._require_physical_ring_scale(scale_source, None)
+        arm, _source = self._require_resources()
+        offset = None if offset_digit is None else int(offset_digit)
+        return {
+            int(digit): self._plan_from_reading(
+                arm, reading, digit=int(digit), offset_digit=offset
+            )
+            for digit, reading in readings.items()
+        }
 
     def align_ring(
         self,
@@ -583,14 +636,16 @@ class Grasp:
         final_reading: tuple[float, float] | None = None
         digit: int | None = None
         final_plan = None
+        final_source = ""
         for attempt in range(1, max(1, int(max_iterations)) + 1):
             target = self._locate_ring_for_plan(
-                source, timeout=timeout, require_digit=require_digit
+                source, timeout=timeout, require_digit=require_digit, settle=True
             )
             plan = self._plan_for_ring(arm, target, scale_mm_per_px=scale_mm_per_px)
             digit = plan.digit
             final_reading = plan.reading
             final_plan = plan
+            final_source = str(target.scale_source)
             error = math.hypot(plan.error_mm[0], plan.error_mm[1])
             step = RingAlignStep(
                 attempt=attempt,
@@ -651,9 +706,12 @@ class Grasp:
 
         final_error = None
         if final_reading is not None and self._target is not None:
+            # 残差要跟**环心那一次的目标**比（含落料补偿），否则报出来的数与闭环停下的
+            # 判据不是同一个口径：补偿 7.5 mm 时它会一直显示差 7.5 mm。
+            ring_target = self._ring_target(digit)
             final_error = math.hypot(
-                final_reading[0] - self._target.x_mm,
-                final_reading[1] - self._target.y_mm,
+                final_reading[0] - ring_target.x_mm,
+                final_reading[1] - ring_target.y_mm,
             )
         return RingAlignResult(
             steps=tuple(steps),
@@ -662,6 +720,7 @@ class Grasp:
             final_error_mm=final_error,
             tolerance_mm=tolerance,
             digit=digit,
+            scale_source=final_source,
             response=response,
             # 收敛时那一份计划：字段与 ``plan_ring()`` 完全同一套，可以直接存下来
             # （"先对准、之后回到这个绝对位置"就靠它）。
@@ -669,15 +728,56 @@ class Grasp:
             note=note,
         )
 
-    def _locate_ring_for_plan(self, source, *, timeout, require_digit):
-        """读一帧并校验"这一个环能不能拿去算角度"；不能就说清楚为什么。"""
+    #: 等环心读数停稳时最多连读几帧。3 帧够滤掉底座摆完的那点余振，又不会在
+    #: "一直等不到稳定"时卡住——等不到就用最后一帧，和现在完全一样。
+    RING_SETTLE_READS = 3
+
+    def _locate_ring_for_plan(
+        self, source, *, timeout, require_digit, settle: bool = False
+    ):
+        """读一帧并校验"这一个环能不能拿去算角度"；不能就说清楚为什么。
+
+        ``settle=True``（闭环用）时连读几帧，直到相邻两次读数足够接近
+        （``settle_tolerance_mm``）。为什么要：每步走完只按**估算耗时 + 0.15 s** 睡一下
+        就去测下一帧，而底座是大惯量摆动，那点时间不够；读数抖 1–2 px，下一步的步长是
+        **按这个读数算的**，于是抖动量直接变成来回摆。单帧定位（``plan_ring``）保持一帧，
+        那条路是人看着按的，多读几帧只是白等。
+        """
+        target = self._validated_ring(
+            source, timeout=timeout, require_digit=require_digit
+        )
+        if not settle:
+            return target
+        previous = target.reading()
+        for _ in range(self.RING_SETTLE_READS - 1):
+            if previous is None:
+                break
+            following = self._validated_ring(
+                source, timeout=timeout, require_digit=require_digit
+            )
+            reading = following.reading()
+            target = following
+            if reading is not None and math.hypot(
+                reading[0] - previous[0], reading[1] - previous[1]
+            ) <= self._config.settle_tolerance_mm:
+                break
+            previous = reading
+        return target
+
+    def _validated_ring(self, source, *, timeout, require_digit):
+        """一帧环心 + 三项校验（有环 / 读数可用 / 环号对得上）。
+
+        ``require_digit`` **下传给定位器**，让它只在这个号里挑框：一帧里同时有 1/2/3 号环
+        是正常取景，按"取分最高的那个再看是不是它"会随机报"画面里是 1 号，不是 2 号"——
+        分最高的那个通常就不是你要的那个。后面那道环号检查留着，兜住不认 ``digit`` 的源。
+        """
         locate = getattr(source, "locate_ring", None)
         if locate is None:
             raise ServoError(
                 f"这个观测源没有环心定位（{type(source).__name__}）："
                 "环心是相机这一侧的能力，先确认会话用的是本机视觉源（Vision）"
             )
-        target = locate(timeout=timeout)
+        target = locate(timeout=timeout, digit=require_digit)
         if target is None:
             raise ServoError(
                 "画面里没有环：把靶标移到视野里、或确认模型类别表里有 tg1/tg2/tg3"
@@ -692,16 +792,45 @@ class Grasp:
             )
         return target
 
+    def _ring_target(self, digit: int | None = None) -> ServoTarget:
+        """环心那一次伺服的**目标读数**：配置里的 ``target`` 加上落料补偿。
+
+        补偿只加在环心路径上（``ServoConfig.ring_offset``）：物料对准仍然对着
+        ``self._target``。两边都加等于整体平移，料与环的相对偏差一点没变。
+
+        闭环看不见"料落在环心的哪一侧"（镜头光轴与爪口有固定偏差、料在爪里也会
+        偏），所以这份偏差只能量出来写进配置；落点误差 = 补偿量 − 实际偏移。
+
+        ``digit`` 给了就用**这个环号那一份**补偿（``ring_offsets``）：同一份补偿放到不同
+        环上会差一个方向，因为回程要转过的角度不同。没配这个号就退回全局那一对。
+        """
+        offset_x, offset_y = self._config.ring_offset(digit)
+        return ServoTarget(
+            x_mm=self._target.x_mm + offset_x,
+            y_mm=self._target.y_mm + offset_y,
+        )
+
     def _plan_for_ring(self, arm, target, *, scale_mm_per_px):
         """一帧已定位的环 → 各轴绝对位置（闭环与单次计划共用这一处）。"""
-        from modules.grasp.drive.ring_plan import plan_ring_base
-
         reading = self._ring_reading_in_jacobian_units(
             target, target.reading(), scale_mm_per_px
         )
+        return self._plan_from_reading(
+            arm, reading, digit=int(target.digit), score=float(target.score)
+        )
+
+    def _plan_from_reading(self, arm, reading, *, digit, score=None, offset_digit=None):
+        """读数**已经与雅可比同一把尺**（比例尺由调用方核过）→ 各轴绝对位置。
+
+        ``offset_digit`` 给了就用那个环号的落料补偿（一条直线上的几个点共用一份）；
+        ``digit`` 仍然是这份计划自己的环号，写进结果里给人看。
+        """
+        from modules.grasp.drive.ring_plan import plan_ring_base
+
+        ring_target = self._ring_target(digit if offset_digit is None else offset_digit)
         plan = plan_ring_base(
             reading=reading,
-            target=(self._target.x_mm, self._target.y_mm),
+            target=(ring_target.x_mm, ring_target.y_mm),
             jacobian=self._jacobian,
             base_pulses=arm.turns_state.of("base").pulses,
             extension_pulses=arm.turns_state.of("extension").pulses,
@@ -709,7 +838,7 @@ class Grasp:
             reduction_ratio=arm.config.base_reduction,
             tolerance_mm=self._config.tolerance_mm,
         )
-        return replace(plan, digit=int(target.digit), score=float(target.score))
+        return replace(plan, digit=int(digit), score=score)
 
     @staticmethod
     def _unusable_ring_reason(target) -> str:
@@ -743,14 +872,25 @@ class Grasp:
                 raise ServoError("环心读数没有比例尺，换不了单位")
             factor = float(scale_mm_per_px) / float(current)
             return (reading[0] * factor, reading[1] * factor)
-        if target.scale_source in ("depth/focal", "ring box"):
-            # 两种都是物理毫米，与雅可比同一把尺：
-            # depth/focal 是针孔标定；ring box 是"外径 / 模型框像素"。
-            return reading
+        self._require_physical_ring_scale(target.scale_source, current)
+        return reading
+
+    @staticmethod
+    def _require_physical_ring_scale(
+        scale_source: str, scale_mm_per_px: float | None
+    ) -> None:
+        """环心读数的比例尺必须是**物理毫米**（与雅可比同一把尺）；不是就拒绝。
+
+        ``station.mm_per_px`` 是给固定相机标的值，相机装在臂上时它会差好几倍：
+        照着算出来的角度看起来完全正常，爪子却朝错的地方去。
+        """
+        if scale_source in PHYSICAL_RING_SCALES:
+            return
+        measured = "无" if scale_mm_per_px is None else f"{scale_mm_per_px:.4f} mm/px"
         raise ServoError(
-            f"环心读数的比例尺是 {target.scale_source}"
-            f"（{current:.4f} mm/px），不是物理毫米，而 jacobian 是按物理毫米标定的："
-            "直接算角度会整体差一个倍数，而计划看起来完全正常。\n"
+            f"环心读数的比例尺是 {scale_source or '未知'}（{measured}），"
+            "不是物理毫米，而 jacobian 是按物理毫米标定的：直接算角度会整体差一个倍数，"
+            "而计划看起来完全正常。\n"
             "  两种做法：\n"
             "  1) 给 modules/vision/config.json 的 ring_target 填 outer_diameter_mm"
             "（靶标图案外径，现场 95 mm），环心读数就会用“外径 / 模型框”换算，"

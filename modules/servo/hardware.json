@@ -3,7 +3,7 @@
     "port": "COM35"
   },
   "jetson": {
-    "port": "/dev/ttyUSB1"
+    "port": "auto"
   },
   "bus": {
     "baudrate": 115200,
@@ -11,8 +11,8 @@
   },
   "gripper": {
     "servo_id": 1,
-    "open_position": 280,
-    "closed_position": 33
+    "open_position": 350,
+    "closed_position": 30
   },
   "turntable": {
     "servo_id": 2,

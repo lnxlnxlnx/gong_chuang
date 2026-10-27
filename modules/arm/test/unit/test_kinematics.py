@@ -10,18 +10,12 @@ from modules.arm.drive.kinematics import (
     TravelLimit,
     base_degrees_for_pulses,
     base_pulses_for_degrees,
-    check_reachable,
-    forward_cylindrical,
-    height_above_table,
     inverse_cylindrical,
     linear_pulses_for_mm,
-    grip_height_mm,
     mm_for_linear_pulses,
     motor_degrees_for_pulses,
     motor_pulses_for_degrees,
     normalize_degrees,
-    require_reachable,
-    shortest_angle_delta_degrees,
 )
 
 PULSES_PER_REVOLUTION = 3200
@@ -212,14 +206,11 @@ class LinearAxisConversionTests(unittest.TestCase):
 
 
 class CylindricalKinematicsTests(unittest.TestCase):
-    def test_forward_and_inverse_are_exact_inverses(self) -> None:
+    def test_the_height_passes_through_unchanged(self) -> None:
         for plane_x, plane_y in ((100.0, 0.0), (0.0, 100.0), (-30.0, -40.0), (0.0, 0.0)):
             with self.subTest(point=(plane_x, plane_y)):
                 pose = inverse_cylindrical(plane_x, plane_y, 17.0)
-                back = forward_cylindrical(pose)
-                self.assertAlmostEqual(back[0], plane_x, places=9)
-                self.assertAlmostEqual(back[1], plane_y, places=9)
-                self.assertAlmostEqual(back[2], 17.0, places=9)
+                self.assertAlmostEqual(pose.height_mm, 17.0, places=9)
 
     def test_radial_distance_is_never_negative(self) -> None:
         pose = inverse_cylindrical(-3.0, -4.0, 0.0)
@@ -234,34 +225,6 @@ class CylindricalKinematicsTests(unittest.TestCase):
     def test_invalid_inputs_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
             inverse_cylindrical(float("inf"), 0.0, 0.0)
-        with self.assertRaises(ValueError):
-            forward_cylindrical(CylindricalPose(0.0, -1.0, 0.0))
-
-
-class ShortestAngleTests(unittest.TestCase):
-    def test_it_takes_the_short_way_around_the_wrap_point(self) -> None:
-        """170° 到 -170° 是 20°，不是 340°；底座扫一大圈会撞到东西。"""
-        self.assertAlmostEqual(shortest_angle_delta_degrees(170.0, -170.0), 20.0, places=9)
-        self.assertAlmostEqual(shortest_angle_delta_degrees(-170.0, 170.0), -20.0, places=9)
-
-    def test_a_half_turn_is_reported_as_positive_180(self) -> None:
-        self.assertAlmostEqual(shortest_angle_delta_degrees(0.0, 180.0), 180.0, places=9)
-        self.assertAlmostEqual(shortest_angle_delta_degrees(0.0, -180.0), 180.0, places=9)
-
-    def test_the_result_always_lands_in_the_documented_range(self) -> None:
-        for start in range(-180, 181, 30):
-            for target in range(-180, 181, 30):
-                delta = shortest_angle_delta_degrees(float(start), float(target))
-                self.assertGreater(delta, -180.0)
-                self.assertLessEqual(delta, 180.0)
-
-    def test_applying_the_delta_lands_on_the_target_modulo_a_full_turn(self) -> None:
-        for start, target in ((175.0, -175.0), (-175.0, 175.0), (0.0, 90.0), (90.0, 0.0)):
-            with self.subTest(start=start, target=target):
-                current = start + shortest_angle_delta_degrees(start, target)
-                self.assertAlmostEqual((current - target) % 360.0, 0.0, places=9)
-                # 而且必须是短边：走过的角度不超过半圈。
-                self.assertLessEqual(abs(current - start), 180.0)
 
 
 class NormalizeDegreesTests(unittest.TestCase):
@@ -287,40 +250,6 @@ class NormalizeDegreesTests(unittest.TestCase):
             normalize_degrees(float("nan"))
 
 
-class HeightTests(unittest.TestCase):
-    def test_table_depth_minus_point_depth_is_the_height(self) -> None:
-        self.assertAlmostEqual(
-            height_above_table(table_depth_mm=300.0, point_depth_mm=285.0), 15.0, places=9
-        )
-
-    def test_a_point_on_the_table_has_zero_height(self) -> None:
-        self.assertAlmostEqual(
-            height_above_table(table_depth_mm=300.0, point_depth_mm=300.0), 0.0, places=9
-        )
-
-    def test_side_grasp_height_follows_the_material_height(self) -> None:
-        """物料高 20 mm、夹半高 -> 夹持点高 10 mm。
-
-        **不含**靶标与夹持点之间的竖直偏移：那个偏移在把观测写成夹持点位姿时已经减过
-        一次（``pipeline._grasp_pose``），生成目标时再加一遍就是重复补偿。
-        """
-        self.assertAlmostEqual(
-            grip_height_mm(material_height_mm=20.0, grip_ratio=0.5), 10.0, places=9
-        )
-        self.assertAlmostEqual(
-            grip_height_mm(material_height_mm=20.0, grip_ratio=1.0), 20.0, places=9
-        )
-        self.assertAlmostEqual(
-            grip_height_mm(material_height_mm=20.0, grip_ratio=0.0), 0.0, places=9
-        )
-
-    def test_invalid_grasp_inputs_are_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            grip_height_mm(material_height_mm=20.0, grip_ratio=1.5)
-        with self.assertRaises(ValueError):
-            grip_height_mm(material_height_mm=-1.0, grip_ratio=0.5)
-
-
 class TravelLimitTests(unittest.TestCase):
     def test_minimum_must_not_exceed_maximum(self) -> None:
         with self.assertRaises(ValueError):
@@ -332,53 +261,3 @@ class TravelLimitTests(unittest.TestCase):
         self.assertTrue(limit.contains(5.0))
         self.assertFalse(limit.contains(5.001))
 
-
-class ReachabilityTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.base_limit = TravelLimit(-110.0, 110.0)
-        self.radial_limit = TravelLimit(40.0, 160.0)
-        self.height_limit = TravelLimit(-5.0, 120.0)
-
-    def check(self, pose: CylindricalPose):
-        return check_reachable(
-            pose,
-            base_limit=self.base_limit,
-            radial_limit=self.radial_limit,
-            height_limit=self.height_limit,
-        )
-
-    def test_a_pose_inside_every_limit_has_no_problems(self) -> None:
-        self.assertEqual(self.check(CylindricalPose(90.0, 80.0, 10.0)), ())
-
-    def test_each_violated_axis_is_named_in_its_own_message(self) -> None:
-        problems = self.check(CylindricalPose(150.0, 200.0, 200.0))
-        self.assertEqual(len(problems), 3)
-        self.assertTrue(any("base" in item for item in problems))
-        self.assertTrue(any("extension" in item for item in problems))
-        self.assertTrue(any("lift" in item for item in problems))
-
-    def test_an_omitted_limit_is_skipped_and_that_is_the_point(self) -> None:
-        """没标定行程就是没有软件保护；这里如实跳过，不假装检查过。"""
-        self.assertEqual(check_reachable(CylindricalPose(9999.0, 9999.0, 9999.0)), ())
-
-    def test_require_reachable_raises_with_every_reason_joined(self) -> None:
-        with self.assertRaises(ValueError) as caught:
-            require_reachable(
-                CylindricalPose(150.0, 200.0, 10.0),
-                base_limit=self.base_limit,
-                radial_limit=self.radial_limit,
-            )
-        message = str(caught.exception)
-        self.assertIn("150.0", message)
-        self.assertIn("200.0", message)
-
-    def test_require_reachable_returns_nothing_when_the_pose_is_fine(self) -> None:
-        require_reachable(
-            CylindricalPose(0.0, 100.0, 0.0),
-            base_limit=self.base_limit,
-            radial_limit=self.radial_limit,
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()

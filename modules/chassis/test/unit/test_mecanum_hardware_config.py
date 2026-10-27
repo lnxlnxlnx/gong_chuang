@@ -29,6 +29,8 @@ def write_config(path: Path) -> None:
                     "pattern": "X",
                     "motion_transform": "standard",
                     "rotation_gain": 1.25,
+                    "rpm": 60,
+                    "mm_per_wheel_rev": 160.0,
                 },
                 "profiles": {
                     "jetson": {
@@ -63,6 +65,60 @@ class MecanumHardwareConfigTests(unittest.TestCase):
         self.assertEqual(profile.motion_transform, "standard")
         self.assertEqual(profile.individual_rpm, 15)
         self.assertEqual(profile.chassis_pause, 0.25)
+        self.assertEqual(profile.rpm, 60)
+        self.assertEqual(profile.mm_per_wheel_rev, 160.0)
+
+    def test_vehicle_rpm_is_required_and_reported_by_key(self) -> None:
+        """默认轮速是运动调参：漏写要报出具体键，不退回代码里的默认值。"""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = Path(temporary_directory) / "mecanum_hardware.json"
+            write_config(config_path)
+            document = json.loads(config_path.read_text(encoding="utf-8"))
+            del document["vehicle"]["rpm"]
+            config_path.write_text(json.dumps(document), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "vehicle.rpm"):
+                load_profile("jetson", config_path, hardware_path=config_path)
+
+    def test_a_null_millimetre_calibration_means_not_calibrated(self) -> None:
+        """``null`` 与整键缺失同义：没标定，脉冲/计时动作照旧可用。"""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = Path(temporary_directory) / "mecanum_hardware.json"
+            write_config(config_path)
+            document = json.loads(config_path.read_text(encoding="utf-8"))
+            document["vehicle"]["mm_per_wheel_rev"] = None
+            config_path.write_text(json.dumps(document), encoding="utf-8")
+
+            profile = load_profile("jetson", config_path, hardware_path=config_path)
+
+        self.assertIsNone(profile.mm_per_wheel_rev)
+
+    def test_rejects_a_non_positive_millimetre_calibration(self) -> None:
+        for value in (0, -160.0, "160"):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    config_path = Path(temporary_directory) / "mecanum_hardware.json"
+                    write_config(config_path)
+                    document = json.loads(config_path.read_text(encoding="utf-8"))
+                    document["vehicle"]["mm_per_wheel_rev"] = value
+                    config_path.write_text(json.dumps(document), encoding="utf-8")
+
+                    with self.assertRaisesRegex(ValueError, "mm_per_wheel_rev"):
+                        load_profile("jetson", config_path, hardware_path=config_path)
+
+    def test_open_hands_the_default_rpm_and_calibration_to_the_drive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = Path(temporary_directory) / "mecanum_hardware.json"
+            write_config(config_path)
+
+            with patch(
+                "modules.chassis.runtime.load_bus_config",
+                return_value=SimpleNamespace(port="COM42", baudrate=115200),
+            ), patch("modules.chassis.runtime.MecanumDrive") as drive:
+                MecanumChassis.open(config_path=config_path, hardware_path=config_path)
+
+        self.assertEqual(drive.call_args.kwargs["default_rpm"], 60)
+        self.assertEqual(drive.call_args.kwargs["mm_per_wheel_rev"], 160.0)
 
     def test_rejects_an_unknown_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -104,7 +160,6 @@ class MecanumHardwareConfigTests(unittest.TestCase):
         # profile 的校准值真的传到了驱动上。
         self.assertEqual(drive.call_args.kwargs["motion_transform"], expected.motion_transform)
         self.assertEqual(drive.call_args.kwargs["motor_ids"], expected.motor_ids)
-        drive.return_value.initialize.assert_called_once_with()
         drive.return_value.enable_all.assert_called_once_with(True)
 
     def test_the_module_level_motor_config_path_override_is_used(self) -> None:

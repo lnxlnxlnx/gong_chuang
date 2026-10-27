@@ -229,6 +229,29 @@ class MotionBatchTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             batch.add([1600, 1600, 1600, 1600])
 
+    def test_add_all_moves_a_whole_group_in_so_its_tickets_really_run(self) -> None:
+        """``batch.add(动作组)`` 曾经只等时长、内层收尾全丢；add_all 才把票据搬进来。"""
+        ran: list = []
+        inner = self.make_batch()
+        inner.add(make_ticket(self.clock, 1.0, finalize=lambda: ran.append("lift") or "ok"))
+        inner.add(make_ticket(self.clock, 3.0, finalize=lambda: ran.append("base") or "ok"))
+
+        outer = self.make_batch()
+        added = outer.add_all(inner)
+
+        self.assertEqual(len(added), 2)
+        self.assertAlmostEqual(outer.estimated_seconds, 3.0, places=9)
+        self.assertTrue(outer.wait().ok)
+        self.assertEqual(ran, ["lift", "base"])
+        # 只等最慢的那一条，不是内层时长再加一遍
+        self.assertAlmostEqual(sum(self.clock.slept), 3.0, places=9)
+
+    def test_a_whole_group_is_not_silently_swallowed(self) -> None:
+        inner = self.make_batch()
+        inner.add(make_ticket(self.clock, 1.0))
+        with self.assertRaises(TypeError):
+            self.make_batch().add(inner)
+
     def test_rejects_the_same_ticket_twice(self) -> None:
         batch = self.make_batch()
         ticket = make_ticket(self.clock, 1.0)

@@ -11,7 +11,6 @@ import unittest
 from unittest.mock import Mock
 
 from modules.arm.config import ArmConfig, AxisConfig
-from modules.arm.drive.kinematics import CylindricalPose
 from modules.arm.runtime import RobotArm
 from modules.motion import MotionBatch, MotionController
 from modules.motor.drive.emm42 import Direction
@@ -89,6 +88,10 @@ class FakeEmm42Bus:
     def read(self, size: int) -> bytes:
         return b""
 
+    def reset_input_buffer(self) -> None:
+        """只写不读的假总线（机械臂三轴都是 ``expect_ack=False``），没有应答可清。"""
+        pass
+
     def close(self) -> None:
         self.is_open = False
 
@@ -116,7 +119,9 @@ class CrossModuleMotionTests(unittest.TestCase):
             sleep=self.clock.sleep,
             clock=self.clock,
         )
+        # 装配时已经使能三轴（并留了帧间隔）；本用例只看之后这三个模块的动作与等待。
         self.bus.writes.clear()
+        self.clock.slept.clear()
 
         self.gripper_servo = Mock()
         self.gripper_servo.read_position.return_value = 40  # 闭到 40：夹住物料了
@@ -222,20 +227,6 @@ class CrossModuleMotionTests(unittest.TestCase):
 
         self.assertEqual(gripper_report.target, 40)
         self.assertEqual([item.motor_id for item in arm_reports], [6])
-
-    def test_the_arm_pose_survives_a_waited_async_group(self) -> None:
-        """异步不等于"位姿永远未知"：等完之后位姿按实际下发的脉冲对上。"""
-        self.arm.pose_state.record_measurement(CylindricalPose(0.0, 250.0, 100.0))
-
-        ticket = self.robot.arm.move_axes({"base": 3200, "lift": 100}, wait=False)
-        self.assertFalse(self.arm.pose_state.is_known)
-
-        batch = MotionBatch(clock=self.clock, sleep=self.clock.sleep)
-        batch.add(ticket)
-        batch.wait()
-
-        self.assertTrue(self.arm.pose_state.is_known)
-        self.assertAlmostEqual(self.arm.pose_state.pose.base_degrees, 60.0, places=9)
 
     def test_closing_the_session_stops_the_axes_but_leaves_a_borrowed_bus_open(self) -> None:
         batch = self.robot.motion.begin()

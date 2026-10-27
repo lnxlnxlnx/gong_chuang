@@ -15,11 +15,16 @@
 | 模块 | 硬件事实（`hardware.json`） | 运动调参（`config.json`） |
 |---|---|---|
 | motor | 串口（按平台）、波特率、**脉冲/圈（细分）**、串口超时 | — |
-| arm | 三轴电机地址、底座减速比、导程、`expect_ack`、行程限位、安全位、回零方式、初始机械角 | `rpm`、`acceleration`、`default_pulses`、`max_pulses` |
+| arm | 三轴电机地址、底座减速比、导程、`expect_ack`、初始机械角（`limits`/`safe_pose`/`homing` 仍被加载校验，但代码已不再使用，见下） | `rpm`、`acceleration`、`default_pulses`、`max_pulses` |
 | chassis | 四轮电机地址、轮向 `wheel_signs`、`expect_ack`、`pattern`、`motion_transform` | `acceleration`、`rotation_gain`、各平台演示 profile |
 | servo | 总线串口与波特率、两个舵机 ID、夹爪机械端位、转盘**输出行程 240°**、到位容差、工位表 | 夹爪/转盘的 `duration_ms`、转盘停稳余量 |
 
 `pulses_per_revolution` 只有**一份**（`modules/motor/hardware.json` 的 `bus` 段），arm 与 chassis 都读它。
+
+> `modules/arm/hardware.json` 里的 `limits` / `safe_pose` / `homing` 是**标定记录**：绝对坐标那套
+> （规划、位姿推算、回零建参考）已经退出，代码不再用它们做运动保护——`limits` 只剩一个用途，
+> 就是加载时校验 `initial_motor_degrees` 有没有超出行程；`safe_pose` / `homing` 只校验格式。
+> 回零本身用驱动器面板的 `O_Set` 或 `0x9A` 帧（`Emm42Driver.home()`）做，不依赖这几个键。
 
 **没有隐藏默认值**：硬件键缺失会直接报出"哪个文件、哪个键"，而不是退回代码里的常量——
 那样"漏写一行"看起来会像"跑通了"。协议不变量（帧头、功能码、字段位宽、0..1000 位置域、
@@ -76,21 +81,19 @@ stepper.stop()
 `FL=3 FR=4 RL=2 RR=1`。更换轮子位置时只需修改配置，不需要修改运动 API 或上层代码。
 
 ```python
-from modules.chassis.config import create_chassis, load_profile
+from modules.chassis import MecanumChassis
 
-profile = load_profile("jetson")
-car = create_chassis(profile).initialize()
-car.enable_all()                      # 移动前必须先使能扭矩
-car.forward(rpm=60)                   # 持续前进，直到 stop()
-car.left(rpm=40, duration=2.0)        # 速度模式：向左平移 2 秒
-car.strafe_left(rpm=40, duration=2.0) # 向左平移 2 秒后自动停
-car.rotate_cw(rpm=30, duration=1.0)   # 原地顺时针转 1 秒
-car.forward(rpm=200, pulses=3200)     # 位置模式：四轮各走 3200 脉冲（一圈）后返回
-car.drive_pulses(1.0, 1.0, 0.0, pulses=1600, rpm=200)  # 任意方向走固定脉冲数
-car.stop()
-car.disable_all()                     # 松轴
-car.close()
+with MecanumChassis.open() as car:    # 读配置 + 打开（或借用）步进总线 + 使能四轮
+    car.forward(rpm=60)                   # 持续前进，直到 stop()
+    car.left(rpm=40, duration=2.0)        # 速度模式：向左平移 2 秒后自动停
+    car.rotate_cw(rpm=30, duration=1.0)   # 原地顺时针转 1 秒
+    car.forward(rpm=200, pulses=3200)     # 位置模式：四轮各走 3200 脉冲（一圈）后返回
+    car.stop()
 ```
+
+`MecanumChassis` 是上层的整车 API；下面那层 `MecanumDrive`（`car.drive`）持有四个
+`Emm42Driver`、逆运动学矩阵和 `inter_frame_seconds`。要单独碰某一个轮子就用
+`car.drive.get_wheel(WheelPosition.FL)`。
 
 ### 统一运动参数（机械臂 / 底盘一致）
 
@@ -100,17 +103,17 @@ car.close()
 |---|---|---|---|
 | `pulses` | 位置模式：本次走多少脉冲（正数，方向由动作方法决定） | 必填（第一个位置参数） | 可选关键字；给 `pulses` 就走位置模式 |
 | `duration` | 速度模式：一条速度命令持续多少秒 | 不支持（机械臂只有相对位置模式） | 可选；与 `pulses` 只能给一个 |
-| `rpm` | 目标转速，缺省用配置值 | 可选关键字 | 必填（第一个位置参数） |
+| `rpm` | 目标转速，缺省用配置值 | 可选关键字 | 可选（缺省用 `config.json` 的 `vehicle.rpm`） |
 | `acceleration` | 曲线加减速档位 `0..255`，缺省用配置值 | 可选关键字 | 可选 |
 | `wait` | `True`（默认）等到动作走完再返回报告；`False` 只发命令、返回**票据** | 默认 `True` | 默认 `True`（位置模式用） |
 
-- **`wait=False` 返回的是票据不是报告**：报告的含义是"这次动作的结论"，而 `wait=False` 的时候还没有结论。票据（`modules.motion.MotionTicket`）的 `estimated_seconds` 就是过去那份报告里同名字段，`.wait()` 才给出报告：`ticket = arm.move_up(pulses=800, wait=False)` → `ticket.wait()`。不调用 `wait` 的话行为与以前完全一样（只发帧、位姿保持未知，`turns_state` 照旧记账）。
+- **`wait=False` 返回的是票据不是报告**：报告的含义是"这次动作的结论"，而 `wait=False` 的时候还没有结论。票据（`modules.motion.MotionTicket`）的 `estimated_seconds` 就是过去那份报告里同名字段，`.wait()` 才给出报告：`ticket = arm.move_up(pulses=800, wait=False)` → `ticket.wait()`。不调用 `wait` 的话行为与以前完全一样（只发帧，`turns_state` 照旧记账）。
 - 需要毫秒级精确时不能用估算：那要用 `0x3A` 读运动状态标志（`&0x02` 到位位）轮询（`RobotArm.open(wait_mode=WAIT_IN_POSITION)`；默认仍走估算，理由见模块文档）。
 - 轮子位置模式默认走 Emm42 多机同步：四条 `0xFD` 帧缓存后发 `00 FF 66 6B` 同时启动；0 脉冲的轮子不下发。
-- 上层整车 API：`MecanumChassis` 的 `forward` / `backward` / `left` / `right` / `rotate_cw` / `rotate_ccw` / `forward_left` / `forward_right` / `backward_left` / `backward_right`，都可带 `duration`（速度模式）、`pulses`（位置模式）或都不带（持续运动）。
-- 四轮位置 API：`move_wheels_relative(fl, fr, rl, rr, rpm)` 按角度、`move_wheels_relative_pulses(fl, fr, rl, rr, rpm)` 按脉冲数（同样默认同步启动），以及对应的一组 `*_absolute*`。
-- 底层单轮 API（供上层调用）：`enable_wheel` / `set_wheel_speed` / `stop_wheel` / `move_wheel_relative` / `move_wheel_absolute` / `home_wheel` / `get_wheel`。
-- 整车低层：`drive(vx, vy, omega, rpm)`（麦轮逆运动学，可斜向移动）、`drive_pulses(vx, vy, omega, pulses, rpm)`（同矩阵，位移用脉冲数给）、`set_speeds(fl, fr, rl, rr)`。
+- **帧间必须留间隔**（`DEFAULT_INTER_FRAME_SECONDS`，30 ms）：这台机器的 CH340 上背靠背发帧会让后面的帧失效。机械臂逐轴命令、底盘逐轮命令与同步广播都由代码自己插这个间隔，调用方不用管。
+- 上层整车 API：`MecanumChassis` 的 `forward` / `backward` / `left` / `right` / `rotate_cw` / `rotate_ccw` / `forward_left` / `forward_right` / `backward_left` / `backward_right`，都可带 `duration`（速度模式）、`pulses`（位置模式，按峰值轮）或 `mm`（位置模式，按车心位移，需标定）或都不带（持续运动）。
+- 底盘驱动层（`car.drive`）还有三个通用入口：`drive(vx, vy, omega, rpm)`（速度模式，任意方向）、`drive_pulses(vx, vy, omega, pulses, rpm)` / `drive_mm(vx, vy, mm, rpm)`（位置模式，任意方向）。
+- 单轮维护：`car.drive.get_wheel(w)` 拿到 `Emm42Driver`；`enable_wheel` / `set_wheel_speed` / `stop_wheel` 是逐轮命令，`enable_all` / `disable_all` / `stop` 是四轮一起。
 - 当前实车使用标定后的麦轮坐标变换 `motion_transform="calibrated"`，四轮横移都会参与运动。
 - 若装配后方向反了：整车方向反 → 把 `drive()` 的 `vx`/`vy` 取反；辊子排布不同 → 换 `pattern="O"`；单轮转向反 → 在 `wheel_signs` 给该轮 `-1`。
 
@@ -128,7 +131,7 @@ with Robot.open(arm=True) as robot:
 ```
 
 - `mode="same_start"`（默认）：一起起步，**各自到位**（谁走的路短谁先停）。想让它们同时停要按轴改 rpm（联动/插补），本模块刻意不做。
-- `mode="serial"`：按 抬升 → 伸缩 → 底座 → 下降 的安全顺序逐轴走完，等价于 `move_cylindrical_by`；它只接受 `wait=True`。
+- `mode="serial"`：按 抬升 → 伸缩 → 底座 → 下降 的安全顺序逐轴走完（与 `_serial_order` 同序）；它只接受 `wait=True`。
 - **并行有安全上限**：底座旋转超过 `DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`（600 脉冲）时不许和伸缩并行——伸出状态下横扫会把整条臂扫过工作区（与 `modules/grasp/drive/servo_motion.py` 同一条规矩）。超了会**在发帧之前**抛错，并提示改用 `mode="serial"`。
 - 发帧中途失败时会先补一条广播触发、再逐轴停止：广播触发帧会点燃总线上所有缓存命令，"缓存了却没触发"是个危险状态，不能留着。
 - 三根轴是 `Response=None` 的驱动器，连 ACK 都不回，所以缓存帧发完不需要读回包——这也是"同时启动"能做得这么轻的原因。
@@ -146,8 +149,8 @@ with Robot.open_all() as robot:
 ```
 
 - 动作组只收**票据**，或带 `estimated_seconds` 的结果对象；两者都没有时用 `batch.add(结果, seconds=预计秒数)` 声明耗时（底盘那类只返回脉冲数的动作走这条）。
-- 每张票据都可以单独 `.wait()`，也可以 `.cancel()`（尽力停住、**不收尾**：动作没走完就推进位姿会记错位置）。
-- 位姿在动作在途时是"未知"的；票据等完之后按**实际下发的脉冲**、从发帧前的位姿推算回写，所以异步不会让绝对定位永久失效。
+- 每张票据都可以单独 `.wait()`，也可以 `.cancel()`（尽力停住、**不收尾**：命令已经发出去了，停在哪里不知道）。
+- 票据只负责"到点 + 补报告"，不推算任何位置；绝对位置一律以 `RobotArm.turns_state` 的命令脉冲里程表为准。
 - 全程在调用线程上 join，**不建线程**（`modules.motion` 里没有后台线程，也没有锁）。真要"边动边看视觉"，再在 `MotionController` 上加后台 join，调用点不用改。
 
 ## 统一入口
@@ -320,7 +323,7 @@ finally:
     servo.close()  # 只关闭串口，不会改变夹爪位置
 ```
 
-这段直接读写 `modules/servo/config.json` 中的总线串口与 `gripper` 参数，与菜单 13 是同一条通路。**自动抓取流程**（菜单 19）走的是另一层：`modules/servo/drive/gripper.py` 的 `GripperServo` 把裸位置值收成 `open_jaws()` / `close_jaws()`，并且用位置读回判断"夹住了东西"——夹紧时读回没到闭合位就说明爪口之间有物料。菜单 13 是逐项确认的底层手动调试，两者共用同一条串口与同一份 `gripper` 参数配置。Jetson 使用前需填写 `modules/servo/config.json` 中的 `jetson.port`。
+这段直接读写 `modules/servo/config.json` 中的总线串口与 `gripper` 参数，与菜单 13 是同一条通路。**抓取流程**走的是另一层：`modules/servo/runtime.py` 的 `GripperServo` 把裸位置值收成 `open_jaws()` / `close_jaws()` / `set_position()`，并且用位置读回判断"夹住了东西"——夹紧时读回没到闭合位就说明爪口之间有物料。菜单 13 是逐项确认的底层手动调试，两者共用同一条串口与同一份 `gripper` 参数配置。Jetson 使用前需填写 `modules/servo/config.json` 中的 `jetson.port`。
 
 `main.py` 只是一个入口，默认测试物料定位：霍夫圆面判断是否有物料，YOLO 给类别和置信度，窗口显示相机坐标 `x/y/z` 与直线距离。演示代码按模块归位：底盘短动作与地图路线在 `modules/chassis/app/`，物料定位与普通视觉预览在 `modules/vision/app/demo.py`，机械臂在 `modules/arm/app/demo.py`，舵机在 `modules/servo/app/demo.py`；除了物料定位，其余都默认不调用。
 
@@ -647,79 +650,61 @@ python -m unittest modules.vision.test.unit.test_vision -v
 
 ## 抓取（grasp）
 
-摄像头识别 + 机械臂抓取：俯视相机测出**物料**与**爪上靶标**的位置，换算成机械臂的圆柱
-关节量，再驱动三轴和夹爪完成一次抓取。完整说明见 [modules/grasp/docs/抓取坐标链路.md](modules/grasp/docs/抓取坐标链路.md)。
+**本机的相机装在机械臂上（eye-in-hand）**，所以走的是**脉冲闭环视觉伺服**：把画面里的
+物块读到固定的目标读数，全程不需要毫米级世界坐标。世界坐标那条链（相机系 → 基座平面 →
+圆柱关节量、爪上靶标）属于"相机固定"路线，**本机不适用**，代码在
+`legacy/grasp_fixed_camera/`。
 
-链路上每一级都独立成一个可离线自测的薄模块，依赖方向只能从上到下：
+```python
+from modules.grasp import Grasp
+
+with Grasp.open() as grasp:        # 读配置 + 开机械臂 + 开视觉源（Vision 或 CameraLink）
+    result = grasp.align_xy()      # 只动平面：把物块伺服到目标读数
+```
 
 | 层 | 文件 | 职责 |
 |---|---|---|
-| 编排 | `modules/grasp/drive/pipeline.py` | 安全廊道、闭环微调、异常收尾 |
-| 状态 | `modules/grasp/drive/arm_state.py` | 位姿与夹爪状态的唯一真相源（位姿 **+ 它是怎么来的**），跨模块共享 |
-| 感知适配 | `modules/grasp/drive/perception.py` | 一帧 → 物料位姿 + 机械臂位姿 |
-| 视觉 | `modules/vision/drive/cell_targets.py` | 同一帧里按颜色区分靶标与物料 |
-| 针孔模型 | `modules/vision/drive/pinhole.py` | 像素 ↔ 相机系毫米 |
-| 平面标定 | `modules/vision/drive/calibration.py` | 相机水平面 → 基座平面（θ 零点 + 半径） |
-| 运动学 | `modules/arm/drive/kinematics.py` | 圆柱正逆解、最短转角、mm/度 ↔ 脉冲、可达性 |
-| 夹爪 | `modules/servo/drive/gripper.py` | 开合与读回 |
+| 会话 / 编排 | `modules/grasp/runtime.py` | `Grasp`：拥有机械臂与视觉源；悬停 → 安全抬升 → x/y → 下降 → 后缩 |
+| 伺服算法 | `modules/grasp/drive/eye_in_hand.py` | 误差 → 脉冲步长，逐帧闭环 |
+| 数值模型 | `modules/grasp/drive/servo_model.py` | 配置、雅可比、结果与异常类型 |
+| 观测判据 | `modules/grasp/drive/servo_observation.py` | "这一帧够不够新、够不够稳" |
+| 脉冲原语 | `modules/grasp/drive/servo_motion.py` | 单轴 / 多轴脉冲下发 |
+| 环心计划 | `modules/grasp/drive/ring_plan.py` | 环心 → 各轴**绝对电机角度**（只算不动） |
 
-几个刻意的设计决定：
+几个要点：
 
-- **中心只有三个标定参数**（基座轴像点 x/y + θ 零点），**没有缩放**——尺度由像素焦距承担，
-  再放一个缩放会和焦距互相吞掉。
-- **直线轴只需要 `mm_per_motor_rev`**，也就是丝杠导程 `L` 与减速比 `g` 的商；不必拆机量导程。
-- **绝对位姿有两个来源，库只给原语，编排留给 main.py**：`0x9A` **回零**给出绝对参考
-  （快、不依赖靶标），**相机测爪上靶标**给出实测位姿。什么时候回零、什么时候归位、
-  要不要拿两者对一下，都由调用方决定——库里没有任何自动判断。
-- **归位靠绝对模式回 0**：`RobotArm.move_all_to_zero()`。回零之后驱动器的位置计数器就在 0，
-  不必在上位机累加反向位移。顺带修了驱动的一个限制：绝对模式原先也拒绝 0 脉冲
-  （从相对模式抄来的检查），而"回原点"正是绝对模式 0。
-- **回零落到"错误的圈"时驱动器不会报错**（单圈编码器，`0x36` 读回来两种情况都是 0）。
-  库不做自动校验，只在 `homing_warnings()` 里把不可靠的配置组合提前列出来；
-  真要兜住就由调用方拿 `measure_pose()` 和 `safe_pose` 比一下。
-- **状态记的是"位姿 + 来源"**（`homed`/`measured`/`dead_reckoned`），不是"位姿 + 一个布尔值"。
-  它只记事实、不做判断，但调用方据此就能决定下一步该不该重新对账。
-- **夹爪读回值是白送的抓取检测**：夹紧时读回没到闭合位，说明爪口之间有东西
-  （`PickResult.held_something`）。
-- **转角度前必须先缩回抬升**：伸缩臂在伸出状态下转底座会把整条臂横扫过工作区。
-  编排层强制经 `safe_pose` 走一段已知的安全廊道，并且只走最短转角。回零也照这条规矩来：
-  顺序固定为**伸缩 → 升降 → 底座**。
+- **一个机器常数都不用标**：伺服要的是"每脉冲让画面挪多少毫米"（2×2 雅可比，实测），
+  不是 `mm_per_motor_rev`。平面一旦对准，剩下的两步就是固定脉冲数
+  （`z_descend_pulses` / `extension_retract_pulses`）。
+- **雅可比是实测的**（`--calibrate`），相机怎么装、歪多少度都不用假设。它是线性的，
+  所以每一步都用**新的一帧**重算，大位移靠闭环而不是"理论上一步到位"。
+- **"新的一帧"是硬要求**：动作前记一个时刻，动作后只认晚于它的观测（`min_received_at`）。
+  用"多久算旧"挡不住"动作很快、旧帧也还新"，那时读到的是动作**之前**的坐标。
+- **绝对位置只到电机角度为止**：`ring_plan` 给的是"底座 / 伸缩走到哪个电机位置"
+  （3200 脉冲 = 360°，不取模），口径与 `RobotArm.move_axis_to_motor_degrees` 一致；
+  它用的是 `turns_state` 命令里程表，所以中间**不能回零**（回零会清零里程表）。
 - **失败一律不张爪**：中途异常只停轴和失能，松开爪子会把已经抓住的物料掉下去。
 
-配置分成四份：机械常数（含回零模式、三轴地址、行程与安全位）在 `modules/arm/hardware.json`，相机标定结果在
-`modules/vision/calibration.json`，目标尺寸颜色在 `modules/vision/config.json`，
-**策略参数**（余量、夹持比例、闭环次数与容差）在 `modules/grasp/config.json`。
-换一台机器只重标，不改策略。
+### 现场调参与标定
 
-### 标定
-
-抓取牵涉的标定最多，缺一项都会变成一句难懂的运行时报错，所以菜单 19 会在**打开硬件之前**
-先把缺的项一次列全并拒绝运行。实验清单（A0 确认减速比 → A 平面标定 → A′ 重标焦距 →
-B/C 标 `mm_per_motor_rev` → D 台面深度 → E 夹爪与 TCP → F 行程与安全位 → G 重复精度与背隙 →
-**H 回零零点**（用回零方案时）→ I 到位回包）见 [modules/grasp/docs/抓取坐标链路.md](modules/grasp/docs/抓取坐标链路.md)。
+所有参数在 `modules/grasp/eye_in_hand.json`：目标读数 `target`、实测雅可比 `jacobian`、
+容差与步长上限、下降 / 后缩脉冲、安全抬升那一组。现场改这个文件，不改代码。
 
 ```powershell
-python test.py                                             # 菜单选 19
-python -m modules.grasp.test.manual.grasp --observe-only   # 只看不动，核对标定
-python -m modules.grasp.test.manual.grasp --home-only      # 只回零，验收实验 H
+python test.py                                                      # 菜单 21：x/y 对准（含一键就位）
+python -m modules.grasp.test.manual.align_xy --set-target           # 记目标读数
+python -m modules.grasp.test.manual.align_xy --calibrate            # 实测雅可比
+python -m modules.grasp.test.manual.align_xy --status               # 只看不动
+python -m modules.grasp.test.manual.align_xy --align-and-descend    # 悬停 → 对准 → 下降 → 后缩
 ```
 
-> 用"每次用完归位"这条路线时，断电重启后**再跑一次** `--home-only`：单圈回零的多义性只在
-> "断电时轴停在别处"时才暴露。手动把底座转过半圈再上电，如果停的位置不对，说明你确实需要
-> 限位开关。
+环心 → 各轴绝对位置走菜单 27（`modules.grasp.test.manual.ring_angle`）；环内数字环心是
+菜单 26（视觉侧）。两套都在开硬件之前把缺的标定一次列全并拒绝运行。
 
 ### 自测
 
-每层都能单独跑，不需要硬件；编排层用假机械臂 + 假夹爪 + 自洽的观测夹具跑通整条流程：
-
 ```powershell
-python -m modules.vision.drive.pinhole
-python -m modules.vision.drive.calibration
-python -m modules.vision.drive.cell_targets
-python -m modules.arm.drive.kinematics
-python -m modules.servo.drive.gripper
-python -m modules.servo.drive.turntable
-python -m modules.grasp.drive.arm_state
-python -m modules.grasp.drive.pipeline
+python -m modules.grasp.drive.ring_plan      # 环心 → 绝对角的解算，纯计算
 ```
 
+其余各层由 `modules/grasp/test/unit/` 覆盖（假机械臂 + 假视觉源，不需要硬件）。

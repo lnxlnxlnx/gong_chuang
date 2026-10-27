@@ -338,8 +338,17 @@ class MotionBatch:
         "``wait=False`` 只返回脉冲数"的动作走这条。
 
         :raises ValueError: 同一张票据被加两次，或者既给了票据又给了 ``seconds``。
-        :raises TypeError: 看不出这项动作要等多久。
+        :raises TypeError: 看不出这项动作要等多久，或者塞进来的是**另一个动作组**
+            （那种情况用 :meth:`add_all`）。
         """
+        if isinstance(item, MotionBatch):
+            # 动作组自带 estimated_seconds，塞进来会被当成"一个带估算时长的结果对象"：
+            # 只等时长，内层每张票据的收尾（到位校验、报告、错误）一个都不跑，还多睡一遍。
+            # 这是现场最容易写错的一处，所以直接拦住，别让它静默降级。
+            raise TypeError(
+                "动作组不能直接塞进动作组：用 batch.add_all(...)，"
+                "否则内层票据的收尾与报告全都不会跑"
+            )
         if isinstance(item, MotionTicket):
             if seconds is not None:
                 raise ValueError("票据自己带着预计耗时，不要再传 seconds")
@@ -364,6 +373,27 @@ class MotionBatch:
             raise ValueError(f"{ticket.subject} 的票据已经在这个动作组里了")
         self._tickets.append(ticket)
         return ticket
+
+    def add_all(self, *items: object) -> Tuple[MotionTicket, ...]:
+        """一次加入多项；每项的规则同 :meth:`add`，另外**整个动作组**也可以直接给。
+
+        ```python
+        batch = robot.motion.begin()
+        batch.add_all(_move_axes_to(robot, {"lift": 760, "base": 450}))   # 动作组
+        batch.add_all(robot.turntable.go_to(500, wait=False))             # 单张票据
+        batch.wait()
+        ```
+
+        这是"把几段同时发出的动作合成一个 join 点"的唯一正确写法：内层动作组的票据被
+        **搬进来**（不是包一层），所以到位校验、报告、失败都会照常发生，也不会多睡一遍。
+        """
+        added: List[MotionTicket] = []
+        for item in items:
+            if isinstance(item, MotionBatch):
+                added.extend(self.add(ticket) for ticket in item.tickets)
+            else:
+                added.append(self.add(item))
+        return tuple(added)
 
     # ------------------------------------------------------------- 查询
     @property

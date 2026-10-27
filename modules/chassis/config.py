@@ -1,10 +1,15 @@
 """Load the mecanum chassis settings from **two** files.
 
 - ``hardware.json`` —— 本机硬件事实：四个轮子的驱动器地址、单轮转向、驱动器要不要回 ACK、
-  辊子排布、实车标定矩阵的选择器。换接线、换装法时改这里。
-- ``config.json`` —— 运动调参：加速度档、旋转增益，以及各平台的真机演示 profile。
+  辊子排布、实车标定矩阵的选择器，以及**轮子转一圈车走多少毫米**
+  （``vehicle.mm_per_wheel_rev``）。换接线、换装法、换轮子时改这里。
+- ``config.json`` —— 运动调参：默认轮速、加速度档、旋转增益，以及各平台的真机演示 profile。
 
 脉冲/圈是驱动器细分，只有一份，读 ``modules/motor/hardware.json``。
+
+``vehicle.mm_per_wheel_rev`` 是**填了才能用毫米指令**的标定值：它不改脉冲/圈的换算，
+只给"车心要走多少毫米"提供一把尺。没填（``null`` 或整键缺失）时脉冲与计时动作照旧可用，
+毫米动作会被明确拒绝，而不是拿一个默认轮径算出一个没人验证过的距离。
 
 **只读并校验配置**：不建驱动、不开串口。装配在
 :meth:`modules.chassis.runtime.MecanumChassis.open`，所以这里不导入任何上层类型、
@@ -17,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional
@@ -43,6 +49,11 @@ class HardwareProfile:
     """硬件事实 + 本次平台的运动调参，合并成一个装配用快照。
 
     串口**故意不在这里**：它属于共享的步进总线，由 :mod:`modules.motor.config` 读。
+
+    ``rpm`` 是"调用方没给轮速时用它"的默认轮速（``config.json`` 的 ``vehicle.rpm``）；
+    ``mm_per_wheel_rev`` 是轮子转一圈车走多少毫米的实测标定（一份值管四个轮子），
+    ``None`` 表示还没填——那时毫米动作会被拒绝，脉冲与计时动作不受影响。
+    ``mm_per_wheel_rev`` 带默认值所以排在最后，其余字段仍然是必填的。
     """
 
     motor_ids: Mapping[WheelPosition, int]
@@ -58,6 +69,8 @@ class HardwareProfile:
     chassis_rpm: int
     chassis_duration: float
     chassis_pause: float
+    rpm: int
+    mm_per_wheel_rev: Optional[float] = None
 
 
 def load_profile(
@@ -104,6 +117,12 @@ def load_profile(
     if motion_transform not in ("standard", "calibrated"):
         raise ValueError("vehicle.motion_transform must be standard or calibrated")
 
+    # 默认轮速是运动调参，毫米标定是硬件事实；两者都不退回代码里的默认值。
+    rpm = _integer(tuning_vehicle.get("rpm"), "vehicle.rpm", minimum=1, maximum=MAX_RPM)
+    mm_per_wheel_rev = _optional_positive_number(
+        vehicle.get("mm_per_wheel_rev"), "vehicle.mm_per_wheel_rev"
+    )
+
     individual = _mapping(
         profile.get("individual_wheels"), f"profiles.{profile_name}.individual_wheels"
     )
@@ -128,6 +147,8 @@ def load_profile(
             chassis.get("duration"), "chassis_motion.duration", minimum=0, exclusive=True
         ),
         chassis_pause=_number(chassis.get("pause"), "chassis_motion.pause", minimum=0),
+        rpm=rpm,
+        mm_per_wheel_rev=mm_per_wheel_rev,
     )
 
 
@@ -185,4 +206,16 @@ def _number(value: object, name: str, *, minimum: float, exclusive: bool = False
     if number < minimum or (exclusive and number == minimum):
         operator = ">" if exclusive else ">="
         raise ValueError(f"{name} must be {operator} {minimum}")
+    return number
+
+
+def _optional_positive_number(value: object, name: str) -> Optional[float]:
+    """可选的正数标定值：``null`` / 缺失都表示**还没填**，不退回代码默认值。"""
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{name} 必须是正数或 null，实际 {value!r}")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{name} 必须是有限正数或 null，实际 {value!r}")
     return number
