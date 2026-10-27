@@ -69,6 +69,20 @@ def make_robot(plant: FakePlant, **kwargs) -> Mock:
     return robot
 
 
+class SwitchingVision(FakeVision):
+    """第一帧看 2 号，之后画面里换成 1 号（真机上横移一格就会这样）。"""
+
+    def __init__(self, plant: FakePlant, **kwargs) -> None:
+        super().__init__(plant, **kwargs)
+        self.seen = 0
+
+    def locate_ring(self, *, digit=None, **kwargs):
+        self.seen += 1
+        self.digit = 2 if self.seen == 1 else 1
+        return super().locate_ring(digit=digit, **kwargs)
+
+
+
 class CenterChassisOnRingTests(unittest.TestCase):
     def run_it(self, plant: FakePlant, **kwargs):
         robot = make_robot(plant)
@@ -145,6 +159,23 @@ class CenterChassisOnRingTests(unittest.TestCase):
         with patch("time.sleep"), self.assertRaisesRegex(RuntimeError, "出现了 2 次"):
             app_gripper.center_chassis_on_ring(robot)
         self.assertEqual(plant.moves, [])
+
+    def test_it_locks_the_first_ring_and_never_switches(self) -> None:
+        """车一动，隔壁环进画面（真机上只差一格）：不许把它当同一个环继续算方向。
+
+        真机上的样子：读到 2 号 x=-13.4 mm → 左移 300 脉冲（约 23 mm）→ 下一帧画面里
+        是 1 号 x=-141.3 mm，残差跳了 -150 mm ≈ 一格，于是报"横向运动学反了"。
+        方向其实没错，是看的环换了。
+        """
+        plant = FakePlant(x_mm=-13.4, mm_per_pulse=0.077)
+        robot = make_robot(plant)
+        robot.vision = SwitchingVision(plant)
+
+        with patch("time.sleep"), self.assertRaisesRegex(RuntimeError, "2 号环"):
+            app_gripper.center_chassis_on_ring(robot)
+        # 只走了第一步试走，绝不再拿"另一个环"的读数算第二步。
+        self.assertEqual(len(plant.moves), 1)
+        self.assertEqual(plant.moves[0], app_gripper.LATERAL_TRIAL_PULSES)
 
 
 if __name__ == "__main__":

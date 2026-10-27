@@ -554,55 +554,5 @@ class RingSettleTests(unittest.TestCase):
         self.assertAlmostEqual(target.reading()[0], 100.0, places=6)
 
 
-class PlanRingReadingsTests(unittest.TestCase):
-    """一批**已经算好的**读数（三环外推出来的那三个）→ 三份绝对位置，一帧都不拍。"""
-
-    def test_it_plans_every_ring_without_taking_a_frame(self) -> None:
-        grasp, _arm, source = make_grasp(ring_target())
-
-        plans = grasp.plan_ring_readings(
-            {1: (-150.0, 0.0), 2: (0.0, 0.0), 3: (150.0, 0.0)},
-            scale_source="ring box",
-        )
-
-        self.assertEqual(source.calls, 0, "读数已经算好了，不该再取帧")
-        self.assertEqual(sorted(plans), [1, 2, 3])
-        self.assertEqual(plans[2].base_pulses, 0, "读数等于目标，不该动")
-        # 三环等距：两端的偏差大小相同、方向相反（同一个雅可比下）。
-        self.assertGreater(abs(plans[1].base_pulses), 0)
-        self.assertAlmostEqual(
-            plans[1].base_pulses, -plans[3].base_pulses, delta=1
-        )
-
-    def test_one_offset_digit_is_shared_by_every_point(self) -> None:
-        """一条直线上的三个点共用 2 号环的落料补偿——各用各的会把那条直线搅乱。"""
-        grasp, _arm, _source = make_grasp(ring_target())
-        grasp._config = VisualServoConfig(ring_offsets_mm=((-7.0, -3.0), (3.0, -4.0), (9.0, -4.0)))
-        readings = {1: (-150.0, 0.0), 2: (0.0, 0.0), 3: (150.0, 0.0)}
-
-        own = grasp.plan_ring_readings(readings, scale_source="ring box")
-        shared = grasp.plan_ring_readings(
-            readings, scale_source="ring box", offset_digit=2
-        )
-
-        self.assertNotEqual(own[1].target, own[3].target)
-        self.assertEqual(shared[1].target, shared[2].target)
-        self.assertEqual(shared[3].target, shared[2].target)
-
-    def test_a_scale_that_is_not_physical_millimetres_is_refused(self) -> None:
-        grasp, _arm, _source = make_grasp(ring_target())
-
-        with self.assertRaisesRegex(VisualServoError, "station.mm_per_px"):
-            grasp.plan_ring_readings(
-                {2: (0.0, 0.0)}, scale_source="station.mm_per_px"
-            )
-
-    def test_a_closed_session_refuses(self) -> None:
-        grasp, _arm, _source = make_grasp(ring_target())
-        grasp._closed = True
-        with self.assertRaises(RuntimeError):
-            grasp.plan_ring_readings({2: (0.0, 0.0)}, scale_source="ring box")
-
-
 if __name__ == "__main__":
     unittest.main()

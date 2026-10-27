@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 
 from modules.arm import MotionReport
@@ -221,23 +222,31 @@ def center_chassis_on_ring(
     这就是"有时对到隔壁环"的来源：错的号会把车正对到 3 号环前面，而动作、残差、
     打印全都看起来完全正常；``square_chassis_to_ring_row`` 只要直线的倾角，所以编号
     错了它照样能用。
+
+    **第一帧读到的那个环就是这次校准的环**：``require_digit`` 没给时按第一帧的号锁死，
+    之后换号一律按"没看见这个环"报错。车一动，隔壁环进来是常事（只差一格），而
+    "换了个环"在残差上就是跳 150 mm——拿它算方向会误报"横向运动学反了"，拿它算步长
+    会把车开到隔壁那一格。
     """
     gain: float | None = None      # 每 +1 脉冲（左移）让环心 x 变化多少毫米
     previous: tuple[float, int] | None = None
+    locked = require_digit          # 第一帧读到哪一号就锁定它（见下）
     x_mm = 0.0
     for attempt in range(1, max(1, int(max_iterations)) + 1):
-        target = _read_ring(robot, digit=require_digit)
+        target = _read_ring(robot, digit=locked)
         if target is None:
             raise RuntimeError(
                 "画面里没有环：先把臂摆到能看见靶标的位置"
-                + (f"（找的是 {require_digit} 号环）" if require_digit is not None else "")
+                + (f"（找的是 {locked} 号环）" if locked is not None else "")
                 + _ring_diagnosis(robot)
             )
-        if require_digit is not None and int(target.digit) != int(require_digit):
+        if locked is not None and int(target.digit) != int(locked):
             raise RuntimeError(
-                f"画面里的环是 {target.digit} 号，不是要求的 {require_digit} 号；"
+                f"画面里的环是 {target.digit} 号，不是要求的 {locked} 号；"
                 "拿另一个环横向对齐会把车开到错的位置"
             )
+        if locked is None:
+            locked = int(target.digit)
         reading = target.reading()
         if reading is None:
             raise RuntimeError("环心读数不可用（贴边 / 缺比例尺）：换个姿态再看")
@@ -789,6 +798,42 @@ def place_material_from_repo_to_floor_by_pose(
 #: ``align_ring`` 从这里开始闭环；``ring_offsets`` 的那个补偿也是在这个高度上标出来的。
 RING2_APPROACH_POSE = {"base": -32, "lift": 600, "extension": 540}
 
+#: **2 号环到底座转轴**的水平距离（毫米）。三环是一条直线，横挪一格要靠
+#: "底座转 ``atan(s/r)`` + 伸缩多伸 ``sqrt(r²+s²)−r``" 两条一起走；只转底座就会落在圆弧上。
+#: 现场按三个料的连线调：两端比中间更**靠近车** → 调大；更**远离车** → 调小。
+#: 默认 270 mm 来自 ``radial_mm`` 行程（180–359.1）与 v2 示教底座角（约 26–32°/格）。
+RING_ROW_RADIUS_MM = 270.0
+
+
+def _row_step_pulses(
+    robot: Robot, *, spacing_mm: float, radius_mm: float
+) -> tuple[int, int]:
+    """横向挪一格间距：底座转多少脉冲、伸缩要多伸多少脉冲。
+
+    机械臂是**圆柱坐标**（``modules/arm/drive/kinematics.py``）：转底座时末端沿圆弧走。
+    要让它落在直线上，底座转 ``atan(s/r)`` 的同时伸缩必须多伸 ``sqrt(r²+s²) − r``。
+    这两个量都是**几何**，和雅可比无关——雅可比是抓料姿态标的一阶导数，用它算一格
+    150 mm 这种大偏移只会得到一条弧（现场就是这样）。
+
+    :returns: ``(底座脉冲, 伸缩脉冲)``，都是正数（往哪边走由调用方按环号给）。
+    """
+    lead = robot.arm.config.axes["extension"].mm_per_motor_rev
+    if lead is None:
+        raise ValueError(
+            "modules/arm/hardware.json 里缺 axes.extension.mm_per_motor_rev，"
+            "算不出伸缩要伸多少"
+        )
+    if not radius_mm > 0:
+        raise ValueError(f"RING_ROW_RADIUS_MM 必须是正数（毫米），收到 {radius_mm!r}")
+    pulses_per_rev = robot.arm.pulses_per_revolution
+    base_degrees = math.degrees(math.atan2(spacing_mm, radius_mm))
+    base_pulses = round(
+        base_degrees * robot.arm.config.base_reduction * pulses_per_rev / 360.0
+    )
+    radial_mm = math.hypot(radius_mm, spacing_mm) - radius_mm
+    extension_pulses = round(radial_mm * pulses_per_rev / lead)
+    return base_pulses, extension_pulses
+
 
 def place_material_from_repo_to_floor_from_center_ring(
     robot: Robot,
@@ -796,23 +841,21 @@ def place_material_from_repo_to_floor_from_center_ring(
     orders: tuple[int, int, int] = (1, 2, 3),
     place_lift: float = 95.0,
     tolerance_mm: float = 2.0,
-    offset_digit: int = 2,
 ):
-    """把物料从仓库放到地面圆环里：**先闭环对准 2 号环，再按 150 mm 算出 1/3 号**。
+    """把物料从仓库放到地面圆环里：**先闭环对准 2 号环，再按几何算出 1/3 号**。
 
-    前提由调用方先做（车头与环排垂直、车横向对到 2 号环）。有了这两条，三环就是
-    "中间那个实测、两端各偏一格间距"：
+    前提由调用方先做（车头与环排垂直、车横向对到 2 号环），于是三环就是"中间那个实测、
+    两端各偏一格间距"：
 
     1. 摆到 :data:`RING2_APPROACH_POSE`，``align_ring(require_digit=2)`` 闭环对准
        —— 2 号环的位置是**量出来**的；
-    2. 1/3 号环心 = 对准后的读数 ∓ 间距（``station.center_spacing_mm``，现场 150 mm）
-       沿画面横向（±x），一次解算成三份各轴绝对位置；三份共用 2 号环的落料补偿
-       （``offset_digit``），否则三份补偿不同会把"三个落点该在一条直线上"搅乱；
-    3. 按 ``orders`` 一趟一趟放：去仓库抓料 → 走到该环绝对位置 → 降到 ``place_lift``
-       松爪 → 抬起。车不动，中间也不再拍帧。
+    2. 1/3 号用**圆柱几何**从对准后的关节位置推：底座 ∓ ``atan(150/r)``、
+       伸缩同时多伸 ``sqrt(r²+150²)−r``（:func:`_row_step_pulses`）；
+    3. 按 ``orders`` 一趟一趟放：去仓库抓料 → 走到该环的绝对关节位置 → 降到
+       ``place_lift`` 松爪 → 抬起。车不动，中间也不再拍帧。
 
-    1/3 号是**一次线性化**解出来的（雅可比在大角度下会变），``plan.residual_mm`` 是预测
-    残差；真放不准就退回 :func:`place_material_from_repo_to_floor_by_pose`（每步重拍重算）。
+    第 2 步必须**转+伸一起走**：只转底座的话末端是沿圆弧走的，三个料就会落在一条弧上
+    （只调底座是修不好的）。``r`` 就是 :data:`RING_ROW_RADIUS_MM`，按三个料的连线调。
     """
     digits = _check_order(orders)
     robot.arm.move_axis_to_motor_degrees("lift", 760)
@@ -822,35 +865,44 @@ def place_material_from_repo_to_floor_from_center_ring(
         aligned = robot.grasp.align_ring(
             require_digit=2, tolerance_mm=tolerance_mm, max_iterations=6
         )
-        if not aligned.aligned or aligned.final_reading is None:
+        if not aligned.aligned:
             raise RuntimeError(
                 "2 号环没对准，不敢往下算："
                 + (aligned.note or f"残差 {aligned.final_error_mm} mm")
             )
-        anchor = aligned.final_reading
+        arm = robot.arm
         spacing = float(robot.vision.ring_center_spacing_mm)
-        plans = robot.grasp.plan_ring_readings(
-            {
-                1: (anchor[0] - spacing, anchor[1]),
-                2: anchor,
-                3: (anchor[0] + spacing, anchor[1]),
-            },
-            scale_source=aligned.scale_source,
-            offset_digit=offset_digit,
+        step_base, step_extension = _row_step_pulses(
+            robot, spacing_mm=spacing, radius_mm=RING_ROW_RADIUS_MM
         )
+        base = arm.turns_state.of("base").pulses
+        extension = arm.turns_state.of("extension").pulses
+        # 三点共线：底座 ∓ 一格，伸缩**两端都多伸一格**。
+        poses = {
+            1: (base - step_base, extension + step_extension),
+            2: (base, extension),
+            3: (base + step_base, extension + step_extension),
+        }
+        degrees_per_pulse = 360.0 / arm.pulses_per_revolution
         print(
-            f"2 号环已对准（残差 {aligned.final_error_mm:.1f} mm），"
-            f"1/3 号按 {spacing:.0f} mm 推出"
+            f"2 号环已对准（残差 {aligned.final_error_mm:.1f} mm）："
+            f"1/3 号 = 底座 -{step_base}/+{step_base} 脉冲、伸缩 +{step_extension} 脉冲"
         )
         for digit in digits:
-            plan = plans[digit]
-            # 抓料会把这几个轴都开走；plan 记的是**绝对**角度，中间怎么走都对得上。
+            base_pulses, extension_pulses = poses[digit]
+            # 抓料会把这几个轴都开走；这里用的是**绝对**位置，中间怎么走都对得上。
             _grab_material_from_car(robot)
-            move_axes_to(robot, {"extension": plan.extension, "base": plan.base}).wait()
+            move_axes_to(
+                robot,
+                {
+                    "base": base_pulses * degrees_per_pulse,
+                    "extension": extension_pulses * degrees_per_pulse,
+                },
+            ).wait()
             robot.arm.move_axis_to_motor_degrees("lift", place_lift)
             robot.gripper.open_jaws()
             robot.arm.move_axis_to_motor_degrees("lift", 375)
-            print(f"  {digit} 号环：{plan.summary()}")
+            print(f"  {digit} 号环：底座 {base_pulses} 脉冲、伸缩 {extension_pulses} 脉冲")
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()

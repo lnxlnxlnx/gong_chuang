@@ -47,7 +47,7 @@ def main() -> None:
         move_axes_to(robot, {"lift": 950, "base": -80}).wait()  # 先让环进视野
         # square_chassis_to_ring_row(robot)
         # input("对齐角度")
-        # center_chassis_on_ring(robot)
+        # center_chassis_on_ring(robot, require_digit=2)
         # place_material_from_repo_to_floor_from_center_ring(robot)
         place_material_from_repo_to_floor_by_pose(robot)
         grab_material_from_floor_to_repo_by_xy(robot)

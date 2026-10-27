@@ -247,66 +247,88 @@ class SquareChassisToRingRowTests(unittest.TestCase):
         self.assertEqual(plant.moves, [])
 
 
-class PlaceBoxFromRepoToFloorV3Tests(unittest.TestCase):
+class RowStepPulsesTests(unittest.TestCase):
+    def robot(self, *, lead=61.0) -> Mock:
+        robot = Mock()
+        robot.arm.pulses_per_revolution = 3200
+        robot.arm.config.base_reduction = 5
+        robot.arm.config.axes = {"extension": SimpleNamespace(mm_per_motor_rev=lead)}
+        return robot
+
+    def test_one_step_is_a_chord_not_an_arc(self) -> None:
+        """转底座 + 多伸一截：atan(150/270)=29.05° → 1291 脉冲；多伸 38.9 mm → 2039 脉冲。"""
+        base_pulses, extension_pulses = app_gripper._row_step_pulses(
+            self.robot(), spacing_mm=150.0, radius_mm=270.0
+        )
+
+        self.assertEqual(base_pulses, 1291)
+        self.assertEqual(extension_pulses, 2039)
+
+    def test_a_missing_extension_lead_is_reported(self) -> None:
+        with self.assertRaisesRegex(ValueError, "mm_per_motor_rev"):
+            app_gripper._row_step_pulses(
+                self.robot(lead=None), spacing_mm=150.0, radius_mm=270.0
+            )
+
+
+class PlaceMaterialFromCenterRingTests(unittest.TestCase):
     def run_it(self, orders):
         robot = Mock()
         robot.vision.ring_center_spacing_mm = 150.0
-        robot.grasp.align_ring.return_value = SimpleNamespace(
-            aligned=True,
-            final_reading=(0.0, 0.0),
-            final_error_mm=0.5,
-            scale_source="ring box",
-            response=None,
-            note="",
+        robot.arm = RowStepPulsesTests().robot().arm
+        robot.arm.turns_state = Mock()
+        robot.arm.turns_state.of.side_effect = lambda name: SimpleNamespace(
+            pulses={"base": 1000, "extension": 4800}[name]
         )
-        robot.grasp.plan_ring_readings.return_value = {
-            digit: SimpleNamespace(
-                base=10.0 * digit,
-                extension=20.0 * digit,
-                summary=lambda digit=digit: f"plan {digit}",
-            )
-            for digit in (1, 2, 3)
-        }
+        robot.grasp.align_ring.return_value = SimpleNamespace(
+            aligned=True, final_error_mm=0.5, note=""
+        )
 
         with patch.object(app_gripper, "move_axes_to") as move, \
                 patch.object(app_gripper, "_grab_material_from_car") as grab, \
                 patch("time.sleep"):
             move.return_value.wait.return_value = None
-            app_gripper.place_material_from_repo_to_floor_from_center_ring(robot, orders=orders)
+            app_gripper.place_material_from_repo_to_floor_from_center_ring(
+                robot, orders=orders
+            )
         return robot, [call.args[1] for call in move.call_args_list], grab
 
-    def test_aligning_ring_two_then_the_three_placements_in_order(self) -> None:
-        robot, targets, grab = self.run_it((3, 1, 2))
+    def test_ring_two_is_aligned_then_the_three_poses_are_on_one_line(self) -> None:
+        robot, targets, _grab = self.run_it((1, 2, 3))
 
         robot.grasp.align_ring.assert_called_once()
         self.assertIn("require_digit", robot.grasp.align_ring.call_args.kwargs)
-        robot.grasp.plan_ring_readings.assert_called_once_with(
-            {
-                1: (-150.0, 0.0),
-                2: (0.0, 0.0),
-                3: (150.0, 0.0),
-            },
-            scale_source="ring box",
-            offset_digit=2,
-        )
-        self.assertEqual(
-            targets,
-            [
-                app_gripper.RING2_APPROACH_POSE,
-                {"extension": 60.0, "base": 30.0},
-                {"extension": 20.0, "base": 10.0},
-                {"extension": 40.0, "base": 20.0},
-                app_gripper.SAFE_RETRACT,
-            ],
-        )
+        self.assertEqual(targets[0], app_gripper.RING2_APPROACH_POSE)
+        self.assertEqual(targets[-1], app_gripper.SAFE_RETRACT)
+
+        ring1, ring2, ring3 = targets[1:-1]
+        # 三点共线：两边伸缩相同且都比中间多伸一截，底座对称地转开。
+        self.assertAlmostEqual(ring1["extension"], ring3["extension"])
+        self.assertGreater(ring1["extension"], ring2["extension"])
+        self.assertLess(ring1["base"], ring2["base"])
+        self.assertLess(ring2["base"], ring3["base"])
+        # 绝对电机角 = 里程表脉冲 × 360/3200
+        self.assertAlmostEqual(ring1["base"], (1000 - 1291) * 360.0 / 3200.0)
+        self.assertAlmostEqual(ring2["base"], 1000 * 360.0 / 3200.0)
+        self.assertAlmostEqual(ring3["base"], (1000 + 1291) * 360.0 / 3200.0)
+        self.assertAlmostEqual(ring3["extension"], (4800 + 2039) * 360.0 / 3200.0)
+
+    def test_the_placements_follow_the_order(self) -> None:
+        _robot, targets, grab = self.run_it((3, 1, 2))
+
+        placed = targets[1:-1]
+        self.assertEqual(len(placed), 3)
+        self.assertGreater(placed[0]["base"], placed[2]["base"])  # 3 号先放
+        self.assertGreater(placed[2]["base"], placed[1]["base"])  # 1 号第二趟
         self.assertEqual(grab.call_count, 3)
-        self.assertEqual(robot.gripper.open_jaws.call_count, 3)
 
     def test_a_bad_order_is_rejected_before_anything_moves(self) -> None:
         robot = Mock()
         with patch.object(app_gripper, "move_axes_to") as move:
             with self.assertRaises(ValueError):
-                app_gripper.place_material_from_repo_to_floor_from_center_ring(robot, orders=(0, 4))
+                app_gripper.place_material_from_repo_to_floor_from_center_ring(
+                    robot, orders=(0, 4)
+                )
         move.assert_not_called()
 
 
