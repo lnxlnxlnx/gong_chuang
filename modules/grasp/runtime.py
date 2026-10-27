@@ -582,6 +582,10 @@ class Grasp:
         :param max_iterations: 最多走几步（默认 4）。
         :param gain: 每步取解算值的多少（默认 0.9，留一点余量防过冲）。
         :param tolerance_mm: 到位门槛；``None`` 用 ``eye_in_hand.json`` 的 ``tolerance_mm``。
+
+        **走满步数不报错**：闭环内部记着"目前误差最小的那一次"（残差 + 两根轴的绝对
+        位置），没进容差就把臂退回那一次，返回 ``aligned=False`` 与那一次的计划。
+        一路都是最后一步最好时，这次退回是 0 脉冲（臂本来就在那儿）。
         :raises VisualServoError: 任何一步看不见环、解算失败；或响应比 ≤ 0（方向反了：
             那是标定/接线问题，硬走只会越走越远）。
         """
@@ -608,6 +612,12 @@ class Grasp:
         final_reading: tuple[float, float] | None = None
         digit: int | None = None
         final_plan = None
+        # 到目前为止**误差最小**的那一次：最小误差 + 量到它时两轴的绝对脉冲。
+        # 牛顿步会过冲，最后一步不一定最好；没进容差就退回这一次，而不是停在最差的一步。
+        best_error: float | None = None
+        best_pulses: dict[str, int] | None = None
+        best_reading: tuple[float, float] | None = None
+        best_plan = None
         for attempt in range(1, max(1, int(max_iterations)) + 1):
             target = self._locate_ring_for_plan(
                 source, timeout=timeout, require_digit=require_digit, settle=True
@@ -617,6 +627,15 @@ class Grasp:
             final_reading = plan.reading
             final_plan = plan
             error = math.hypot(plan.error_mm[0], plan.error_mm[1])
+            if best_error is None or error < best_error:
+                # 量到这次误差时两根轴就在**现在**这个位置（不是 ``plan.pulses``：那是
+                # "算完之后该走到哪"，还差一步没走）。退回去要回的就是这里。
+                best_error = error
+                best_reading = plan.reading
+                best_plan = plan
+                best_pulses = {
+                    axis: int(arm.turns_state.of(axis).pulses) for axis in wanted
+                }
             step = RingAlignStep(
                 attempt=attempt,
                 reading=plan.reading,
@@ -673,6 +692,26 @@ class Grasp:
             previous_step = (base_step, extension_step)
         else:
             note = note or f"走了 {max_iterations} 步还没进容差，先看响应比是不是一直不变"
+
+        if not aligned and best_pulses is not None:
+            # 没进容差（走满步数 / 中途停下）：把臂**退回误差最小的那一次**。最后一步常常
+            # 是过冲的那一步，停在上面对准结果只会更差。已经在那儿就一步都不走。
+            moved = False
+            for axis in wanted:
+                delta = int(best_pulses[axis]) - int(arm.turns_state.of(axis).pulses)
+                if delta:
+                    _move_axis(arm, axis, delta)
+                    moved = True
+            if moved:
+                final_reading = best_reading
+                # 计划按**退回来之后**的姿态重算：``plan`` 的读数、误差、绝对位置都得是
+                # 现在这个姿态的，否则后面照着 plan 落料会整体偏。
+                final_plan = self._plan_from_reading(
+                    arm, best_reading, digit=best_plan.digit, score=best_plan.score
+                )
+                note = (note + "；" if note else "") + (
+                    f"已退回误差最小的姿态（{best_error:.1f} mm）"
+                )
 
         final_error = None
         if final_reading is not None and self._target is not None:
