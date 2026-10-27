@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import math
 import unittest
 from unittest.mock import Mock, patch
 
@@ -502,18 +503,41 @@ class ClosedLoopTests(unittest.TestCase):
         self.assertGreater(result.response or 0.0, 0.5)
 
     def test_a_reversed_axis_stops_instead_of_walking_away(self) -> None:
-        """方向反了（接线/标定问题）必须停下并说清楚，而不是继续发帧。"""
+        """方向反了（接线/标定问题）必须停下并说清楚，而不是继续发帧。
+
+        停完之后还要退回误差最小那一次（这里是起点）：第一步已经把它推远了，
+        留在那儿等于挑最差的结果。
+        """
         grasp, arm = make_closed_loop(-1.0)
         result = grasp.align_ring(max_iterations=4)
         self.assertFalse(result.aligned)
         self.assertIn("方向相反", result.note)
-        self.assertLessEqual(len(arm.moves), 2, "只该走第一步，之后必须停")
+        self.assertIn("误差最小", result.note)
+        # 第一步（两根轴）+ 退回第一步（两根轴），到此为止，不再试探第二步
+        self.assertLessEqual(len(arm.moves), 4, "只该走一步、再退回")
+        self.assertAlmostEqual(arm.reading[0], 30.0, delta=1.0)
 
     def test_base_only_leaves_the_extension_alone(self) -> None:
         grasp, arm = make_closed_loop(1.0)
         result = grasp.align_ring(axes=("base",), max_iterations=4)
         self.assertEqual({axis for axis, _ in arm.moves}, {"base"})
         self.assertIsNotNone(result.final_error_mm)
+
+    def test_it_goes_back_to_the_smallest_error_when_the_steps_run_out(self) -> None:
+        """走满步数不报错：退回**误差最小**那一次的姿态，而不是停在过冲的最后一步。
+
+        ``gain=4`` 故意过冲：误差 36 mm → 108 mm。两步入数走完，臂必须回到量到 36 mm
+        时那个位置（读数 (30, 20)），报的残差也是它。
+        """
+        grasp, arm = make_closed_loop(1.0)
+
+        result = grasp.align_ring(max_iterations=2, gain=4.0, tolerance_mm=0.5)
+
+        self.assertFalse(result.aligned)
+        self.assertIn("误差最小", result.note)
+        self.assertAlmostEqual(result.final_error_mm, math.hypot(30.0, 20.0), delta=1.0)
+        self.assertAlmostEqual(arm.reading[0], 30.0, delta=1.0)
+        self.assertAlmostEqual(arm.reading[1], 20.0, delta=1.0)
 
     def test_an_unknown_axis_is_rejected_before_any_motion(self) -> None:
         grasp, arm = make_closed_loop(1.0)

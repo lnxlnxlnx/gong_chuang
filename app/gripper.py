@@ -211,8 +211,9 @@ def center_chassis_on_ring(
     按牛顿一步算到位：轮径、打滑、地面摩擦都不必预先标定，闭环自己学。方向反了（挪完
     反而更远）当场报错，不会越走越偏。
 
-    :returns: 最后一次读到的横向残差（毫米，右为正）。
-    :raises RuntimeError: 画面里没有环 / 读数不可用 / 环号不符 / 方向反了 / 走不进容差。
+    :returns: 最后一次读到的横向残差（毫米，右为正）。走满 ``max_iterations`` 也没进
+        容差时**不报错**：车停在最后一步，返回迭代过程中的**最小残差**（打印里两个数都在）。
+    :raises RuntimeError: 画面里没有环 / 读数不可用 / 环号不符 / 方向反了。
 
     读环时**连读几帧才认输**（``RING_READ_ATTEMPTS``）：一帧运动模糊、或刚好被爪影
     扫过，不该让整次校准失败——这是"看一眼就抛"最容易误报的地方。
@@ -231,6 +232,7 @@ def center_chassis_on_ring(
     gain: float | None = None      # 每 +1 脉冲（左移）让环心 x 变化多少毫米
     previous: tuple[float, int] | None = None
     locked = require_digit          # 第一帧读到哪一号就锁定它（见下）
+    best_residual: float | None = None   # 迭代到的最小残差，走不进容差时按它收工
     x_mm = 0.0
     for attempt in range(1, max(1, int(max_iterations)) + 1):
         target = _read_ring(robot, digit=locked)
@@ -270,6 +272,9 @@ def center_chassis_on_ring(
             print(f"  车已对正：横向残差 {x_mm:+.1f} mm（读了 {attempt} 帧）")
             return x_mm
 
+        if best_residual is None or abs(x_mm) < abs(best_residual):
+            best_residual = x_mm
+
         if gain is None:
             magnitude = LATERAL_TRIAL_PULSES
         else:
@@ -284,10 +289,14 @@ def center_chassis_on_ring(
             step = magnitude
         previous = (x_mm, step)
 
-    raise RuntimeError(
-        f"{max_iterations} 步还没把车对到环前（最后横向残差 {x_mm:+.1f} mm，"
-        f"门槛 {tolerance_mm:.1f} mm）：检查轮子是不是打滑或撞到东西"
+    # 走满步数不报错：车停在最后一步、把**最小残差**报出去。横移是一维的，没有"两个电机
+    # 位置"可回退，而为了 0.3 mm 再挪一次不值当——真打滑时按最小残差继续还能干活。
+    print(
+        f"  车没进容差：{max_iterations} 步后残差 {x_mm:+.1f} mm，"
+        f"最小残差 {best_residual if best_residual is not None else x_mm:+.1f} mm"
+        f"（门槛 {tolerance_mm:.1f} mm）——检查轮子是不是打滑或撞到东西"
     )
+    return float(best_residual if best_residual is not None else x_mm)
 
 
 def _read_ring_row(robot: Robot, *, attempts: int = RING_READ_ATTEMPTS):
@@ -866,9 +875,17 @@ def place_material_from_repo_to_floor_from_center_ring(
             require_digit=2, tolerance_mm=tolerance_mm, max_iterations=6
         )
         if not aligned.aligned:
-            raise RuntimeError(
-                "2 号环没对准，不敢往下算："
-                + (aligned.note or f"残差 {aligned.final_error_mm} mm")
+            # 没进容差不再直接退出去：``align_ring`` 已经把臂放在**误差最小**的姿态上，
+            # 按这个姿态推出来的 1/3 号只会跟着偏那点残差。现场放偏一点也比整段不跑强。
+            residual = (
+                "—"
+                if aligned.final_error_mm is None
+                else f"{aligned.final_error_mm:.1f} mm"
+            )
+            print(
+                f"  2 号环没进容差（残差 {residual}，门槛 {tolerance_mm:.1f} mm）："
+                "按误差最小的姿态继续，1/3 号会跟着偏这么多"
+                + (f"；{aligned.note}" if aligned.note else "")
             )
         arm = robot.arm
         spacing = float(robot.vision.ring_center_spacing_mm)
