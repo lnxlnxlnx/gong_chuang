@@ -30,6 +30,7 @@ SCENE_STABLE_TIMEOUT_SECONDS = 20.0
 from modules.vision.app.demo import demo_material
 from robot import Robot
 
+ROTATE_PULSE = 4510
 
 def main() -> None:
     """默认演示：物料定位预览。
@@ -131,22 +132,57 @@ def _place_material(robot: Robot):
     robot.arm.move_axis_to_motor_degrees("lift", 675)
     robot.arm.move_forward(3200)
 
-def run_map(robot: Robot):
+def run_map():
     with Robot.open(grasp=True, gripper=True, turntable=True, chassis = True) as robot:
         robot.turntable.go_home()
         robot.gripper.open_jaws()
         
+        ###############
+        # move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
+        # move_axes_to(robot, {"lift": 950, "base": -80}).wait()  # 先让环进视野
+        
+        # robot.chassis.rotate_cw(pulses=4510*4)
+        ###############
+        
+        
         ###################
         # place_box_from_repo_to_floor_v2(robot)
+        # robot.chassis.rotate_ccw(rpm= 60, pulses=4650)
+        # robot.chassis.forward(rpm= 60, pulses=22800)
+        # robot.chassis.left(rpm= 60, pulses=1000)
+        # move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
+        # move_axes_to(robot, {"lift": 950, "base": -80}).wait()  # 先让环进视野
+        # square_chassis_to_ring_row(robot)
+        # center_chassis_on_ring(robot, require_digit=2)
+        
+        # 到细加工区
+        # robot.chassis.right(rpm = 60, pulses=11600)
+        # robot.chassis.rotate_cw(rpm=60, pulses=4650)
+        # robot.chassis.right(rpm = 60, pulses=10600)
+        # move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
+        # move_axes_to(robot, {"lift": 950, "base": -80}).wait()  # 先让环进视野
+        # square_chassis_to_ring_row(robot)
+        # center_chassis_on_ring(robot, require_digit=2)
+        
+        # robot.chassis.left(pulses=1000)       # 到二号圆环位置
+        
+        # 第二次到圆盘
+        # robot.chassis.right(pulses=12000)
+        # robot.chassis.backward(pulses=10600)
+        
+        # robot.chassis.left(pulses=22800)
+        
+        
+        # input("调试!!!!!!!!")
         ###################
         
-        # robot.chassis.forward_left(rpm = 60, pulses=5400)      # 90
-        # robot.chassis.forward(rpm=60, pulses=9600)     # 240
+        robot.chassis.forward_left(rpm = 60, pulses=4800)      # 90
+        robot.chassis.forward(rpm=60, pulses=11600)     # 240
 
         # time.sleep(1)
         # input("开始抓取物料")
-        # grab_box_from_turntable_to_repo(robot)
-        # robot.chassis.forward(rpm = 60, duration = 8.5 * 0.5)
+        grab_material_from_turntable_to_repo(robot)     # 已完成
+        
         
         # input("移动到拐角")
         # robot.chassis.forward(rpm = 60, pulses=12200)
@@ -209,4 +245,5 @@ def run_map(robot: Robot):
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    run_map()
