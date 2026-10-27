@@ -445,6 +445,11 @@ class Vision:
         #: 事后复测往往已经停了，两个数对不上就说明是等得不够长。只作观测记录，
         #: 不影响任何判定。
         self.last_scene_stability: Optional["SceneStability"] = None
+        #: 最近一次 :meth:`locate_ring` 为什么给出/没给出那个环（诊断用）。
+        #:
+        #: 最常见的一种是"同一帧里同一个环号出现两次"——模型把相邻的环读成同一号，
+        #: 这一帧作废。只看报错是"画面里没有环"会把人引去查相机，所以原因要带出来。
+        self.last_ring_diagnosis = ""
 
     # ------------------------------------------------------------- 创建
     @classmethod
@@ -1044,7 +1049,10 @@ class Vision:
         :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
         """
         frame = self._read_frame(timeout=timeout)
-        return self._ring_target_locator().detect(frame, digit=digit)
+        locator = self._ring_target_locator()
+        target = locator.detect(frame, digit=digit)
+        self.last_ring_diagnosis = locator.last_diagnosis
+        return target
 
     def locate_rings(
         self, *, timeout: Optional[float] = None

@@ -184,6 +184,12 @@ def _read_ring(robot: Robot, *, digit: int | None = None, attempts: int = RING_R
     return None
 
 
+def _ring_diagnosis(robot: Robot) -> str:
+    """把"这一帧为什么不能用"接到报错后面；没有（或换成假视觉）就什么也不加。"""
+    detail = getattr(robot.vision, "last_ring_diagnosis", "")
+    return f"；最近一次：{detail}" if isinstance(detail, str) and detail else ""
+
+
 def center_chassis_on_ring(
     robot: Robot,
     *,
@@ -209,6 +215,12 @@ def center_chassis_on_ring(
 
     读环时**连读几帧才认输**（``RING_READ_ATTEMPTS``）：一帧运动模糊、或刚好被爪影
     扫过，不该让整次校准失败——这是"看一眼就抛"最容易误报的地方。
+
+    环号是模型读的，代码不猜：同一帧里读出两个同号环（数字被料挡住、框贴边、离得
+    太近时都会），这一帧**直接作废**、连读几帧仍如此就报错，而不是按分数挑一个。
+    这就是"有时对到隔壁环"的来源：错的号会把车正对到 3 号环前面，而动作、残差、
+    打印全都看起来完全正常；``square_chassis_to_ring_row`` 只要直线的倾角，所以编号
+    错了它照样能用。
     """
     gain: float | None = None      # 每 +1 脉冲（左移）让环心 x 变化多少毫米
     previous: tuple[float, int] | None = None
@@ -219,6 +231,7 @@ def center_chassis_on_ring(
             raise RuntimeError(
                 "画面里没有环：先把臂摆到能看见靶标的位置"
                 + (f"（找的是 {require_digit} 号环）" if require_digit is not None else "")
+                + _ring_diagnosis(robot)
             )
         if require_digit is not None and int(target.digit) != int(require_digit):
             raise RuntimeError(
@@ -229,6 +242,9 @@ def center_chassis_on_ring(
         if reading is None:
             raise RuntimeError("环心读数不可用（贴边 / 缺比例尺）：换个姿态再看")
         x_mm = float(reading[0])
+        # 每一帧都报"这是几号环、模型多大把握"：认错环时残差照样收敛得很漂亮，
+        # 唯一能当场看出来的就是这个数。
+        print(f"  读到 {target.digit} 号：x={x_mm:+.1f} mm（模型 {target.score:.2f}）")
 
         # 先结算上一步：车真的动了多少，按脉冲折算；方向反了/没动就别再走。
         if previous is not None and previous[1]:

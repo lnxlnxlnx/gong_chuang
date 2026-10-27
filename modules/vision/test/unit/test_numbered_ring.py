@@ -149,6 +149,34 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_locator([centred()]).detect(None)
 
+    def test_one_digit_on_two_rings_is_refused(self) -> None:
+        """模型把相邻环读成同一号（实测会这样）：这一帧作废，绝不按分数挑一个。
+
+        真机上的样子：三个环读出 ``tg1 / tg1 / tg2``，于是"要 2 号"落到了 3 号身上，
+        车被正对着开到隔壁环前面，而残差打印看起来完全正常。
+        """
+        hits = [
+            centred("tg1", score=0.96, centre=(200.0, 300.0)),
+            centred("tg1", score=0.73, centre=(640.0, 300.0)),
+            centred("tg2", score=0.92, centre=(1050.0, 300.0)),
+        ]
+        locator = make_locator(hits)
+
+        self.assertIsNone(locator.detect(frame()))
+        self.assertIn("1 号环出现了 2 次", locator.last_diagnosis)
+        # 指定 2 号也一样作废：这一帧的编号整体不可信，2 号也可能就是隔壁那个。
+        self.assertIsNone(locator.detect(frame(), digit=2))
+
+    def test_two_boxes_of_the_same_ring_are_not_a_clash(self) -> None:
+        """同一个环漏过 NMS 出两个框（中心几乎重合）不算矛盾，照常按分数挑。"""
+        hits = [
+            centred("tg2", score=0.95, centre=(640.0, 360.0)),
+            centred("tg2", score=0.71, centre=(648.0, 362.0)),
+        ]
+        target = make_locator(hits).detect(frame(), digit=2)
+        self.assertIsNotNone(target)
+        self.assertAlmostEqual(target.score, 0.95, places=2)
+
 
 class ClippedTests(unittest.TestCase):
     """框被画面裁掉：照样返回（说明"看到了"），但不给可对准读数。"""

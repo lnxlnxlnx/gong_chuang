@@ -134,6 +134,18 @@ class CenterChassisOnRingTests(unittest.TestCase):
         self.assertEqual(plant.moves, [])
         self.assertEqual(robot.vision.locate_ring.call_count, app_gripper.RING_READ_ATTEMPTS)
 
+    def test_a_refused_frame_says_why(self) -> None:
+        """视觉因为"同一号出现在两个环上"而作废时，报错要带出那句原因，别让人去查相机。"""
+        plant = FakePlant(x_mm=0.0)
+        robot = make_robot(plant)
+        robot.vision = Mock()
+        robot.vision.locate_ring.return_value = None
+        robot.vision.last_ring_diagnosis = "同一帧里 1 号环出现了 2 次"
+
+        with patch("time.sleep"), self.assertRaisesRegex(RuntimeError, "出现了 2 次"):
+            app_gripper.center_chassis_on_ring(robot)
+        self.assertEqual(plant.moves, [])
+
 
 if __name__ == "__main__":
     unittest.main()

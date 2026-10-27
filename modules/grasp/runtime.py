@@ -787,9 +787,13 @@ class Grasp:
             )
         target = locate(timeout=timeout, digit=require_digit)
         if target is None:
+            detail = getattr(source, "last_ring_diagnosis", "")
+            extra = ""
+            if isinstance(detail, str) and detail:
+                extra = f"；最近一次：{detail}"
             raise VisualServoError(
                 "画面里没有环：把靶标移到视野里、或确认模型类别表里有 tg1/tg2/tg3"
-                "（modules/vision/config.json 的 model.class_names）"
+                "（modules/vision/config.json 的 model.class_names）" + extra
             )
         if target.reading() is None:
             raise VisualServoError(self._unusable_ring_reason(target))
