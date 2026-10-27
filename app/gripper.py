@@ -1017,3 +1017,9 @@ def place_material_on_material_by_order(
         move_axes_to(robot, SAFE_RETRACT).wait()
         return
     move_axes_to(robot, SAFE_RETRACT).wait()
+    
+    
+def place_and_grab_material(robot:Robot, place_orders, grab_orders):
+    # TODO:待优化
+    place_material_from_repo_to_floor_by_pose(robot, orders=place_orders)   # 这边应该返回三个位置
+    grab_material_from_floor_to_repo_by_xy()
