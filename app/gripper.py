@@ -974,11 +974,12 @@ def grab_material_from_floor_to_repo_by_xy(
     try:
         for order in orders:
             move_axes_to(robot, {"lift": ring_position[order - 1][1], "extension": ring_position[order - 1][2], "base": ring_position[order - 1][0]}).wait()
-            time.sleep(1)  # 先让车停稳
             if pre_locations is None:
+                time.sleep(1)  # 先让车停稳
                 result = robot.grasp.align_xy(tolerance_mm=3.0)
             else:
                 position = pre_locations.pop(0)
+                print(position)
                 move_axes_to(robot, position).wait()
             robot.arm.move_axis_to_motor_degrees("lift", 90)
             robot.gripper.close_jaws()
@@ -1042,7 +1043,9 @@ def place_material_on_material_by_order(
     move_axes_to(robot, SAFE_RETRACT).wait()
     
     
-def place_and_grab_material(robot:Robot, place_orders, grab_orders):
+def place_and_grab_material(robot:Robot, place_orders = (1, 2, 3), grab_orders = None):
+    if grab_orders is None:
+        grab_orders = place_orders
     # TODO:待优化
     pre_locations = place_material_from_repo_to_floor_by_pose(robot, orders=place_orders)   # 这边应该返回三个位置
     grab_material_from_floor_to_repo_by_xy(robot, orders=grab_orders, pre_locations=pre_locations)   # 这边应该传入三个位置

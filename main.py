@@ -21,6 +21,7 @@ from app.gripper import (
     place_material_on_material,  # 物料到物料
     place_material_on_material_by_order,  # 物料到物料（按 order 依次放三个位置）
     square_chassis_to_ring_row,  # 车纵向对到圆环正前方
+    place_and_grab_material
 )
 
 SCENE_STABLE_TIMEOUT_SECONDS = 20.0
@@ -151,7 +152,8 @@ def run_map():
         
         # robot.chassis.rotate_cw(pulses=4510*4)
         ###############
-        grab_material_from_turntable_to_repo(robot)
+        place_and_grab_material(robot)
+        # grab_material_from_turntable_to_repo(robot)
         input("结束!!!!!!!!!!!!!!!")
         
         ###################
