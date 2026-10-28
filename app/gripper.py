@@ -780,7 +780,7 @@ def place_material_from_repo_to_floor_by_pose(
     *,
     orders: tuple[int, int, int] = (1, 2, 3),
     home: dict[str, float] | None = {"lift": 760, "extension": 400, "base": -32},
-):
+)-> list[dict[str, float]] | None:
     """把物料从仓库放到地面圆环里：车停在原地，逐环摆姿态后用 ``align_ring`` 闭环。
 
     ``home`` 是进流程前先摆到的姿态；传 ``None`` 表示这次不摆（轴本来就停在目标上时
@@ -789,6 +789,7 @@ def place_material_from_repo_to_floor_by_pose(
     robot.arm.move_axis_to_motor_degrees("lift", 400)
     _go_home(robot, home)
     ring_position = [(-190, 800, 690), (-32, 800, 540), (100, 800, 690)]
+    res = []
     try:
         for order in orders:
             move_axes_to(robot, {"lift": ring_position[order - 1][1], "extension": ring_position[order - 1][2], "base": ring_position[order - 1][0]}).wait()
@@ -796,6 +797,8 @@ def place_material_from_repo_to_floor_by_pose(
             result = robot.grasp.align_ring(tolerance_mm=2, max_iterations = 5)
             base_deg = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
+            position = {"base": base_deg, "extension": extension_deg}
+            res.append(position)
             
             _grab_material_from_car(robot)
             
@@ -809,10 +812,10 @@ def place_material_from_repo_to_floor_by_pose(
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()
-        return
+        return None
 
     move_axes_to(robot, SAFE_RETRACT).wait()
-
+    return res
 
 #: 放料前先把臂摆到 2 号环前的姿态（``base``/``lift``/``extension``，电机角度）。
 #: 取 :func:`place_material_from_repo_to_floor_by_pose` 里 2 号环那一份：相机在这个姿态下看得到 2 号环，
@@ -944,6 +947,7 @@ def grab_material_from_floor_to_repo_by_xy(
     robot: Robot,
     *,
     orders: tuple[int, int, int] = (3, 2, 1),
+    pre_locations: list[dict[str, float]] | None = None,
     home: dict[str, float] | None = {"lift": 760, "extension": 400, "base": -32},
 ):
     """把物料从地面圆环放到仓库里。不需要考虑初始状态。
@@ -958,7 +962,11 @@ def grab_material_from_floor_to_repo_by_xy(
         for order in orders:
             move_axes_to(robot, {"lift": ring_position[order - 1][1], "extension": ring_position[order - 1][2], "base": ring_position[order - 1][0]}).wait()
             time.sleep(1)  # 先让车停稳
-            result = robot.grasp.align_xy(tolerance_mm=3.0)
+            if pre_locations is None:
+                result = robot.grasp.align_xy(tolerance_mm=3.0)
+            else:
+                position = pre_locations.pop(0)
+                move_axes_to(robot, position).wait()
             robot.arm.move_axis_to_motor_degrees("lift", 90)
             robot.gripper.close_jaws()
             _place_material_to_repo(robot, verbose=True)
@@ -1023,5 +1031,5 @@ def place_material_on_material_by_order(
     
 def place_and_grab_material(robot:Robot, place_orders, grab_orders):
     # TODO:待优化
-    place_material_from_repo_to_floor_by_pose(robot, orders=place_orders)   # 这边应该返回三个位置
-    grab_material_from_floor_to_repo_by_xy()
+    pre_locations = place_material_from_repo_to_floor_by_pose(robot, orders=place_orders)   # 这边应该返回三个位置
+    grab_material_from_floor_to_repo_by_xy(robot, orders=grab_orders, pre_locations=pre_locations)   # 这边应该传入三个位置
