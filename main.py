@@ -162,11 +162,17 @@ def run_map():
         # robot.chassis.forward(rpm=60, pulses=11500)     # 240
 
         # 抓取物料
-        grab_material_from_turntable_to_repo(robot)     # 已完成
+        grab_material_from_turntable_to_repo(robot)     # 完成后在extension=270的位置
         robot.chassis.rotate_ccw(rpm= 60, pulses=ROTATE_PULSE)
         
         # 移动到粗加工区
-        time.sleep(0.3)
+        # time.sleep(0.3)
+        # batch = robot.motion.begin()
+        # batch.add(robot.chassis.forward(rpm= 60, pulses=22500, wait=False))
+        # batch.add(move_axes_to(robot, {"lift": 950, "extension": 580, "base": -80}))
+        # batch.wait()
+        
+        # place_and_grab_material(robot)
         robot.chassis.forward(rpm= 60, pulses=22500)
         robot.chassis.left(rpm= 60, pulses=1600)
         move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
@@ -176,7 +182,6 @@ def run_map():
         robot.chassis.left(pulses=500)
         place_material_from_repo_to_floor_by_pose(robot)
         grab_material_from_floor_to_repo_by_xy(robot)
-        
         # 到细加工区
         # robot.chassis.right(rpm = 60, pulses=13200)
         # time.sleep(0.1)
