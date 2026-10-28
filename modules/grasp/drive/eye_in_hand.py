@@ -727,57 +727,93 @@ def align_xy_for_turntable(
     step_limit: Optional[int] = None,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> VisualServoResult:
-    """转盘抓料用的 x/y 对准：**单帧一步、大步、按秒收工**，没进容差就停在误差最小的位置。
+    """转盘抓料用的 x/y 对准：**首帧只取一帧、一步按粗调上限走完、按秒收工**。
 
-    与 :func:`align_x_y` 只差三处，都是为"转盘只停一会儿、1 s 内必须动手"换来的：
+    与 :func:`align_x_y` 的差别，以及为什么这样更快：
 
-    - **不等停稳**：每一轮只取一帧。等停稳要连取两帧、多等一次判据（实测 0.35–0.6 s），
-      而停稳已经由调用方（``vision.wait_scene_stable``）保证。
-    - **步长不按档位夹**：``step_limit`` 默认就是整份脉冲预算，一次把解算值走完，
-      大误差也只拆一两轮。
-    - **按墙上时间收工**：等的是 ``seconds``（默认 1 s），不是迭代次数。到点就退回到
-      **这次测到过的误差最小位置**（脉冲是逐轮累计出来的），所以返回值可能
-      ``aligned=False``——那是"已知最好"，不是失败；调用方据此决定要不要照样下降。
+    - **第一次测量只取一帧**：调用方（:func:`modules.grasp.runtime` 的转盘入口）已经用
+      ``vision.wait_scene_stable`` 确认过整幅画面静止，再等"连续两帧一致"是白花一次定位
+      （实测约 0.27 s）。物块还没转进视野时仍退回旧语义，按 ``target_wait_seconds`` 等它出现。
+    - **动作之后**仍然等停稳：机械臂刚停的那一两帧读数还在漂，拿它去解算会再走一步反向的，
+      表现为原地转——那是"更慢"，不是"更快"。
+    - **一步按粗调上限走完**（``step_limit`` 默认 ``coarse_max_pulses_per_step``），
+      不再拆成细调的小步。
+    - **按墙上时间收工**：第一次测量 + 第一步一定做完（没动就收工等于没对准），之后每再走
+      一步之前看预算；到点就退回到**测到过的误差最小位置**。返回值可能
+      ``aligned=False``——那是"已知最好"，不是对准了，调用方**不能**拿它去下降。
 
-    每一轮都带 ``after=checkpoint`` 过滤旧帧：动作很快时队列里还压着动作**之前**的
-    画面，读到它就会以为没动过、再发一次同样的指令（表现为来回振荡）。
+    每一轮测量都带 ``after=checkpoint`` 过滤旧帧：动作很快时队列里还压着动作**之前**的画面，
+    读到它就会以为没动过、再发一次同样的指令（表现为来回振荡）。
 
-    :param seconds: 对准预算（秒），从第一帧之前开始计。
-    :param max_iterations: 最多取几帧；时间预算先到时以时间预算为准。
+    :param seconds: 对准预算（秒），从第一次测量之前开始计。
+    :param max_iterations: 最多测几次（首次 + 验证 + 补充步）；时间预算先到时以时间预算为准。
     :param tolerance_mm: 这一次的到位门槛；``None`` 用 ``config.tolerance_mm``。
-    :param step_limit: 单轴单步脉冲上限；``None`` 用 ``config.max_total_pulses``。
+    :param step_limit: 单轴单步脉冲上限；``None`` 用 ``config.coarse_max_pulses_per_step``。
     :raises VisualServoError: 一帧都测不到、脉冲预算用完；中途物块看不见时按已知最好位置收工。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     tolerance = config.tolerance_mm if tolerance_mm is None else float(tolerance_mm)
     if tolerance <= 0:
         raise ValueError("tolerance_mm 必须是正数")
-    limit = config.max_total_pulses if step_limit is None else int(step_limit)
+    limit = config.coarse_max_pulses_per_step if step_limit is None else int(step_limit)
+    # ponytail: 预算内只保证"一次测量 + 一步 + 一次验证"。初始误差大于一步的修正量时，
+    # 到点就停在已知最好位置、不下降——要"抓到"而不是"快点抓空"，把 seconds 调到 2–3
+    # 或者先让转盘停位对齐，比在这里多塞小步划算。
     budget = max(0.0, float(seconds))
     started = time.monotonic()
     deadline = started + budget
+    #: 验证那几轮判"停稳"用的一致性门槛，与 ``align_x_y`` 同一个取法。
+    fine_settle = min(
+        config.coarse_settle_tolerance_mm,
+        max(config.settle_tolerance_mm, 0.25 * tolerance),
+    )
 
-    #: ``(误差, 偏移, 累计底座脉冲, 累计伸缩脉冲)``，按测量顺序。退回时按误差挑最小的那次。
+    #: ``(误差, 偏移, 累计底座脉冲, 累计伸缩脉冲)``，按测量顺序。
     history: List[Tuple[float, Tuple[float, float], int, int]] = []
     total_base = 0
     total_radial = 0
     checkpoint: Optional[float] = None
+    attempts = 0
 
-    for attempt in range(1, max_iterations + 1):
-        try:
-            sighting = _read_material(link, selector, config, after=checkpoint)
-        except MaterialMissingError:
-            if not history:
-                raise
-            say("  物块看不见了：按已知误差最小的位置收工")
-            break
+    while True:
+        attempts += 1
+        if not history:
+            try:
+                # 场景刚被判过静止：这一帧就是可信的读数，不必再等第二帧。
+                sighting = _read_material(link, selector, config)
+            except MaterialMissingError:
+                # 物块还没转进视野。这不是失败，退回旧语义等它出现。
+                sighting = _settled_sighting(
+                    link,
+                    selector,
+                    config,
+                    tolerance=fine_settle,
+                    include_depth=False,
+                    wait_for_first_target=True,
+                    on_message=say,
+                )
+        else:
+            try:
+                # 动作之后必须等停稳：刚停那一两帧读数还在漂，拿它解算会再走反方向。
+                sighting = _settled_sighting(
+                    link,
+                    selector,
+                    config,
+                    after=checkpoint,
+                    tolerance=fine_settle,
+                    include_depth=False,
+                    on_message=say,
+                )
+            except MaterialMissingError:
+                say("  物块看不见了：按已知误差最小的位置收工")
+                break
         offset = (sighting.x_mm, sighting.y_mm)
         error_x = offset[0] - target.x_mm
         error_y = offset[1] - target.y_mm
         error = math.hypot(error_x, error_y)
         history.append((error, offset, total_base, total_radial))
         say(
-            f"第 {attempt} 次（{time.monotonic() - started:.2f} s）："
+            f"第 {attempts} 次（{time.monotonic() - started:.2f} s）："
             f"物块 ({offset[0]:+.2f}, {offset[1]:+.2f}) mm，误差 {error:.2f} mm"
         )
         if error <= tolerance:
@@ -788,7 +824,7 @@ def align_xy_for_turntable(
                 error_y=error_y,
                 base_pulses=total_base,
                 radial_pulses=total_radial,
-                iterations=attempt,
+                iterations=attempts,
                 tolerance_mm=tolerance,
             )
         if error < config.min_step_mm:
@@ -803,10 +839,13 @@ def align_xy_for_turntable(
                 error_y=error_y,
                 base_pulses=total_base,
                 radial_pulses=total_radial,
-                iterations=attempt,
+                iterations=attempts,
                 tolerance_mm=tolerance,
                 resolution_limited=True,
             )
+        if attempts >= max_iterations:
+            say(f"  测量次数用完了（{max_iterations} 次）：按已知误差最小的位置收工")
+            break
         if time.monotonic() >= deadline:
             say(f"  {budget:.1f} s 预算用完：按已知误差最小的位置收工")
             break
@@ -827,23 +866,25 @@ def align_xy_for_turntable(
         total_radial += radial_step
         checkpoint = time.monotonic() + config.frame_margin_seconds
 
+    last = history[-1]
     best = min(history, key=lambda item: item[0])
-    best_error, best_offset, best_base, best_radial = best
-    retreat_base = best_base - total_base
-    retreat_radial = best_radial - total_radial
-    if retreat_base or retreat_radial:
+    final = last
+    retreat_base = best[2] - total_base
+    retreat_radial = best[3] - total_radial
+    # 只在"最好那次明显比现在好"时退：差不到一个背隙地板，退回去只是白花一次动作。
+    if best[0] < last[0] - config.min_step_mm and (retreat_base or retreat_radial):
         say(f"  退回误差最小那一次：底座 {retreat_base:+d}、伸缩 {retreat_radial:+d} 脉冲")
         _move_axes(arm, retreat_base, retreat_radial, config)
-    best_index = [item[0] for item in history].index(best_error)
-    readings = [item[1] for index, item in enumerate(history) if index != best_index]
-    readings.append(best_offset)
+        final = best
+    readings = [item[1] for item in history if item is not final]
+    readings.append(final[1])
     return VisualServoResult(
         target=target,
         readings=tuple(readings),
-        error_x=best_offset[0] - target.x_mm,
-        error_y=best_offset[1] - target.y_mm,
-        base_pulses=best_base,
-        radial_pulses=best_radial,
+        error_x=final[1][0] - target.x_mm,
+        error_y=final[1][1] - target.y_mm,
+        base_pulses=final[2],
+        radial_pulses=final[3],
         iterations=len(history),
         tolerance_mm=tolerance,
     )

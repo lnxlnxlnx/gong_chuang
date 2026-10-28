@@ -498,18 +498,58 @@ class Grasp:
             **options,
         )
 
+    def follow_material(
+        self,
+        want_color,
+        *,
+        tolerance_mm: float | None = None,
+    ) -> VisualServoResult:
+        """跟着物料水平走**一步**：YOLO 取一帧 → 底座与伸缩各走一步 → 返回；不动升降。
+
+        每轮只取**一帧**、只走**一步**（``align_xy(single_step=True)``）。物料在动时
+        "等画面停稳再测"是在等一个永远等不到的东西，所以这里不等；循环调用它就是跟随::
+
+            while True:
+                try:
+                    robot.grasp.follow_material("red")
+                except VisualServoError:
+                    continue        # 转出去 / 被爪影挡住的那一帧不算失败
+
+        循环什么时候停、跟丢之后怎么办，都是调用方的事——本方法不自己决定停稳，只负责
+        "这一帧看到的料在哪，就把爪子水平挪过去一步"。
+
+        **一次升降帧都不发**：不悬停，也不做"转底盘前的安全高度检查"
+        （``ensure_safe_height=False``）——那次检查会**自己升降**，与"只做水平跟随"矛盾。
+        高度由调用方负责：低位转底盘会撞到台面上的物块。
+
+        :param want_color: 跟哪一个物料：类别名（``"red"``）或从 1 开始的编号，
+            与 ``vision.locate(want_color)`` 同一套说法。
+        :param tolerance_mm: 这一次的到位门槛；``None`` 用 ``eye_in_hand.json`` 的
+            ``tolerance_mm``。误差在门槛内时这一步一个脉冲都不发。
+        :raises VisualServoError: 这一帧看不到该物料、雅可比奇异、脉冲预算超了。
+            跟丢一帧不是"跟随失败"，调用方按需重试。
+        """
+        return self.align_xy(
+            want=want_color,
+            single_step=True,
+            ensure_safe_height=False,
+            tolerance_mm=tolerance_mm,
+        )
+
     def align_xy_for_turntable(
         self,
         *,
         want=None,
         tolerance_mm: float | None = None,
     ) -> VisualServoResult:
-        """转盘抓料用的快速 x/y 对准：**单帧一步、大步、1 s 预算**，到点停在误差最小的位置。
+        """转盘抓料用的 x/y 对准：**首帧只取一帧、一步按粗调上限走完、1 s 预算**，到点停在
+        测到过的最小误差位置。
 
         与 :meth:`align_xy` 的差别全在
         :func:`modules.grasp.drive.eye_in_hand.align_xy_for_turntable`；这里只负责挑判别
         条件、把这次的容差传下去。与 ``align_xy`` 的默认值一致：**不动高度**，高度由调用方
-        负责。返回值可能 ``aligned=False``——那是 1 s 内已知最好的位置，不是失败。
+        负责。返回值可能 ``aligned=False``——那是 1 s 内已知最好的位置，**不是**对准了，
+        调用方不能拿它去下降。
         """
         arm, source = self._require_resources()
         from modules.grasp.drive.eye_in_hand import align_xy_for_turntable

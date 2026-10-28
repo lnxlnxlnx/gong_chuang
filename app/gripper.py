@@ -557,6 +557,7 @@ def grab_material_from_floor_to_repo(
     order=(3, 2, 1),
     rpm: int = 30,
     verbose: bool = False,
+    pre_locations: list[list[int]] | None = None, 
     home: dict[str, float] | None = {"lift": 760, "extension": 120.0, "base": 400},
 ):
     """把物料从地面圆环放到仓库里。不需要考虑初始状态。
@@ -583,7 +584,10 @@ def grab_material_from_floor_to_repo(
         for digit in digits:
             _drive_to_ring(robot.chassis, targets, digit, rpm=rpm)
             time.sleep(1.5)  # 车停稳再对准
-            robot.grasp.align_ring(require_digit=digit, tolerance_mm=2.0)
+            if pre_locations is None:
+                robot.grasp.align_xy(tolerance_mm=2.0)   # TODO:这里有问题，怎么会对准的是圆环
+            else:
+                move_axes_to(robot, {"base":pre_locations[digit][0], "lift":300, "extension": pre_locations[digit][1]})
             robot.arm.move_axis_to_motor_degrees("lift", 90)
             robot.gripper.close_jaws()
             _place_material_to_repo(robot, verbose=verbose)
@@ -607,10 +611,13 @@ def _grab_material_from_turntable(
     已经对准的爪子落到物块上再合爪。
 
     对准走 :meth:`~modules.grasp.runtime.Grasp.align_xy_for_turntable`：转盘只停一会儿，
-    所以它单帧一步、大步、1 s 预算；预算到了没进容差就停在**这次测到过的最小误差**位置，
-    照样下降（这是"抢时间"的代价，误差写在日志里）。
+    所以它首帧只取一帧、一步按粗调上限走完、1 s 预算；预算到了没进容差就停在
+    **测到过的最小误差**位置。**没进容差就不下降**——"已知最好"不等于对准了，
+    照着它下降就是抓空或抓偏（要的是别提前抓，不是抢那 0.2 s）。
+    对准花了多久打出来：这是现场判断"哪一段慢"的唯一依据。
     """
 
+    started = time.monotonic()
     try:
         result = robot.grasp.align_xy_for_turntable(want=want_color)
     except Exception as e:
@@ -618,11 +625,14 @@ def _grab_material_from_turntable(
         move_axes_to(robot, SAFE_RETRACT).wait()
         return
 
-    print(f"  {result.summary()}")
+    print(f"  {result.summary()}（对准耗时 {time.monotonic() - started:.2f} s）")
     if not result.aligned:
         print(
-            f"  1 s 内没进容差：已按误差最小的位置停在 {result.error_mm:.1f} mm 处，继续下降"
+            f"  1 s 预算内没进容差（误差 {result.error_mm:.1f} mm）："
+            "停在已知最好的位置，这次不下降"
         )
+        move_axes_to(robot, SAFE_RETRACT).wait()
+        return
 
 
     robot.arm.move_axis_to_motor_degrees("lift", 550, rpm=120)

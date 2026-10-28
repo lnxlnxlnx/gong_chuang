@@ -1110,18 +1110,20 @@ class TurntableAlignTests(unittest.TestCase):
             **kwargs,
         )
 
-    def test_one_big_step_is_not_clamped_by_the_normal_tier(self) -> None:
-        """误差 60 mm 时一步就吃掉：单步上限是整份预算，不是 ``coarse_max_pulses_per_step``。"""
+    def test_one_measurement_and_one_coarse_step(self) -> None:
+        """首帧只取一帧，一步按粗调上限走完，再等停稳验证一次。"""
         arm = FakeArm(self.JACOBIAN)
-        arm.offset = [60.0, 0.0]
+        arm.offset = [30.0, 0.0]
         link = JumpyDepthLink(arm=arm)
 
         result = self.call(arm, link)
 
         self.assertTrue(result.aligned)
-        self.assertEqual(link.reads, 2, "每轮只取一帧：第一帧测、第二帧验证")
+        self.assertEqual(result.iterations, 2, "测一次、走一步、验证一次")
+        self.assertEqual(link.reads, 3, "首帧 1 次 + 验证时连续两帧")
         self.assertGreater(
-            abs(result.base_pulses), self.CONFIG.coarse_max_pulses_per_step
+            abs(result.base_pulses), self.CONFIG.max_pulses_per_step,
+            "一步就按粗调上限走完，不被细调档 1200 夹住",
         )
 
     def test_the_budget_stops_at_the_smallest_error_seen(self) -> None:
@@ -2207,6 +2209,44 @@ class GraspAlignXYSessionTests(unittest.TestCase):
                 with self.subTest(step=name):
                     # 这四个底层函数的前三个位置参数都是 (arm, source, selector)。
                     self.assertEqual(session.mock(name).call_args.args[2], wanted)
+
+
+class GraspFollowMaterialTests(unittest.TestCase):
+    """``Grasp.follow_material``：每次调用只走一步，而且**一次升降帧都不发**。
+
+    跟随循环由调用方写（``while True``），所以这里守的是"这一步"的三个口子：
+    单帧一步、按次的 want、以及安全高度检查也必须关掉——那次检查会自己升降。
+    """
+
+    def test_it_takes_one_step_without_touching_the_height(self) -> None:
+        rig = GraspSessionRig()
+        with rig as session:
+            result = session.grasp.follow_material("green")
+
+            align = session.mock("align")
+            align.assert_called_once()
+            self.assertIs(align.call_args.kwargs["single_step"], True)
+            self.assertIs(align.call_args.kwargs["ensure_safe_height"], False)
+            # 按次给的 want 必须真的变成判别条件：否则跟的是配置里那个默认物料。
+            self.assertEqual(align.call_args.args[2], MaterialSelector(color="green"))
+            for stage in ("hover", "raise", "down", "back"):
+                with self.subTest(stage=stage):
+                    session.mock(stage).assert_not_called()
+
+        self.assertTrue(result.aligned)
+
+    def test_a_per_call_tolerance_reaches_the_servo(self) -> None:
+        rig = GraspSessionRig()
+        with rig as session:
+            session.grasp.follow_material("red", tolerance_mm=1.5)
+            self.assertEqual(session.mock("align").call_args.args[5].tolerance_mm, 1.5)
+
+    def test_a_bad_want_is_rejected_before_anything_moves(self) -> None:
+        rig = GraspSessionRig()
+        with rig as session:
+            with self.assertRaises(ValueError):
+                session.grasp.follow_material(0)
+            session.mock("align").assert_not_called()
 
 
 class GraspAlignAndDescendTests(unittest.TestCase):
