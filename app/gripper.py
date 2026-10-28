@@ -460,7 +460,7 @@ def grab_material_from_turntable_to_repo(
         for color in want_colors :
             # wait_scene_stable 返回 True = 看满最小等待（3.5 s）之后画面仍然静止，可以抓；
             # False = 等满上限一直在动，这次不能下降。
-            time.sleep(1)  # 先让转盘停一下，别一进去就赶上它在转
+            # time.sleep(1)  # 先让转盘停一下，别一进去就赶上它在转
             # interval=0.15：判一眼本身约 0.13–0.15 s（连拍 4 帧 + 差分），默认 0.3 s
             # 的间隔等于每次都白等一半时间；放行时刻由 min_seconds=3.5 定，不跟着变。
             if not robot.vision.wait_scene_stable(
@@ -583,7 +583,7 @@ def grab_material_from_floor_to_repo(
     try:
         for digit in digits:
             _drive_to_ring(robot.chassis, targets, digit, rpm=rpm)
-            time.sleep(1.5)  # 车停稳再对准
+            time.sleep(1)  # 车停稳再对准
             if pre_locations is None:
                 robot.grasp.align_xy(tolerance_mm=2.0)   # TODO:这里有问题，怎么会对准的是圆环
             else:
@@ -623,7 +623,7 @@ def _grab_material_from_turntable(
     except Exception as e:
         print(f"Error occurred while aligning the gripper: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()
-        return 1
+        return 2
 
     print(f"  {result.summary()}（对准耗时 {time.monotonic() - started:.2f} s）")
     if not result.aligned:
@@ -632,12 +632,13 @@ def _grab_material_from_turntable(
             "停在已知最好的位置，这次不下降"
         )
         move_axes_to(robot, SAFE_RETRACT).wait()
-        return 0
+        return 1
 
 
     robot.arm.move_axis_to_motor_degrees("lift", 550, rpm=120)
     robot.gripper.close_jaws()
     robot.arm.move_axis_to_motor_degrees("lift", 800, rpm=120)
+    return 0
 
 
 def _stow_material_to_repo(robot: Robot, position: dict[str, float] | None = None) -> None:

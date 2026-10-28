@@ -22,7 +22,7 @@
   "coarse_max_pulses_per_step": 6500,
   "coarse_error_mm": 10.0,
   "min_step_mm": 1.0,
-  "parallel_rotation_limit_pulses": 600,
+  "parallel_rotation_limit_pulses": 1000,
   "max_total_pulses": 10000,
   "probe_pulses": 100,
   "frame_timeout_seconds": 2.0,
