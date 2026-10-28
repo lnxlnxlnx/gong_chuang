@@ -591,18 +591,24 @@ class Grasp:
         *,
         want=None,
         tolerance_mm: float | None = None,
+        fast: bool = False,
+        step_seconds: float | None = None,
     ) -> VisualServoResult:
-        """转盘抓料用的 x/y 对准：**首帧只取一帧、一步按粗调上限走完、1 s 预算**，到点停在
-        测到过的最小误差位置。
+        """转盘抓料用的 x/y 对准；``fast=True`` 时每轮一帧、一小步，不再补颜色/霍夫。
 
-        与 :meth:`align_xy` 的差别全在
-        :func:`modules.grasp.drive.eye_in_hand.align_xy_for_turntable`；这里只负责挑判别
-        条件、把这次的容差传下去。与 ``align_xy`` 的默认值一致：**不动高度**，高度由调用方
-        负责。返回值可能 ``aligned=False``——那是 1 s 内已知最好的位置，**不是**对准了，
-        调用方不能拿它去下降。
+        ``fast=True`` 用于**料已经停住**的场合（``wait_scene_stable`` 之后）：帧走
+        ``Vision.frame_fast``（只 YOLO 框），动作走短步 + 满档加速度，1 s 预算内能修正
+        好几步；到点停在已知最好位置，并再取一帧确认。``fast=False`` 保持原来的
+        "一大步 + 停稳验证"路径。
+
+        与 :meth:`align_xy` 的默认值一致：**不动高度**，高度由调用方负责。返回值可能
+        ``aligned=False``——那是"已知最好"，**不是**对准了，调用方不能拿它去下降。
         """
         arm, source = self._require_resources()
-        from modules.grasp.drive.eye_in_hand import align_xy_for_turntable
+        from modules.grasp.drive.eye_in_hand import (
+            TURNTABLE_FAST_STEP_SECONDS,
+            align_xy_for_turntable,
+        )
 
         selector = self._selector_for(want, self._selector)
         return align_xy_for_turntable(
@@ -613,6 +619,10 @@ class Grasp:
             self._jacobian,
             self._config,
             tolerance_mm=tolerance_mm,
+            fast=fast,
+            step_seconds=(
+                TURNTABLE_FAST_STEP_SECONDS if step_seconds is None else step_seconds
+            ),
             on_message=self._say,
         )
 
