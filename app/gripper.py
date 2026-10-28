@@ -194,7 +194,7 @@ def _ring_diagnosis(robot: Robot) -> str:
 def center_chassis_on_ring(
     robot: Robot,
     *,
-    require_digit: int | None = None,
+    require_digit: int | None = 2,
     tolerance_mm: float = RING_LATERAL_TOLERANCE_MM,
     max_iterations: int = 7,
     rpm: int = 30,
@@ -335,7 +335,7 @@ def square_chassis_to_ring_row(
     *,
     yaw_offset_deg: float = ROW_SQUARE_YAW_OFFSET_DEG,
     tolerance_deg: float = RING_ROW_SQUARE_TOLERANCE_DEG,
-    max_iterations: int = 4,
+    max_iterations: int = 6,
     rpm: int = 30,
 ) -> float:
     """转**车**让车头与三环圆心那条直线垂直：读一帧倾角，按实测响应比一步到位。
@@ -437,8 +437,8 @@ def grab_material_from_turntable_to_repo(
     robot: Robot,
     want_colors=("red", "green", "blue"),
     *,
-    home: dict[str, float] | None = {"lift": 830, "extension": 120.0, "base": 420}
-):
+    home: dict[str, float] | None = {"lift": 830, "extension": 90.0, "base": 420}
+):  # 420是中心位置
     """把物料从转盘上抓下来，放到仓库里。不需要处理初始状态
     从转盘上抓料：等它看满最小等待还静止 → 对准 → 下降 → 合爪。
 
@@ -455,7 +455,7 @@ def grab_material_from_turntable_to_repo(
         robot.arm.move_axis_to_motor_degrees("lift", 460)
     _go_home(robot, home)
 
-    input("继续")
+    # input("继续")
     try:
         for color in want_colors :
             # wait_scene_stable 返回 True = 看满最小等待（3.5 s）之后画面仍然静止，可以抓；
@@ -654,7 +654,7 @@ def _stow_material_to_repo(robot: Robot) -> None:
     _turntable_position_index = (_turntable_position_index + 1) % len(TURNTABLE_POSITIONS)
     batch = robot.motion.begin()
     batch.add(robot.arm.move_axis_to_motor_degrees("base", 420, wait=False))
-    batch.add(robot.arm.move_axis_to_motor_degrees("extension", 100.0, wait=False))
+    batch.add(robot.arm.move_axis_to_motor_degrees("extension", 90.0, wait=False))
     batch.add(robot.arm.move_axis_to_motor_degrees("lift", 830, wait=False))
     batch.add(
         robot.turntable.go_to(TURNTABLE_POSITIONS[_turntable_position_index], wait=False)
