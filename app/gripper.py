@@ -623,7 +623,7 @@ def _grab_material_from_turntable(
 
     started = time.monotonic()
     try:
-        result = robot.grasp.align_xy_for_turntable(want=want_color, fast=True, tolerance_mm = 15)
+        result = robot.grasp.align_xy_for_turntable(want=want_color, fast=True, tolerance_mm = 13)
     except Exception as e:
         print(f"Error occurred while aligning the gripper: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()
