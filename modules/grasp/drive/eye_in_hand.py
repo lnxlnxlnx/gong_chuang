@@ -1015,7 +1015,7 @@ def align_xy_for_turntable(
     jacobian: VisualServoJacobian,
     config: VisualServoConfig,
     *,
-    seconds: float = 1.0,
+    seconds: float = 1.5,
     max_iterations: int = 3,
     tolerance_mm: Optional[float] = None,
     step_limit: Optional[int] = None,
