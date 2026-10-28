@@ -505,18 +505,24 @@ class Grasp:
         timeout: float = 20.0,
         tolerance_mm: float | None = None,
         step_seconds: float | None = None,
+        coarse_step_seconds: float | None = None,
         acceleration: int | None = None,
+        lost_base_pulses: int | None = None,
+        lost_retract_pulses: int | None = None,
     ) -> VisualServoResult:
         """**跟着走起来的物料走**，直到料自己停住：不动升降、只动平面。
 
         循环在 :func:`modules.grasp.drive.eye_in_hand.follow_material_xy` 里：
-        **每轮取一帧、走一小步**（单步动作量按 ``step_seconds`` 折算，加速度满档），
-        一轮约 0.1 s 取帧 + 0.1 s 动作，4–5 Hz。不是原来那种"走一大步（底座 49 mm）
-        再按估算等 0.37 s"的节奏。
+        **每轮取一帧、走一步**；误差大时按 ``coarse_step_seconds`` 一大步吃掉，误差小了
+        再按 ``step_seconds`` 细跟（底座一步最多约 49 mm / 35 mm）。
 
         "料停住"= 这一步不需要发动作、读数也不变，**并且**整幅画面静止
         （本机 ``Vision.scene_stable()``）。只看读数会在跟得准时误判：相机装在爪上，
         料还在走、读数本来就不变。跟丢（转出去／被爪影挡住）的那几帧不算失败。
+
+        **料跑到后面去、看不见了**：连续丢几帧后朝上次跟随的方向（转盘是顺时针的，
+        默认 CW）扫底座，同时把伸得过长的伸缩回收一点；每丢一帧再扫一步，直到重新看见。
+        方向取自上一次成功的底座步向，所以底座装反只需要看第一次丢料时往哪边扫。
 
         **一次升降帧都不发**：不悬停，也不做"转底盘前的安全高度检查"——那次检查会自己
         升降，与"只做水平跟随"矛盾。高度由调用方负责：低位转底盘会撞到台面上的物块。
@@ -527,13 +533,21 @@ class Grasp:
         :param tolerance_mm: 这次的对准门槛；``None`` 用 ``eye_in_hand.json`` 的
             ``tolerance_mm``。返回值里 ``aligned`` 说的是"料停住那一刻在不在门槛内"，
             不在也不影响：精确对准由 :meth:`align_xy_for_turntable` 接手。
-        :param step_seconds: 每一步允许走多久（秒）；跟得快慢就是这个数。``None`` 用默认。
+        :param step_seconds: 细跟一步允许走多久（秒）；``None`` 用默认。
+        :param coarse_step_seconds: 误差大于 ``coarse_error_mm`` 时的粗调档；``None`` 用默认。
         :param acceleration: 加减速档位 0..255；越小越柔和，但起转越慢。``None`` 用默认。
+        :param lost_base_pulses: 丢料盲扫时底座每次转多少脉冲（正 = CW）；``None`` 用默认，
+            给 0 关掉底座盲扫。
+        :param lost_retract_pulses: 丢料盲扫时伸缩每次回收多少脉冲；``None`` 用默认，
+            给 0 关掉回收。
         :raises VisualServoError: 跟满 ``timeout`` 料还没停住（或一直看不见）。
         """
         arm, source = self._require_resources()
         from modules.grasp.drive.eye_in_hand import (
             FOLLOW_ACCELERATION,
+            FOLLOW_COARSE_STEP_SECONDS,
+            FOLLOW_LOST_BASE_PULSES,
+            FOLLOW_LOST_RETRACT_PULSES,
             FOLLOW_STEP_SECONDS,
             follow_material_xy,
         )
@@ -549,7 +563,22 @@ class Grasp:
             timeout=timeout,
             tolerance_mm=tolerance_mm,
             step_seconds=FOLLOW_STEP_SECONDS if step_seconds is None else step_seconds,
+            coarse_step_seconds=(
+                FOLLOW_COARSE_STEP_SECONDS
+                if coarse_step_seconds is None
+                else coarse_step_seconds
+            ),
             acceleration=FOLLOW_ACCELERATION if acceleration is None else acceleration,
+            lost_base_pulses=(
+                FOLLOW_LOST_BASE_PULSES
+                if lost_base_pulses is None
+                else lost_base_pulses
+            ),
+            lost_retract_pulses=(
+                FOLLOW_LOST_RETRACT_PULSES
+                if lost_retract_pulses is None
+                else lost_retract_pulses
+            ),
             on_message=self._say,
         )
 

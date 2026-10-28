@@ -51,6 +51,7 @@ from modules.grasp.drive.eye_in_hand import (
     descend_z,
     find_material,
     follow_material_xy,
+    follow_x_y,
     hover_above_material,
     probe_jacobian,
     retract_extension,
@@ -1164,6 +1165,22 @@ class BoxesOnlyLink:
         return (sighting(4, 0.0, 0.0, stamp=time.monotonic()),)
 
 
+class BlindFirstLink:
+    """前 ``misses`` 帧什么都看不见，之后一直报同一个读数（料转到后面再回来）。"""
+
+    error = None
+
+    def __init__(self, misses: int) -> None:
+        self.misses = misses
+        self.reads = 0
+
+    def frame_fast(self, **_kwargs):
+        self.reads += 1
+        if self.reads <= self.misses:
+            return ()
+        return (sighting(4, 0.0, 0.0, stamp=time.monotonic()),)
+
+
 class FollowClock:
     """跟随循环的假钟：时间只由 ``sleep`` 推进（一小步动作的等待）。"""
 
@@ -1206,8 +1223,8 @@ class FollowMaterialTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(arm.calls), 2, "跟的时候每轮都要发一步")
 
-    def test_a_step_is_short_enough_to_keep_up(self) -> None:
-        """单步按 ``step_seconds`` 折算：不再一次走 49 mm。"""
+    def test_a_large_error_takes_the_coarse_step(self) -> None:
+        """误差还大时按 ``coarse_step_seconds`` 走一大步，别拆成好几下。"""
         arm = FakeArm(self.JACOBIAN)
         link = DriftingLink()
         config = SingleStepTests.config(max_total_pulses=10_000_000)
@@ -1216,13 +1233,40 @@ class FollowMaterialTests(unittest.TestCase):
                 self.assertRaisesRegex(VisualServoError, "跟了"):
             self.call(arm, link, config=config, timeout=0.05)
 
-        limit = int(
+        fine = int(
             algorithms.FOLLOW_STEP_SECONDS * arm.config.rpm
             * arm.pulses_per_revolution / 60
         )
+        coarse = min(
+            int(
+                algorithms.FOLLOW_COARSE_STEP_SECONDS * arm.config.rpm
+                * arm.pulses_per_revolution / 60
+            ),
+            config.parallel_rotation_limit_pulses,
+        )
         self.assertTrue(arm.calls)
         for _kind, pulses in arm.calls:
-            self.assertLessEqual(pulses, limit)
+            self.assertLessEqual(pulses, coarse)
+        self.assertGreater(max(pulses for _kind, pulses in arm.calls), fine)
+
+    def test_it_sweeps_clockwise_and_retracts_while_the_material_is_lost(self) -> None:
+        """料转到后面看不见：朝 CW 扫、同时回收伸缩，重新看见就继续跟。"""
+        arm = FakeArm(self.JACOBIAN)
+        link = BlindFirstLink(misses=6)
+
+        with patch.object(algorithms, "time", FollowClock()):
+            result = self.call(
+                arm,
+                link,
+                timeout=5.0,
+                lost_frames=2,
+                lost_base_pulses=20,
+                lost_retract_pulses=120,
+            )
+
+        self.assertTrue(result.aligned)
+        self.assertIn(("base:fwd", 20), arm.calls, "丢料时朝 CW（正脉冲）扫")
+        self.assertIn(("radial:back", 120), arm.calls, "同时把伸得太长的伸缩收回来")
 
     def test_a_steady_reading_does_not_mean_the_material_stopped(self) -> None:
         """读数一直不变但每轮都在发动作：那是"跟得很准、料还在走"，不能收工。"""
