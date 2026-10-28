@@ -470,10 +470,14 @@ def grab_material_from_turntable_to_repo(
                     "画面迟迟没有停稳，无法进行下一步操作；最近一次判据："
                     + _scene_stability_detail(robot)
                 )
-            _grab_material_from_turntable(
-                robot,
-                want_color=color
-            )
+            while True:
+                res = _grab_material_from_turntable(
+                    robot,
+                    want_color=color
+                )
+                if res:
+                    continue
+                break
             # 将当前机械臂的状态保存下来
             extension_position = robot.arm.read_abs_state("extension").motor_degrees
             base_position = robot.arm.read_abs_state("base").motor_degrees
