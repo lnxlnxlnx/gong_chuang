@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import time
+from typing import Optional
 
 from modules.grasp.drive.visual_servo_model import BASE_AXIS, RADIAL_AXIS, VisualServoConfig
 
@@ -26,11 +27,21 @@ def _move_axis(arm, axis: str, signed_pulses: int) -> float:
     return seconds
 
 
-def _send_axis(arm, axis: str, signed_pulses: int) -> float:
+def _send_axis(
+    arm,
+    axis: str,
+    signed_pulses: int,
+    *,
+    rpm: Optional[int] = None,
+    acceleration: Optional[int] = None,
+) -> float:
     """只**发出**一个轴的动作、不等；返回估算耗时（秒）。
 
     Emm42 是"发完就返回、不回 ACK"的，所以 ``wait=False`` 立刻返回，
     耗时靠 :func:`estimate_move_seconds` 估算——这正是能并行两个轴的前提。
+
+    ``rpm`` / ``acceleration`` 原样交给机械臂的动作方法：跟随要压短每一步的起转时间，
+    就会传更高的档位；不传则用 ``modules/arm/config.json`` 里的默认值。
     """
     if signed_pulses == 0:
         return 0.0
@@ -38,7 +49,9 @@ def _send_axis(arm, axis: str, signed_pulses: int) -> float:
         action = arm.rotate_cw if signed_pulses > 0 else arm.rotate_ccw
     else:
         action = arm.move_forward if signed_pulses > 0 else arm.move_backward
-    report = action(abs(signed_pulses), wait=False)
+    report = action(
+        abs(signed_pulses), wait=False, rpm=rpm, acceleration=acceleration
+    )
     return float(getattr(report, "estimated_seconds", 0.0) or 0.0)
 
 

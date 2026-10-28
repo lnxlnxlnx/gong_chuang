@@ -512,7 +512,7 @@ class Vision:
 
     # ------------------------------------------------------------- 取帧与定位
     def _read_report(
-        self, *, timeout: Optional[float] = None, want=None
+        self, *, timeout: Optional[float] = None, want=None, fast: bool = False
     ) -> "Optional[Tuple[MaterialReport, float]]":
         """丢掉缓冲里的旧画面，读一帧并定位；读不到返回 ``None``。
 
@@ -541,11 +541,11 @@ class Vision:
             time.sleep(0.05)
 
         stamp = self._clock()
-        report = locator.locate(frame, want=want)
+        report = locator.locate(frame, want=want, fast=fast)
         self.frames += 1
         return report, stamp
 
-    def locate(self, want=None) -> "MaterialReport":
+    def locate(self, want=None, *, fast: bool = False) -> "MaterialReport":
         """取帧并定位一次；``want`` 指定**要哪一个物料**。
 
         - ``None``（默认，保持原行为）：认出来的里置信度最高的那个，否则半径最大的
@@ -559,11 +559,15 @@ class Vision:
         而动作本身看起来完全正常。画面里的其它候选仍然照常列在报告里，便于看清到底
         看到了什么。
 
+        ``fast=True`` 只跑 YOLO 框，**不补颜色/霍夫**（那一路本机约 0.6 s/帧），也不看
+        "框离光轴多远"；框没认出来就是空报告。跟随移动中的物料时用它——料离光轴远是
+        正常状态，补那一路纯属白花时间。
+
         :raises RuntimeError: 读不到摄像头画面（设备掉线）。画面里没有合格物料
             是**正常的空报告**（``report.best is None``），不是失败。
         :raises ValueError: ``want`` 写法不合法（**在取帧之前**就报出来）。
         """
-        result = self._read_report(want=want)
+        result = self._read_report(want=want, fast=fast)
         if result is None:
             raise RuntimeError("读不到摄像头画面")
         return result[0]
@@ -582,6 +586,27 @@ class Vision:
         停稳筛选在 :mod:`modules.grasp.drive.visual_servo_observation`，这里只提供时间戳。
         """
         result = self._read_report(timeout=timeout)
+        if result is None:
+            return None
+        report, stamp = result
+        return _sightings_from_report(report, received_at=stamp)
+
+    def frame_fast(
+        self,
+        *,
+        timeout: Optional[float] = None,
+        max_age_seconds: Optional[float] = None,
+        min_received_at: Optional[float] = None,
+    ) -> "Optional[Tuple[MaterialSighting, ...]]":
+        """[`frame()`] 的快速版：**只跑 YOLO 框**，不补颜色/霍夫（约 0.6 s/帧）。
+
+        给"跟着走起来的料"用：料离光轴远是正常状态，不该为它补跑一次辅助定位。
+        代价是 YOLO 这一帧没认出来时就是空观测（跟随会跳过这一帧，接着跟）。
+
+        ``max_age_seconds`` / ``min_received_at`` 保留与 :meth:`frame` 相同的形状，
+        新鲜度仍由取帧前丢缓冲保证。
+        """
+        result = self._read_report(timeout=timeout, fast=True)
         if result is None:
             return None
         report, stamp = result

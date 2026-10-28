@@ -399,17 +399,6 @@ class FakeArm:
         #: ``follow_x_y`` 按配置的 rpm 把 step_seconds 折算成单轴脉冲上限。
         self.pulses_per_revolution = 3200
         self.config = SimpleNamespace(rpm=80, acceleration=200)
-        #: 每次 ``move_axes`` 的 (目标, rpm, acceleration)。
-        self.moves: List[Tuple[dict, Optional[int], Optional[int]]] = []
-
-    def move_axes(self, targets, *, rpm=None, acceleration=None, **_kwargs):
-        """跟随只许动底座/伸缩：收到别的轴直接判失败。"""
-        for axis, pulses in targets.items():
-            if axis not in (BASE_AXIS, RADIAL_AXIS):
-                raise AssertionError(f"跟随只许动底座/伸缩，收到 {axis}")
-            self._axis(axis, pulses > 0, abs(pulses))
-        self.moves.append((dict(targets), rpm, acceleration))
-        return ()
 
     def _axis(self, axis: str, forward: bool, pulses: int) -> None:
         signed = pulses if forward else -pulses
@@ -1157,6 +1146,24 @@ class DriftingLink:
         )
 
 
+class BoxesOnlyLink:
+    """带 ``frame_fast`` 的观测源：跟随必须走它，不能走会补霍夫的 ``frame``。"""
+
+    error = None
+
+    def __init__(self) -> None:
+        self.fast_reads = 0
+        self.slow_reads = 0
+
+    def frame(self, **_kwargs):
+        self.slow_reads += 1
+        return ()
+
+    def frame_fast(self, **_kwargs):
+        self.fast_reads += 1
+        return (sighting(4, 0.0, 0.0, stamp=time.monotonic()),)
+
+
 class FollowClock:
     """跟随循环的假钟：时间只由 ``sleep`` 推进（一小步动作的等待）。"""
 
@@ -1227,6 +1234,18 @@ class FollowMaterialTests(unittest.TestCase):
             self.call(arm, link, timeout=0.35)
 
         self.assertGreaterEqual(len(arm.calls), 2)
+
+    def test_following_uses_the_boxes_only_frame(self) -> None:
+        """有 ``frame_fast`` 的观测源：跟随走快路径，不再调会补霍夫的 ``frame``。"""
+        arm = FakeArm(self.JACOBIAN)
+        link = BoxesOnlyLink()
+
+        with patch.object(algorithms, "time", FollowClock()):
+            result = self.call(arm, link, timeout=5.0)
+
+        self.assertTrue(result.aligned)
+        self.assertEqual(link.fast_reads, 3, "读数一直没变：三帧才够判停")
+        self.assertEqual(link.slow_reads, 0, "跟随不该走会补颜色/霍夫的那条路")
 
     def test_the_scene_must_be_still_before_it_reports_stopped(self) -> None:
         """读数不变只是候选；``scene_stable()`` 说画面还在动就得继续跟。"""

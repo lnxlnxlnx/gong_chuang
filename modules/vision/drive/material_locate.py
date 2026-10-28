@@ -186,7 +186,7 @@ class MaterialLocator:
         )
 
     # ------------------------------------------------------------- 主流程
-    def locate(self, frame: np.ndarray, *, want=None) -> MaterialReport:
+    def locate(self, frame: np.ndarray, *, want=None, fast: bool = False) -> MaterialReport:
         """从一帧 BGR 图像返回物料、类别和近似相机坐标。
 
         ## 两条路，顺序是硬要求
@@ -207,6 +207,12 @@ class MaterialLocator:
         所以补一个条件：框的结果里没有任何一块料离光轴小于一个物料直径时，补跑一次辅助定位
         并把它的候选并进来。代价是这种帧多花 ~0.6 s；常态（料就在下面）一分钱不花。
 
+        ``fast=True`` 只跑 YOLO 框：**不管框离光轴多远都直接返回**，框一个都没有就返回
+        空报告，绝不进 :meth:`locate_auxiliary`（那里本机实测约 0.6 s/帧）。跟随移动中的
+        物料时，"料离光轴很远"就是**正常状态**，那一步补跑颜色/霍夫纯属白花；代价是
+        YOLO 这一帧没认出来时这一帧就没有目标（跟随会把这一帧跳过）。
+        默认 ``False`` = 原来的两步顺序。
+
         ``want`` 指定**要哪一个物料**：类别名（``"red"``）或从 1 开始的编号；
         它只影响 ``report.best`` 挑哪一个，整帧的候选照旧列在 ``report.regions`` 里。
         写法不合法当场报错（见 :func:`modules.vision.reports.normalize_want`）。
@@ -222,10 +228,13 @@ class MaterialLocator:
         hits = tuple(self.yolo.detect(frame, materials_only=True))
         from_boxes = self._report_from_boxes(frame, hits, want=want)
         if from_boxes is None:
+            if fast:
+                # 跟随专用：YOLO 这一帧没框就当"这一帧没有目标"，不花 0.6 s 去补。
+                return self._empty_report(frame, hits, want=want)
             # 一个合格的物料框都没有：这才轮到辅助定位。框已经问过了，传下去（空元组）
             # 让它别再问第二遍——同一个 frame、同样的参数，结果必然一样，重跑只是白花 20 ms。
             return self.locate_auxiliary(frame, want=want, hits=hits)
-        if self._under_the_gripper(from_boxes):
+        if fast or self._under_the_gripper(from_boxes):
             return from_boxes
         # 框**全在远处**：爪口正下方那块料模型没认出来。真机现场：环里立着的深蓝柱被认成
         # ``tg3 0.22``、blue 只有 0.025，模型框只剩隔壁环的红色（离光轴 59 mm），而颜色块
@@ -238,6 +247,21 @@ class MaterialLocator:
             return from_boxes
         return replace(
             from_boxes, regions=tuple(from_boxes.regions) + tuple(auxiliary.regions)
+        )
+
+    def _empty_report(
+        self, frame: np.ndarray, hits: Sequence[Detection], *, want=None
+    ) -> MaterialReport:
+        """这一帧没有合格物料框（也不许补辅助定位）时的空报告。"""
+        height, width = frame.shape[:2]
+        return MaterialReport(
+            lock=RingLock((), None),
+            hits=tuple(hits),
+            regions=(),
+            focal_px=self.resolved_focal_px(width, height, required=False),
+            radius_window_px=self.radius_window(width, height),
+            colour_source="yolo",
+            want=want,
         )
 
     def _under_the_gripper(self, report: MaterialReport) -> bool:

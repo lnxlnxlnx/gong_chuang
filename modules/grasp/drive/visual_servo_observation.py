@@ -92,9 +92,24 @@ def select_material(
     return matched[-1]
 
 
-def _read_material(link: FrameSource, selector: MaterialSelector, config: VisualServoConfig, *, after: Optional[float] = None) -> MaterialSighting:
-    """等一帧，并返回物块那一观测。``after`` 给出"只要不早于这个时刻"的过滤。"""
-    frame = link.frame(
+def _read_material(
+    link: FrameSource,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
+    *,
+    after: Optional[float] = None,
+    fast: bool = False,
+) -> MaterialSighting:
+    """等一帧，并返回物块那一观测。``after`` 给出"只要不早于这个时刻"的过滤。
+
+    ``fast=True`` 时优先用观测源的 ``frame_fast``（本机 ``Vision`` 有）：那条路只跑
+    YOLO 框，不补颜色/霍夫（约 0.6 s/帧）。没有这个方法的源（``CameraLink``、测试替身）
+    退回普通 ``frame``——它们本来也没有那条辅助定位。
+    """
+    reader = getattr(link, "frame_fast", None) if fast else None
+    if reader is None:
+        reader = link.frame
+    frame = reader(
         timeout=config.frame_timeout_seconds,
         min_received_at=after,
     )

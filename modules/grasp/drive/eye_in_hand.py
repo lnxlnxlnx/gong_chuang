@@ -67,6 +67,7 @@ from modules.grasp.drive.visual_servo_motion import (
     _move_axes,
     _move_axis,
     _move_lift,
+    _send_axis,
     _send_lift,
 )
 from modules.grasp.drive.visual_servo_model import (
@@ -771,7 +772,8 @@ def follow_x_y(
     if not step_seconds > 0:
         raise ValueError(f"step_seconds 必须是正数，收到 {step_seconds!r}")
     say = on_message if on_message is not None else (lambda _message: None)
-    sighting = _read_material(link, selector, config, after=after)
+    # 跟随只认 YOLO 框：料离光轴远是正常状态，不该为它补跑颜色/霍夫（约 0.6 s/帧）。
+    sighting = _read_material(link, selector, config, after=after, fast=True)
     offset = (sighting.x_mm, sighting.y_mm)
     error_x = offset[0] - target.x_mm
     error_y = offset[1] - target.y_mm
@@ -814,13 +816,14 @@ def follow_x_y(
         f"跟随：误差 {error:.2f} mm → 底座 {base_step:+d}、伸缩 {radial_step:+d} 脉冲"
         f"（单步上限 {limit}）"
     )
-    # 两轴同时发、不在这里等整段估算；等待按**这次动作的实际时长**算（见模块常量）。
-    arm.move_axes(
-        {BASE_AXIS: base_step, RADIAL_AXIS: radial_step},
-        rpm=rpm,
-        acceleration=acceleration,
-        wait=False,
-    )
+    # 两轴各发一条（先底座、隔一个帧间隔再伸缩），都不等动作走完；等待按**这次动作的
+    # 实际时长**算（见模块常量）。注意轴名：``BASE_AXIS``/``RADIAL_AXIS`` 是伺服这边的
+    # 抽象名（radial 在机械臂上叫 extension），所以这里走方向原语，不拼 ``move_axes``
+    # 的轴名字典。
+    _send_axis(arm, BASE_AXIS, base_step, rpm=rpm, acceleration=acceleration)
+    if base_step and radial_step:
+        time.sleep(config.inter_frame_seconds)
+    _send_axis(arm, RADIAL_AXIS, radial_step, rpm=rpm, acceleration=acceleration)
     wait = max(
         estimate_move_seconds(
             pulses, rpm, pulses_per_revolution, acceleration, FOLLOW_SETTLE_SECONDS
