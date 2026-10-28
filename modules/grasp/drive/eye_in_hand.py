@@ -730,15 +730,23 @@ FOLLOW_SETTLE_SECONDS = 0.02
 #: 实时跟随的默认加减速档位。配置里 200 档在 80 rpm 下起转就要 0.22 s，
 #: 加上 0.15 s 到位余量，一步至少 0.37 s——那正是"一顿一顿"的来源。
 FOLLOW_ACCELERATION = 255
+#: 跟随的**过冲系数**：解出来要走的脉冲再乘它。料在动，按"把当前误差走完"算永远慢
+#: 半拍，多冲 40% 相当于把惯性算进去。离散闭环下残差按 ``|1-K| = 0.4`` 收敛，不会发散；
+#: 到料停住那一刻最多来回两次就进容差。觉得追得太猛就调到 1.2，1.0 = 不过冲。
+FOLLOW_GAIN = 1.4
 #: 连续丢几帧才开始"盲找"。一帧丢是运动模糊/爪影，不是料真的没了。
 FOLLOW_LOST_FRAMES = 3
 #: 盲找时一次顺时针转多少脉冲（机械臂底座，CW=正）。转盘只会顺时针把料带走，
 #: 所以丢料之后朝同一个方向扫，而不是原地等。20 脉冲 ≈ 11° 输出轴。
 #: ponytail: 固定小步扫，扫多快没闭环；现场按画面丢失时长调，够不到就加大。
 FOLLOW_LOST_BASE_PULSES = 20
-#: 盲找时一次回收多少伸缩脉冲（往回缩=负）。料跑到后面时伸缩往往伸得太长，
-#: 回收一点视野才会回来；120 脉冲 ≈ 2.3 mm。
-FOLLOW_LOST_RETRACT_PULSES = 120
+#: 丢料后**一次性**把伸缩拉回多少脉冲（正数 = 往里缩）。料跑到后面时伸缩常常已经
+#: 伸得太长，视野里根本没有它；120 脉冲（2.3 mm）不解套，按现场经验一次拉回
+#: 2000 脉冲（≈38 mm）才够。每个"丢失片段"只拉一次，重新看见料后复位。
+FOLLOW_LOST_RETRACT_PULSES = 2000
+#: 一次跟随里最多拉回几次（安全阀）：3 × 2000 脉冲 ≈ 114 mm，再往下就快压到
+#: 伸缩行程下限了。到顶之后只扫底座，不再继续收——收过头会顶在限位上。
+FOLLOW_LOST_MAX_RETRACTS = 3
 
 
 def follow_x_y(
@@ -751,6 +759,7 @@ def follow_x_y(
     *,
     step_seconds: float = FOLLOW_STEP_SECONDS,
     coarse_step_seconds: float = FOLLOW_COARSE_STEP_SECONDS,
+    gain: float = FOLLOW_GAIN,
     acceleration: int = FOLLOW_ACCELERATION,
     after: Optional[float] = None,
     on_message: Optional[Callable[[str], None]] = None,
@@ -780,6 +789,8 @@ def follow_x_y(
     :param step_seconds: 这一帧的**细调**动作时长（秒）；按它换算单轴脉冲上限。
     :param coarse_step_seconds: 误差大于 ``config.coarse_error_mm`` 时用这一档，一步吃掉
         大部分误差；避免"一个 100 mm 的误差拆成四步、每步都付一次取帧"。
+    :param gain: 过冲系数（默认 1.4）：料在动时按"走完当前误差"算会永远慢半拍，多冲
+        一点相当于把惯性算进去。1.0 = 不过冲；离散闭环下 1.4 的残差按 0.4 收敛。
     :param acceleration: 加减速档位 0..255；越小越柔和，但起转越慢、跟随越顿。
     :param after: 只接受不早于这个时刻的观测；上一小步走完之后的时间戳能挡住
         "动作之前的旧帧"（走网络镜头 ``CameraLink`` 时那一层才真的按它过滤）。
@@ -789,6 +800,8 @@ def follow_x_y(
         raise ValueError(f"step_seconds 必须是正数，收到 {step_seconds!r}")
     if not coarse_step_seconds > 0:
         raise ValueError(f"coarse_step_seconds 必须是正数，收到 {coarse_step_seconds!r}")
+    if not gain > 0:
+        raise ValueError(f"gain 必须是正数，收到 {gain!r}")
     say = on_message if on_message is not None else (lambda _message: None)
     # 跟随只认 YOLO 框：料离光轴远是正常状态，不该为它补跑颜色/霍夫（约 0.6 s/帧）。
     sighting = _read_material(link, selector, config, after=after, fast=True)
@@ -832,9 +845,14 @@ def follow_x_y(
     base_step, radial_step = _plan_planar_step(
         error_x, error_y, jacobian, config, limit=limit
     )
+    if gain != 1.0:
+        # 过冲：料在动，按"走完当前误差"算永远慢半拍。多冲的部分下一帧被新读数扣回来，
+        # 离散闭环下的残差按 |1-gain| 收敛（1.4 -> 0.4），不会越追越远。
+        base_step = _clamp_pulses(base_step * gain, limit)
+        radial_step = _clamp_pulses(radial_step * gain, limit)
     say(
         f"跟随：误差 {error:.2f} mm → 底座 {base_step:+d}、伸缩 {radial_step:+d} 脉冲"
-        f"（单步上限 {limit}）"
+        f"（单步上限 {limit}，过冲 ×{gain:g}）"
     )
     # 两轴各发一条（先底座、隔一个帧间隔再伸缩），都不等动作走完；等待按**这次动作的
     # 实际时长**算（见模块常量）。注意轴名：``BASE_AXIS``/``RADIAL_AXIS`` 是伺服这边的
@@ -1081,6 +1099,7 @@ def follow_material_xy(
     tolerance_mm: Optional[float] = None,
     step_seconds: float = FOLLOW_STEP_SECONDS,
     coarse_step_seconds: float = FOLLOW_COARSE_STEP_SECONDS,
+    gain: float = FOLLOW_GAIN,
     acceleration: int = FOLLOW_ACCELERATION,
     lost_frames: int = FOLLOW_LOST_FRAMES,
     lost_base_pulses: int = FOLLOW_LOST_BASE_PULSES,
@@ -1094,10 +1113,11 @@ def follow_material_xy(
     动作那一小段——不是"走一大步再按估算等 0.37 s"那个一顿一顿的节奏。
 
     **料跑到后面去、看不见了**：连续丢 ``lost_frames`` 帧后开始盲扫——底座朝上次
-    跟随的方向（默认 CW，转盘就是顺时针把料带走的）转 ``lost_base_pulses`` 脉冲，
-    伸缩同时往回收 ``lost_retract_pulses`` 脉冲；每丢一帧再扫一步，直到重新看见或超时。
-    伸缩回收是给"伸得太长、视野已经不在料上"解套；方向用**上一次成功的底座步向**
-    （没有就用 CW），所以底座装反了只需要看第一次丢料时的转向，不用改代码。
+    跟随的方向（默认 CW，转盘就是顺时针把料带走的）转 ``lost_base_pulses`` 脉冲；
+    每个丢失片段**先一次性**把伸缩拉回 ``lost_retract_pulses`` 脉冲（默认 2000 ≈ 38 mm），
+    把"伸得太长、视野已经不在料上"这件事解套；之后每丢一帧再扫一步底座，
+    直到重新看见或超时。方向用**上一次成功的底座步向**（还没有就用
+    ``lost_base_pulses`` 的符号，默认 CW），所以底座装反了不用改代码。
 
     "料停住了"要**同时**满足两条，缺一不可：
 
@@ -1120,10 +1140,11 @@ def follow_material_xy(
     :param tolerance_mm: 到位门槛；``None`` 用 ``config.tolerance_mm``。
     :param step_seconds: 细跟一步允许走多久（秒），折算成单轴脉冲上限。
     :param coarse_step_seconds: 误差大于 ``config.coarse_error_mm`` 时用的粗调档。
+    :param gain: 过冲系数（默认 1.4）：料在动时多冲一点，少追几步。
     :param acceleration: 加减速档位 0..255；越小越柔和，但起转越慢、跟得越顿。
     :param lost_frames: 连续丢几帧才开始盲扫。
     :param lost_base_pulses: 盲扫时底座每次转多少脉冲（正 = CW）。
-    :param lost_retract_pulses: 盲扫时伸缩每次回收多少脉冲（正数 = 往里缩）。
+    :param lost_retract_pulses: 每个丢失片段**一次性**回收多少伸缩脉冲（正数 = 往里缩）。
         这两个都给 0 就关掉盲扫（只等转盘把料带回来）。
     :raises VisualServoError: 跟满 ``timeout`` 料还没停住（或一直看不见）。
     """
@@ -1146,6 +1167,10 @@ def follow_material_xy(
     total_base = 0
     total_radial = 0
     misses = 0
+    #: 这一轮"丢失片段"里已经把伸缩拉回来了吗：一次丢失只拉一大把，不每帧都拉。
+    lost_retracted = False
+    #: 本次跟随一共拉回了几次（安全阀见 ``FOLLOW_LOST_MAX_RETRACTS``）。
+    lost_retracts = 0
     #: 上一次成功的底座步向（+1 = CW）；丢料后的盲扫沿这个方向继续。
     #: 还没跟出过一步时为 ``None``：那时按 ``lost_base_pulses`` 的符号定方向（默认 CW）。
     last_base_sign: Optional[int] = None
@@ -1168,6 +1193,7 @@ def follow_material_xy(
                 config,
                 step_seconds=step_seconds,
                 coarse_step_seconds=coarse_step_seconds,
+                gain=gain,
                 acceleration=acceleration,
                 after=checkpoint,
                 on_message=say,
@@ -1178,8 +1204,8 @@ def follow_material_xy(
             previous = None
             still = 0
             misses += 1
-            # 连续丢料：转盘只会顺时针把料带走，就沿同一个方向扫，同时把伸得过长的
-            # 伸缩收回来——不然视野一直在料外面，等它自己转回来也看不到。
+            # 连续丢料：转盘只会顺时针把料带走，就沿同一个方向扫；伸缩先一次性拉回一大把
+            # （伸得太长时视野根本不在料上，小步回收不解套）。
             if (
                 misses >= max(1, int(lost_frames))
                 and (lost_base_pulses or lost_retract_pulses)
@@ -1190,26 +1216,36 @@ def follow_material_xy(
                     else (1 if lost_base_pulses >= 0 else -1)
                 )
                 base_search = direction * abs(int(lost_base_pulses))
-                radial_search = -abs(int(lost_retract_pulses))
-                wait = _blind_search_step(
-                    arm,
-                    base_pulses=base_search,
-                    radial_pulses=radial_search,
-                    rpm=rpm,
-                    pulses_per_revolution=pulses_per_revolution,
-                    acceleration=acceleration,
-                    inter_frame_seconds=config.inter_frame_seconds,
-                )
-                total_base += base_search
-                total_radial += radial_search
-                checkpoint = time.monotonic()
-                say(
-                    f"  丢料 {misses} 帧：盲扫（底座 {base_search:+d}、"
-                    f"伸缩 {radial_search:+d} 脉冲，等 {wait:.2f} s）"
-                )
+                radial_search = 0
+                if (
+                    lost_retract_pulses
+                    and not lost_retracted
+                    and lost_retracts < FOLLOW_LOST_MAX_RETRACTS
+                ):
+                    radial_search = -abs(int(lost_retract_pulses))
+                    lost_retracted = True
+                    lost_retracts += 1
+                if base_search or radial_search:
+                    wait = _blind_search_step(
+                        arm,
+                        base_pulses=base_search,
+                        radial_pulses=radial_search,
+                        rpm=rpm,
+                        pulses_per_revolution=pulses_per_revolution,
+                        acceleration=acceleration,
+                        inter_frame_seconds=config.inter_frame_seconds,
+                    )
+                    total_base += base_search
+                    total_radial += radial_search
+                    checkpoint = time.monotonic()
+                    say(
+                        f"  丢料 {misses} 帧：盲扫（底座 {base_search:+d}、"
+                        f"伸缩 {radial_search:+d} 脉冲，等 {wait:.2f} s）"
+                    )
             continue
         checkpoint = time.monotonic()
         misses = 0
+        lost_retracted = False
         offset = result.readings[-1]
         reads += 1
         total_base += result.base_pulses

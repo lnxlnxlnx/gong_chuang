@@ -1250,7 +1250,7 @@ class FollowMaterialTests(unittest.TestCase):
         self.assertGreater(max(pulses for _kind, pulses in arm.calls), fine)
 
     def test_it_sweeps_clockwise_and_retracts_while_the_material_is_lost(self) -> None:
-        """料转到后面看不见：朝 CW 扫、同时回收伸缩，重新看见就继续跟。"""
+        """料转到后面看不见：朝 CW 扫；伸缩**先一次性**拉回一大把，再重新看见就继续跟。"""
         arm = FakeArm(self.JACOBIAN)
         link = BlindFirstLink(misses=6)
 
@@ -1258,15 +1258,42 @@ class FollowMaterialTests(unittest.TestCase):
             result = self.call(
                 arm,
                 link,
-                timeout=5.0,
+                timeout=8.0,
                 lost_frames=2,
                 lost_base_pulses=20,
-                lost_retract_pulses=120,
+                lost_retract_pulses=2000,
             )
 
         self.assertTrue(result.aligned)
         self.assertIn(("base:fwd", 20), arm.calls, "丢料时朝 CW（正脉冲）扫")
-        self.assertIn(("radial:back", 120), arm.calls, "同时把伸得太长的伸缩收回来")
+        self.assertEqual(
+            arm.calls.count(("radial:back", 2000)),
+            1,
+            "每个丢失片段只拉回一次 2000 脉冲，不是每帧都拉",
+        )
+
+    def test_the_follow_step_overshoots_on_purpose(self) -> None:
+        """``gain>1``：料在动时多冲一点，别每帧都只走"刚好走完误差"。"""
+
+        def run(gain: float):
+            arm = FakeArm(SingleStepTests.JACOBIAN)
+            arm.offset = [5.0, 0.0]
+            link = JumpyDepthLink(arm=arm)
+            with patch.object(algorithms, "time", FollowClock()):
+                return follow_x_y(
+                    arm,
+                    link,
+                    MaterialSelector(),
+                    VisualServoTarget(x_mm=0.0, y_mm=0.0),
+                    SingleStepTests.JACOBIAN,
+                    SingleStepTests.config(),
+                    gain=gain,
+                )
+
+        plain = run(1.0)
+        overshooting = run(1.4)
+        self.assertGreater(abs(overshooting.base_pulses), abs(plain.base_pulses))
+        self.assertGreater(abs(overshooting.radial_pulses), abs(plain.radial_pulses))
 
     def test_a_steady_reading_does_not_mean_the_material_stopped(self) -> None:
         """读数一直不变但每轮都在发动作：那是"跟得很准、料还在走"，不能收工。"""
@@ -2488,8 +2515,12 @@ class GraspFollowMaterialTests(unittest.TestCase):
             follow.assert_called_once()
             kwargs = follow.call_args.kwargs
             self.assertEqual(kwargs["timeout"], 4.0)
-            # 不传调参时用快版默认值：跟着动的料走靠的就是这两个数。
+            # 不传调参时用快版默认值：跟着动的料走靠的就是这几个数。
             self.assertEqual(kwargs["step_seconds"], algorithms.FOLLOW_STEP_SECONDS)
+            self.assertEqual(
+                kwargs["coarse_step_seconds"], algorithms.FOLLOW_COARSE_STEP_SECONDS
+            )
+            self.assertEqual(kwargs["gain"], algorithms.FOLLOW_GAIN)
             self.assertEqual(kwargs["acceleration"], algorithms.FOLLOW_ACCELERATION)
             # 按次给的 want 必须真的变成判别条件：否则跟的是配置里那个默认物料。
             self.assertEqual(follow.call_args.args[2], MaterialSelector(color="green"))

@@ -506,6 +506,7 @@ class Grasp:
         tolerance_mm: float | None = None,
         step_seconds: float | None = None,
         coarse_step_seconds: float | None = None,
+        gain: float | None = None,
         acceleration: int | None = None,
         lost_base_pulses: int | None = None,
         lost_retract_pulses: int | None = None,
@@ -535,6 +536,7 @@ class Grasp:
             不在也不影响：精确对准由 :meth:`align_xy_for_turntable` 接手。
         :param step_seconds: 细跟一步允许走多久（秒）；``None`` 用默认。
         :param coarse_step_seconds: 误差大于 ``coarse_error_mm`` 时的粗调档；``None`` 用默认。
+        :param gain: 过冲系数（默认 1.4）：料在动时多冲一点，少追几步；1.0 = 不过冲。
         :param acceleration: 加减速档位 0..255；越小越柔和，但起转越慢。``None`` 用默认。
         :param lost_base_pulses: 丢料盲扫时底座每次转多少脉冲（正 = CW）；``None`` 用默认，
             给 0 关掉底座盲扫。
@@ -546,6 +548,7 @@ class Grasp:
         from modules.grasp.drive.eye_in_hand import (
             FOLLOW_ACCELERATION,
             FOLLOW_COARSE_STEP_SECONDS,
+            FOLLOW_GAIN,
             FOLLOW_LOST_BASE_PULSES,
             FOLLOW_LOST_RETRACT_PULSES,
             FOLLOW_STEP_SECONDS,
@@ -568,6 +571,7 @@ class Grasp:
                 if coarse_step_seconds is None
                 else coarse_step_seconds
             ),
+            gain=FOLLOW_GAIN if gain is None else gain,
             acceleration=FOLLOW_ACCELERATION if acceleration is None else acceleration,
             lost_base_pulses=(
                 FOLLOW_LOST_BASE_PULSES
