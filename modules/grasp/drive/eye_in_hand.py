@@ -64,23 +64,15 @@ import time
 from dataclasses import replace
 from typing import Callable, List, Optional, Sequence, Tuple
 
-from modules.grasp.drive.visual_servo_motion import (
-    _move_axes,
-    _move_axis,
-    _move_lift,
-    _send_axis,
-    _send_lift,
-)
 from modules.grasp.drive.visual_servo_model import (
     BASE_AXIS,
-    DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH,
     LIFT_AXIS,
     MIN_JACOBIAN_DETERMINANT,
-    MaterialMissingError,
     RADIAL_AXIS,
     GraspReadyResult,
     HoverResult,
     LiftScale,
+    MaterialMissingError,
     MaterialSelector,
     VisualServoConfig,
     VisualServoError,
@@ -92,14 +84,24 @@ from modules.grasp.drive.visual_servo_model import (
     load_jacobian,
     load_lift_scale,
     load_material_selector,
-    load_visual_servo_config,
     load_target,
+    load_visual_servo_config,
     load_z_target,
     save_calibration,
 )
+from modules.grasp.drive.visual_servo_model import (
+    DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH,
+)
+from modules.grasp.drive.visual_servo_motion import (
+    _move_axes,
+    _move_axis,
+    _move_lift,
+    _send_axis,
+    _send_lift,
+)
 from modules.grasp.drive.visual_servo_observation import (
-    FrameSource,
     VISIBILITY_PROBE_FRAMES,
+    FrameSource,
     _probe_visible,
     _read_material,
     _settled_sighting,
@@ -109,7 +111,6 @@ from modules.grasp.drive.visual_servo_observation import (
 )
 from modules.motor.drive.motion import estimate_move_seconds
 from modules.vision.drive.sighting import MaterialSighting
-
 
 
 def _apply_minimum(step: int, wanted: float, minimum: float) -> int:
@@ -766,6 +767,7 @@ def follow_x_y(
     gain: float = FOLLOW_GAIN,
     acceleration: int = FOLLOW_ACCELERATION,
     after: Optional[float] = None,
+    force: bool = True,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> VisualServoResult:
     """实时跟随的**一步**：一帧 → 一次短动作，**不等**那 0.15 s 到位余量。
@@ -798,6 +800,8 @@ def follow_x_y(
     :param acceleration: 加减速档位 0..255；越小越柔和，但起转越慢、跟随越顿。
     :param after: 只接受不早于这个时刻的观测；上一小步走完之后的时间戳能挡住
         "动作之前的旧帧"（走网络镜头 ``CameraLink`` 时那一层才真的按它过滤）。
+    :param force: ``True`` = **忽略容差、至少走一步**（背隙地板以下仍然不动）。
+        静止料对准要求"即使首帧已在容差内也校准一次"时用；跟随不要开。
     :raises VisualServoError: 这一帧看不到该物料、雅可比奇异。
     """
     if not step_seconds > 0:
@@ -828,7 +832,7 @@ def follow_x_y(
             unverified=True,
         )
 
-    if error <= config.tolerance_mm:
+    if error <= config.tolerance_mm and not force:
         say(f"跟随：误差 {error:.2f} mm 已在容差 {config.tolerance_mm:.1f} mm 内，这一步不动")
         return result(base_pulses=0, radial_pulses=0)
     if error < config.min_step_mm:
@@ -897,7 +901,9 @@ def _align_xy_fast(
     - 帧走 ``frame_fast``：只跑 YOLO 框，不补颜色/霍夫（那一路约 0.6 s/帧）；
     - 动作走 :func:`follow_x_y` 的短步：加速度满档、只等实际动作那一小段，
       不补 0.15 s 到位余量；
-    - 每轮只取一帧，修正靠下一步立刻重新测，不在动作之后等"连续两帧一致"。
+    - 每轮只取一帧，修正靠下一步立刻重新测，不在动作之后等"连续两帧一致"；
+    - **首帧即使已在容差内也先校准一步**（``force``）：调用方要的是"真的对准再下降"，
+      不是"读数看起来够近就不动"。背隙地板以下的误差仍然不动。
 
     预算到点时如果最后一步动过，会再取一帧、**不移动**地确认一次：避免"其实已经到位，
     只是最后一步没被验证"导致调用方不敢下降。
@@ -932,7 +938,10 @@ def _align_xy_fast(
                 jacobian,
                 fast_config,
                 step_seconds=step_seconds,
+                gain=1.0,          # 静止料不需要按惯性过冲
                 acceleration=FOLLOW_ACCELERATION,
+                # 首帧即使已在容差内也先校准一步：调用方等的是"真的对准再下降"。
+                force=not got_reading,
                 on_message=say,
             )
         except MaterialMissingError:
@@ -1034,6 +1043,8 @@ def align_xy_for_turntable(
       表现为原地转——那是"更慢"，不是"更快"。
     - **一步按粗调上限走完**（``step_limit`` 默认 ``coarse_max_pulses_per_step``），
       不再拆成细调的小步。
+    - **首测即使已在容差内也先校准一步**：``align_xy_for_turntable`` 的返回值决定要不要
+      下降，读起来"够近"并不等于真的对上了；背隙地板以下的误差仍然不动。
     - **按墙上时间收工**：预算从**第一次拿到读数之后**才起算（前面可能在等物块转进视野，
       实测能等 6 s 以上，算进去就会"一次都没动就预算用完"）。第一次修正**一定**会走，
       之后每再走一步之前看预算；到点就退回到**测到过的误差最小位置**。返回值可能
@@ -1135,7 +1146,8 @@ def align_xy_for_turntable(
             f"第 {attempts} 次（{time.monotonic() - started:.2f} s）："
             f"物块 ({offset[0]:+.2f}, {offset[1]:+.2f}) mm，误差 {error:.2f} mm"
         )
-        if error <= tolerance:
+        # 首测即使已在容差内也先校准一步再收工（``history`` 只有当前这一条 = 还没走过）。
+        if error <= tolerance and len(history) > 1:
             return VisualServoResult(
                 target=target,
                 readings=tuple(item[1] for item in history),
