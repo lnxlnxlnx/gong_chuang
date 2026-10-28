@@ -1181,6 +1181,43 @@ class BlindFirstLink:
         return (sighting(4, 0.0, 0.0, stamp=time.monotonic()),)
 
 
+class FastJumpyLink(JumpyDepthLink):
+    """带 ``frame_fast`` 的假源：分别记录慢/快两条取帧路径各走了几次。"""
+
+    def __init__(self, arm: FakeArm) -> None:
+        super().__init__(arm=arm)
+        self.fast_reads = 0
+        self.slow_reads = 0
+
+    def frame(self, **kwargs):
+        self.slow_reads += 1
+        return super().frame(**kwargs)
+
+    def frame_fast(self, **kwargs):
+        self.fast_reads += 1
+        return super().frame(**kwargs)
+
+
+class SlowOnlyLink:
+    """``frame_fast`` 永远看不见，只有慢 ``frame`` 能认出料（深蓝柱那种模型漏检）。"""
+
+    error = None
+
+    def __init__(self, x: float = 0.0, y: float = 0.0) -> None:
+        self.x = x
+        self.y = y
+        self.fast_reads = 0
+        self.slow_reads = 0
+
+    def frame_fast(self, **_kwargs):
+        self.fast_reads += 1
+        return ()
+
+    def frame(self, **_kwargs):
+        self.slow_reads += 1
+        return (sighting(4, self.x, self.y, stamp=time.monotonic()),)
+
+
 class FollowClock:
     """跟随循环的假钟：时间只由 ``sleep`` 推进（一小步动作的等待）。"""
 
@@ -1391,6 +1428,35 @@ class TurntableAlignTests(unittest.TestCase):
             abs(result.base_pulses), self.CONFIG.max_pulses_per_step,
             "一步就按粗调上限走完，不被细调档 1200 夹住",
         )
+
+    def test_fast_mode_takes_short_steps_and_skips_auxiliary_frames(self) -> None:
+        """静止料的快速档：每轮一帧一小步，帧只走 YOLO 框，不再补颜色/霍夫。"""
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [20.0, -6.0]
+        link = FastJumpyLink(arm)
+
+        with patch.object(algorithms, "time", FollowClock()):
+            result = self.call(arm, link, fast=True, seconds=2.0)
+
+        self.assertTrue(result.aligned)
+        self.assertGreater(link.fast_reads, 0)
+        self.assertEqual(link.slow_reads, 0, "快速档不该再调会补霍夫的 frame")
+        self.assertFalse(result.unverified, "最后一步已经取过一帧确认")
+        # 走的是 follow_x_y 的短步：单轴不再一次给到 4000 脉冲的粗调上限。
+        self.assertTrue(arm.calls)
+        for _kind, pulses in arm.calls:
+            self.assertLessEqual(pulses, self.CONFIG.parallel_rotation_limit_pulses)
+
+    def test_fast_mode_falls_back_to_the_auxiliary_path_when_yolo_misses(self) -> None:
+        """第一帧没有 YOLO 框（模型漏检）时退回慢路径，深蓝柱那种现场仍然抓得到。"""
+        arm = FakeArm(self.JACOBIAN)
+        link = SlowOnlyLink()
+
+        result = self.call(arm, link, fast=True, seconds=1.0)
+
+        self.assertTrue(result.aligned)
+        self.assertGreater(link.fast_reads, 0, "先试过快速档")
+        self.assertGreater(link.slow_reads, 0, "没框时退回慢路径")
 
     def test_the_first_step_always_happens(self) -> None:
         """首测可能要等物块转进视野（现场等过 6.85 s）：预算不能把第一次修正吃掉。

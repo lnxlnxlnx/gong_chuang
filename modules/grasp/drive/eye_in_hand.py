@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import replace
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from modules.grasp.drive.visual_servo_motion import (
@@ -730,6 +731,9 @@ FOLLOW_SETTLE_SECONDS = 0.02
 #: 实时跟随的默认加减速档位。配置里 200 档在 80 rpm 下起转就要 0.22 s，
 #: 加上 0.15 s 到位余量，一步至少 0.37 s——那正是"一顿一顿"的来源。
 FOLLOW_ACCELERATION = 255
+#: 静止料快速对准（:func:`_align_xy_fast`）的每步动作时长（秒）。比跟随稍大一点：
+#: 料已经停住，不必每一步都只挪几毫米；在并行上限内一步走完更快。
+TURNTABLE_FAST_STEP_SECONDS = 0.15
 #: 跟随的**过冲系数**：解出来要走的脉冲再乘它。料在动，按"把当前误差走完"算永远慢
 #: 半拍，多冲 40% 相当于把惯性算进去。离散闭环下残差按 ``|1-K| = 0.4`` 收敛，不会发散；
 #: 到料停住那一刻最多来回两次就进容差。觉得追得太猛就调到 1.2，1.0 = 不过冲。
@@ -873,6 +877,136 @@ def follow_x_y(
     return result(base_pulses=base_step, radial_pulses=radial_step)
 
 
+def _align_xy_fast(
+    arm,
+    link: FrameSource,
+    selector: MaterialSelector,
+    target: VisualServoTarget,
+    jacobian: VisualServoJacobian,
+    config: VisualServoConfig,
+    *,
+    seconds: float,
+    tolerance: float,
+    step_seconds: float,
+    on_message: Callable[[str], None],
+) -> VisualServoResult:
+    """静止料的快速对准：每轮一帧、一小步，对齐或预算到点就停。
+
+    与 :func:`align_xy_for_turntable` 的慢路径差在三处，而三处都在同一轮里叠加：
+
+    - 帧走 ``frame_fast``：只跑 YOLO 框，不补颜色/霍夫（那一路约 0.6 s/帧）；
+    - 动作走 :func:`follow_x_y` 的短步：加速度满档、只等实际动作那一小段，
+      不补 0.15 s 到位余量；
+    - 每轮只取一帧，修正靠下一步立刻重新测，不在动作之后等"连续两帧一致"。
+
+    预算到点时如果最后一步动过，会再取一帧、**不移动**地确认一次：避免"其实已经到位，
+    只是最后一步没被验证"导致调用方不敢下降。
+
+    :param seconds: 从第一次拿到读数之后开始计的对准预算（秒）。
+    :param tolerance: 这一次的到位门槛（毫米）。
+    :param step_seconds: 每一步允许走多久（秒）；按它折算单轴脉冲上限。
+    """
+    say = on_message
+    # ``follow_x_y`` 按 config 里的门槛判"这一步还要不要动"，所以这次调严/调松要带进去。
+    fast_config = replace(config, tolerance_mm=tolerance)
+    deadline: Optional[float] = None
+    readings: List[Tuple[float, float]] = []
+    total_base = 0
+    total_radial = 0
+    attempts = 0
+    final_error_x = 0.0
+    final_error_y = 0.0
+    resolution_limited = False
+    moved_last = False
+    missing_last = False
+    got_reading = False
+
+    while True:
+        attempts += 1
+        try:
+            result = follow_x_y(
+                arm,
+                link,
+                selector,
+                target,
+                jacobian,
+                fast_config,
+                step_seconds=step_seconds,
+                acceleration=FOLLOW_ACCELERATION,
+                on_message=say,
+            )
+        except MaterialMissingError:
+            missing_last = True
+            if got_reading:
+                say("  物块看不见了：按已知位置收工，不下降")
+                break
+            # YOLO 这一帧完全没认出料（可能是模型漏检、也可能还没转进视野）：
+            # 退回带颜色/霍夫的慢路径。深蓝柱那种"只有辅助定位找得到"的现场就靠这一步，
+            # 而它只在**第一帧**没框时付钱，正常有框的抓取不会变慢。
+            say("  快速档第一帧没有 YOLO 框：退回带辅助定位的慢路径")
+            return align_xy_for_turntable(
+                arm,
+                link,
+                selector,
+                target,
+                jacobian,
+                config,
+                seconds=seconds,
+                tolerance_mm=tolerance,
+                fast=False,
+                on_message=say,
+            )
+        missing_last = False
+        got_reading = True
+        offset = result.readings[-1]
+        readings.append(offset)
+        final_error_x = result.error_x
+        final_error_y = result.error_y
+        resolution_limited = result.resolution_limited
+        total_base += result.base_pulses
+        total_radial += result.radial_pulses
+        moved_last = bool(result.base_pulses or result.radial_pulses)
+        if deadline is None:
+            # 预算从这里起算：等料转进视野的时间不算对准时间。
+            deadline = time.monotonic() + max(0.0, seconds)
+        if result.aligned or result.resolution_limited:
+            break
+        if time.monotonic() >= deadline:
+            say(f"  {seconds:.1f} s 预算用完：停在已知最好位置，不下降")
+            break
+
+    if not got_reading:
+        raise VisualServoError("一帧都没测到物块，无法对准")
+
+    # 最后一步动过：它还没被验证，再取一帧（不移动）确认。
+    verified = True
+    if moved_last:
+        try:
+            sighting = _read_material(link, selector, fast_config, fast=True)
+        except MaterialMissingError:
+            verified = False
+        else:
+            offset = (sighting.x_mm, sighting.y_mm)
+            readings.append(offset)
+            final_error_x = offset[0] - target.x_mm
+            final_error_y = offset[1] - target.y_mm
+        if missing_last:
+            verified = False
+
+    return VisualServoResult(
+        target=target,
+        readings=tuple(readings),
+        error_x=final_error_x,
+        error_y=final_error_y,
+        base_pulses=total_base,
+        radial_pulses=total_radial,
+        iterations=attempts,
+        tolerance_mm=tolerance,
+        resolution_limited=resolution_limited,
+        unverified=not verified,
+    )
+
+
 def align_xy_for_turntable(
     arm,
     link: FrameSource,
@@ -885,6 +1019,8 @@ def align_xy_for_turntable(
     max_iterations: int = 3,
     tolerance_mm: Optional[float] = None,
     step_limit: Optional[int] = None,
+    fast: bool = False,
+    step_seconds: float = TURNTABLE_FAST_STEP_SECONDS,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> VisualServoResult:
     """转盘抓料用的 x/y 对准：**首帧只取一帧、一步按粗调上限走完、按秒收工**。
@@ -910,12 +1046,29 @@ def align_xy_for_turntable(
     :param max_iterations: 最多测几次（首次 + 验证 + 补充步）；时间预算先到时以时间预算为准。
     :param tolerance_mm: 这一次的到位门槛；``None`` 用 ``config.tolerance_mm``。
     :param step_limit: 单轴单步脉冲上限；``None`` 用 ``config.coarse_max_pulses_per_step``。
+    :param fast: 走 :func:`_align_xy_fast`：每轮一帧、一小步，跳过颜色/霍夫的辅助定位。
+        物料**已经停住**时用这条（``wait_scene_stable`` 之后）；本来就要快速修正的
+        场合，它比默认的"一大步 + 停稳验证"快得多。默认 ``False`` 保持原行为。
+    :param step_seconds: ``fast=True`` 时每一步允许走多久（秒）。
     :raises VisualServoError: 一帧都测不到、脉冲预算用完；中途物块看不见时按已知最好位置收工。
     """
     say = on_message if on_message is not None else (lambda _message: None)
     tolerance = config.tolerance_mm if tolerance_mm is None else float(tolerance_mm)
     if tolerance <= 0:
         raise ValueError("tolerance_mm 必须是正数")
+    if fast:
+        return _align_xy_fast(
+            arm,
+            link,
+            selector,
+            target,
+            jacobian,
+            config,
+            seconds=seconds,
+            tolerance=tolerance,
+            step_seconds=step_seconds,
+            on_message=say,
+        )
     limit = config.coarse_max_pulses_per_step if step_limit is None else int(step_limit)
     # ponytail: 预算内只保证"一次测量 + 一步 + 一次验证"。初始误差大于一步的修正量时，
     # 到点就停在已知最好位置、不下降——要"抓到"而不是"快点抓空"，把 seconds 调到 2–3

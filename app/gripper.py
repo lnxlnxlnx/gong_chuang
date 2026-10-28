@@ -602,16 +602,16 @@ def _grab_material_from_turntable(
     停稳那一道闸在 :func:`grab_material_from_turntable_to_repo` 的循环里、对准之前做；这里只把
     已经对准的爪子落到物块上再合爪。
 
-    对准走 :meth:`~modules.grasp.runtime.Grasp.align_xy_for_turntable`：转盘只停一会儿，
-    所以它首帧只取一帧、一步按粗调上限走完、1 s 预算；预算到了没进容差就停在
-    **测到过的最小误差**位置。**没进容差就不下降**——"已知最好"不等于对准了，
-    照着它下降就是抓空或抓偏（要的是别提前抓，不是抢那 0.2 s）。
+    对准走 :meth:`~modules.grasp.runtime.Grasp.align_xy_for_turntable` 的快速档：
+    料已经停住（调用方先 ``wait_scene_stable``），所以每轮只取一帧、走一小步，
+    **跳过颜色/霍夫的辅助定位**（约 0.6 s/帧），1 s 预算内修正几步；到点再取一帧确认。
+    **没进容差就不下降**——"已知最好"不等于对准了，照着它下降就是抓空或抓偏。
     对准花了多久打出来：这是现场判断"哪一段慢"的唯一依据。
     """
 
     started = time.monotonic()
     try:
-        result = robot.grasp.align_xy_for_turntable(want=want_color)
+        result = robot.grasp.align_xy_for_turntable(want=want_color, fast=True)
     except Exception as e:
         print(f"Error occurred while aligning the gripper: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()
