@@ -537,7 +537,11 @@ def grab_material_from_turntable_to_repo_follow(
     try:
         for color in want_colors:
             _follow_material_until_stable(robot, color, timeout=follow_seconds)
-            _grab_material_from_turntable(robot, want_color=color)
+            while True:
+                res = _grab_material_from_turntable(robot, want_color=color)
+                if res:
+                    continue
+                break
             _stow_material_to_repo(robot)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
@@ -615,11 +619,11 @@ def _grab_material_from_turntable(
 
     started = time.monotonic()
     try:
-        result = robot.grasp.align_xy_for_turntable(want=want_color, fast=True, tolerance_mm = 12)
+        result = robot.grasp.align_xy_for_turntable(want=want_color, fast=True, tolerance_mm = 15)
     except Exception as e:
         print(f"Error occurred while aligning the gripper: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()
-        return
+        return 1
 
     print(f"  {result.summary()}（对准耗时 {time.monotonic() - started:.2f} s）")
     if not result.aligned:
@@ -628,7 +632,7 @@ def _grab_material_from_turntable(
             "停在已知最好的位置，这次不下降"
         )
         move_axes_to(robot, SAFE_RETRACT).wait()
-        return
+        return 0
 
 
     robot.arm.move_axis_to_motor_degrees("lift", 550, rpm=120)
