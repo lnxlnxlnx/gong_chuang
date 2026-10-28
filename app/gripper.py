@@ -437,7 +437,7 @@ def grab_material_from_turntable_to_repo(
     robot: Robot,
     want_colors=("red", "green", "blue"),
     *,
-    home: dict[str, float] | None = {"lift": 830, "extension": 90.0, "base": 420}
+    home: dict[str, float] | None = {"lift": 860, "extension": 90.0, "base": 420}
 ):  # 420是中心位置
     """把物料从转盘上抓下来，放到仓库里。不需要处理初始状态
     从转盘上抓料：等它看满最小等待还静止 → 对准 → 下降 → 合爪。
@@ -474,7 +474,11 @@ def grab_material_from_turntable_to_repo(
                 robot,
                 want_color=color
             )
-            _stow_material_to_repo(robot)
+            # 将当前机械臂的状态保存下来
+            extension_position = robot.arm.read_abs_state("extension").motor_degrees
+            base_position = robot.arm.read_abs_state("base").motor_degrees
+            position = {"extension": extension_position, "base": base_position}
+            _stow_material_to_repo(robot, position=position)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()
@@ -611,7 +615,7 @@ def _grab_material_from_turntable(
 
     started = time.monotonic()
     try:
-        result = robot.grasp.align_xy_for_turntable(want=want_color, fast=True)
+        result = robot.grasp.align_xy_for_turntable(want=want_color, fast=True, tolerance_mm = 12)
     except Exception as e:
         print(f"Error occurred while aligning the gripper: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()
@@ -632,7 +636,7 @@ def _grab_material_from_turntable(
     robot.arm.move_axis_to_motor_degrees("lift", 800, rpm=120)
 
 
-def _stow_material_to_repo(robot: Robot) -> None:
+def _stow_material_to_repo(robot: Robot, position: dict[str, float] | None = None) -> None:
     """夹着料从转盘上方摆到仓库位、松爪、转盘进位。
 
     ``grab_material_from_turntable_to_repo`` 与 ``..._follow`` 共用这一段：换位/松爪的顺序
@@ -645,8 +649,12 @@ def _stow_material_to_repo(robot: Robot) -> None:
     robot.arm.move_axis_to_motor_degrees("base", 800)
     _turntable_position_index = (_turntable_position_index + 1) % len(TURNTABLE_POSITIONS)
     batch = robot.motion.begin()
-    batch.add(robot.arm.move_axis_to_motor_degrees("base", 420, wait=False))
-    batch.add(robot.arm.move_axis_to_motor_degrees("extension", 90.0, wait=False))
+    if position is not None:
+        batch.add(robot.arm.move_axis_to_motor_degrees("base", position["base"], wait=False))
+        batch.add(robot.arm.move_axis_to_motor_degrees("extension", position["extension"], wait=False))
+    else:
+        batch.add(robot.arm.move_axis_to_motor_degrees("base", 420, wait=False))
+        batch.add(robot.arm.move_axis_to_motor_degrees("extension", 90.0, wait=False))
     batch.add(robot.arm.move_axis_to_motor_degrees("lift", 830, wait=False))
     batch.add(
         robot.turntable.go_to(TURNTABLE_POSITIONS[_turntable_position_index], wait=False)

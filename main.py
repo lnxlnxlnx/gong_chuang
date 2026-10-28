@@ -27,6 +27,7 @@ SCENE_STABLE_TIMEOUT_SECONDS = 20.0
 
 # 预览演示的**模块级**导入：``demo_material`` 只定义函数、不开设备，真正的装配发生在
 # 它内部（读配置 + ``Vision.from_settings``）；保持模块级也让既有入口用例能直接替换它。
+from modules.grasp.drive.visual_servo_model import VisualServoError
 from modules.vision.app.demo import demo_material
 from robot import Robot
 
@@ -138,19 +139,28 @@ def run_map():
         robot.gripper.open_jaws()
         
         ###############
+        # move_axes_to(robot, {"lift": 595, "extension": 350, "base": 0}).wait()
+        # move_axes_to(robot, {"lift": 950, "base": 390}).wait()  # 先让环进视野
+        # while True:
+        #     try:
+        #         robot.grasp.follow_material("red")   # YOLO 一帧 → 水平走一步
+        #     except:
+        #         continue                              # 跟丢一帧不算失败
         # move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
         # move_axes_to(robot, {"lift": 950, "base": -80}).wait()  # 先让环进视野
         
         # robot.chassis.rotate_cw(pulses=4510*4)
         ###############
-        
+        grab_material_from_turntable_to_repo(robot)
+        input("结束!!!!!!!!!!!!!!!")
         
         ###################
-        robot.chassis.forward_left(rpm = 60, pulses=4000)      # 90
-        robot.chassis.forward(rpm=60, pulses=11500)     # 240
+        # 移动到物料盘
+        # robot.chassis.forward_left(rpm = 60, pulses=4000)      # 90
+        # robot.chassis.forward(rpm=60, pulses=11500)     # 240
 
         # 抓取物料
-        # grab_material_from_turntable_to_repo(robot)     # 已完成
+        grab_material_from_turntable_to_repo(robot)     # 已完成
         robot.chassis.rotate_ccw(rpm= 60, pulses=ROTATE_PULSE)
         
         # 移动到粗加工区
