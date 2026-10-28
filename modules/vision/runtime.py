@@ -1117,6 +1117,26 @@ class Vision:
             )
         return self._ring_target
 
+    # ------------------------------------------------------------- 板载屏幕
+    def show_text(self, text: str, *, size: Optional[Tuple[int, int]] = None) -> str:
+        """把一段文字显示在板载屏幕上，**显示完就留在那儿**（不阻塞、不关闭）。
+
+        入参就是要给外面看的那串字符，例如 ``"134+123+314+231"``；文字里带换行符
+        就分行显示。字号按画布自动缩，所以字符串长短都不会画出界
+        （:mod:`modules.vision.drive.text_screen`）。
+
+        重复调用覆盖同一个窗口，循环里每帧更新也不会堆出一排窗口。
+
+        **不读帧、不开设备**：只画一张画布，所以相机没打开也能用（与
+        :meth:`pixel_distance` 一样是纯算术）。真正的显示在
+        :func:`modules.vision.drive.text_screen.show_text`，那里也能脱离本会话直接调用。
+
+        :raises ValueError: 文字为空，或画布尺寸装不下留白。
+        """
+        from modules.vision.drive.text_screen import DEFAULT_SIZE, show_text
+
+        return show_text(text, size=DEFAULT_SIZE if size is None else size)
+
     # ------------------------------------------------------------- 收尾
     def close(self) -> None:
         """释放所有已取得的资源；重复关闭不再执行资源动作。

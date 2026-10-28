@@ -491,27 +491,19 @@ FOLLOW_SECONDS = 20.0
 
 
 def _follow_material_until_stable(robot: Robot, want_color, *, timeout: float = FOLLOW_SECONDS) -> None:
-    """**跟着转盘上的料走**，直到某一眼看见画面停住。
+    """**跟着转盘上的料走**，直到料自己停住（停住那一刻才下降到抓）。
 
-    每一轮只取**一帧**、只走**一步**（``align_xy(single_step=True)``）：物块在动，
-    "等它停稳再测"是在等一个永远等不到的东西（见 ``eye_in_hand.align_xy`` 的
-    ``single_step``）。转出去、被爪影挡住的那几帧可能一个目标都没有，那不是失败，
-    接着跟——停稳由 ``vision.scene_stable()`` 判，判的是**整幅画面**而不是"这个料在不在"。
+    跟踪整个在 :meth:`~modules.grasp.runtime.Grasp.follow_material` 里：每轮只取一帧、
+    **发完动作就去看下一帧、不等动作走完**，所以轮周期是一帧（约 0.27 s）而不是
+    "一帧 + 一次动作"——转盘一直在转，等动作走完再测就永远慢半拍，看着有动作其实跟不上。
+    料停没停由**料自己的读数**判（连续两帧一致），不再额外连拍一小段算整幅画面差分。
 
-    :raises RuntimeError: 跟满 ``timeout`` 秒画面仍在动（带上最后一次跟丢的原因）。
+    :raises RuntimeError: 跟满 ``timeout`` 秒料还在动（带上最后一次跟丢的原因）。
     """
-    deadline = time.monotonic() + float(timeout)
-    last_error = None
-    while time.monotonic() < deadline:
-        try:
-            robot.grasp.align_xy(single_step=True, want=want_color)
-        except Exception as error:  # noqa: BLE001 - 跟丢一帧不算失败，接着跟
-            last_error = error
-        if robot.vision.scene_stable():
-            return
-    raise RuntimeError(
-        f"跟了 {timeout:.0f} s 画面还没停稳，不敢下降；最后一次跟丢的原因："
-        f"{last_error if last_error is not None else '没有（料可能已经不在转盘上）'}"
+    result = robot.grasp.follow_material(want_color, timeout=timeout)
+    print(
+        f"  料停住了：读数 ({result.readings[-1][0]:+.2f}, {result.readings[-1][1]:+.2f}) mm，"
+        f"误差 {result.error_mm:.2f} mm；跟了 {result.iterations} 帧"
     )
 
 
@@ -527,8 +519,8 @@ def grab_material_from_turntable_to_repo_follow(
     与 :func:`grab_material_from_turntable_to_repo` 只差中间那一段：
 
     - 那个入口：站在原地等 ``wait_scene_stable`` 看到画面停稳 → 对准 → 抓；
-    - 这个入口：``_follow_material_until_stable`` 每轮单帧一步地跟着料走（料在动也跟得上），
-      看到画面停住就退出 → 后面的对准/下降/合爪完全一样
+    - 这个入口：``_follow_material_until_stable`` 一路跟着料走（发完动作就取下一帧，
+      不等动作走完），料自己停住就退出 → 后面的对准/下降/合爪完全一样
       （``_grab_material_from_turntable`` 自己还会再对准一次，停稳之后再收一次残差）。
 
     换位/摆料这一段共用 :func:`_stow_material_to_repo`，两个入口不会各漂一份。

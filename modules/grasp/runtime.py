@@ -502,38 +502,55 @@ class Grasp:
         self,
         want_color,
         *,
+        timeout: float = 20.0,
         tolerance_mm: float | None = None,
+        step_seconds: float | None = None,
+        acceleration: int | None = None,
     ) -> VisualServoResult:
-        """跟着物料水平走**一步**：YOLO 取一帧 → 底座与伸缩各走一步 → 返回；不动升降。
+        """**跟着走起来的物料走**，直到料自己停住：不动升降、只动平面。
 
-        每轮只取**一帧**、只走**一步**（``align_xy(single_step=True)``）。物料在动时
-        "等画面停稳再测"是在等一个永远等不到的东西，所以这里不等；循环调用它就是跟随::
+        循环在 :func:`modules.grasp.drive.eye_in_hand.follow_material_xy` 里：
+        **每轮取一帧、走一小步**（单步动作量按 ``step_seconds`` 折算，加速度满档），
+        一轮约 0.1 s 取帧 + 0.1 s 动作，4–5 Hz。不是原来那种"走一大步（底座 49 mm）
+        再按估算等 0.37 s"的节奏。
 
-            while True:
-                try:
-                    robot.grasp.follow_material("red")
-                except VisualServoError:
-                    continue        # 转出去 / 被爪影挡住的那一帧不算失败
+        "料停住"= 这一步不需要发动作、读数也不变，**并且**整幅画面静止
+        （本机 ``Vision.scene_stable()``）。只看读数会在跟得准时误判：相机装在爪上，
+        料还在走、读数本来就不变。跟丢（转出去／被爪影挡住）的那几帧不算失败。
 
-        循环什么时候停、跟丢之后怎么办，都是调用方的事——本方法不自己决定停稳，只负责
-        "这一帧看到的料在哪，就把爪子水平挪过去一步"。
-
-        **一次升降帧都不发**：不悬停，也不做"转底盘前的安全高度检查"
-        （``ensure_safe_height=False``）——那次检查会**自己升降**，与"只做水平跟随"矛盾。
-        高度由调用方负责：低位转底盘会撞到台面上的物块。
+        **一次升降帧都不发**：不悬停，也不做"转底盘前的安全高度检查"——那次检查会自己
+        升降，与"只做水平跟随"矛盾。高度由调用方负责：低位转底盘会撞到台面上的物块。
 
         :param want_color: 跟哪一个物料：类别名（``"red"``）或从 1 开始的编号，
             与 ``vision.locate(want_color)`` 同一套说法。
-        :param tolerance_mm: 这一次的到位门槛；``None`` 用 ``eye_in_hand.json`` 的
-            ``tolerance_mm``。误差在门槛内时这一步一个脉冲都不发。
-        :raises VisualServoError: 这一帧看不到该物料、雅可比奇异、脉冲预算超了。
-            跟丢一帧不是"跟随失败"，调用方按需重试。
+        :param timeout: 最多跟多久（秒）；停不住就报错，不要一直追下去。
+        :param tolerance_mm: 这次的对准门槛；``None`` 用 ``eye_in_hand.json`` 的
+            ``tolerance_mm``。返回值里 ``aligned`` 说的是"料停住那一刻在不在门槛内"，
+            不在也不影响：精确对准由 :meth:`align_xy_for_turntable` 接手。
+        :param step_seconds: 每一步允许走多久（秒）；跟得快慢就是这个数。``None`` 用默认。
+        :param acceleration: 加减速档位 0..255；越小越柔和，但起转越慢。``None`` 用默认。
+        :raises VisualServoError: 跟满 ``timeout`` 料还没停住（或一直看不见）。
         """
-        return self.align_xy(
-            want=want_color,
-            single_step=True,
-            ensure_safe_height=False,
+        arm, source = self._require_resources()
+        from modules.grasp.drive.eye_in_hand import (
+            FOLLOW_ACCELERATION,
+            FOLLOW_STEP_SECONDS,
+            follow_material_xy,
+        )
+
+        selector = self._selector_for(want_color, self._selector)
+        return follow_material_xy(
+            arm,
+            source,
+            selector,
+            self._target,
+            self._jacobian,
+            self._config,
+            timeout=timeout,
             tolerance_mm=tolerance_mm,
+            step_seconds=FOLLOW_STEP_SECONDS if step_seconds is None else step_seconds,
+            acceleration=FOLLOW_ACCELERATION if acceleration is None else acceleration,
+            on_message=self._say,
         )
 
     def align_xy_for_turntable(

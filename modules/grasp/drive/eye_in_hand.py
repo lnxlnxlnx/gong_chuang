@@ -105,6 +105,7 @@ from modules.grasp.drive.visual_servo_observation import (
     measure_settled,
     select_material,
 )
+from modules.motor.drive.motion import estimate_move_seconds
 from modules.vision.drive.sighting import MaterialSighting
 
 
@@ -713,6 +714,124 @@ def align_x_y(
     )
 
 
+#: 实时跟随一步的目标动作时长（秒）：单轴脉冲上限与等待时长都按它折算。
+#:
+#: 这个数就是跟随的"时间常数"：调大每步走得多、但一轮更慢，调小跟得勤、但每步
+#: 只挪一点。现场按料的移动速度调（转盘快就调大）。
+FOLLOW_STEP_SECONDS = 0.08
+#: 动作估算里多留的停稳时间（秒）。估算公式只含加速 + 匀速，减速段没算进去；
+#: 这一步之后马上要取下一帧，动作还没停完就读，画面是糊的。
+FOLLOW_SETTLE_SECONDS = 0.02
+#: 实时跟随的默认加减速档位。配置里 200 档在 80 rpm 下起转就要 0.22 s，
+#: 加上 0.15 s 到位余量，一步至少 0.37 s——那正是"一顿一顿"的来源。
+FOLLOW_ACCELERATION = 255
+
+
+def follow_x_y(
+    arm,
+    link: FrameSource,
+    selector: MaterialSelector,
+    target: VisualServoTarget,
+    jacobian: VisualServoJacobian,
+    config: VisualServoConfig,
+    *,
+    step_seconds: float = FOLLOW_STEP_SECONDS,
+    acceleration: int = FOLLOW_ACCELERATION,
+    after: Optional[float] = None,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> VisualServoResult:
+    """实时跟随的**一步**：一帧 → 一次短动作，**不等**那 0.15 s 到位余量。
+
+    与 :func:`align_x_y` 的 ``single_step`` 分支算的是同一件事，差在**动作怎么等**：
+    那边走 :func:`modules.grasp.drive.visual_servo_motion._move_axes`，按驱动器公式
+    （加速段 + 匀速段 + 0.15 s 到位余量）睡完；配置里 200 档加速度在 80 rpm 下起转
+    就要 0.22 s，所以**每一步至少 0.37 s**。跟一个正在动的料时，看起来就是"顿一下、
+    走一步"，根本没有跟随的连续感。
+
+    这里把一步压到 ``step_seconds`` 量级：
+
+    - 单轴步长按 ``step_seconds`` 折算脉冲上限（``rpm * 脉冲每圈 / 60 * step_seconds``），
+      误差再大也只走一小段，下一帧立刻纠正——误差大时不是走不动，是**分几步走**；
+    - 加减速用满档（默认 255）：起转从 0.22 s 压到几毫秒；
+    - 只等加速 + 匀速 + 少量停稳，不补 0.15 s 到位余量。
+
+    代价写在结果里：``unverified=True``，这一步走完**不保证到位**，收敛靠外层循环::
+
+        while True:
+            robot.grasp.follow_material("red")      # 一轮 = 一帧 + 一小步
+
+    **不动升降**：只发底座与伸缩两轴。高度由调用方负责。
+
+    :param step_seconds: 这一步允许走多久（秒）；按它换算单轴脉冲上限，也按它等待。
+    :param acceleration: 加减速档位 0..255；越小越柔和，但起转越慢、跟随越顿。
+    :param after: 只接受不早于这个时刻的观测；上一小步走完之后的时间戳能挡住
+        "动作之前的旧帧"（走网络镜头 ``CameraLink`` 时那一层才真的按它过滤）。
+    :raises VisualServoError: 这一帧看不到该物料、雅可比奇异。
+    """
+    if not step_seconds > 0:
+        raise ValueError(f"step_seconds 必须是正数，收到 {step_seconds!r}")
+    say = on_message if on_message is not None else (lambda _message: None)
+    sighting = _read_material(link, selector, config, after=after)
+    offset = (sighting.x_mm, sighting.y_mm)
+    error_x = offset[0] - target.x_mm
+    error_y = offset[1] - target.y_mm
+    error = math.hypot(error_x, error_y)
+
+    def result(*, base_pulses: int, radial_pulses: int, resolution_limited: bool = False):
+        return VisualServoResult(
+            target=target,
+            readings=(offset,),
+            error_x=error_x,
+            error_y=error_y,
+            base_pulses=base_pulses,
+            radial_pulses=radial_pulses,
+            iterations=1,
+            tolerance_mm=config.tolerance_mm,
+            resolution_limited=resolution_limited,
+            unverified=True,
+        )
+
+    if error <= config.tolerance_mm:
+        say(f"跟随：误差 {error:.2f} mm 已在容差 {config.tolerance_mm:.1f} mm 内，这一步不动")
+        return result(base_pulses=0, radial_pulses=0)
+    if error < config.min_step_mm:
+        say(
+            f"跟随：误差 {error:.2f} mm 已小于背隙地板 {config.min_step_mm:.2f} mm，"
+            "再走只会跨过目标；按分辨率极限收工"
+        )
+        return result(base_pulses=0, radial_pulses=0, resolution_limited=True)
+
+    rpm = int(arm.config.rpm)
+    pulses_per_revolution = int(arm.pulses_per_revolution)
+    # 上限取"时间预算折算的脉冲"与"允许并行的旋转上限"里小的那个：跟着料走时底座
+    # 每步都转，超过并行上限就只能串行走，一轮立刻翻倍。
+    limit = int(step_seconds * rpm * pulses_per_revolution / 60.0)
+    limit = max(1, min(limit, config.parallel_rotation_limit_pulses))
+    base_step, radial_step = _plan_planar_step(
+        error_x, error_y, jacobian, config, limit=limit
+    )
+    say(
+        f"跟随：误差 {error:.2f} mm → 底座 {base_step:+d}、伸缩 {radial_step:+d} 脉冲"
+        f"（单步上限 {limit}）"
+    )
+    # 两轴同时发、不在这里等整段估算；等待按**这次动作的实际时长**算（见模块常量）。
+    arm.move_axes(
+        {BASE_AXIS: base_step, RADIAL_AXIS: radial_step},
+        rpm=rpm,
+        acceleration=acceleration,
+        wait=False,
+    )
+    wait = max(
+        estimate_move_seconds(
+            pulses, rpm, pulses_per_revolution, acceleration, FOLLOW_SETTLE_SECONDS
+        )
+        for pulses in (abs(base_step), abs(radial_step))
+        if pulses
+    )
+    time.sleep(wait)
+    return result(base_pulses=base_step, radial_pulses=radial_step)
+
+
 def align_xy_for_turntable(
     arm,
     link: FrameSource,
@@ -738,14 +857,15 @@ def align_xy_for_turntable(
       表现为原地转——那是"更慢"，不是"更快"。
     - **一步按粗调上限走完**（``step_limit`` 默认 ``coarse_max_pulses_per_step``），
       不再拆成细调的小步。
-    - **按墙上时间收工**：第一次测量 + 第一步一定做完（没动就收工等于没对准），之后每再走
-      一步之前看预算；到点就退回到**测到过的误差最小位置**。返回值可能
+    - **按墙上时间收工**：预算从**第一次拿到读数之后**才起算（前面可能在等物块转进视野，
+      实测能等 6 s 以上，算进去就会"一次都没动就预算用完"）。第一次修正**一定**会走，
+      之后每再走一步之前看预算；到点就退回到**测到过的误差最小位置**。返回值可能
       ``aligned=False``——那是"已知最好"，不是对准了，调用方**不能**拿它去下降。
 
     每一轮测量都带 ``after=checkpoint`` 过滤旧帧：动作很快时队列里还压着动作**之前**的画面，
     读到它就会以为没动过、再发一次同样的指令（表现为来回振荡）。
 
-    :param seconds: 对准预算（秒），从第一次测量之前开始计。
+    :param seconds: 对准预算（秒），**从第一次拿到读数之后**起算。
     :param max_iterations: 最多测几次（首次 + 验证 + 补充步）；时间预算先到时以时间预算为准。
     :param tolerance_mm: 这一次的到位门槛；``None`` 用 ``config.tolerance_mm``。
     :param step_limit: 单轴单步脉冲上限；``None`` 用 ``config.coarse_max_pulses_per_step``。
@@ -761,7 +881,9 @@ def align_xy_for_turntable(
     # 或者先让转盘停位对齐，比在这里多塞小步划算。
     budget = max(0.0, float(seconds))
     started = time.monotonic()
-    deadline = started + budget
+    #: 预算截止时刻；**第一次拿到读数之后**才定。等物块转进视野（``target_wait_seconds``
+    #: 可能是 ``null``，一直等）不是对准时间，算进去就会出现"一次都没动就预算用完"。
+    deadline: Optional[float] = None
     #: 验证那几轮判"停稳"用的一致性门槛，与 ``align_x_y`` 同一个取法。
     fine_settle = min(
         config.coarse_settle_tolerance_mm,
@@ -812,6 +934,9 @@ def align_xy_for_turntable(
         error_y = offset[1] - target.y_mm
         error = math.hypot(error_x, error_y)
         history.append((error, offset, total_base, total_radial))
+        if deadline is None:
+            # 预算从这里起算，所以第一次修正**一定**会走：没动就收工等于没对准。
+            deadline = time.monotonic() + budget
         say(
             f"第 {attempts} 次（{time.monotonic() - started:.2f} s）："
             f"物块 ({offset[0]:+.2f}, {offset[1]:+.2f}) mm，误差 {error:.2f} mm"
@@ -846,8 +971,8 @@ def align_xy_for_turntable(
         if attempts >= max_iterations:
             say(f"  测量次数用完了（{max_iterations} 次）：按已知误差最小的位置收工")
             break
-        if time.monotonic() >= deadline:
-            say(f"  {budget:.1f} s 预算用完：按已知误差最小的位置收工")
+        if attempts > 1 and deadline is not None and time.monotonic() >= deadline:
+            say(f"  {budget:.1f} s 预算用完（首测之后开始计）：按已知误差最小的位置收工")
             break
         base_step, radial_step = _plan_planar_step(
             error_x, error_y, jacobian, config, limit=limit
@@ -887,6 +1012,137 @@ def align_xy_for_turntable(
         radial_pulses=final[3],
         iterations=len(history),
         tolerance_mm=tolerance,
+    )
+
+
+def follow_material_xy(
+    arm,
+    link: FrameSource,
+    selector: MaterialSelector,
+    target: VisualServoTarget,
+    jacobian: VisualServoJacobian,
+    config: VisualServoConfig,
+    *,
+    timeout: float = 20.0,
+    tolerance_mm: Optional[float] = None,
+    step_seconds: float = FOLLOW_STEP_SECONDS,
+    acceleration: int = FOLLOW_ACCELERATION,
+    on_message: Optional[Callable[[str], None]] = None,
+) -> VisualServoResult:
+    """**跟着走起来的物块走**：每轮取一帧、走一小步，料停住才收工。
+
+    每一步交给 :func:`follow_x_y`：单轴步长按 ``step_seconds`` 折算（默认 0.08 s），
+    加速度满档、只等实际动作那一小段。所以一轮 ≈ 0.1 s 取帧 + 0.1 s 动作，约 4–5 Hz；
+    不是"走一大步（底座可到 49 mm）再按估算等 0.37 s"那个一顿一顿的节奏。
+
+    "料停住了"要**同时**满足两条，缺一不可：
+
+    1. 这一步不需要发动作（``base_pulses == radial_pulses == 0``），且与上一帧读数相差
+       不超过 ``still_tolerance``；
+    2. 观测源支持 ``scene_stable()`` 时（本机 :class:`~modules.vision.runtime.Vision` 有），
+       再确认**整幅画面**静止。
+
+    只比 1 会在"跟得很准"时误判：相机装在爪上，料还在走但始终停在画面同一处，读数本来
+    就不变；整幅画面才看得见背景还在动。连续两次满足才返回。
+
+    跟丢（转出去／被爪影挡住）的那几帧不算失败，接着跟；跟满 ``timeout`` 才报错。
+
+    **一次升降帧都不发**：只发底座与伸缩两轴。
+
+    返回时位置可信度有限（``unverified``）：``aligned`` 说的是料停住时读数在不在容差内；
+    精确对准由 :func:`align_xy_for_turntable` 接手。
+
+    :param timeout: 最多跟多久（秒）。
+    :param tolerance_mm: 到位门槛；``None`` 用 ``config.tolerance_mm``。
+    :param step_seconds: 每一步允许走多久（秒），折算成单轴脉冲上限；跟随快慢就是这个数。
+    :param acceleration: 加减速档位 0..255；越小越柔和，但起转越慢、跟得越顿。
+    :raises VisualServoError: 跟满 ``timeout`` 料还没停住（或一直看不见）。
+    """
+    say = on_message if on_message is not None else (lambda _message: None)
+    tolerance = config.tolerance_mm if tolerance_mm is None else float(tolerance_mm)
+    if tolerance <= 0:
+        raise ValueError("tolerance_mm 必须是正数")
+    #: "料停住了"的读数判据：连续两帧读数之差不超过它。比细档稍松，免得读数抖动当成在动。
+    still_tolerance = min(
+        config.coarse_settle_tolerance_mm,
+        max(config.settle_tolerance_mm, 0.25 * tolerance),
+    )
+    #: 整幅画面静止的判据只在"料看起来停住"时才问，避免每轮多付一次连拍（约 0.13 s）。
+    scene_stable = getattr(link, "scene_stable", None)
+    seconds = max(0.0, float(timeout))
+    started = time.monotonic()
+    deadline = started + seconds
+
+    reads = 0
+    total_base = 0
+    total_radial = 0
+    previous: Optional[Tuple[float, float]] = None
+    still = 0
+    last_error: Optional[Exception] = None
+    #: 上一步走完的时刻；下一次取帧只接受晚于它的观测（网络镜头那条路真的按它过滤）。
+    checkpoint: Optional[float] = None
+
+    while time.monotonic() < deadline:
+        try:
+            result = follow_x_y(
+                arm,
+                link,
+                selector,
+                target,
+                jacobian,
+                config,
+                step_seconds=step_seconds,
+                acceleration=acceleration,
+                after=checkpoint,
+                on_message=say,
+            )
+        except MaterialMissingError as error:
+            # 跟着走的时候"这一帧没看见"是常态：爪影、转出去、运动模糊都算，接着跟。
+            last_error = error
+            previous = None
+            still = 0
+            continue
+        checkpoint = time.monotonic()
+        offset = result.readings[-1]
+        reads += 1
+        total_base += result.base_pulses
+        total_radial += result.radial_pulses
+        moved = (
+            math.inf
+            if previous is None
+            else math.hypot(offset[0] - previous[0], offset[1] - previous[1])
+        )
+        previous = offset
+        # 这一帧不需要动、读数也没变，才可能是"料停住"；还要整幅画面也静止（有那条判据时）。
+        if (
+            moved <= still_tolerance
+            and result.base_pulses == 0
+            and result.radial_pulses == 0
+        ):
+            still += 1
+        else:
+            still = 0
+        if still >= 2:
+            if scene_stable is None or scene_stable():
+                say(f"  料停住了（误差 {result.error_mm:.2f} mm）：交给精确对准")
+                return VisualServoResult(
+                    target=target,
+                    readings=(offset,),
+                    error_x=result.error_x,
+                    error_y=result.error_y,
+                    base_pulses=total_base,
+                    radial_pulses=total_radial,
+                    iterations=reads,
+                    tolerance_mm=tolerance,
+                    unverified=True,
+                )
+            # 读数没变、背景还在动：那是"跟得很准但料还在走"，不能当成停住。
+            still = 0
+            say(f"  读数没变但画面还在动：继续跟（误差 {result.error_mm:.2f} mm）")
+
+    raise VisualServoError(
+        f"跟了 {seconds:.0f} s 料还没停住（或一直看不见）；最后一次跟丢的原因："
+        f"{last_error if last_error is not None else '没有（读数一直在变）'}"
     )
 
 

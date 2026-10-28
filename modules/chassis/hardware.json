@@ -15,6 +15,6 @@
     "expect_ack": true,
     "pattern": "X",
     "motion_transform": "calibrated",
-    "mm_per_wheel_rev": null
+    "mm_per_wheel_rev": 245.0
   }
 }

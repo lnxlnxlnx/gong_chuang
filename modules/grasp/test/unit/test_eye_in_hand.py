@@ -37,6 +37,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Optional, Tuple
 from unittest.mock import patch
 
@@ -49,6 +50,7 @@ from modules.grasp.drive.eye_in_hand import (
     align_x_y,
     descend_z,
     find_material,
+    follow_material_xy,
     hover_above_material,
     probe_jacobian,
     retract_extension,
@@ -394,6 +396,20 @@ class FakeArm:
         self.gain = gain
         self.offset = [12.0, -7.0]
         self.calls: List[Tuple[str, int]] = []
+        #: ``follow_x_y`` 按配置的 rpm 把 step_seconds 折算成单轴脉冲上限。
+        self.pulses_per_revolution = 3200
+        self.config = SimpleNamespace(rpm=80, acceleration=200)
+        #: 每次 ``move_axes`` 的 (目标, rpm, acceleration)。
+        self.moves: List[Tuple[dict, Optional[int], Optional[int]]] = []
+
+    def move_axes(self, targets, *, rpm=None, acceleration=None, **_kwargs):
+        """跟随只许动底座/伸缩：收到别的轴直接判失败。"""
+        for axis, pulses in targets.items():
+            if axis not in (BASE_AXIS, RADIAL_AXIS):
+                raise AssertionError(f"跟随只许动底座/伸缩，收到 {axis}")
+            self._axis(axis, pulses > 0, abs(pulses))
+        self.moves.append((dict(targets), rpm, acceleration))
+        return ()
 
     def _axis(self, axis: str, forward: bool, pulses: int) -> None:
         signed = pulses if forward else -pulses
@@ -1093,6 +1109,166 @@ class ScriptedLink:
         )
 
 
+class MovingLink:
+    """按脚本给出物块读数：模拟转盘带着料走，脚本用完之后停在最后一个读数上。
+
+    读数直接来自脚本、不跟着假机械臂走——这一点是**故意的**：这里要验的是"跟的时候
+    每帧都发一步、料不跑了就收工"，而不是伺服能不能收敛（那由 ``AlignXYTests`` 负责）。
+    """
+
+    error = None
+
+    def __init__(self, offsets: List[Tuple[float, float]]) -> None:
+        self.offsets = list(offsets)
+        self.reads = 0
+
+    def frame(self, **_kwargs):
+        offset = self.offsets[min(self.reads, len(self.offsets) - 1)]
+        self.reads += 1
+        return (sighting(4, offset[0], offset[1], stamp=time.monotonic()),)
+
+
+class IffyLink(MovingLink):
+    """前几帧一个目标都没有（转出去/被爪影挡住），之后按脚本报读数。"""
+
+    def __init__(self, offsets, misses: int) -> None:
+        super().__init__(offsets)
+        self.misses = misses
+
+    def frame(self, **_kwargs):
+        if self.reads < self.misses:
+            self.reads += 1
+            return ()
+        return super().frame()
+
+
+class DriftingLink:
+    """永远在动：每次读数都比上一次远 5 mm（模拟转盘一直带着料走）。"""
+
+    error = None
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def frame(self, **_kwargs):
+        self.reads += 1
+        return (
+            sighting(4, -40.0 - 5.0 * self.reads, 0.0, stamp=time.monotonic()),
+        )
+
+
+class FollowClock:
+    """跟随循环的假钟：时间只由 ``sleep`` 推进（一小步动作的等待）。"""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += max(0.0, seconds)
+
+
+class FollowMaterialTests(unittest.TestCase):
+    """``follow_material_xy``：每轮一帧、一小步，料停住才收工。"""
+
+    JACOBIAN = SingleStepTests.JACOBIAN
+    CONFIG = SingleStepTests.config()
+
+    def call(self, arm, link, **kwargs):
+        return follow_material_xy(
+            arm,
+            link,
+            MaterialSelector(),
+            VisualServoTarget(x_mm=0.0, y_mm=0.0),
+            self.JACOBIAN,
+            kwargs.pop("config", self.CONFIG),
+            **kwargs,
+        )
+
+    def test_it_keeps_sending_while_the_material_moves(self) -> None:
+        """料一直在走：每轮都发一小步，跟满时限才放弃。"""
+        arm = FakeArm(self.JACOBIAN)
+        link = DriftingLink()
+        config = SingleStepTests.config(max_total_pulses=10_000_000)
+
+        with patch.object(algorithms, "time", FollowClock()), \
+                self.assertRaisesRegex(VisualServoError, "跟了"):
+            self.call(arm, link, config=config, timeout=0.35)
+
+        self.assertGreaterEqual(len(arm.calls), 2, "跟的时候每轮都要发一步")
+
+    def test_a_step_is_short_enough_to_keep_up(self) -> None:
+        """单步按 ``step_seconds`` 折算：不再一次走 49 mm。"""
+        arm = FakeArm(self.JACOBIAN)
+        link = DriftingLink()
+        config = SingleStepTests.config(max_total_pulses=10_000_000)
+
+        with patch.object(algorithms, "time", FollowClock()), \
+                self.assertRaisesRegex(VisualServoError, "跟了"):
+            self.call(arm, link, config=config, timeout=0.05)
+
+        limit = int(
+            algorithms.FOLLOW_STEP_SECONDS * arm.config.rpm
+            * arm.pulses_per_revolution / 60
+        )
+        self.assertTrue(arm.calls)
+        for _kind, pulses in arm.calls:
+            self.assertLessEqual(pulses, limit)
+
+    def test_a_steady_reading_does_not_mean_the_material_stopped(self) -> None:
+        """读数一直不变但每轮都在发动作：那是"跟得很准、料还在走"，不能收工。"""
+        arm = FakeArm(self.JACOBIAN)
+        link = MovingLink([(-40.0, 0.0)] * 50)
+
+        with patch.object(algorithms, "time", FollowClock()), \
+                self.assertRaisesRegex(VisualServoError, "跟了"):
+            self.call(arm, link, timeout=0.35)
+
+        self.assertGreaterEqual(len(arm.calls), 2)
+
+    def test_the_scene_must_be_still_before_it_reports_stopped(self) -> None:
+        """读数不变只是候选；``scene_stable()`` 说画面还在动就得继续跟。"""
+        arm = FakeArm(self.JACOBIAN)
+        link = MovingLink([(0.0, 0.0)] * 8)
+        checks = []
+
+        def scene_stable() -> bool:
+            checks.append(True)
+            return len(checks) >= 2
+
+        link.scene_stable = scene_stable
+
+        with patch.object(algorithms, "time", FollowClock()):
+            result = self.call(arm, link, timeout=5.0)
+
+        self.assertEqual(len(checks), 2, "第一次判动、第二次判静，然后收工")
+        self.assertTrue(result.aligned)
+
+    def test_it_stops_when_the_material_stops(self) -> None:
+        arm = FakeArm(self.JACOBIAN)
+        link = MovingLink(
+            [(-40.0, -6.0), (-26.0, -6.0), (-12.0, -6.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]
+        )
+
+        with patch.object(algorithms, "time", FollowClock()):
+            result = self.call(arm, link, timeout=5.0)
+
+        self.assertTrue(result.aligned)
+        self.assertTrue(result.unverified, "跟的过程本来就不再验证")
+        self.assertGreater(len(arm.calls), 0)
+        self.assertEqual(link.reads, 6, "连续两帧一致就算停住，不多取")
+
+    def test_a_frame_where_the_material_is_missing_does_not_stop_the_follow(self) -> None:
+        arm = FakeArm(self.JACOBIAN)
+        link = IffyLink([(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)], misses=2)
+
+        result = self.call(arm, link, timeout=5.0)
+
+        self.assertTrue(result.aligned, "跟丢两帧之后看见料停住，照样收工")
+
+
 class TurntableAlignTests(unittest.TestCase):
     """``align_xy_for_turntable``：单帧一步、大步、1 s 预算，到点停在误差最小的位置。"""
 
@@ -1125,6 +1301,21 @@ class TurntableAlignTests(unittest.TestCase):
             abs(result.base_pulses), self.CONFIG.max_pulses_per_step,
             "一步就按粗调上限走完，不被细调档 1200 夹住",
         )
+
+    def test_the_first_step_always_happens(self) -> None:
+        """首测可能要等物块转进视野（现场等过 6.85 s）：预算不能把第一次修正吃掉。
+
+        ``seconds=0`` 是这条底线的极端形式：一次都没动就"预算用完"等于对准没做，
+        现场看到的就是"误差 16 mm、走了 0 脉冲"。
+        """
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [16.5, 5.0]
+        link = JumpyDepthLink(arm=arm)
+
+        result = self.call(arm, link, seconds=0.0)
+
+        self.assertTrue(arm.calls, "至少要走一次")
+        self.assertTrue(result.aligned)
 
     def test_the_budget_stops_at_the_smallest_error_seen(self) -> None:
         """预算到点、而且之后更差时：退回误差最小的那一次，读数也按"最终位置"排列。"""
@@ -1235,6 +1426,8 @@ class GraspSessionRig:
     TRUTH = VisualServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
     TARGET = VisualServoTarget(x_mm=0.0, y_mm=0.0)
     STAGES = ("hover", "raise", "align", "down", "back")
+    #: 不在 ``align_and_descend`` 主链里、单独 mock 的名字（``follow_material`` 用）。
+    EXTRA_STAGES = ("follow",)
 
     def __init__(self, *, hover_z_mm: Optional[float] = None, strict_align: bool = True):
         """``strict_align``：主链必须传 ``ensure_safe_height=False``。
@@ -1264,15 +1457,17 @@ class GraspSessionRig:
         self._patches = [
             patch.object(algorithms, name)
             for name in ("hover_above_material", "raise_before_rotating", "align_x_y",
-                         "descend_z", "retract_extension")
+                         "descend_z", "retract_extension", "follow_material_xy")
         ]
-        hover, lift, align, down, back = (item.start() for item in self._patches)
+        hover, lift, align, down, back, follow = (item.start() for item in self._patches)
         self._mocks = [hover, lift, align, down, back]
+        self._extra = [follow]
         hover.side_effect = lambda *_a, **_k: HoverResult(
             configured=True, pulses=-120, start_z_mm=120.0, end_z_mm=100.0
         )
         lift.side_effect = lambda *_a, **_k: 250
         align.side_effect = self._align
+        follow.side_effect = lambda *_a, **_k: align_result()
         down.side_effect = lambda *_a, **_k: ZDescentResult(
             pulses=2200, planar_mm=0.64, start_z_mm=100.0, seconds=1.2
         )
@@ -1322,6 +1517,8 @@ class GraspSessionRig:
         return [name for name, item in zip(self.STAGES, self._mocks) if item.called]
 
     def mock(self, stage: str):
+        if stage in self.EXTRA_STAGES:
+            return self._extra[self.EXTRA_STAGES.index(stage)]
         return self._mocks[self.STAGES.index(stage)]
 
 
@@ -2212,24 +2409,28 @@ class GraspAlignXYSessionTests(unittest.TestCase):
 
 
 class GraspFollowMaterialTests(unittest.TestCase):
-    """``Grasp.follow_material``：每次调用只走一步，而且**一次升降帧都不发**。
+    """``Grasp.follow_material``：**每轮一帧、一小步**，而且一次升降帧都不发。
 
-    跟随循环由调用方写（``while True``），所以这里守的是"这一步"的三个口子：
-    单帧一步、按次的 want、以及安全高度检查也必须关掉——那次检查会自己升降。
+    循环本身在 ``follow_material_xy`` 里测；这里守的是会话这一层的口子：
+    循环真的被调用、按次的 want、跟随的两个调参原样交下去、以及"只动平面"——
+    升降那四个口子一个都不许动（安全高度检查会自己升降，与跟随即矛盾）。
     """
 
-    def test_it_takes_one_step_without_touching_the_height(self) -> None:
+    def test_it_runs_the_tracking_loop_without_touching_the_height(self) -> None:
         rig = GraspSessionRig()
         with rig as session:
-            result = session.grasp.follow_material("green")
+            result = session.grasp.follow_material("green", timeout=4.0)
 
-            align = session.mock("align")
-            align.assert_called_once()
-            self.assertIs(align.call_args.kwargs["single_step"], True)
-            self.assertIs(align.call_args.kwargs["ensure_safe_height"], False)
+            follow = session.mock("follow")
+            follow.assert_called_once()
+            kwargs = follow.call_args.kwargs
+            self.assertEqual(kwargs["timeout"], 4.0)
+            # 不传调参时用快版默认值：跟着动的料走靠的就是这两个数。
+            self.assertEqual(kwargs["step_seconds"], algorithms.FOLLOW_STEP_SECONDS)
+            self.assertEqual(kwargs["acceleration"], algorithms.FOLLOW_ACCELERATION)
             # 按次给的 want 必须真的变成判别条件：否则跟的是配置里那个默认物料。
-            self.assertEqual(align.call_args.args[2], MaterialSelector(color="green"))
-            for stage in ("hover", "raise", "down", "back"):
+            self.assertEqual(follow.call_args.args[2], MaterialSelector(color="green"))
+            for stage in ("hover", "raise", "align", "down", "back"):
                 with self.subTest(stage=stage):
                     session.mock(stage).assert_not_called()
 
@@ -2239,14 +2440,16 @@ class GraspFollowMaterialTests(unittest.TestCase):
         rig = GraspSessionRig()
         with rig as session:
             session.grasp.follow_material("red", tolerance_mm=1.5)
-            self.assertEqual(session.mock("align").call_args.args[5].tolerance_mm, 1.5)
+            self.assertEqual(
+                session.mock("follow").call_args.kwargs["tolerance_mm"], 1.5
+            )
 
     def test_a_bad_want_is_rejected_before_anything_moves(self) -> None:
         rig = GraspSessionRig()
         with rig as session:
             with self.assertRaises(ValueError):
                 session.grasp.follow_material(0)
-            session.mock("align").assert_not_called()
+            session.mock("follow").assert_not_called()
 
 
 class GraspAlignAndDescendTests(unittest.TestCase):
