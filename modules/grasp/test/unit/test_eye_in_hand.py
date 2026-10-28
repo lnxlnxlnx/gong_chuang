@@ -1458,6 +1458,38 @@ class TurntableAlignTests(unittest.TestCase):
         self.assertGreater(link.fast_reads, 0, "先试过快速档")
         self.assertGreater(link.slow_reads, 0, "没框时退回慢路径")
 
+    def test_fast_mode_calibrates_once_even_if_the_first_frame_is_in_tolerance(self) -> None:
+        """首帧已在容差内也要先校准一步：读数够近不等于真的对上了才下降。"""
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [4.0, 0.0]
+        link = FastJumpyLink(arm)
+
+        with patch.object(algorithms, "time", FollowClock()):
+            result = self.call(arm, link, fast=True, seconds=1.0)
+
+        self.assertTrue(result.aligned)
+        self.assertTrue(arm.calls, "首帧已在容差内也必须先校准一步")
+        self.assertLess(result.error_mm, 4.0)
+
+    def test_the_slow_path_also_calibrates_once_within_tolerance(self) -> None:
+        """慢路径同样：首帧 4 mm（<6 mm 容差）也得先走一步，再按验证结果收工。"""
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [4.0, 0.0]
+        link = JumpyDepthLink(arm=arm)
+
+        def move(arm_, base_pulses, radial_pulses, _config):
+            if base_pulses:
+                arm_._axis(BASE_AXIS, base_pulses > 0, abs(base_pulses))
+            if radial_pulses:
+                arm_._axis(RADIAL_AXIS, radial_pulses > 0, abs(radial_pulses))
+            return 0.0
+
+        with patch.object(algorithms, "_move_axes", side_effect=move):
+            result = self.call(arm, link, seconds=1.0)
+
+        self.assertTrue(result.aligned)
+        self.assertTrue(arm.calls, "首帧已在容差内也必须先校准一步")
+
     def test_the_first_step_always_happens(self) -> None:
         """首测可能要等物块转进视野（现场等过 6.85 s）：预算不能把第一次修正吃掉。
 

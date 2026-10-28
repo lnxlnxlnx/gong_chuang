@@ -55,6 +55,8 @@ class PlaceAfterFollowTests(unittest.TestCase):
                 patch.object(app_gripper, "_go_home"), \
                 patch.object(app_gripper, "move_axes_to"), \
                 patch("builtins.input", return_value=""):
+            # 真实函数没有返回值（重试循环靠 `if res:` 判）；Mock 默认真值会让 while 死循环。
+            grab.return_value = None
             app_gripper.grab_material_from_turntable_to_repo_follow(
                 robot, want_colors, home=None
             )
