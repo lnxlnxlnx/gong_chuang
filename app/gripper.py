@@ -437,7 +437,7 @@ def grab_material_from_turntable_to_repo(
     robot: Robot,
     want_colors=("red", "green", "blue"),
     *,
-    home: dict[str, float] | None = {"lift": 830, "extension": 90.0, "base": 420}
+    home: dict[str, float] | None = {"lift": 860, "extension": 90.0, "base": 420}
 ):  # 420是中心位置
     """把物料从转盘上抓下来，放到仓库里。不需要处理初始状态
     从转盘上抓料：等它看满最小等待还静止 → 对准 → 下降 → 合爪。
