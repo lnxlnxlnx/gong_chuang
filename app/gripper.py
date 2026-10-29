@@ -707,7 +707,7 @@ def _place_material_to_repo(robot: Robot, *, verbose: bool = False):
     #    注意：底座这次要转约 9300 脉冲，超过"不许和伸缩并行"的 600 脉冲上限。
     #    那条限制只在 RobotArm.move_axes 里检查，单轴帧不拦，所以现场必须确认
     #    工作区是空的（伸出状态下横扫会把整条臂扫过去）。
-    robot.arm.move_axis_to_motor_degrees("lift", 500)
+    robot.arm.move_axis_to_motor_degrees("lift", 500, rpm = 110)
     move_axes_to(robot, {"extension": 270.0, "base": 400, "lift": 900}).wait()
     report = move_axes_to(robot, {"lift": 900, "extension": 10, "base": 1048}).wait()
     if verbose:
@@ -811,7 +811,7 @@ def place_material_from_repo_to_floor_by_pose(
         for order in orders:
             move_axes_to(robot, {"lift": ring_position[order - 1][1], "extension": ring_position[order - 1][2], "base": ring_position[order - 1][0]}).wait()
             time.sleep(1)  # 先让车停稳
-            result = robot.grasp.align_ring(tolerance_mm=2, max_iterations = 5)
+            result = robot.grasp.align_ring(tolerance_mm=5.0, max_iterations = 3)
             base_deg = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
             position = {"base": base_deg, "extension": extension_deg}
@@ -821,10 +821,10 @@ def place_material_from_repo_to_floor_by_pose(
             
             # 这趟的落点就是现在这个角度。抓料会把这几个轴都开走，所以先记下来：
             move_axes_to(robot, {"extension": extension_deg, "base": base_deg}).wait()
-            robot.arm.move_axis_to_motor_degrees("lift", 95)
+            robot.arm.move_axis_to_motor_degrees("lift", 95, rpm=130)
             
             robot.gripper.open_jaws()
-            robot.arm.move_axis_to_motor_degrees("lift", 375)
+            robot.arm.move_axis_to_motor_degrees("lift", 375, rpm = 130)
             _go_home(robot, home)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
@@ -974,7 +974,7 @@ def grab_material_from_floor_to_repo_by_xy(
     """
     robot.arm.move_axis_to_motor_degrees("lift", 400)
     _go_home(robot, home)
-    ring_position = [(-190, 580, 690), (-32, 580, 540), (110, 580, 690)]
+    ring_position = [(-190, 580, 720), (-32, 580, 540), (110, 580, 720)]
     try:
         for order in orders:
             move_axes_to(robot, {"lift": ring_position[order - 1][1], "extension": ring_position[order - 1][2], "base": ring_position[order - 1][0]}).wait()
