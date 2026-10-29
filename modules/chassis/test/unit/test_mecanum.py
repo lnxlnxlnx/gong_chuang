@@ -347,6 +347,21 @@ class PulseModeTests(unittest.TestCase):
         # 只发 2 条帧：帧间 1 个间隔 + 触发帧之前 1 个
         self.assertEqual(self.sleep.calls, [GAP, GAP])
 
+    def test_unequal_strokes_scale_rpm_so_all_wheels_finish_together(self) -> None:
+        self.car.move_wheels_relative_pulses(2000, 1000, 2000, 1000, rpm=100)
+
+        # 行程一半 = 速度一半：四轮同起同停，不会"别的轮停了还有轮在转"
+        self.assertEqual(
+            self.serial.writes,
+            [
+                self.position_frame(1, Direction.CW, 100, 10, 2000),
+                self.position_frame(2, Direction.CW, 50, 10, 1000),
+                self.position_frame(3, Direction.CW, 100, 10, 2000),
+                self.position_frame(4, Direction.CW, 50, 10, 1000),
+                bytes.fromhex("00 FF 66 6B"),
+            ],
+        )
+
     def test_rotate_ccw_pulses_use_opposite_directions_per_wheel(self) -> None:
         counts = self.car.rotate_ccw(rpm=100, pulses=800, wait=False)
 

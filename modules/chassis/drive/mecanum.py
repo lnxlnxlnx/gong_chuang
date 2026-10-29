@@ -313,11 +313,20 @@ class MecanumDrive:
         0 脉冲的轮子不下发（协议不允许 0 位移）；``synchronized=True`` 时四条
         ``0xFD`` 帧先缓存，最后用一条 ``00 FF 66 6B`` 让四轮同时启动。
         帧间与触发帧之前各留 ``inter_frame_seconds``，见 :meth:`_each_wheel`。
+
+        ``rpm`` 是**行程最远那只轮**的速度，其余轮按各自行程等比例降速：
+        位置模式下四轮同时启动但各自到点，若都用同一个 rpm，行程短的轮子先停、
+        剩下那只还在转，会把车拖偏。按行程缩放 rpm 后四轮同起同停。
         """
+        counts = (fl, fr, rl, rr)
+        peak = max(abs(value) for value in counts)
         self._move_wheel_frames(
-            (fl, fr, rl, rr),
+            counts,
             lambda motor, pulses, accel: motor.move_relative_pulses(
-                pulses, rpm, accel, synchronized=synchronized
+                pulses,
+                max(1, round(rpm * abs(pulses) / peak)),
+                accel,
+                synchronized=synchronized,
             ),
             acceleration,
             synchronized,

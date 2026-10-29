@@ -685,6 +685,7 @@ class Grasp:
         self,
         *,
         require_digit: int | None = None,
+        assume_digit: int | None = None,
         timeout: float | None = None,
         scale_mm_per_px: float | None = None,
         axes: "Sequence[str]" = ("base", "extension"),
@@ -707,6 +708,20 @@ class Grasp:
         与 :meth:`plan_ring` 相同的拒绝（没有环 / 读数不可用 / 环号不符 / 尺不对 /
         雅可比奇异），另外：
 
+        ## 环号：``require_digit`` 是检查，``assume_digit`` 是先验
+
+        按示教姿态逐环放的流程（``place_material_from_repo_to_floor_by_pose``）**已经知道**
+        这一格是几号环，而模型对**转过角度的靶标**会读错号（2026-10-29 新放的 1 号环 5 帧
+        全读成 2/3 号，环心却一直是准的）。这时 ``require_digit`` 只会让整段流程失败：
+
+        - ``require_digit=N``：画面里的**必须**是 N 号，不是就报错（相机驱动、不知道是几号
+          的场合用这个：拿错一个环去转，臂会朝 95 mm 外的位置动）；
+        - ``assume_digit=N``：这一格**按姿态就是** N 号。先让定位器只在 N 号里挑框；模型
+          读不出 N 号时退回"画面里那个环"照样对准，落料补偿按 N 号取——模型给的号只当
+          参考，对不上就记进 ``note``。
+
+        两个只能给一个。
+
         :param axes: 只动哪些轴；``("base",)`` = 只转底座。
         :param max_iterations: 最多走几步（默认 4）。
         :param gain: 每步取解算值的多少（默认 0.9，留一点余量防过冲）。
@@ -728,6 +743,16 @@ class Grasp:
             raise ValueError(
                 f"align_ring 只认 base / extension，收到 {unknown}"
             )
+        if assume_digit is not None and require_digit is not None:
+            raise ValueError(
+                "assume_digit 与 require_digit 只能给一个：前者是「按姿态这一格就是几号环」，"
+                "后者是「画面里的必须就是这个号」"
+            )
+        assumed = None if assume_digit is None else int(assume_digit)
+        if assumed is not None and assumed < 1:
+            raise ValueError(
+                f"assume_digit 是环号，必须从 1 开始，收到 {assume_digit!r}"
+            )
         tolerance = float(
             self._config.tolerance_mm if tolerance_mm is None else tolerance_mm
         )
@@ -747,11 +772,26 @@ class Grasp:
         best_pulses: dict[str, int] | None = None
         best_reading: tuple[float, float] | None = None
         best_plan = None
+        wrong_digit: int | None = None
         for attempt in range(1, max(1, int(max_iterations)) + 1):
-            target = self._locate_ring_for_plan(
-                source, timeout=timeout, require_digit=require_digit, settle=True
+            target = self._locate_ring_preferring(
+                source,
+                timeout=timeout,
+                require_digit=require_digit,
+                assume_digit=assumed,
+                settle=True,
             )
-            plan = self._plan_for_ring(arm, target, scale_mm_per_px=scale_mm_per_px)
+            if assumed is not None and int(target.digit) != assumed and wrong_digit is None:
+                # 模型读错号不是这次对准的失败：环心照样是它给的，补偿按姿态用 assumed。
+                # 只在第一次说一句，免得闭环每一步都刷同一行。
+                wrong_digit = int(target.digit)
+                self._say(
+                    f"  模型把这一格读成 {wrong_digit} 号（姿态告诉的是 {assumed} 号）："
+                    f"按画面里这个环对准，落料补偿用 {assumed} 号那一份"
+                )
+            plan = self._plan_for_ring(
+                arm, target, scale_mm_per_px=scale_mm_per_px, ring_digit=assumed
+            )
             digit = plan.digit
             final_reading = plan.reading
             final_plan = plan
@@ -843,10 +883,11 @@ class Grasp:
                 # 而且它只说明"当时误差最小"，不说明现在真的停在了那里。
                 fresh = None
                 try:
-                    measured = self._locate_ring_for_plan(
+                    measured = self._locate_ring_preferring(
                         source,
                         timeout=timeout,
                         require_digit=require_digit,
+                        assume_digit=assumed,
                         settle=True,
                     )
                     fresh = measured.reading()
@@ -882,6 +923,10 @@ class Grasp:
                 note = (note + "；" if note else "") + (
                     f"退回后复测已在容差内（{final_error:.1f} mm）"
                 )
+        if wrong_digit is not None:
+            note = (note + "；" if note else "") + (
+                f"模型读成 {wrong_digit} 号，落料补偿按姿态用 {assumed} 号那份"
+            )
         return RingAlignResult(
             steps=tuple(steps),
             aligned=aligned,
@@ -903,6 +948,29 @@ class Grasp:
     #: （``RingTargetLocator._digit_clash`` 会让整帧编号作废），而下一帧通常就正常；
     #: 单帧失败不该让整段闭环从头再来。
     RING_FRAME_ATTEMPTS = 3
+
+    def _locate_ring_preferring(
+        self, source, *, timeout, require_digit, assume_digit, settle: bool = False
+    ):
+        """``assume_digit`` 为空时就是 :meth:`_locate_ring_for_plan`；给了就先只找这个号。
+
+        模型对**转过角度**的靶标会读错号（2026-10-29 现场：同一张 1 号环 5 帧读成 2/3 号，
+        环心一直是准的），而按示教姿态逐环放的流程本来就知道这一格是几号。这时不能因为
+        模型不认这个号就把整段闭环抛出去：先按号找（读对了就是用对的框），找不到就退回
+        "画面里那个环"——号只影响落料补偿，补偿由调用方按姿态给。
+        """
+        if assume_digit is None:
+            return self._locate_ring_for_plan(
+                source, timeout=timeout, require_digit=require_digit, settle=settle
+            )
+        try:
+            return self._locate_ring_for_plan(
+                source, timeout=timeout, require_digit=assume_digit, settle=settle
+            )
+        except VisualServoError:
+            return self._locate_ring_for_plan(
+                source, timeout=timeout, require_digit=require_digit, settle=settle
+            )
 
     def _locate_ring_for_plan(
         self, source, *, timeout, require_digit, settle: bool = False
@@ -1012,13 +1080,20 @@ class Grasp:
             y_mm=self._target.y_mm + offset_y,
         )
 
-    def _plan_for_ring(self, arm, target, *, scale_mm_per_px):
-        """一帧已定位的环 → 各轴绝对位置（闭环与单次计划共用这一处）。"""
+    def _plan_for_ring(self, arm, target, *, scale_mm_per_px, ring_digit: int | None = None):
+        """一帧已定位的环 → 各轴绝对位置（闭环与单次计划共用这一处）。
+
+        ``ring_digit`` 给了就按这个号取落料补偿（按示教姿态放的场合：环号是已知的），
+        这时模型读出来的号只当参考。
+        """
         reading = self._ring_reading_in_jacobian_units(
             target, target.reading(), scale_mm_per_px
         )
         return self._plan_from_reading(
-            arm, reading, digit=int(target.digit), score=float(target.score)
+            arm,
+            reading,
+            digit=int(target.digit) if ring_digit is None else int(ring_digit),
+            score=float(target.score),
         )
 
     def _plan_from_reading(self, arm, reading, *, digit, score=None):

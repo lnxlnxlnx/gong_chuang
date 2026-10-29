@@ -578,6 +578,87 @@ class ClosedLoopTests(unittest.TestCase):
             grasp.align_ring()
 
 
+class AssumedDigitTests(unittest.TestCase):
+    """按示教姿态逐环放的流程：这一格是几号环**已经知道**，模型读错号不该让整段失败。
+
+    2026-10-29 现场就是这种取景：一张转过角度的 1 号靶标，模型 5 帧全读成 2/3 号，环心
+    却一直是准的（框内椭圆精修散布 0.7 px）。按号筛框（``require_digit``）只会得到
+    "画面里没有环"。
+    """
+
+    class Misread:
+        """模型永远报 2 号，环心跟着假臂走。"""
+
+        def __init__(self, arm) -> None:
+            self.arm = arm
+            self.digits: list = []
+
+        def locate_ring(self, *, timeout=None, digit=None):
+            self.digits.append(digit)
+            return RingTarget(
+                center_px=(640.0, 360.0),
+                radius_px=250.0,
+                digit=2,
+                score=0.8,
+                clipped=False,
+                x_mm=self.arm.reading[0],
+                y_mm=self.arm.reading[1],
+                scale_mm_per_px=1.0,
+                scale_source="depth/focal",
+            )
+
+    def build(self):
+        """1 号环的落料补偿是 7.5 mm、2 号是 0：从落点就能看出用的是哪一份。"""
+        arm = SimulatedPlantArm(JACOBIAN)
+        grasp = Grasp(
+            config=VisualServoConfig(
+                ring_offsets_mm=((7.5, 0.0), (0.0, 0.0), (0.0, 0.0)),
+            ),
+            selector=MaterialSelector(),
+            target=VisualServoTarget(x_mm=0.0, y_mm=0.0),
+            jacobian=JACOBIAN,
+            lift_scale=None,
+        )
+        source = self.Misread(arm)
+        grasp._arm = arm
+        grasp._source = source
+        return grasp, arm, source
+
+    def test_a_misread_digit_still_aligns_with_the_taught_ring_offset(self) -> None:
+        grasp, arm, source = self.build()
+
+        result = grasp.align_ring(assume_digit=1, gain=1.0)
+
+        self.assertTrue(result.aligned, result.summary())
+        self.assertEqual(result.digit, 1)
+        # 补偿取 1 号那份（7.5 mm），不是模型说的 2 号（0 mm）
+        self.assertAlmostEqual(arm.reading[0], 7.5, delta=0.1)
+        self.assertIn("模型读成 2 号", result.note)
+        self.assertIn(1, source.digits, "先按姿态给的号找")
+        self.assertIn(None, source.digits, "读不出这个号才退回画面里那个环")
+
+    def test_a_matching_digit_is_not_reported_as_a_misread(self) -> None:
+        grasp, _arm = make_closed_loop(1.0)   # 这个源报的就是 2 号
+
+        result = grasp.align_ring(assume_digit=2, gain=1.0)
+
+        self.assertTrue(result.aligned, result.summary())
+        self.assertNotIn("模型读成", result.note)
+
+    def test_a_strict_ring_number_still_refuses_a_misread(self) -> None:
+        grasp, arm, _source = self.build()
+
+        with self.assertRaisesRegex(VisualServoError, "不是要求的 1 号"):
+            grasp.align_ring(require_digit=1, gain=1.0)
+        self.assertEqual(arm.moves, [], "号不对时一步都不该走")
+
+    def test_the_two_notions_of_ring_number_cannot_be_mixed(self) -> None:
+        grasp, _arm, _source = self.build()
+
+        with self.assertRaisesRegex(ValueError, "只能给一个"):
+            grasp.align_ring(require_digit=1, assume_digit=1)
+
+
 class RingSettleTests(unittest.TestCase):
     """底座摆完还在抖：读数没稳就拿来算步长，抖动会被放大成来回摆。"""
 

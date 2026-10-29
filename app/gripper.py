@@ -815,11 +815,13 @@ def place_material_from_repo_to_floor_by_pose(
         for order in orders:
             move_axes_to(robot, {"lift": ring_position[order - 1][1], "extension": ring_position[order - 1][2], "base": ring_position[order - 1][0]}).wait()
             time.sleep(1)  # 先让车停稳
-            # require_digit：这一格本来就是 order 号环；模型读错号时 offset 会换成
-            # 别的环的补偿（相差十几毫米），读数看着对准、实际落点却偏。
+            # assume_digit：这一格按示教姿态就是 order 号环。模型对转过角度的靶标会读错号
+            # （2026-10-29 现场：1 号环 5 帧全读成 2/3 号，环心一直是准的），用
+            # require_digit 按号筛框只会让整段失败；环心照样由模型给，落料补偿按 order 取。
             result = robot.grasp.align_ring(
-                tolerance_mm=2, max_iterations=5, require_digit=order
+                tolerance_mm=2, max_iterations=5, assume_digit=order
             )
+            print("  " + result.summary())
             base_deg = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
             position = {"base": base_deg, "extension": extension_deg}
