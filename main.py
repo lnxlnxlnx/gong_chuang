@@ -152,8 +152,8 @@ def run_map():
         
         # robot.chassis.rotate_cw(pulses=4510*4)
         ###############
-        place_and_grab_material(robot)
-        # grab_material_from_turntable_to_repo(robot)
+        # place_and_grab_material(robot)
+        grab_material_from_turntable_to_repo(robot)
         input("结束!!!!!!!!!!!!!!!")
         
         ###################
