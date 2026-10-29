@@ -55,6 +55,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
+from statistics import median
 from typing import TYPE_CHECKING, TypedDict
 
 from modules.grasp.drive.visual_servo_model import (
@@ -779,7 +780,14 @@ class Grasp:
                     plan.reading[1] - previous_reading[1],
                 )
                 denominator = predicted[0] ** 2 + predicted[1] ** 2
-                if denominator > 1e-12:
+                predicted_length = math.hypot(predicted[0], predicted[1])
+                # 小步里背隙和读数噪声占大头：拿这种步去学响应比，scale 会被推到
+                # 0.2 或 5，下一步直接过冲/原地磨。低于这个量级只走、不学。
+                min_learn_mm = max(
+                    4.0 * self._config.settle_tolerance_mm,
+                    2.0 * self._config.min_step_mm,
+                )
+                if denominator > 1e-12 and predicted_length >= min_learn_mm:
                     response = (
                         measured[0] * predicted[0] + measured[1] * predicted[1]
                     ) / denominator
@@ -831,11 +839,28 @@ class Grasp:
                     _move_axis(arm, axis, delta)
                     moved = True
             if moved:
-                final_reading = best_reading
+                # 退回到位后**重新量一次**（取中位数）：退回前的旧读数可能已经过时，
+                # 而且它只说明"当时误差最小"，不说明现在真的停在了那里。
+                fresh = None
+                try:
+                    measured = self._locate_ring_for_plan(
+                        source,
+                        timeout=timeout,
+                        require_digit=require_digit,
+                        settle=True,
+                    )
+                    fresh = measured.reading()
+                except VisualServoError:
+                    fresh = None
+                reading_for_plan = best_reading if fresh is None else fresh
+                final_reading = reading_for_plan
                 # 计划按**退回来之后**的姿态重算：``plan`` 的读数、误差、绝对位置都得是
                 # 现在这个姿态的，否则后面照着 plan 落料会整体偏。
                 final_plan = self._plan_from_reading(
-                    arm, best_reading, digit=best_plan.digit, score=best_plan.score
+                    arm,
+                    reading_for_plan,
+                    digit=best_plan.digit,
+                    score=best_plan.score,
                 )
                 note = (note + "；" if note else "") + (
                     f"已退回误差最小的姿态（{best_error:.1f} mm）"
@@ -850,6 +875,13 @@ class Grasp:
                 final_reading[0] - ring_target.x_mm,
                 final_reading[1] - ring_target.y_mm,
             )
+            # 退回后复测已经在容差内：这就是对准了，别因为"走满步数"的旧结论
+            # 让上层不敢抓/不敢放。
+            if not aligned and final_error <= tolerance:
+                aligned = True
+                note = (note + "；" if note else "") + (
+                    f"退回后复测已在容差内（{final_error:.1f} mm）"
+                )
         return RingAlignResult(
             steps=tuple(steps),
             aligned=aligned,
@@ -865,7 +897,7 @@ class Grasp:
         )
 
     #: 等环心读数停稳时最多连读几帧。3 帧够滤掉底座摆完的那点余振，又不会在
-    #: "一直等不到稳定"时卡住——等不到就用最后一帧，和现在完全一样。
+    #: "一直等不到稳定"时卡住——读到的几帧取中位数，噪声按 √n 降。
     RING_SETTLE_READS = 3
     #: 一帧读不出可用的环时连读几帧再认输。模型偶尔会把相邻两个环读成同一号
     #: （``RingTargetLocator._digit_clash`` 会让整帧编号作废），而下一帧通常就正常；
@@ -882,12 +914,19 @@ class Grasp:
         就去测下一帧，而底座是大惯量摆动，那点时间不够；读数抖 1–2 px，下一步的步长是
         **按这个读数算的**，于是抖动量直接变成来回摆。单帧定位（``plan_ring``）保持一帧，
         那条路是人看着按的，多读几帧只是白等。
+
+        拿到的几帧**取中位数**再返回（不是用最后一帧）：停稳判据只保证"够近"，噪声仍在，
+        中位数才是这几帧里最可信的估计；帧数不变，只是别再白读。
         """
         target = self._validated_ring(
             source, timeout=timeout, require_digit=require_digit
         )
         if not settle:
             return target
+        # 环心本身就有噪声（模型框 + 椭圆精修，实测中位 2.2 px、最坏 7.7 px）：
+        # 停稳判据只是"两帧够近就收工"，不代表最后一帧最可信。把读到的这几帧
+        # 取中位数再拿去解算，噪声按 √n 降，而帧数一点没多花。
+        targets = [target]
         previous = target.reading()
         for _ in range(self.RING_SETTLE_READS - 1):
             if previous is None:
@@ -895,14 +934,21 @@ class Grasp:
             following = self._validated_ring(
                 source, timeout=timeout, require_digit=require_digit
             )
+            targets.append(following)
             reading = following.reading()
-            target = following
             if reading is not None and math.hypot(
                 reading[0] - previous[0], reading[1] - previous[1]
             ) <= self._config.settle_tolerance_mm:
                 break
             previous = reading
-        return target
+        readings = [item.reading() for item in targets if item.reading() is not None]
+        if not readings:
+            return targets[-1]
+        return replace(
+            targets[-1],
+            x_mm=median(reading[0] for reading in readings),
+            y_mm=median(reading[1] for reading in readings),
+        )
 
     def _validated_ring(self, source, *, timeout, require_digit):
         """一帧环心 + 三项校验（有环 / 读数可用 / 环号对得上）；坏帧会重读几帧。

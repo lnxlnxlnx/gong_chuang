@@ -401,19 +401,19 @@ class SimulatedPlantArm:
         self.reading[1] += moved[1]
 
     # ``_move_axis`` 只会调这四个方向原语，且 ``wait=False``（不等，返回的耗时是 0）。
-    def rotate_cw(self, pulses, wait=False):
+    def rotate_cw(self, pulses, wait=False, **_kwargs):
         self._apply("base", int(pulses))
         return Mock(estimated_seconds=0.0)
 
-    def rotate_ccw(self, pulses, wait=False):
+    def rotate_ccw(self, pulses, wait=False, **_kwargs):
         self._apply("base", -int(pulses))
         return Mock(estimated_seconds=0.0)
 
-    def move_forward(self, pulses, wait=False):
+    def move_forward(self, pulses, wait=False, **_kwargs):
         self._apply("extension", int(pulses))
         return Mock(estimated_seconds=0.0)
 
-    def move_backward(self, pulses, wait=False):
+    def move_backward(self, pulses, wait=False, **_kwargs):
         self._apply("extension", -int(pulses))
         return Mock(estimated_seconds=0.0)
 
@@ -539,6 +539,16 @@ class ClosedLoopTests(unittest.TestCase):
         self.assertAlmostEqual(arm.reading[0], 30.0, delta=1.0)
         self.assertAlmostEqual(arm.reading[1], 20.0, delta=1.0)
 
+    def test_a_small_step_does_not_update_the_response_scale(self) -> None:
+        """1 mm 的步子被背隙/噪声主导：只走，不拿它去学响应比（否则 scale 被带飞）。"""
+        grasp, arm = make_closed_loop(1.0)
+        arm.reading = [1.0, 0.0]
+
+        result = grasp.align_ring(tolerance_mm=0.2, max_iterations=2, gain=1.0)
+
+        self.assertTrue(result.aligned, result.summary())
+        self.assertIsNone(result.response, "小于约 2 mm 预测位移的步子不参与学习")
+
     def test_an_unknown_axis_is_rejected_before_any_motion(self) -> None:
         grasp, arm = make_closed_loop(1.0)
         with self.assertRaisesRegex(ValueError, "lift"):
@@ -597,18 +607,20 @@ class RingSettleTests(unittest.TestCase):
         self.assertAlmostEqual(target.reading()[0], 3.0, places=6)
 
     def test_it_reads_through_a_jittering_frame(self) -> None:
+        """三帧读数取中位数，不是用最后一帧——最后一帧只是"够近"，不代表最可信。"""
         source = self.Jittery([(3.0, 0.0), (5.0, 0.0), (5.05, 0.02)])
         target = self.locate(source)
 
         self.assertEqual(source.calls, 3)
-        self.assertAlmostEqual(target.reading()[0], 5.05, places=6)
+        self.assertAlmostEqual(target.reading()[0], 5.0, places=6)
+        self.assertAlmostEqual(target.reading()[1], 0.0, places=6)
 
     def test_never_settling_still_stops_at_the_read_limit(self) -> None:
         source = self.Jittery([(1.0, 0.0), (50.0, 0.0), (100.0, 0.0)])
         target = self.locate(source)
 
-        self.assertEqual(source.calls, 3)   # 有上限：等不到稳定就用最后一帧
-        self.assertAlmostEqual(target.reading()[0], 100.0, places=6)
+        self.assertEqual(source.calls, 3)   # 有上限：等不到稳定就读满三帧
+        self.assertAlmostEqual(target.reading()[0], 50.0, places=6)
 
 
 if __name__ == "__main__":
