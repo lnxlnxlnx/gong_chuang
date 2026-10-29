@@ -95,7 +95,7 @@ DEFAULT_SCENE_STABLE_POLL_SECONDS = 0.3
 #: 一次判断只连拍 4 帧（约 130 ms），"这一眼没动"太便宜：转盘刚接到转动指令、物块正要
 #: 被带走之前，画面也能看着是静的，照这一眼放行就会跑过去扑空。所以头几眼的静止一律
 #: 不作数，看满这段窗口——足够把"物块要被带走"那次运动等出来，再等它停下来。
-DEFAULT_SCENE_STABLE_MIN_SECONDS = 4.1
+DEFAULT_SCENE_STABLE_MIN_SECONDS = 4.8
 
 if TYPE_CHECKING:
     from modules.vision.drive.camera import USBCamera as Camera

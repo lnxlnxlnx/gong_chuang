@@ -363,7 +363,11 @@ def square_chassis_to_ring_row(
     yaw = 0.0
     residual = 0.0
     for attempt in range(1, max(1, int(max_iterations)) + 1):
-        row, _middle = _read_ring_row(robot)
+        try:
+            row, _middle = _read_ring_row(robot)
+        except RuntimeError as problem:
+            print(f"  第 {attempt} 帧读三环直线失败：{problem}")
+            return 0.0
         yaw = row.yaw_deg
         residual = yaw - yaw_offset_deg
         # 先结算上一步：车真的转了多少度；一步都没转就别再猜。
@@ -805,7 +809,7 @@ def place_material_from_repo_to_floor_by_pose(
     """
     robot.arm.move_axis_to_motor_degrees("lift", 400)
     _go_home(robot, home)
-    ring_position = [(-190, 800, 690), (-32, 800, 540), (100, 800, 690)]
+    ring_position = [(-200, 800, 700), (-32, 800, 540), (130, 800, 700)]
     res = []
     try:
         for order in orders:
