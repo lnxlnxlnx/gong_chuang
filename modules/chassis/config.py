@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -71,6 +71,8 @@ class HardwareProfile:
     chassis_pause: float
     rpm: int
     mm_per_wheel_rev: Optional[float] = None
+    #: 每轮有效行程增益；空 = 不修正（等价于四轮都是 1.0），见 :func:`_wheel_gains`。
+    wheel_gains: Mapping[WheelPosition, float] = field(default_factory=dict)
 
 
 def load_profile(
@@ -122,6 +124,7 @@ def load_profile(
     mm_per_wheel_rev = _optional_positive_number(
         vehicle.get("mm_per_wheel_rev"), "vehicle.mm_per_wheel_rev"
     )
+    wheel_gains = _wheel_gains(vehicle.get("wheel_gains"), "vehicle.wheel_gains")
 
     individual = _mapping(
         profile.get("individual_wheels"), f"profiles.{profile_name}.individual_wheels"
@@ -149,6 +152,7 @@ def load_profile(
         chassis_pause=_number(chassis.get("pause"), "chassis_motion.pause", minimum=0),
         rpm=rpm,
         mm_per_wheel_rev=mm_per_wheel_rev,
+        wheel_gains=wheel_gains,
     )
 
 
@@ -176,6 +180,26 @@ def _wheel_mapping(value: object, name: str, *, allow_negative: bool) -> dict[Wh
     return {
         WheelPosition[wheel_name]: _integer(
             mapping[wheel_name], f"{name}.{wheel_name}", minimum=minimum, maximum=255
+        )
+        for wheel_name in _WHEEL_NAMES
+    }
+
+
+def _wheel_gains(value: object, name: str) -> dict[WheelPosition, float]:
+    """可选的每轮有效行程增益：``null``/缺失 = 不修正（四轮默认 1.0）。
+
+    实测"四轮同样脉冲、车却稳定画了一段弧"时填这里：偏快那侧（车头转向的反侧）
+    给 <1，两侧对称地各分一半。整键缺失不报错——没标定就是没修正，和 ``mm_per_wheel_rev`` 同理；
+    但一旦写了就要求四个轮子齐全，避免漏一轮时静默按 1.0 跑。
+    """
+    if value is None:
+        return {}
+    mapping = _mapping(value, name)
+    if set(mapping) != set(_WHEEL_NAMES):
+        raise ValueError(f"{name} must define exactly: {', '.join(_WHEEL_NAMES)}")
+    return {
+        WheelPosition[wheel_name]: _number(
+            mapping[wheel_name], f"{name}.{wheel_name}", minimum=0, exclusive=True
         )
         for wheel_name in _WHEEL_NAMES
     }

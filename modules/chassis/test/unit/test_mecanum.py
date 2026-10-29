@@ -184,6 +184,33 @@ class WheelSignTests(MecanumDriveTests):
         self.assert_wheel_speeds((1, -1, 1, 1), rpm=60)
 
 
+class WheelGainTests(MecanumDriveTests):
+    def test_wheel_gains_trim_the_fast_side_and_keep_signs(self) -> None:
+        car = MecanumDrive(
+            "/dev/ttyUSB0",
+            serial_port=FakeSerial(),
+            motion_transform="calibrated",
+            wheel_gains={
+                WheelPosition.FL: 0.99,
+                WheelPosition.FR: 1.01,
+                WheelPosition.RL: 0.99,
+                WheelPosition.RR: 1.01,
+            },
+        )
+
+        # 右侧吃满 10000，左侧按增益少 2%：直行时"往右画弧"被反向抵消，符号不动
+        self.assertEqual(
+            car.forward(rpm=200, pulses=10000, wait=False),
+            [-9802, -10000, 9802, -10000],
+        )
+
+    def test_rejects_non_positive_gain(self) -> None:
+        with self.assertRaisesRegex(ValueError, "wheel_gains"):
+            MecanumDrive(
+                "/dev/ttyUSB0", serial_port=FakeSerial(), wheel_gains={WheelPosition.FL: 0}
+            )
+
+
 class ConvenienceMethodTests(MecanumDriveTests):
     def test_forward_wraps_drive(self) -> None:
         self.car.forward(rpm=60)

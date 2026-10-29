@@ -19,7 +19,9 @@
 装配后若某方向反了，优先在高层修正，不用改协议层:
   1. 整车主向完全不符  → 构造/配置时用 motion_transform="calibrated"，走 _MATRIX_CALIBRATED 标定表；
   2. 辊子排布不同        → 构造时换 pattern="O"；
-  3. 单轮转向反了        → 在 wheel_signs 里给该轮 -1。
+  3. 单轮转向反了        → 在 wheel_signs 里给该轮 -1；
+  4. 直行稳定偏向一侧    → 在 wheel_gains 里把偏快那侧（车头转向的反侧）给一个 <1 的系数，
+                          两侧各分一半，总速度不变。
 """
 
 from __future__ import annotations
@@ -117,6 +119,7 @@ class MecanumDrive:
         motor_ids: Mapping[WheelPosition, int] | None = None,
         *,
         wheel_signs: Mapping[WheelPosition, int] | None = None,
+        wheel_gains: Mapping[WheelPosition, float] | None = None,
         acceleration: int = 10,
         pattern: str = "X",
         rotation_gain: float = 1.0,
@@ -152,6 +155,13 @@ class MecanumDrive:
         )
         # 单轮转向修正：装配后某轮方向反了就给 -1，否则 +1
         self.wheel_signs = dict(wheel_signs or {wheel: +1 for wheel in WHEEL_ORDER})
+        # 每轮有效行程增益（默认 1.0）：四轮同样的脉冲，实际走得多的那侧系数给 <1。
+        # 麦轮的偏航只由左右两组的差决定，所以"直行画弧"用一个左右差就能补掉；
+        # 物理病因（轮径差、单侧承重滑移）留在机械上，这里只把可见的偏差拉直。
+        gains = dict(wheel_gains or {})
+        self.wheel_gains = {wheel: float(gains.get(wheel, 1.0)) for wheel in WHEEL_ORDER}
+        if any(not math.isfinite(gain) or gain <= 0 for gain in self.wheel_gains.values()):
+            raise ValueError("wheel_gains 必须是有限正数")
         self.acceleration = acceleration
         # 调用方没给 rpm 时用这个默认轮速（配置的 vehicle.rpm）；None = 每次都必须显式给。
         self.default_rpm = default_rpm
@@ -498,7 +508,10 @@ class MecanumDrive:
         else:
             matrix = _MATRIX_O if self.pattern == "O" else _MATRIX_X
         w = omega * self.rotation_gain
-        return [a * vx + b * vy + c * w for a, b, c in matrix]
+        return [
+            self.wheel_gains[wheel] * (a * vx + b * vy + c * w)
+            for wheel, (a, b, c) in zip(WHEEL_ORDER, matrix)
+        ]
 
     def stop(self) -> None:
         """四个轮子全部立即停止（EStop）。"""

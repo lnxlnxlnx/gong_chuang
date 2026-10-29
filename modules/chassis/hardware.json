@@ -12,6 +12,12 @@
       "RL": 1,
       "RR": 1
     },
+    "wheel_gains": {
+      "FL": 0.9955,
+      "FR": 1.0045,
+      "RL": 0.9955,
+      "RR": 1.0045
+    },
     "expect_ack": true,
     "pattern": "X",
     "motion_transform": "calibrated",

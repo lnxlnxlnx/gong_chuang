@@ -139,6 +139,7 @@ class MecanumChassis:
             port,
             motor_ids=profile.motor_ids,
             wheel_signs=profile.wheel_signs,
+            wheel_gains=profile.wheel_gains,
             acceleration=profile.acceleration,
             pattern=profile.pattern,
             rotation_gain=profile.rotation_gain,

@@ -41,6 +41,7 @@ def _create_drive(
         port if port is not None else load_bus_config().port,
         motor_ids=profile.motor_ids,
         wheel_signs=profile.wheel_signs,
+        wheel_gains=profile.wheel_gains,
         acceleration=profile.acceleration if acceleration is None else acceleration,
         pattern=profile.pattern,
         rotation_gain=profile.rotation_gain,
