@@ -151,21 +151,25 @@ def run_map():
         # move_axes_to(robot, {"lift": 950, "base": -80}).wait()  # 先让环进视野
         
         # robot.chassis.rotate_cw(pulses=4510*4)
-        ###############
+        ###############测试区###############
         # place_and_grab_material(robot)
-        grab_material_from_turntable_to_repo(robot)
+        # grab_material_from_floor_to_repo_by_xy(robot)
+        # grab_material_from_turntable_to_repo(robot)
+        robot.chassis.forward(rpm= 60, pulses=23300)
         input("结束!!!!!!!!!!!!!!!")
         
         ###################
+        ###################运行区##########
         # 移动到物料盘
-        # robot.chassis.forward_left(rpm = 60, pulses=4000)      # 90
-        # robot.chassis.forward(rpm=60, pulses=11500)     # 240
+        robot.chassis.forward_left(rpm = 60, pulses=4000)      # 90
+        robot.chassis.forward(rpm=60, pulses=11500)     # 240
 
         # 抓取物料
         grab_material_from_turntable_to_repo(robot)     # 完成后在extension=270的位置
         robot.chassis.rotate_ccw(rpm= 60, pulses=ROTATE_PULSE)
         
         # 移动到粗加工区
+        input("移动到粗加工区")
         # time.sleep(0.3)
         # batch = robot.motion.begin()
         # batch.add(robot.chassis.forward(rpm= 60, pulses=22500, wait=False))
@@ -173,14 +177,18 @@ def run_map():
         # batch.wait()
         
         # place_and_grab_material(robot)
-        robot.chassis.forward(rpm= 60, pulses=22500)
+        robot.chassis.forward(rpm= 60, pulses=23300)
         robot.chassis.left(rpm= 60, pulses=1600)
         move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
         move_axes_to(robot, {"lift": 950, "base": -80}).wait()  # 先让环进视野
         square_chassis_to_ring_row(robot)
         center_chassis_on_ring(robot, require_digit=2)
         robot.chassis.left(pulses=500)
-        place_material_from_repo_to_floor_by_pose(robot)
+        try:
+            place_material_from_repo_to_floor_by_pose(robot)
+        except VisualServoError as e:
+            robot.chassis.forward(rpm= 60, pulses=500)
+            place_material_from_repo_to_floor_by_pose(robot)
         grab_material_from_floor_to_repo_by_xy(robot)
         # 到细加工区
         # robot.chassis.right(rpm = 60, pulses=13200)
