@@ -509,16 +509,17 @@ class Grasp:
         coarse_step_seconds: float | None = None,
         gain: float | None = None,
         acceleration: int | None = None,
+        rpm: int | None = None,
         lost_base_pulses: int | None = None,
         lost_retract_pulses: int | None = None,
     ) -> VisualServoResult:
         """**跟着走起来的物料走**，直到料自己停住：不动升降、只动平面。
 
         循环在 :func:`modules.grasp.drive.eye_in_hand.follow_material_xy` 里：
-        **每轮取一帧、走一步**；误差大时按 ``coarse_step_seconds`` 一大步吃掉，误差小了
-        再按 ``step_seconds`` 细跟（底座一步最多约 49 mm / 35 mm）。
+        **短位置段与下一帧采集重叠**；误差大时也及时更新方向，退出前等最后一段完成。
 
-        "料停住"= 这一步不需要发动作、读数也不变，**并且**整幅画面静止
+        首次看见指定物料后至少连续跟随四秒，跟丢重新计时；随后仍须满足：
+        这一步不需要发动作、读数也不变，**并且**整幅画面静止
         （本机 ``Vision.scene_stable()``）。只看读数会在跟得准时误判：相机装在爪上，
         料还在走、读数本来就不变。跟丢（转出去／被爪影挡住）的那几帧不算失败。
 
@@ -537,8 +538,9 @@ class Grasp:
             不在也不影响：精确对准由 :meth:`align_xy_for_turntable` 接手。
         :param step_seconds: 细跟一步允许走多久（秒）；``None`` 用默认。
         :param coarse_step_seconds: 误差大于 ``coarse_error_mm`` 时的粗调档；``None`` 用默认。
-        :param gain: 过冲系数（默认 1.4）：料在动时多冲一点，少追几步；1.0 = 不过冲。
+        :param gain: 每帧误差修正比例（默认 0.7）。
         :param acceleration: 加减速档位 0..255；越小越柔和，但起转越慢。``None`` 用默认。
+        :param rpm: 跟随转速；``None`` 用 40 rpm，仅影响这次跟随。
         :param lost_base_pulses: 丢料盲扫时底座每次转多少脉冲（正 = CW）；``None`` 用默认，
             给 0 关掉底座盲扫。
         :param lost_retract_pulses: 丢料盲扫时伸缩每次回收多少脉冲；``None`` 用默认，
@@ -552,6 +554,7 @@ class Grasp:
             FOLLOW_GAIN,
             FOLLOW_LOST_BASE_PULSES,
             FOLLOW_LOST_RETRACT_PULSES,
+            FOLLOW_RPM,
             FOLLOW_STEP_SECONDS,
             follow_material_xy,
         )
@@ -574,6 +577,7 @@ class Grasp:
             ),
             gain=FOLLOW_GAIN if gain is None else gain,
             acceleration=FOLLOW_ACCELERATION if acceleration is None else acceleration,
+            rpm=FOLLOW_RPM if rpm is None else rpm,
             lost_base_pulses=(
                 FOLLOW_LOST_BASE_PULSES
                 if lost_base_pulses is None

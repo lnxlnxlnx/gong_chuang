@@ -46,6 +46,21 @@ class FollowUntilStableTests(unittest.TestCase):
             app_gripper._follow_material_until_stable(robot, "red", timeout=0.05)
 
 
+class FollowGrabGateTests(unittest.TestCase):
+    def test_a_material_that_moves_again_after_alignment_is_not_grabbed(self):
+        robot = make_robot()
+        robot.grasp.align_xy_for_turntable.return_value = SimpleNamespace(
+            aligned=True, summary=lambda: "aligned",
+        )
+        robot.vision.scene_stable.return_value = False
+        result = app_gripper._grab_material_from_turntable(
+            robot, want_color="red", require_stable=True,
+        )
+        self.assertEqual(result, 1)
+        robot.gripper.close_jaws.assert_not_called()
+        robot.arm.move_axis_to_motor_degrees.assert_not_called()
+
+
 class PlaceAfterFollowTests(unittest.TestCase):
     def run_it(self, want_colors=("red",)):
         robot = make_robot()
@@ -68,8 +83,36 @@ class PlaceAfterFollowTests(unittest.TestCase):
         self.assertEqual(follow.call_count, 2)
         self.assertEqual([call.args[1] for call in follow.call_args_list], ["red", "green"])
         self.assertEqual(grab.call_count, 2)
-        self.assertEqual(grab.call_args_list[1].kwargs, {"want_color": "green"})
+        self.assertEqual(
+            grab.call_args_list[1].kwargs,
+            {"want_color": "green", "require_stable": True},
+        )
         self.assertEqual(stow.call_count, 2)
+
+    def test_a_failed_grab_gate_follows_again_before_retrying(self):
+        robot = make_robot()
+        events = []
+
+        def follow(*_args, **_kwargs):
+            events.append("follow")
+
+        def grab(*_args, **_kwargs):
+            events.append("grab")
+            return 1 if events.count("grab") == 1 else 0
+
+        with patch.object(
+            app_gripper, "_follow_material_until_stable", side_effect=follow,
+        ), patch.object(
+            app_gripper, "_grab_material_from_turntable", side_effect=grab,
+        ), \
+                patch.object(app_gripper, "_stow_material_to_repo"), \
+                patch.object(app_gripper, "_go_home"), \
+                patch.object(app_gripper, "move_axes_to"), \
+                patch("builtins.input", return_value=""):
+            app_gripper.grab_material_from_turntable_to_repo_follow(
+                robot, ("red",), home=None,
+            )
+        self.assertEqual(events, ["follow", "grab", "follow", "grab"])
 
     def test_a_follow_timeout_stops_the_whole_run(self) -> None:
         robot = make_robot()

@@ -1261,7 +1261,7 @@ class FollowMaterialTests(unittest.TestCase):
         self.assertGreaterEqual(len(arm.calls), 2, "跟的时候每轮都要发一步")
 
     def test_a_large_error_takes_the_coarse_step(self) -> None:
-        """误差还大时按 ``coarse_step_seconds`` 走一大步，别拆成好几下。"""
+        """大误差允许稍长的短步，但仍按跟随转速和修正比例限幅。"""
         arm = FakeArm(self.JACOBIAN)
         link = DriftingLink()
         config = SingleStepTests.config(max_total_pulses=10_000_000)
@@ -1270,13 +1270,13 @@ class FollowMaterialTests(unittest.TestCase):
                 self.assertRaisesRegex(VisualServoError, "跟了"):
             self.call(arm, link, config=config, timeout=0.05)
 
-        fine = int(
-            algorithms.FOLLOW_STEP_SECONDS * arm.config.rpm
-            * arm.pulses_per_revolution / 60
+        fine = round(
+            int(algorithms.FOLLOW_STEP_SECONDS * algorithms.FOLLOW_RPM
+                * arm.pulses_per_revolution / 60) * algorithms.FOLLOW_GAIN
         )
         coarse = min(
             int(
-                algorithms.FOLLOW_COARSE_STEP_SECONDS * arm.config.rpm
+                algorithms.FOLLOW_COARSE_STEP_SECONDS * algorithms.FOLLOW_RPM
                 * arm.pulses_per_revolution / 60
             ),
             config.parallel_rotation_limit_pulses,
@@ -1324,6 +1324,7 @@ class FollowMaterialTests(unittest.TestCase):
                     VisualServoTarget(x_mm=0.0, y_mm=0.0),
                     SingleStepTests.JACOBIAN,
                     SingleStepTests.config(),
+                    step_seconds=0.2,
                     gain=gain,
                 )
 
@@ -1352,7 +1353,7 @@ class FollowMaterialTests(unittest.TestCase):
             result = self.call(arm, link, timeout=5.0)
 
         self.assertTrue(result.aligned)
-        self.assertEqual(link.fast_reads, 3, "读数一直没变：三帧才够判停")
+        self.assertGreaterEqual(link.fast_reads, 3, "四秒跟随期间持续取帧确认停稳")
         self.assertEqual(link.slow_reads, 0, "跟随不该走会补颜色/霍夫的那条路")
 
     def test_the_scene_must_be_still_before_it_reports_stopped(self) -> None:
@@ -1385,7 +1386,7 @@ class FollowMaterialTests(unittest.TestCase):
         self.assertTrue(result.aligned)
         self.assertTrue(result.unverified, "跟的过程本来就不再验证")
         self.assertGreater(len(arm.calls), 0)
-        self.assertEqual(link.reads, 6, "连续两帧一致就算停住，不多取")
+        self.assertGreaterEqual(link.reads, 6, "读数一致之后仍须跟满四秒")
 
     def test_a_frame_where_the_material_is_missing_does_not_stop_the_follow(self) -> None:
         arm = FakeArm(self.JACOBIAN)
