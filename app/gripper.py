@@ -946,8 +946,8 @@ def place_material_from_repo_to_floor_from_center_ring(
     need_calibrate: bool = False,
     row_yaw_correction_deg: float = 0,      # 往负数调，值越大1环离车越近
     row_normal_base_motor_degrees: float = -17.0,
-    ring3_down_offset_mm: float = 10.0,
-    ring3_right_offset_mm: float = 13,
+    ring3_down_offset_mm: float = 7.6,
+    ring3_right_offset_mm: float = 10.3,
 ):
     """只闭环对准中环一次，按可调补偿角计算三环落点，再从仓库放料。
 
