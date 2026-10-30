@@ -256,6 +256,21 @@ class SmoothFollowTests(unittest.TestCase):
         self.assertTrue(result.aligned)
         self.assertGreaterEqual(clock.now - link.first_seen_at, 4.0)
 
+    def test_a_lost_material_is_not_chased_with_any_motion(self) -> None:
+        """默认盲扫量都是 0：找不到料就**原地不动**，一个底座/伸缩帧都不发。"""
+
+        class NeverSeenLink:
+            error = None
+
+            def frame(self, **_kwargs):
+                return ()
+
+        arm = FakeArm(self.JACOBIAN)
+        with patch.object(algorithms, "time", FollowClock()), \
+                self.assertRaisesRegex(VisualServoError, "跟了"):
+            self.follow(arm, NeverSeenLink(), timeout=1.0)
+        self.assertEqual(arm.calls, [])
+
     def test_a_moving_scene_cannot_finish_after_four_seconds(self):
         clock = FollowClock()
         arm = FakeArm(self.JACOBIAN)

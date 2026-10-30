@@ -941,12 +941,17 @@ def place_material_from_repo_to_floor_from_center_ring(
     need_calibrate: bool = False,
     row_yaw_correction_deg: float = 0.0,
     row_normal_base_motor_degrees: float = -17.0,
+    ring3_right_offset_mm: float = 15.0,
 ):
     """只闭环对准中环一次，按可调补偿角计算三环落点，再从仓库放料。
 
     ``row_yaw_correction_deg`` 直接给环排的方向补偿，单位为输出轴角度（不再除减速比）。
     0° 对应原先以中环朝向为法线的对称算法；此前日志中自动补偿为 -13.21°，
     若该值过矫，可在 0° 与 -13.21° 之间调节。中环落点不受这个参数影响。
+
+    ``ring3_right_offset_mm`` 单独补偿 3 号环的稳定左偏：沿环排 1→3 的方向为正，
+    默认右移 15 mm；0 关闭，负数左移。先在平面坐标中平移，再同时反算底座和伸缩，
+    因而不是只转底座走圆弧，也不会改变 1/2 号环的位置。
 
     1. 摆到 :data:`RING2_APPROACH_POSE`，``align_ring(require_digit=2)`` 闭环对准
        —— 2 号环的位置是**量出来**的；
@@ -960,6 +965,8 @@ def place_material_from_repo_to_floor_from_center_ring(
     digits = _check_order(orders)
     if not math.isfinite(row_yaw_correction_deg):
         raise ValueError("row_yaw_correction_deg 必须是有限的输出轴角度")
+    if not math.isfinite(ring3_right_offset_mm):
+        raise ValueError("ring3_right_offset_mm 必须是有限的毫米数")
     robot.arm.move_axis_to_motor_degrees("lift", 760)
     move_axes_to(robot, RING2_APPROACH_POSE).wait()
     if need_calibrate:
@@ -976,14 +983,18 @@ def place_material_from_repo_to_floor_from_center_ring(
         degrees_per_pulse = 360.0 / arm.pulses_per_revolution
         poses = {2: (base, extension)}
         for digit in (1, 3):
+            lateral_mm = (digit - 2) * spacing
+            if digit == 3:
+                lateral_mm += ring3_right_offset_mm
             step_base, step_extension = _row_step_pulses(
-                robot, spacing_mm=(digit - 2) * spacing,
+                robot, spacing_mm=lateral_mm,
                 radius_mm=radius, middle_yaw_deg=row_yaw_correction_deg,
             )
             poses[digit] = (base + step_base, extension + step_extension)
         print(
             f"2 号环几何基准：当前半径 {radius:.2f} mm；"
-            f"环排补偿角 {row_yaw_correction_deg:+.2f}°（输出轴）"
+            f"环排补偿角 {row_yaw_correction_deg:+.2f}°（输出轴）；"
+            f"3 号环向右补偿 {ring3_right_offset_mm:+.1f} mm"
         )
         for digit in digits:
             base_pulses, extension_pulses = poses[digit]
