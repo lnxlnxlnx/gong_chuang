@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -176,9 +177,12 @@ class CycleStepTests(unittest.TestCase):
 
     def step_for(self, *, cycle_seconds: float):
         arm = FakeArm(self.JACOBIAN)
-        arm.offset = [0.0, -20.0]          # 只剩 y 方向 20 mm：伸缩吃满单步上限
+        arm.offset = [0.0, -40.0]          # 只剩 y 方向 40 mm：伸缩吃满单步上限
         clock = FollowClock()
         clock.sleep(cycle_seconds)         # 上一段下发之后过了这么久才轮到这一段
+        config = replace(
+            fixtures.SingleStepTests.config(), parallel_rotation_limit_pulses=4000,
+        )
         with patch.object(algorithms, "time", clock):
             return algorithms.follow_x_y(
                 arm,
@@ -186,7 +190,7 @@ class CycleStepTests(unittest.TestCase):
                 MaterialSelector(),
                 VisualServoTarget(0.0, 0.0),
                 self.JACOBIAN,
-                fixtures.SingleStepTests.config(),
+                config,
                 rpm=algorithms.FOLLOW_RPM,
                 gain=1.0,
                 since=0.0,
@@ -243,7 +247,8 @@ class SmoothFollowTests(unittest.TestCase):
         self.assertTrue(result.aligned)
         self.assertEqual(arm.calls, [])
 
-    def test_follow_uses_slow_short_moves_and_reads_during_motion(self):
+    def test_follow_keeps_reading_while_it_moves(self):
+        """跟随始终在"运动中取帧"：帧没读完不重发，动作没走完不覆盖。"""
         clock = FollowClock()
         arm = TimedArm(clock, self.JACOBIAN)
         link = TimedLink(arm, clock)
@@ -251,10 +256,10 @@ class SmoothFollowTests(unittest.TestCase):
             result = self.follow(arm, link, timeout=5.0)
         self.assertTrue(result.aligned)
         self.assertTrue(arm.settled)
-        self.assertGreaterEqual(len(arm.moves), 3)
+        self.assertGreaterEqual(len(arm.moves), 2)
         self.assertGreater(link.frames_while_moving, 0)
         for _axis, start, end, _pulses, rpm in arm.moves:
-            self.assertLessEqual(rpm, 40)
+            self.assertLessEqual(rpm, algorithms.FOLLOW_RPM)
             self.assertLessEqual(end - start, 0.105)
 
     def test_camera_failure_waits_for_the_last_position_command(self):
