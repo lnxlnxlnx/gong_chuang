@@ -339,6 +339,8 @@ class VisualServoConfig:
     find_max_steps: int = 10
     #: 等新观测的超时（秒）。
     frame_timeout_seconds: float = 2.0
+    #: 遮挡后沿实测圆弧追踪的最长时间；1.5 秒覆盖当前一次转盘换位。
+    follow_prediction_seconds: float = 1.5
     #: 只接受"接收时刻晚于动作完成时刻"的观测；这里额外留一点余量（秒）。
     frame_margin_seconds: float = 0.0
     #: 连续两次读数相差不超过这个值（毫米）才算"画面停稳了"。
@@ -437,6 +439,11 @@ class VisualServoConfig:
     settle_poll_seconds: float = 0.01
 
     def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.follow_prediction_seconds)
+            or self.follow_prediction_seconds <= 0
+        ):
+            raise ValueError("follow_prediction_seconds 必须为正的有限数")
         # 与 load_visual_servo_config 的判据保持一致：容差、超时、粗调门槛为 0 都没有意义
         # （容差 0 等于要求"分毫不差"，超时 0 等于"根本不等帧"，
         # 粗调门槛 0 等于"永远走粗调"），而 frame_margin_seconds 取 0 是合法的。
@@ -775,6 +782,12 @@ def load_visual_servo_config(config_path: Path = DEFAULT_CONFIG_PATH) -> VisualS
         frame_timeout_seconds=_positive(
             document.get("frame_timeout_seconds", defaults.frame_timeout_seconds),
             "frame_timeout_seconds",
+        ),
+        follow_prediction_seconds=_positive(
+            document.get(
+                "follow_prediction_seconds", defaults.follow_prediction_seconds
+            ),
+            "follow_prediction_seconds",
         ),
         frame_margin_seconds=_non_negative(
             document.get("frame_margin_seconds", defaults.frame_margin_seconds),

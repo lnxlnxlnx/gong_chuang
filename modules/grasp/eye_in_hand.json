@@ -26,6 +26,7 @@
   "max_total_pulses": 10000,
   "probe_pulses": 100,
   "frame_timeout_seconds": 2.0,
+  "follow_prediction_seconds": 1.5,
   "frame_margin_seconds": 0.0,
   "settle_tolerance_mm": 0.4,
   "coarse_settle_tolerance_mm": 3.0,

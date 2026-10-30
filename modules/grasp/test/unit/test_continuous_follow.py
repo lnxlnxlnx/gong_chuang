@@ -1,6 +1,9 @@
 """连续跟随的带时间、编码器和偏心转盘仿真，不连接硬件。"""
 
 import math
+import json
+from pathlib import Path
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,6 +18,7 @@ from modules.grasp.drive.visual_servo_model import (
     VisualServoError,
     VisualServoJacobian,
     VisualServoTarget,
+    load_visual_servo_config,
 )
 from modules.grasp.test.unit.test_eye_in_hand import FollowClock, sighting
 
@@ -73,7 +77,10 @@ class VelocityArm:
 
     def set_velocity(self, base, extension):
         self._advance()
-        self.velocity = tuple(int(max(-50, min(50, v))) for v in (base, extension))
+        limit = self.options["max_rpm"]
+        self.velocity = tuple(
+            int(max(-limit, min(limit, v))) for v in (base, extension)
+        )
         self.commands.append((self.clock.now, *self.velocity))
         return self.velocity
 
@@ -147,6 +154,7 @@ class WorldLink:
 
 
 def follow(arm, link, **kwargs):
+    kwargs.setdefault("rpm", 50)
     return algorithms.follow_material_xy(
         arm,
         link,
@@ -196,8 +204,8 @@ class ContinuousFollowTests(unittest.TestCase):
             patch.object(algorithms, "time", clock),
             self.assertRaises(VisualServoError),
         ):
-            follow(arm, link, timeout=2)
-        late = [v for t, *v in arm.commands if t > 1.5]
+            follow(arm, link, timeout=3)
+        late = [v for t, *v in arm.commands if t > 2.5]
         self.assertTrue(late)
         self.assertTrue(all(v == [0, 0] for v in late))
         self.assertTrue(arm.closed)
@@ -223,9 +231,47 @@ class ContinuousFollowTests(unittest.TestCase):
 
     def test_excess_rpm_is_rejected_before_opening_session(self):
         clock, arm, link = self.rig()
-        with self.assertRaisesRegex(ValueError, "50"):
-            follow(arm, link, rpm=51)
+        with self.assertRaisesRegex(ValueError, "80"):
+            follow(arm, link, rpm=81)
         self.assertFalse(hasattr(arm, "options"))
+
+    def test_80_rpm_reaches_the_bounded_speed_session(self):
+        clock, arm, link = self.rig()
+        with patch.object(algorithms, "time", clock):
+            result = follow(arm, link, rpm=80, timeout=7)
+        self.assertTrue(result.aligned)
+        self.assertEqual(arm.options["max_rpm"], 80)
+
+    def test_occlusion_at_farthest_point_continues_into_retraction(self):
+        """最远点前开始遮挡，回收动作主要发生在丢料0.35秒之后。"""
+        clock, arm, link = self.rig(stop_at=2)
+        geometry = PlanarGeometry(arm.config)
+        radial_start = arm.position[1]
+
+        def rear_arc(**kwargs):
+            clock.sleep(0.04)
+            arm._advance()
+            stamp = clock.now
+            angle = 0.65 * (0.75 - min(stamp, 2.0))
+            x = link.origin_radius - 35 * math.cos(0.65 * 0.75) + 35 * math.cos(angle)
+            y = -35 * math.sin(0.65 * 0.75) + 35 * math.sin(angle)
+            desired, _ = geometry.joints((x, y), (0, 0), arm.position[0])
+            offset = JACOBIAN.displacement_for(
+                arm.position[0] - desired[0], arm.position[1] - desired[1]
+            )
+            clock.sleep(0.04)
+            if 0.76 < stamp < 1.5:
+                return ()
+            return (sighting(4, *offset, stamp=stamp),)
+
+        link.frame_fast = rear_arc
+        with patch.object(algorithms, "time", clock):
+            result = follow(arm, link, rpm=50, timeout=8)
+        hidden_retract = [e for t, b, e in arm.commands if 1.1 < t < 1.5]
+        self.assertTrue(hidden_retract)
+        self.assertTrue(all(e < 0 for e in hidden_retract))
+        self.assertLess(arm.position[1], radial_start)
+        self.assertTrue(result.aligned)
 
     def test_missing_capture_timestamp_fails_and_stops(self):
         clock, arm, link = self.rig()
@@ -344,7 +390,27 @@ class TrajectoryTests(unittest.TestCase):
         geometry = PlanarGeometry(load_arm_config())
         _, speeds = geometry.joints(point, velocity, reference_base=0)
         self.assertLess(speeds[0], 0, "不能把转盘顺时针硬编码成底座顺时针")
-        self.assertIsNone(track.predict(1.01, invisible=True))
+        self.assertIsNone(track.predict(2.15, invisible=True))
+
+    def test_configured_prediction_window_expires_even_for_a_valid_circle(self):
+        track = ClockwiseTrajectory(prediction_seconds=0.6)
+        source = self.observed_arc(-0.7)
+        for stamp, x, y in source.points:
+            track.observe(stamp, (x, y))
+        self.assertIsNotNone(track.predict(1.2, invisible=True))
+        self.assertIsNone(track.predict(1.25, invisible=True))
+
+    def test_prediction_duration_loads_from_motion_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "eye_in_hand.json"
+            path.write_text(
+                json.dumps({"follow_prediction_seconds": 1.2}), encoding="utf-8"
+            )
+            config = load_visual_servo_config(path)
+            self.assertEqual(config.follow_prediction_seconds, 1.2)
+            for duration in (0, -1, float("inf"), float("nan")):
+                with self.subTest(duration=duration), self.assertRaises(ValueError):
+                    VisualServoConfig(follow_prediction_seconds=duration)
 
     def test_counterclockwise_observations_are_not_used_for_blind_motion(self):
         track = self.observed_arc(0.7)

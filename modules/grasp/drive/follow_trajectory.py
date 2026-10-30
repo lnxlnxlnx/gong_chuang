@@ -60,7 +60,10 @@ class PlanarGeometry:
 class ClockwiseTrajectory:
     """窗口内的运动用于前馈；只有实测支持的顺时针圆弧能用于丢料预测。"""
 
-    def __init__(self):
+    def __init__(self, *, prediction_seconds=1.5):
+        if not math.isfinite(prediction_seconds) or prediction_seconds <= 0:
+            raise ValueError("prediction_seconds 必须为正的有限数")
+        self.prediction_seconds = prediction_seconds
         self.points = deque(maxlen=40)
         self.circle = None
         self.velocity = (0.0, 0.0)
@@ -118,7 +121,10 @@ class ClockwiseTrajectory:
 
     def predict(self, stamp, *, invisible=False):
         if not self.points or (
-            invisible and (self.circle is None or stamp - self.last_stamp > 0.35)
+            invisible
+            and (
+                self.circle is None or stamp - self.last_stamp > self.prediction_seconds
+            )
         ):
             return None
         dt = max(0.0, stamp - self.last_stamp)

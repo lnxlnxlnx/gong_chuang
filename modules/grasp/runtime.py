@@ -507,11 +507,11 @@ class Grasp:
         tolerance_mm: float | None = None,
         gain: float = 4.0,
         acceleration: int = 220,
-        rpm: int = 50,
+        rpm: int = 80,
     ) -> VisualServoResult:
         """仅平面连续跟随，停盘后交给精确对准；短时遮挡沿实测顺时针圆弧追踪。
 
-        rpm 最大 50，伸缩电机范围 30..990°，并保留硬件更严格的限位。
+        rpm 最大 80，伸缩电机范围 30..990°，并保留硬件更严格的限位。
         跟随退出时刹停并用编码器对账，随后抓取、回位继续使用位置模式。
         gain 为每秒误差修正比例；高度由调用方预先保证。
         """

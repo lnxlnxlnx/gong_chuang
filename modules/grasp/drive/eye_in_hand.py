@@ -729,7 +729,7 @@ FOLLOW_COARSE_STEP_SECONDS = 0.08
 #: （上一段下发的时刻）后，步长改成按这一轮真实花掉的时间算——这段时间本来就该走掉。
 #: 上限防"某帧卡了 2 s，一步甩出去"：0.4 s 在 80 rpm 下 ≈ 1707 脉冲（38° 底座）。
 FOLLOW_MAX_STEP_SECONDS = 0.4
-#: 短位置段原语的默认转速；连续跟随入口独立限制在 50 rpm。
+#: 短位置段原语的默认转速；连续跟随入口独立限制在 80 rpm。
 FOLLOW_RPM = 100
 #: 从首次看见当前物料起计时；没看见的时间不能算作有效跟随。
 FOLLOW_MIN_SECONDS = 4.0
@@ -1316,7 +1316,7 @@ def follow_material_xy(
     tolerance_mm: Optional[float] = None,
     gain: float = 4.0,
     acceleration: int = 220,
-    rpm: int = 50,
+    rpm: int = 80,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> VisualServoResult:
     """以连续速度跟随平面物料；短时丢料只追实测支持的顺时针圆弧。
@@ -1334,8 +1334,8 @@ def follow_material_xy(
     tolerance = config.tolerance_mm if tolerance_mm is None else float(tolerance_mm)
     if not math.isfinite(tolerance) or tolerance <= 0:
         raise ValueError("tolerance_mm 必须是正数")
-    if isinstance(rpm, bool) or not isinstance(rpm, int) or not 1 <= rpm <= 50:
-        raise ValueError("连续跟随 rpm 必须为 1..50 的整数")
+    if isinstance(rpm, bool) or not isinstance(rpm, int) or not 1 <= rpm <= 80:
+        raise ValueError("连续跟随 rpm 必须为 1..80 的整数")
     if (
         not math.isfinite(timeout)
         or timeout <= 0
@@ -1362,7 +1362,9 @@ def follow_material_xy(
             max(30.0, ref + (radial.minimum - geometry.reference_radius) * scale),
             min(990.0, ref + (radial.maximum - geometry.reference_radius) * scale),
         )
-    trajectory = ClockwiseTrajectory()
+    trajectory = ClockwiseTrajectory(
+        prediction_seconds=config.follow_prediction_seconds
+    )
     say = on_message if on_message is not None else (lambda _message: None)
     scene_stable = getattr(link, "scene_stable", None)
     if not callable(scene_stable):

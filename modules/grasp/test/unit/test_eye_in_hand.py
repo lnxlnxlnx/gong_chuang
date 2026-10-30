@@ -2579,7 +2579,7 @@ class GraspFollowMaterialTests(unittest.TestCase):
             # Continuous follow has its own velocity-loop settings.
             self.assertEqual(kwargs["gain"], 4.0)
             self.assertEqual(kwargs["acceleration"], 220)
-            self.assertEqual(kwargs["rpm"], 50)
+            self.assertEqual(kwargs["rpm"], 80)
             self.assertNotIn("step_seconds", kwargs)
             self.assertNotIn("coarse_step_seconds", kwargs)
             # 按次给的 want 必须真的变成判别条件：否则跟的是配置里那个默认物料。
