@@ -503,11 +503,11 @@ class Grasp:
         self,
         want_color,
         *,
-        timeout: float = 20.0,
+        timeout: float = 90.0,
         tolerance_mm: float | None = None,
         gain: float = 4.0,
         acceleration: int = 220,
-        rpm: int = 50,
+        rpm: int = 80,
     ) -> VisualServoResult:
         """仅平面连续跟随，停盘后交给精确对准；短时遮挡沿实测顺时针圆弧追踪。
 
