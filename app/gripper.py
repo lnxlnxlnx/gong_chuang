@@ -163,7 +163,7 @@ RING_ROW_SQUARE_TOLERANCE_DEG = 1.0
 #: 车头与"相机画面水平轴"的固定差角（度）。装出来的臂不是正对车头时补这个。
 #: 它等于**车头摆正时**该量到的直线倾角：人眼把车头摆到与环排垂直，跑一次
 #: :func:`square_chassis_to_ring_row` 读打印出来的倾角，把那个数填这里。
-ROW_SQUARE_YAW_OFFSET_DEG = 4.89
+ROW_SQUARE_YAW_OFFSET_DEG = 5.01
 #: 还不知道"每脉冲让倾角变多少度"时的第一步试转量（脉冲）。
 ROW_ROTATE_TRIAL_PULSES = 150
 #: 单步最多转多少脉冲：离得再远也别一把扫过去。
@@ -935,11 +935,11 @@ def _align_floor_ring(
 def place_material_from_repo_to_floor_from_center_ring(
     robot: Robot,
     *,
-    orders: tuple[int, int, int] = (1, 2, 3),
+    orders: tuple[int, int, int] = (3, 2, 1),
     place_lift: float = 95.0,
-    tolerance_mm: float = 2.0,
+    tolerance_mm: float = 2,
     need_calibrate: bool = False,
-    row_yaw_correction_deg: float = 0.0,
+    row_yaw_correction_deg: float = -5.5,
     row_normal_base_motor_degrees: float = -17.0,
 ):
     """只闭环对准中环一次，按可调补偿角计算三环落点，再从仓库放料。

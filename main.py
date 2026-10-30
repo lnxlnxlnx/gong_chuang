@@ -165,13 +165,14 @@ def run_map():
         # time.sleep(0.1)
         # robot.chassis.forward(rpm= 60, pulses=11650)
         # move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
-        # move_axes_to(robot, {"lift": 980, "base": -30}).wait()  # 先让环进视野
-        # square_chassis_to_ring_row(robot)
+        move_axes_to(robot, {"lift": 980, "base": -30}).wait()  # 先让环进视野
+        square_chassis_to_ring_row(robot, tolerance_deg=180)
+        input("继续")
         # center_chassis_on_ring(robot, require_digit=2)
         # robot.chassis.left(rpm = 40, pulses = 400)
         # place_and_grab_material(robot)
-        grab_material_from_turntable_to_repo_follow(robot)
-        # place_material_from_repo_to_floor_from_center_ring(robot, need_calibrate=False)
+        # grab_material_from_turntable_to_repo_follow(robot)
+        place_material_from_repo_to_floor_from_center_ring(robot, need_calibrate=False)
         input("结束!!!!!!!!!!!!!!!")
         
         ###################
