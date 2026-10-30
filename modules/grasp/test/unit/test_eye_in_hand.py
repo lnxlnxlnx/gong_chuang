@@ -1268,7 +1268,7 @@ class FollowMaterialTests(unittest.TestCase):
 
         with patch.object(algorithms, "time", FollowClock()), \
                 self.assertRaisesRegex(VisualServoError, "跟了"):
-            self.call(arm, link, config=config, timeout=0.05)
+            self.call(arm, link, config=config, timeout=0.01)
 
         fine = round(
             int(algorithms.FOLLOW_STEP_SECONDS * algorithms.FOLLOW_RPM

@@ -731,11 +731,10 @@ FOLLOW_COARSE_STEP_SECONDS = 0.08
 FOLLOW_MAX_STEP_SECONDS = 0.4
 #: 仅跟随循环使用的转速。
 #:
-#: **40 rpm 追不上转盘**：底座 5:1 减速、3200 脉冲/圈 → 一圈 16000 脉冲，40 rpm 只有
-#: 40*3200/60/16000*360 ≈ **48 °/s**；而转盘一格 120°、1.5 s → **80 °/s**。占空比做到
-#: 100% 也还是落后一半，现场看到的就是"怎么都跟不上"。80 rpm 给 96 °/s，才留出余量。
+#: 底座 5:1 减速时，80 rpm 的标称速度只有 96°/s；转盘一格 120° / 1.5 s = 80°/s，
+#: 短位置段的停稳与串口静默会吃掉这点余量。100 rpm 给 120°/s，为这些间隔留出空间。
 #: 静止料快速对准仍用机械臂配置的转速（那条路不吃跟随这组参数）。
-FOLLOW_RPM = 80
+FOLLOW_RPM = 100
 #: 从首次看见当前物料起计时；没看见的时间不能算作有效跟随。
 FOLLOW_MIN_SECONDS = 4.0
 #: 动作估算里的减速余量；下一条位置指令必须等到这个余量也结束。
@@ -774,6 +773,7 @@ class _FollowMotion:
 
     def __init__(self) -> None:
         self.ready_at = 0.0
+        self.started_at: Optional[float] = None
 
     def wait(self) -> None:
         remaining = self.ready_at - time.monotonic()
@@ -852,6 +852,8 @@ def follow_x_y(
     if _motion is not None:
         # 取帧和推理已经消耗的时间不再重复等待；同轴下一条位置帧必须等上一段结束。
         _motion.wait()
+        # 周期从发指令前算起，不能漏掉驱动器发帧后自身的静默时间。
+        _motion.started_at = time.monotonic()
     offset = (sighting.x_mm, sighting.y_mm)
     error_x = offset[0] - target.x_mm
     error_y = offset[1] - target.y_mm
@@ -893,12 +895,10 @@ def follow_x_y(
         step = max(step, cycle)
     limit = int(step * speed * pulses_per_revolution / 60.0)
     limit = max(1, min(limit, config.parallel_rotation_limit_pulses))
+    # 修正比例只缩放目标误差；限幅后再乘 gain 会连最大追赶速度也压到 70%。
     base_step, radial_step = _plan_planar_step(
-        error_x, error_y, jacobian, config, limit=limit
+        error_x * gain, error_y * gain, jacobian, config, limit=limit
     )
-    if gain != 1.0:
-        base_step = _clamp_pulses(base_step * gain, limit)
-        radial_step = _clamp_pulses(radial_step * gain, limit)
     say(
         f"跟随：误差 {error:.2f} mm → 底座 {base_step:+d}、伸缩 {radial_step:+d} 脉冲"
         f"（单步上限 {limit}"
@@ -909,21 +909,26 @@ def follow_x_y(
     # 实际时长**算（见模块常量）。注意轴名：``BASE_AXIS``/``RADIAL_AXIS`` 是伺服这边的
     # 抽象名（radial 在机械臂上叫 extension），所以这里走方向原语，不拼 ``move_axes``
     # 的轴名字典。
-    _send_axis(arm, BASE_AXIS, base_step, rpm=speed, acceleration=acceleration)
-    if base_step and radial_step:
-        time.sleep(config.inter_frame_seconds)
-    _send_axis(arm, RADIAL_AXIS, radial_step, rpm=speed, acceleration=acceleration)
-    wait = max(
-        estimate_move_seconds(
-            pulses, speed, pulses_per_revolution, acceleration, FOLLOW_SETTLE_SECONDS
+    ready_at = 0.0
+    for axis, pulses in ((BASE_AXIS, base_step), (RADIAL_AXIS, radial_step)):
+        if not pulses:
+            continue
+        if axis == RADIAL_AXIS and base_step:
+            time.sleep(config.inter_frame_seconds)
+        _send_axis(arm, axis, pulses, rpm=speed, acceleration=acceleration)
+        # 两轴的起步时刻不同：各自计时，避免底座也重复等待伸缩的发送间隔。
+        ready_at = max(
+            ready_at,
+            time.monotonic() + estimate_move_seconds(
+                abs(pulses), speed, pulses_per_revolution,
+                acceleration, FOLLOW_SETTLE_SECONDS,
+            ),
         )
-        for pulses in (abs(base_step), abs(radial_step))
-        if pulses
-    )
+        if _motion is not None:
+            # 下一轴发帧失败时，外层 finally 仍需等已经发出的这一轴结束。
+            _motion.ready_at = ready_at
     if _motion is None:
-        time.sleep(wait)
-    else:
-        _motion.ready_at = time.monotonic() + wait
+        time.sleep(max(0.0, ready_at - time.monotonic()))
     return result(base_pulses=base_step, radial_pulses=radial_step)
 
 
@@ -1366,7 +1371,7 @@ def follow_material_xy(
     :param coarse_step_seconds: 误差大于 ``config.coarse_error_mm`` 时用的粗调档。
     :param gain: 每帧误差修正比例（默认 0.7）。
     :param acceleration: 加减速档位 0..255；越小越柔和，但起转越慢、跟得越顿。
-    :param rpm: 跟随转速（默认 40），不修改机械臂其他动作的速度。
+    :param rpm: 跟随转速（默认 100），不修改机械臂其他动作的速度。
     :param lost_frames: 连续丢几帧才开始盲扫（默认 3）。
     :param lost_base_pulses: 盲扫时底座每次转多少脉冲（正 = CW）。**默认 0 = 不扫**。
     :param lost_retract_pulses: 每个丢失片段**一次性**回收多少伸缩脉冲（正数 = 往里缩）。
@@ -1424,13 +1429,14 @@ def follow_material_xy(
                     acceleration=acceleration,
                     rpm=rpm,
                     after=checkpoint,
-                    since=checkpoint,
+                    since=motion.started_at,
                     force=False,
                     on_message=say,
                     _motion=motion,
                 )
             except MaterialMissingError as error:
                 motion.wait()
+                motion.started_at = None
                 # 跟着走的时候"这一帧没看见"是常态：爪影、转出去、运动模糊都算，接着跟。
                 last_error = error
                 previous = None

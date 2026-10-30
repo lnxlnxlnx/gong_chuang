@@ -33,9 +33,10 @@ from modules.motor.drive.motion import estimate_move_seconds
 class TimedArm:
     """按时间推进两轴位置；上一段没结束就重发同轴指令会直接失败。"""
 
-    def __init__(self, clock, jacobian):
+    def __init__(self, clock, jacobian, *, command_seconds=0.0):
         self.clock = clock
         self.jacobian = jacobian
+        self.command_seconds = command_seconds
         self.config = SimpleNamespace(rpm=80)
         self.pulses_per_revolution = 3200
         self.moves = []
@@ -64,6 +65,8 @@ class TimedArm:
         self.moves.append(
             (axis, self.clock.now, self.clock.now + duration, pulses, rpm)
         )
+        # Emm42 在发帧后留静默时间，此时电机已经开始运动。
+        self.clock.sleep(self.command_seconds)
 
     def rotate_cw(self, pulses, *, rpm, acceleration, **_kwargs):
         self._send("base", pulses, rpm, acceleration)
@@ -177,7 +180,7 @@ class CycleStepTests(unittest.TestCase):
 
     def step_for(self, *, cycle_seconds: float):
         arm = FakeArm(self.JACOBIAN)
-        arm.offset = [0.0, -40.0]          # 只剩 y 方向 40 mm：伸缩吃满单步上限
+        arm.offset = [0.0, -80.0]          # 大误差保证 100 rpm 下也能吃满单步上限
         clock = FollowClock()
         clock.sleep(cycle_seconds)         # 上一段下发之后过了这么久才轮到这一段
         config = replace(
@@ -261,6 +264,89 @@ class SmoothFollowTests(unittest.TestCase):
         for _axis, start, end, _pulses, rpm in arm.moves:
             self.assertLessEqual(rpm, algorithms.FOLLOW_RPM)
             self.assertLessEqual(end - start, 0.105)
+
+    def test_a_turntable_step_stays_in_view_with_camera_and_command_latency(self):
+        """120° / 1.5 s 的转盘换位，包含慢取帧和驱动器发帧后的静默。"""
+        clock = FollowClock()
+        arm = TimedArm(clock, self.JACOBIAN, command_seconds=0.03)
+
+        class TurntableLink:
+            error = None
+
+            def __init__(self):
+                self.errors = []
+                self.lost_frames = 0
+
+            def frame_fast(self, **_kwargs):
+                clock.sleep(0.15)
+                x, y = arm.offset
+                # 首帧看见料后开始换位；底座 5:1 减速，80°/s = 3556 脉冲/s。
+                moving_seconds = min(max(clock.now - 0.15, 0.0), 1.5)
+                target_pulses = moving_seconds * 80.0 / 360.0 * 16000
+                x -= target_pulses * arm.jacobian.base_dx
+                self.errors.append(abs(x))
+                if abs(x) > 80.0:
+                    self.lost_frames += 1
+                    return ()
+                return (sighting(4, x, y, stamp=clock.now),)
+
+            def scene_stable(self):
+                return clock.now >= 1.65 and arm.settled
+
+        link = TurntableLink()
+        config = replace(
+            fixtures.SingleStepTests.config(), parallel_rotation_limit_pulses=2800,
+        )
+        with patch.object(algorithms, "time", clock):
+            try:
+                result = algorithms.follow_material_xy(
+                    arm, link, MaterialSelector(), VisualServoTarget(0.0, 0.0),
+                    self.JACOBIAN, config, timeout=8.0,
+                )
+            except VisualServoError as error:
+                self.fail(
+                    f"turntable tracking failed: {error}; "
+                    f"peak error={max(link.errors):.1f} mm, "
+                    f"lost frames={link.lost_frames}"
+                )
+        self.assertTrue(result.aligned)
+        self.assertEqual(link.lost_frames, 0)
+        self.assertTrue(arm.settled)
+
+    def test_a_large_error_does_not_cut_the_available_tracking_speed(self):
+        """远处目标以 80°/s 走一帧，修正后不能离它更远。"""
+        clock = FollowClock()
+        arm = TimedArm(clock, self.JACOBIAN)
+        link = SimpleNamespace(
+            frame_fast=lambda **_kwargs: (sighting(4, -60.0, 0.0),),
+        )
+        with patch.object(algorithms, "time", clock):
+            result = algorithms.follow_x_y(
+                arm, link, MaterialSelector(), VisualServoTarget(0.0, 0.0),
+                self.JACOBIAN, fixtures.SingleStepTests.config(),
+                rpm=algorithms.FOLLOW_RPM,
+            )
+            clock.sleep(max(0.0, 0.1 - clock.now))
+        target_travel = clock.now * 80.0 / 360.0 * 16000 * self.JACOBIAN.base_dx
+        arm_travel, _ = self.JACOBIAN.displacement_for(result.base_pulses, 0)
+        self.assertLessEqual(60.0 + target_travel - arm_travel, 60.0)
+
+    def test_a_short_radial_move_does_not_delay_the_longer_base_move(self):
+        """底座先发、伸缩后发：等待应结束于两轴各自结束时刻的较晚者。"""
+        clock = FollowClock()
+        arm = TimedArm(clock, self.JACOBIAN)
+        link = SimpleNamespace(
+            frame_fast=lambda **_kwargs: (sighting(4, -40.0, -1.0),),
+        )
+        motion = algorithms._FollowMotion()
+        with patch.object(algorithms, "time", clock):
+            algorithms.follow_x_y(
+                arm, link, MaterialSelector(), VisualServoTarget(0.0, 0.0),
+                self.JACOBIAN, fixtures.SingleStepTests.config(), _motion=motion,
+            )
+            finished_at = max(end for _axis, _start, end, _count, _rpm in arm.moves)
+            motion.wait()
+        self.assertAlmostEqual(clock.now, finished_at)
 
     def test_camera_failure_waits_for_the_last_position_command(self):
         clock = FollowClock()
