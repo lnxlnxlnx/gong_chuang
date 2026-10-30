@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
@@ -104,6 +105,9 @@ class AxisConfig:
     #: 它是**每台驱动器的菜单状态**，不是协议事实，所以必须在 hardware.json 里如实声明；
     #: 这个默认值只服务于手工构造的夹具，加载器在没有该键时会直接报错。
     expect_ack: bool = False
+    #: 伸缩轴的实测半径参考，固定在电机坐标系内，不随程序启动位置变化。
+    radius_reference_motor_degrees: Optional[float] = None
+    radius_reference_mm: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -203,6 +207,25 @@ class ArmConfig:
                 "先用实验 B/C 测出电机一圈走多少毫米（见 modules/grasp/docs/抓取坐标链路.md）"
             )
         return value
+
+    def extension_radius_mm(self, pulses: int) -> float:
+        """由当前伸缩脉冲和实测参考求夹持中心到底座转轴的水平距离。"""
+        axis = self.axes["extension"]
+        reference_degrees = axis.radius_reference_motor_degrees
+        reference_mm = axis.radius_reference_mm
+        if reference_degrees is None or reference_mm is None:
+            raise ValueError("axes.extension 缺少 radius_reference 半径标定")
+        if isinstance(pulses, bool) or not isinstance(pulses, int):
+            raise ValueError("extension pulses must be an integer")
+        lead = self.require_mm_per_motor_rev("extension")
+        # 启程读数只声明开机位置；几何参考始终使用标定时的电机坐标。
+        degrees = pulses * 360.0 / self.pulses_per_revolution
+        radius = reference_mm + (degrees - reference_degrees) * lead / 360.0
+        if not math.isfinite(radius) or radius <= 0:
+            raise ValueError(
+                f"extension radius must be finite and positive, got {radius!r}"
+            )
+        return radius
 
     def require_safe_pose(self) -> CylindricalPose:
         """Return the configured safe pose or explain what is missing."""
@@ -461,6 +484,23 @@ def _read_json(path: Path) -> Mapping[str, object]:
 def _axis_config(document: Mapping[str, object], axis_name: str) -> AxisConfig:
     reduction_ratio = document.get("reduction_ratio")
     mm_per_motor_rev = document.get("mm_per_motor_rev")
+    reference_degrees = document.get("radius_reference_motor_degrees")
+    reference_mm = document.get("radius_reference_mm")
+    if reference_degrees is not None or reference_mm is not None:
+        if axis_name != "extension":
+            raise ValueError(f"axes.{axis_name}.radius_reference is not supported")
+        reference_degrees = _number(
+            reference_degrees, "axes.extension.radius_reference_motor_degrees"
+        )
+        reference_mm = _number(reference_mm, "axes.extension.radius_reference_mm")
+        if (
+            not math.isfinite(reference_degrees)
+            or not math.isfinite(reference_mm)
+            or reference_mm <= 0
+        ):
+            raise ValueError(
+                "axes.extension.radius_reference must be finite with positive radius"
+            )
     if axis_name == "base":
         reduction_ratio = _integer(
             reduction_ratio,
@@ -480,6 +520,8 @@ def _axis_config(document: Mapping[str, object], axis_name: str) -> AxisConfig:
         motor_id=_integer(document.get("motor_id"), f"axes.{axis_name}.motor_id", minimum=1, maximum=255),
         reduction_ratio=reduction_ratio,
         mm_per_motor_rev=mm_per_motor_rev,
+        radius_reference_motor_degrees=reference_degrees,
+        radius_reference_mm=reference_mm,
         expect_ack=_boolean(
             document.get("expect_ack", False), f"axes.{axis_name}.expect_ack"
         ),

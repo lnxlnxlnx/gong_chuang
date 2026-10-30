@@ -165,7 +165,7 @@ RING_ROW_SQUARE_TOLERANCE_DEG = 1.0
 #: :func:`square_chassis_to_ring_row` 读打印出来的倾角，把那个数填这里。
 ROW_SQUARE_YAW_OFFSET_DEG = 4.89
 #: 还不知道"每脉冲让倾角变多少度"时的第一步试转量（脉冲）。
-ROW_ROTATE_TRIAL_PULSES = 300
+ROW_ROTATE_TRIAL_PULSES = 150
 #: 单步最多转多少脉冲：离得再远也别一把扫过去。
 ROW_ROTATE_MAX_PULSES = 2000
 #: 一帧看清三环、随后一次性放完三个环之前要摆的姿态（``lift``/``extension``/``base``，
@@ -326,6 +326,19 @@ def _read_ring_row(robot: Robot, *, attempts: int = RING_READ_ATTEMPTS):
         if len(readings) < 2:
             last_problem = "只看到 2 号环，定不出直线（1 号或 3 号要进画面且不贴边）"
             continue
+        middle = targets[2]
+        scale = middle.scale_mm_per_px
+        if scale is None or not math.isfinite(scale) or scale <= 0:
+            raise RuntimeError("三环直线解不出来：2 号环没有有效比例尺")
+        middle_x, middle_y = readings[2]
+        # 各框松紧不同，各自换算毫米会把水平的像素连线扭斜；同帧统一用中环那把尺。
+        readings = {
+            digit: (
+                middle_x + (targets[digit].center_px[0] - middle.center_px[0]) * scale,
+                middle_y + (targets[digit].center_px[1] - middle.center_px[1]) * scale,
+            )
+            for digit in readings
+        }
         row = derive_ring_row(readings, spacing_mm=robot.vision.ring_center_spacing_mm)
         return row, targets[2]
     raise RuntimeError(f"三环直线解不出来：{last_problem}")
@@ -337,7 +350,7 @@ def square_chassis_to_ring_row(
     yaw_offset_deg: float = ROW_SQUARE_YAW_OFFSET_DEG,
     tolerance_deg: float = RING_ROW_SQUARE_TOLERANCE_DEG,
     max_iterations: int = 6,
-    rpm: int = 30,
+    rpm: int = 15,
 ) -> float:
     """转**车**让车头与三环圆心那条直线垂直：读一帧倾角，按实测响应比一步到位。
 
@@ -364,16 +377,13 @@ def square_chassis_to_ring_row(
     yaw = 0.0
     residual = 0.0
     for attempt in range(1, max(1, int(max_iterations)) + 1):
-        try:
-            row, _middle = _read_ring_row(robot)
-        except RuntimeError as problem:
-            print(f"  第 {attempt} 帧读三环直线失败：{problem}")
-            return 0.0
+        row, _middle = _read_ring_row(robot)
         yaw = row.yaw_deg
-        residual = yaw - yaw_offset_deg
+        residual = (yaw - yaw_offset_deg + 90.0) % 180.0 - 90.0
         # 先结算上一步：车真的转了多少度；一步都没转就别再猜。
         if previous is not None and previous[1]:
-            observed = (residual - previous[0]) / previous[1]
+            change = (residual - previous[0] + 90.0) % 180.0 - 90.0
+            observed = change / previous[1]
             if abs(observed) < 1e-6:
                 raise RuntimeError(
                     f"车转了 {previous[1]:+d} 脉冲，直线倾角却一点没变"
@@ -387,14 +397,14 @@ def square_chassis_to_ring_row(
                 f"（目标 {yaw_offset_deg:+.2f}°、残差 {residual:+.2f}°；读了 {attempt} 帧）"
             )
             return residual
-        magnitude = (
-            ROW_ROTATE_TRIAL_PULSES
-            if gain is None
-            else abs(int(round(-residual / gain)))
+        correction = (
+            math.copysign(ROW_ROTATE_TRIAL_PULSES, residual)
+            if gain is None else -residual / gain
         )
+        magnitude = abs(int(round(correction)))
         magnitude = min(max(magnitude, 1), ROW_ROTATE_MAX_PULSES)
-        # 残差为正 = 画面右边那头更低（更靠近车）：顺时针转把它转平。
-        if residual > 0:
+        # 第一段试转后，方向必须服从实测响应，不能把算出的符号丢掉。
+        if correction > 0:
             robot.chassis.rotate_cw(rpm=rpm, pulses=magnitude)
             step = magnitude
         else:
@@ -862,13 +872,6 @@ def place_material_from_repo_to_floor_by_pose(
 #: ``align_ring`` 从这里开始闭环；``ring_offsets`` 的那个补偿也是在这个高度上标出来的。
 RING2_APPROACH_POSE = {"base": -32, "lift": 600, "extension": 540}
 
-#: **2 号环到底座转轴**的水平距离（毫米）。三环是一条直线，横挪一格要靠
-#: "底座转 ``atan(s/r)`` + 伸缩多伸 ``sqrt(r²+s²)−r``" 两条一起走；只转底座就会落在圆弧上。
-#: 现场按三个料的连线调：两端比中间更**靠近车** → 调大；更**远离车** → 调小。
-#: 默认 270 mm 来自 ``radial_mm`` 行程（180–359.1）与 v2 示教底座角（约 26–32°/格）。
-RING_ROW_RADIUS_MM = 270.0
-
-
 def _row_step_pulses(
     robot: Robot, *, spacing_mm: float, radius_mm: float
 ) -> tuple[int, int]:
@@ -888,7 +891,7 @@ def _row_step_pulses(
             "算不出伸缩要伸多少"
         )
     if not radius_mm > 0:
-        raise ValueError(f"RING_ROW_RADIUS_MM 必须是正数（毫米），收到 {radius_mm!r}")
+        raise ValueError(f"radius_mm 必须是正数（毫米），收到 {radius_mm!r}")
     pulses_per_rev = robot.arm.pulses_per_revolution
     base_degrees = math.degrees(math.atan2(spacing_mm, radius_mm))
     base_pulses = round(
@@ -919,7 +922,7 @@ def place_material_from_repo_to_floor_from_center_ring(
        ``place_lift`` 松爪 → 抬起。车不动，中间也不再拍帧。
 
     第 2 步必须**转+伸一起走**：只转底座的话末端是沿圆弧走的，三个料就会落在一条弧上
-    （只调底座是修不好的）。``r`` 就是 :data:`RING_ROW_RADIUS_MM`，按三个料的连线调。
+    （只调底座是修不好的）。``r`` 根据对准后的伸缩位置和硬件配置里的实测半径参考计算。
     """
     digits = _check_order(orders)
     robot.arm.move_axis_to_motor_degrees("lift", 760)
@@ -944,11 +947,12 @@ def place_material_from_repo_to_floor_from_center_ring(
             )
         arm = robot.arm
         spacing = float(robot.vision.ring_center_spacing_mm)
-        step_base, step_extension = _row_step_pulses(
-            robot, spacing_mm=spacing, radius_mm=RING_ROW_RADIUS_MM
-        )
         base = arm.turns_state.of("base").pulses
         extension = arm.turns_state.of("extension").pulses
+        radius = arm.config.extension_radius_mm(extension)
+        step_base, step_extension = _row_step_pulses(
+            robot, spacing_mm=spacing, radius_mm=radius
+        )
         # 三点共线：底座 ∓ 一格，伸缩**两端都多伸一格**。
         poses = {
             1: (base - step_base, extension + step_extension),
@@ -958,6 +962,7 @@ def place_material_from_repo_to_floor_from_center_ring(
         degrees_per_pulse = 360.0 / arm.pulses_per_revolution
         print(
             f"2 号环已对准（残差 {aligned.final_error_mm:.1f} mm）："
+            f"当前半径 {radius:.2f} mm；"
             f"1/3 号 = 底座 -{step_base}/+{step_base} 脉冲、伸缩 +{step_extension} 脉冲"
         )
         for digit in digits:

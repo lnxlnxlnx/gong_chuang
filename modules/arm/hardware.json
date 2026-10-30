@@ -13,6 +13,8 @@
     "extension": {
       "motor_id": 7,
       "mm_per_motor_rev": 61.0,
+      "radius_reference_motor_degrees": 270.0,
+      "radius_reference_mm": 235.0,
       "expect_ack": false
     }
   },

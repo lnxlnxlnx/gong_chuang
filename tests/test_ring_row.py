@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import math
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
 
 import app.gripper as app_gripper
+from modules.arm.config import load_arm_config
 from modules.vision.drive.numbered_ring import (
     RingTarget,
     RingTargetLocator,
@@ -151,14 +153,17 @@ class RowVision:
         unit = (math.cos(yaw), math.sin(yaw))
         return {
             digit: RingTarget(
-                center_px=(640.0, 360.0),
+                center_px=(
+                    640.0 + (digit - 2) * 300.0 * unit[0],
+                    360.0 + (digit - 2) * 300.0 * unit[1],
+                ),
                 radius_px=200.0,
                 digit=digit,
                 score=0.9,
                 clipped=False,
                 x_mm=(digit - 2) * 150.0 * unit[0],
                 y_mm=(digit - 2) * 150.0 * unit[1],
-                scale_mm_per_px=0.2,
+                scale_mm_per_px=0.5,
                 scale_source="ring box",
             )
             for digit in (1, 2, 3)
@@ -186,8 +191,17 @@ class SquareChassisToRingRowTests(unittest.TestCase):
         residual = self.run_it(plant, tolerance_deg=0.5)
 
         self.assertLessEqual(abs(residual), 0.5)
-        # 第一步试转 300 脉冲（10° → -2°），第二步按学到的 -0.04°/脉冲退回 50。
-        self.assertEqual(plant.moves, [app_gripper.ROW_ROTATE_TRIAL_PULSES, -50])
+        # 小步试转后按实测响应一次补齐，避免大步跨过目标再倒回来。
+        self.assertEqual(len(plant.moves), 2)
+        self.assertAlmostEqual(plant.yaw_deg, 0.0, delta=0.5)
+
+    def test_line_angle_wrap_uses_the_shortest_residual(self) -> None:
+        plant = RowPlant(yaw_deg=-89.0)
+
+        residual = self.run_it(plant, yaw_offset_deg=89.0, tolerance_deg=0.5)
+
+        self.assertLessEqual(abs(residual), 0.5)
+        self.assertLessEqual(sum(abs(step) for step in plant.moves), 300)
 
     def test_it_turns_the_other_way_for_a_negative_angle(self) -> None:
         plant = RowPlant(yaw_deg=-10.0)
@@ -196,6 +210,38 @@ class SquareChassisToRingRowTests(unittest.TestCase):
 
         self.assertLessEqual(abs(residual), 1.0)
         self.assertLess(plant.moves[0], 0)
+
+    def test_the_measured_response_determines_turn_direction(self) -> None:
+        plant = RowPlant(yaw_deg=10.0, deg_per_pulse=-0.04)
+
+        residual = self.run_it(plant, tolerance_deg=0.5)
+
+        self.assertLessEqual(abs(residual), 0.5)
+        self.assertAlmostEqual(plant.yaw_deg, 0.0, delta=0.5)
+        self.assertLess(plant.moves[1], 0)
+
+    def test_box_scale_changes_do_not_tilt_a_horizontal_pixel_row(self) -> None:
+        plant = RowPlant(yaw_deg=0.0)
+        robot = make_row_robot(plant)
+        targets = robot.vision.locate_rings()
+        for digit, scale in ((1, 0.3), (2, 0.5), (3, 0.8)):
+            target = targets[digit]
+            u, v = target.center_px[0], target.center_px[1] + 100.0
+            targets[digit] = replace(
+                target, center_px=(u, v), scale_mm_per_px=scale,
+                x_mm=(u - 640.0) * scale, y_mm=(v - 360.0) * scale,
+            )
+        robot.vision = Mock()
+        robot.vision.locate_rings.return_value = targets
+        robot.vision.ring_center_spacing_mm = 150.0
+
+        with patch("time.sleep"):
+            residual = app_gripper.square_chassis_to_ring_row(
+                robot, yaw_offset_deg=0.0
+            )
+
+        self.assertAlmostEqual(residual, 0.0)
+        self.assertEqual(plant.moves, [])
 
     def test_an_already_square_row_moves_nothing(self) -> None:
         plant = RowPlant(yaw_deg=0.0)
@@ -272,13 +318,14 @@ class RowStepPulsesTests(unittest.TestCase):
 
 
 class PlaceMaterialFromCenterRingTests(unittest.TestCase):
-    def run_it(self, orders):
+    def run_it(self, orders, *, extension_pulses=4800):
         robot = Mock()
         robot.vision.ring_center_spacing_mm = 150.0
         robot.arm = RowStepPulsesTests().robot().arm
+        robot.arm.config = load_arm_config()
         robot.arm.turns_state = Mock()
         robot.arm.turns_state.of.side_effect = lambda name: SimpleNamespace(
-            pulses={"base": 1000, "extension": 4800}[name]
+            pulses={"base": 1000, "extension": extension_pulses}[name]
         )
         robot.grasp.align_ring.return_value = SimpleNamespace(
             aligned=True, final_error_mm=0.5, note=""
@@ -307,11 +354,33 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         self.assertGreater(ring1["extension"], ring2["extension"])
         self.assertLess(ring1["base"], ring2["base"])
         self.assertLess(ring2["base"], ring3["base"])
-        # 绝对电机角 = 里程表脉冲 × 360/3200
-        self.assertAlmostEqual(ring1["base"], (1000 - 1291) * 360.0 / 3200.0)
         self.assertAlmostEqual(ring2["base"], 1000 * 360.0 / 3200.0)
-        self.assertAlmostEqual(ring3["base"], (1000 + 1291) * 360.0 / 3200.0)
-        self.assertAlmostEqual(ring3["extension"], (4800 + 2039) * 360.0 / 3200.0)
+        self.assertAlmostEqual(ring2["extension"], 4800 * 360.0 / 3200.0)
+        self.assert_row_geometry(targets)
+
+    def assert_row_geometry(self, targets):
+        """用实测参考正向还原末端坐标，检查物理共线和间距，而不是只核对脉冲。"""
+        positions = []
+        for pose in targets[1:-1]:
+            radius = 235.0 + (pose["extension"] - 270.0) * 61.0 / 360.0
+            theta = math.radians(pose["base"] / 5.0)
+            positions.append((radius * math.cos(theta), radius * math.sin(theta)))
+        first, middle, last = positions
+        tangent = (last[0] - first[0], last[1] - first[1])
+        span = math.hypot(*tangent)
+        line_error = abs(
+            tangent[0] * (middle[1] - first[1])
+            - tangent[1] * (middle[0] - first[0])
+        ) / span
+        self.assertLess(line_error, 0.1, "三个落点没有共线")
+        for side in (first, last):
+            self.assertAlmostEqual(math.dist(side, middle), 150.0, delta=0.1)
+
+    def test_row_stays_straight_at_different_aligned_extensions(self) -> None:
+        for pulses in (2400, 4800, 6400):
+            with self.subTest(extension_pulses=pulses):
+                _robot, targets, _grab = self.run_it((1, 2, 3), extension_pulses=pulses)
+                self.assert_row_geometry(targets)
 
     def test_the_placements_follow_the_order(self) -> None:
         _robot, targets, grab = self.run_it((3, 1, 2))
