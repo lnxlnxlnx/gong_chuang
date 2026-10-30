@@ -13,10 +13,10 @@
       "RR": 1
     },
     "wheel_gains": {
-      "FL": 0.98,
-      "FR": 1.0,
-      "RL": 0.98,
-      "RR": 1.0
+      "FL": 1,
+      "FR": 1,
+      "RL": 1.04,
+      "RR": 1.054
     },
     "expect_ack": true,
     "pattern": "X",
