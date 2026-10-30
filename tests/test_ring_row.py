@@ -21,6 +21,7 @@ import numpy as np
 
 import app.gripper as app_gripper
 from modules.arm.config import load_arm_config
+from modules.grasp.drive.ring_plan import RingAlignResult
 from modules.vision.drive.numbered_ring import (
     RingTarget,
     RingTargetLocator,
@@ -304,7 +305,7 @@ class RowStepPulsesTests(unittest.TestCase):
     def test_one_step_is_a_chord_not_an_arc(self) -> None:
         """转底座 + 多伸一截：atan(150/270)=29.05° → 1291 脉冲；多伸 38.9 mm → 2039 脉冲。"""
         base_pulses, extension_pulses = app_gripper._row_step_pulses(
-            self.robot(), spacing_mm=150.0, radius_mm=270.0
+            self.robot(), spacing_mm=150.0, radius_mm=270.0, middle_yaw_deg=0.0
         )
 
         self.assertEqual(base_pulses, 1291)
@@ -313,21 +314,56 @@ class RowStepPulsesTests(unittest.TestCase):
     def test_a_missing_extension_lead_is_reported(self) -> None:
         with self.assertRaisesRegex(ValueError, "mm_per_motor_rev"):
             app_gripper._row_step_pulses(
-                self.robot(lead=None), spacing_mm=150.0, radius_mm=270.0
+                self.robot(lead=None), spacing_mm=150.0, radius_mm=270.0,
+                middle_yaw_deg=0.0,
             )
 
 
 class PlaceMaterialFromCenterRingTests(unittest.TestCase):
-    def run_it(self, orders, *, extension_pulses=4800):
+    def test_unaligned_middle_aborts_before_pickup_or_release(self) -> None:
+        robot = Mock()
+        robot.vision.ring_center_spacing_mm = 150.0
+        robot.arm.config = load_arm_config()
+        robot.arm.pulses_per_revolution = 3200
+        robot.arm.turns_state.of.side_effect = lambda name: SimpleNamespace(
+            pulses={"base": 1000, "extension": 4800}[name]
+        )
+        robot.grasp.align_ring.return_value = RingAlignResult(
+            aligned=False, final_error_mm=20.0, note="走满步数"
+        )
+        with patch.object(app_gripper, "move_axes_to") as move, \
+                patch.object(app_gripper, "_grab_material_from_car") as grab, \
+                patch("time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "2 号环.*未对准"):
+                app_gripper.place_material_from_repo_to_floor_from_center_ring(robot)
+
+        grab.assert_not_called()
+        robot.gripper.open_jaws.assert_not_called()
+        self.assertEqual(move.call_args.args[1], app_gripper.SAFE_RETRACT)
+
+    def test_alignment_error_is_propagated_after_retract(self) -> None:
+        robot = Mock()
+        robot.grasp.align_ring.side_effect = RuntimeError("环心读数不可用")
+        with patch.object(app_gripper, "move_axes_to") as move, patch("time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "环心读数不可用"):
+                app_gripper.place_material_from_repo_to_floor_from_center_ring(robot)
+
+        robot.gripper.open_jaws.assert_not_called()
+        self.assertEqual(move.call_args.args[1], app_gripper.SAFE_RETRACT)
+
+    def run_it(
+        self, orders, *, extension_pulses=4800, base_pulses=1000,
+        **kwargs,
+    ):
         robot = Mock()
         robot.vision.ring_center_spacing_mm = 150.0
         robot.arm = RowStepPulsesTests().robot().arm
         robot.arm.config = load_arm_config()
         robot.arm.turns_state = Mock()
         robot.arm.turns_state.of.side_effect = lambda name: SimpleNamespace(
-            pulses={"base": 1000, "extension": extension_pulses}[name]
+            pulses={"base": base_pulses, "extension": extension_pulses}[name]
         )
-        robot.grasp.align_ring.return_value = SimpleNamespace(
+        robot.grasp.align_ring.return_value = RingAlignResult(
             aligned=True, final_error_mm=0.5, note=""
         )
 
@@ -336,12 +372,14 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
                 patch("time.sleep"):
             move.return_value.wait.return_value = None
             app_gripper.place_material_from_repo_to_floor_from_center_ring(
-                robot, orders=orders
+                robot, orders=orders, **kwargs
             )
         return robot, [call.args[1] for call in move.call_args_list], grab
 
     def test_ring_two_is_aligned_then_the_three_poses_are_on_one_line(self) -> None:
-        robot, targets, _grab = self.run_it((1, 2, 3))
+        robot, targets, _grab = self.run_it(
+            (1, 2, 3), row_normal_base_motor_degrees=112.5
+        )
 
         robot.grasp.align_ring.assert_called_once()
         self.assertIn("require_digit", robot.grasp.align_ring.call_args.kwargs)
@@ -349,21 +387,21 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         self.assertEqual(targets[-1], app_gripper.SAFE_RETRACT)
 
         ring1, ring2, ring3 = targets[1:-1]
-        # 三点共线：两边伸缩相同且都比中间多伸一截，底座对称地转开。
+        # 只有中环恰好在法线上时，两端的伸缩相同，底座对称地转开。
         self.assertAlmostEqual(ring1["extension"], ring3["extension"])
         self.assertGreater(ring1["extension"], ring2["extension"])
         self.assertLess(ring1["base"], ring2["base"])
         self.assertLess(ring2["base"], ring3["base"])
         self.assertAlmostEqual(ring2["base"], 1000 * 360.0 / 3200.0)
         self.assertAlmostEqual(ring2["extension"], 4800 * 360.0 / 3200.0)
-        self.assert_row_geometry(targets)
+        self.assert_row_geometry(targets, normal_motor_degrees=112.5)
 
-    def assert_row_geometry(self, targets):
-        """用实测参考正向还原末端坐标，检查物理共线和间距，而不是只核对脉冲。"""
+    def assert_row_geometry(self, targets, *, normal_motor_degrees=-17.0):
+        """正向还原末端坐标，检查共线、间距以及相对实测法线的方向。"""
         positions = []
         for pose in targets[1:-1]:
             radius = 235.0 + (pose["extension"] - 270.0) * 61.0 / 360.0
-            theta = math.radians(pose["base"] / 5.0)
+            theta = math.radians((pose["base"] - normal_motor_degrees) / 5.0)
             positions.append((radius * math.cos(theta), radius * math.sin(theta)))
         first, middle, last = positions
         tangent = (last[0] - first[0], last[1] - first[1])
@@ -375,12 +413,29 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         self.assertLess(line_error, 0.1, "三个落点没有共线")
         for side in (first, last):
             self.assertAlmostEqual(math.dist(side, middle), 150.0, delta=0.1)
+            self.assertAlmostEqual(side[0], middle[0], delta=0.1)
 
     def test_row_stays_straight_at_different_aligned_extensions(self) -> None:
         for pulses in (2400, 4800, 6400):
             with self.subTest(extension_pulses=pulses):
                 _robot, targets, _grab = self.run_it((1, 2, 3), extension_pulses=pulses)
                 self.assert_row_geometry(targets)
+
+    def test_logged_middle_pose_keeps_both_ends_on_the_actual_ring_row(self) -> None:
+        """现场中环不在环排法线上：落点仍须沿实测 -17° 电机角的垂线展开。"""
+        _robot, targets, _grab = self.run_it(
+            (1, 2, 3), base_pulses=-781, extension_pulses=3566
+        )
+        positions = []
+        for pose in targets[1:-1]:
+            radius = 235.0 + (pose["extension"] - 270.0) * 61.0 / 360.0
+            theta = math.radians((pose["base"] - (-17.0)) / 5.0)
+            positions.append((radius * math.cos(theta), radius * math.sin(theta)))
+        first, middle, last = positions
+        self.assertAlmostEqual(first[0], middle[0], delta=0.1)
+        self.assertAlmostEqual(last[0], middle[0], delta=0.1)
+        self.assertAlmostEqual(first[1], middle[1] - 150.0, delta=0.1)
+        self.assertAlmostEqual(last[1], middle[1] + 150.0, delta=0.1)
 
     def test_the_placements_follow_the_order(self) -> None:
         _robot, targets, grab = self.run_it((3, 1, 2))

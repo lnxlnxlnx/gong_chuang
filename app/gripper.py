@@ -873,16 +873,12 @@ def place_material_from_repo_to_floor_by_pose(
 RING2_APPROACH_POSE = {"base": -32, "lift": 600, "extension": 540}
 
 def _row_step_pulses(
-    robot: Robot, *, spacing_mm: float, radius_mm: float
+    robot: Robot, *, spacing_mm: float, radius_mm: float, middle_yaw_deg: float
 ) -> tuple[int, int]:
-    """横向挪一格间距：底座转多少脉冲、伸缩要多伸多少脉冲。
+    """沿环排平移带符号的间距，返回底座和伸缩的带符号脉冲增量。
 
-    机械臂是**圆柱坐标**（``modules/arm/drive/kinematics.py``）：转底座时末端沿圆弧走。
-    要让它落在直线上，底座转 ``atan(s/r)`` 的同时伸缩必须多伸 ``sqrt(r²+s²) − r``。
-    这两个量都是**几何**，和雅可比无关——雅可比是抓料姿态标的一阶导数，用它算一格
-    150 mm 这种大偏移只会得到一条弧（现场就是这样）。
-
-    :returns: ``(底座脉冲, 伸缩脉冲)``，都是正数（往哪边走由调用方按环号给）。
+    ``middle_yaw_deg`` 是中环朝向相对环排法线的输出轴夹角。先把中环还原到以
+    法线为 x 轴的平面坐标，再只改变 y；不能把中环朝向直接当作法线，否则整排会倾斜。
     """
     lead = robot.arm.config.axes["extension"].mm_per_motor_rev
     if lead is None:
@@ -893,11 +889,17 @@ def _row_step_pulses(
     if not radius_mm > 0:
         raise ValueError(f"radius_mm 必须是正数（毫米），收到 {radius_mm!r}")
     pulses_per_rev = robot.arm.pulses_per_revolution
-    base_degrees = math.degrees(math.atan2(spacing_mm, radius_mm))
+    yaw = math.radians(middle_yaw_deg)
+    normal_mm = radius_mm * math.cos(yaw)
+    lateral_mm = radius_mm * math.sin(yaw)
+    # 两向量的叉积/点积求转角增量，避免 atan2 跨过 ±180° 时多转一整圈。
+    base_degrees = math.degrees(math.atan2(
+        normal_mm * spacing_mm, radius_mm**2 + lateral_mm * spacing_mm
+    ))
     base_pulses = round(
         base_degrees * robot.arm.config.base_reduction * pulses_per_rev / 360.0
     )
-    radial_mm = math.hypot(radius_mm, spacing_mm) - radius_mm
+    radial_mm = math.hypot(normal_mm, lateral_mm + spacing_mm) - radius_mm
     extension_pulses = round(radial_mm * pulses_per_rev / lead)
     return base_pulses, extension_pulses
 
@@ -912,13 +914,13 @@ def place_material_from_repo_to_floor_from_center_ring(
 ):
     """把物料从仓库放到地面圆环里：**先闭环对准 2 号环，再按几何算出 1/3 号**。
 
-    前提由调用方先做（车头与环排垂直、车横向对到 2 号环），于是三环就是"中间那个实测、
-    两端各偏一格间距"：
+    前提是车头与环排垂直；``row_normal_base_motor_degrees`` 是机械臂伸缩方向
+    垂直环排时的实测底座**电机角度**，不是输出轴角度，也不是对准 2 环时的角度。
 
     1. 摆到 :data:`RING2_APPROACH_POSE`，``align_ring(require_digit=2)`` 闭环对准
        —— 2 号环的位置是**量出来**的；
-    2. 1/3 号用**圆柱几何**从对准后的关节位置推：底座 ∓ ``atan(150/r)``、
-       伸缩同时多伸 ``sqrt(r²+150²)−r``（:func:`_row_step_pulses`）；
+    2. 用实测法线方向建立平面坐标，1/3 号在中环两侧各平移一格，再分别反算圆柱关节
+       位置（:func:`_row_step_pulses`），两端的底座和伸缩增量通常不对称；
     3. 按 ``orders`` 一趟一趟放：去仓库抓料 → 走到该环的绝对关节位置 → 降到
        ``place_lift`` 松爪 → 抬起。车不动，中间也不再拍帧。
 
@@ -926,6 +928,8 @@ def place_material_from_repo_to_floor_from_center_ring(
     （只调底座是修不好的）。``r`` 根据对准后的伸缩位置和硬件配置里的实测半径参考计算。
     """
     digits = _check_order(orders)
+    if not math.isfinite(row_normal_base_motor_degrees):
+        raise ValueError("row_normal_base_motor_degrees 必须是有限的电机角度")
     robot.arm.move_axis_to_motor_degrees("lift", 760)
     move_axes_to(robot, RING2_APPROACH_POSE).wait()
     if need_calibrate:
@@ -936,17 +940,20 @@ def place_material_from_repo_to_floor_from_center_ring(
         aligned = robot.grasp.align_ring(
             require_digit=2, tolerance_mm=tolerance_mm, max_iterations=6
         )
+        for step in aligned.steps:
+            print(f"  {step.line()}")
+        if aligned.plan is not None:
+            target_x, target_y = aligned.plan.target
+            print(f"  2 号环视觉目标读数：({target_x:+.2f}, {target_y:+.2f}) mm")
         if not aligned.aligned:
-            # 没进容差不再直接退出去：``align_ring`` 已经把臂放在**误差最小**的姿态上，
-            # 按这个姿态推出来的 1/3 号只会跟着偏那点残差。现场放偏一点也比整段不跑强。
+            # 中环是三处落点的共同基准，未对准就不能据此抓料和放料。
             residual = (
-                "—"
+                "未知"
                 if aligned.final_error_mm is None
                 else f"{aligned.final_error_mm:.1f} mm"
             )
-            print(
-                f"  2 号环没进容差（残差 {residual}，门槛 {tolerance_mm:.1f} mm）："
-                "按误差最小的姿态继续，1/3 号会跟着偏这么多"
+            raise RuntimeError(
+                f"2 号环未对准（残差 {residual}，门槛 {tolerance_mm:.1f} mm）：停止放料"
                 + (f"；{aligned.note}" if aligned.note else "")
             )
         arm = robot.arm
@@ -954,20 +961,22 @@ def place_material_from_repo_to_floor_from_center_ring(
         base = arm.turns_state.of("base").pulses
         extension = arm.turns_state.of("extension").pulses
         radius = arm.config.extension_radius_mm(extension)
-        step_base, step_extension = _row_step_pulses(
-            robot, spacing_mm=spacing, radius_mm=radius
-        )
-        # 三点共线：底座 ∓ 一格，伸缩**两端都多伸一格**。
-        poses = {
-            1: (base - step_base, extension + step_extension),
-            2: (base, extension),
-            3: (base + step_base, extension + step_extension),
-        }
         degrees_per_pulse = 360.0 / arm.pulses_per_revolution
+        middle_yaw = (
+            base * degrees_per_pulse - row_normal_base_motor_degrees
+        ) / arm.config.base_reduction
+        poses = {2: (base, extension)}
+        for digit in (1, 3):
+            step_base, step_extension = _row_step_pulses(
+                robot, spacing_mm=(digit - 2) * spacing,
+                radius_mm=radius, middle_yaw_deg=middle_yaw,
+            )
+            poses[digit] = (base + step_base, extension + step_extension)
         print(
-            f"2 号环已对准（残差 {aligned.final_error_mm:.1f} mm）："
+            f"2 号环视觉已对准（视觉残差 {aligned.final_error_mm:.1f} mm）："
             f"当前半径 {radius:.2f} mm；"
-            f"1/3 号 = 底座 -{step_base}/+{step_base} 脉冲、伸缩 +{step_extension} 脉冲"
+            f"环排法线底座电机角 {row_normal_base_motor_degrees:+.2f}°；"
+            f"中环相对法线夹角 {middle_yaw:+.2f}°（输出轴）"
         )
         for digit in digits:
             base_pulses, extension_pulses = poses[digit]
@@ -987,7 +996,7 @@ def place_material_from_repo_to_floor_from_center_ring(
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()
-        return
+        raise
 
     move_axes_to(robot, SAFE_RETRACT).wait()
 
