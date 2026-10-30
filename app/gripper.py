@@ -908,6 +908,7 @@ def place_material_from_repo_to_floor_from_center_ring(
     orders: tuple[int, int, int] = (1, 2, 3),
     place_lift: float = 95.0,
     tolerance_mm: float = 2.0,
+    need_calibrate: bool = False
 ):
     """把物料从仓库放到地面圆环里：**先闭环对准 2 号环，再按几何算出 1/3 号**。
 
@@ -927,6 +928,9 @@ def place_material_from_repo_to_floor_from_center_ring(
     digits = _check_order(orders)
     robot.arm.move_axis_to_motor_degrees("lift", 760)
     move_axes_to(robot, RING2_APPROACH_POSE).wait()
+    if need_calibrate:
+        robot.arm.move_axis_to_motor_degrees("lift", 960)
+        square_chassis_to_ring_row(robot)
     time.sleep(1)  # 先让臂停稳再看
     try:
         aligned = robot.grasp.align_ring(

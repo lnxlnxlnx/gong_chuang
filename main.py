@@ -141,6 +141,10 @@ def run_map():
         
         ###############
         # move_axes_to(robot, {"lift": 595, "extension": 350, "base": 0}).wait()
+        # robot.arm.move_axis_to_motor_degrees("base", -15)
+        # input("调试!!!!!!!!")
+        # robot.arm.move_axis_to_motor_degrees("base", -18)
+        # input("调试!!!!!!!!")
         # move_axes_to(robot, {"lift": 950, "base": 390}).wait()  # 先让环进视野
         # while True:
         #     try:
@@ -162,11 +166,12 @@ def run_map():
         # robot.chassis.forward(rpm= 60, pulses=11650)
         # move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
         # move_axes_to(robot, {"lift": 980, "base": -30}).wait()  # 先让环进视野
-        # square_chassis_to_ring_row(robot, tolerance_deg=180)
+        # square_chassis_to_ring_row(robot)
         # center_chassis_on_ring(robot, require_digit=2)
         # robot.chassis.left(rpm = 40, pulses = 400)
         # place_and_grab_material(robot)
-        # input("结束!!!!!!!!!!!!!!!")
+        place_material_from_repo_to_floor_from_center_ring(robot, need_calibrate=False)
+        input("结束!!!!!!!!!!!!!!!")
         
         ###################
         ###################运行区##########
