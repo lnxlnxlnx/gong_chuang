@@ -163,7 +163,7 @@ RING_ROW_SQUARE_TOLERANCE_DEG = 1.0
 #: 车头与"相机画面水平轴"的固定差角（度）。装出来的臂不是正对车头时补这个。
 #: 它等于**车头摆正时**该量到的直线倾角：人眼把车头摆到与环排垂直，跑一次
 #: :func:`square_chassis_to_ring_row` 读打印出来的倾角，把那个数填这里。
-ROW_SQUARE_YAW_OFFSET_DEG = 13.97
+ROW_SQUARE_YAW_OFFSET_DEG = 4.89
 #: 还不知道"每脉冲让倾角变多少度"时的第一步试转量（脉冲）。
 ROW_ROTATE_TRIAL_PULSES = 300
 #: 单步最多转多少脉冲：离得再远也别一把扫过去。
@@ -261,6 +261,7 @@ def center_chassis_on_ring(
         if previous is not None and previous[1]:
             observed = (x_mm - previous[0]) / previous[1]
             if observed <= 0.0:
+                return 0.0
                 raise RuntimeError(
                     f"车动了 {previous[1]:+d} 脉冲，画面里的环却没往反方向走"
                     f"（{previous[0]:+.1f} → {x_mm:+.1f} mm）：横向运动学反了、轮子没动，"
@@ -694,8 +695,8 @@ def _grab_material_from_car(robot: Robot):
     batch.add(robot.gripper.set_position(150, wait=False))
     batch.wait()
     report = move_axes_to(robot, {"lift": 980, "extension": 5, "base": 1045}).wait()
-    robot.gripper.set_position(100)
-    robot.arm.move_axis_to_motor_degrees("lift", 840)
+    robot.gripper.set_position(120)
+    robot.arm.move_axis_to_motor_degrees("lift", 845)
     
     robot.gripper.close_jaws()
     
@@ -715,7 +716,7 @@ def _place_material_to_repo(robot: Robot, *, verbose: bool = False):
     #    注意：底座这次要转约 9300 脉冲，超过"不许和伸缩并行"的 600 脉冲上限。
     #    那条限制只在 RobotArm.move_axes 里检查，单轴帧不拦，所以现场必须确认
     #    工作区是空的（伸出状态下横扫会把整条臂扫过去）。
-    robot.arm.move_axis_to_motor_degrees("lift", 500, rpm = 110)
+    robot.arm.move_axis_to_motor_degrees("lift", 500)
     move_axes_to(robot, {"extension": 270.0, "base": 400, "lift": 900}).wait()
     report = move_axes_to(robot, {"lift": 900, "extension": 10, "base": 1048}).wait()
     if verbose:
@@ -813,7 +814,7 @@ def place_material_from_repo_to_floor_by_pose(
     """
     robot.arm.move_axis_to_motor_degrees("lift", 400)
     _go_home(robot, home)
-    ring_position = [(-200, 800, 700), (-32, 800, 540), (130, 800, 700)]
+    ring_position = [(-190, 800, 710), (-32, 800, 540), (130, 800, 740)]
     res = []
     try:
         for order in orders:
@@ -822,9 +823,17 @@ def place_material_from_repo_to_floor_by_pose(
             # assume_digit：这一格按示教姿态就是 order 号环。模型对转过角度的靶标会读错号
             # （2026-10-29 现场：1 号环 5 帧全读成 2/3 号，环心一直是准的），用
             # require_digit 按号筛框只会让整段失败；环心照样由模型给，落料补偿按 order 取。
-            result = robot.grasp.align_ring(
-                tolerance_mm=2, max_iterations=5, assume_digit=order
-            )
+            try:
+                result = robot.grasp.align_ring(
+                    tolerance_mm=3, max_iterations=6, assume_digit=order
+                )
+            except Exception as e:
+                print(f"Error occurred while aligning ring: {e}")
+                robot.arm.move_axis_to_motor_degrees("extension", 580)
+                result = robot.grasp.align_ring(
+                    tolerance_mm=3, max_iterations=6, assume_digit=order
+                )
+                continue
             print("  " + result.summary())
             base_deg = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
@@ -835,10 +844,10 @@ def place_material_from_repo_to_floor_by_pose(
             
             # 这趟的落点就是现在这个角度。抓料会把这几个轴都开走，所以先记下来：
             move_axes_to(robot, {"extension": extension_deg, "base": base_deg}).wait()
-            robot.arm.move_axis_to_motor_degrees("lift", 95, rpm=130)
+            robot.arm.move_axis_to_motor_degrees("lift", 95, rpm=100)
             
             robot.gripper.open_jaws()
-            robot.arm.move_axis_to_motor_degrees("lift", 375, rpm = 130)
+            robot.arm.move_axis_to_motor_degrees("lift", 375, rpm = 100)
             _go_home(robot, home)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
@@ -999,7 +1008,7 @@ def grab_material_from_floor_to_repo_by_xy(
                 position = pre_locations.pop(0)
                 print(position)
                 move_axes_to(robot, position).wait()
-            robot.arm.move_axis_to_motor_degrees("lift", 90)
+            robot.arm.move_axis_to_motor_degrees("lift", 90, rpm = 75)
             robot.gripper.close_jaws()
             _place_material_to_repo(robot, verbose=True)
             _go_home(robot, home)
