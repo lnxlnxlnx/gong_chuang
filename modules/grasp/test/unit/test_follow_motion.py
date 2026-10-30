@@ -221,97 +221,41 @@ class CycleStepTests(unittest.TestCase):
 
 class SmoothFollowTests(unittest.TestCase):
     JACOBIAN = VisualServoJacobian(
-        base_dx=0.08, base_dy=0.0, radial_dx=0.0, radial_dy=0.02,
+        base_dx=0.08,
+        base_dy=0.0,
+        radial_dx=0.0,
+        radial_dy=0.02,
     )
 
-    def follow(self, arm, link, **kwargs):
-        return algorithms.follow_material_xy(
-            arm, link, MaterialSelector(), VisualServoTarget(0.0, 0.0),
-            self.JACOBIAN, fixtures.SingleStepTests.config(), **kwargs,
+    def rig(self, **kwargs):
+        from modules.grasp.test.unit.test_continuous_follow import (
+            VelocityArm,
+            WorldLink,
         )
+
+        clock = FollowClock()
+        arm = VelocityArm(clock)
+        return clock, arm, WorldLink(arm, **kwargs)
+
+    def follow(self, arm, link, **kwargs):
+        from modules.grasp.test.unit.test_continuous_follow import follow
+
+        return follow(arm, link, **kwargs)
 
     def test_default_step_approaches_without_crossing_a_stationary_target(self):
         arm = FakeArm(self.JACOBIAN)
         arm.offset = [5.0, 0.0]
         with patch.object(algorithms, "time", FollowClock()):
             algorithms.follow_x_y(
-                arm, JumpyDepthLink(arm=arm), MaterialSelector(),
-                VisualServoTarget(0.0, 0.0), self.JACOBIAN,
+                arm,
+                JumpyDepthLink(arm=arm),
+                MaterialSelector(),
+                VisualServoTarget(0.0, 0.0),
+                self.JACOBIAN,
                 fixtures.SingleStepTests.config(),
             )
         self.assertGreaterEqual(arm.offset[0], 0.0)
         self.assertLess(arm.offset[0], 5.0)
-
-    def test_an_in_tolerance_target_does_not_trigger_corrections(self):
-        arm = FakeArm(self.JACOBIAN)
-        arm.offset = [2.0, 0.0]
-        with patch.object(algorithms, "time", FollowClock()):
-            result = self.follow(arm, JumpyDepthLink(arm=arm), timeout=5.0)
-        self.assertTrue(result.aligned)
-        self.assertEqual(arm.calls, [])
-
-    def test_follow_keeps_reading_while_it_moves(self):
-        """跟随始终在"运动中取帧"：帧没读完不重发，动作没走完不覆盖。"""
-        clock = FollowClock()
-        arm = TimedArm(clock, self.JACOBIAN)
-        link = TimedLink(arm, clock)
-        with patch.object(algorithms, "time", clock):
-            result = self.follow(arm, link, timeout=5.0)
-        self.assertTrue(result.aligned)
-        self.assertTrue(arm.settled)
-        self.assertGreaterEqual(len(arm.moves), 2)
-        self.assertGreater(link.frames_while_moving, 0)
-        for _axis, start, end, _pulses, rpm in arm.moves:
-            self.assertLessEqual(rpm, algorithms.FOLLOW_RPM)
-            self.assertLessEqual(end - start, 0.105)
-
-    def test_a_turntable_step_stays_in_view_with_camera_and_command_latency(self):
-        """120° / 1.5 s 的转盘换位，包含慢取帧和驱动器发帧后的静默。"""
-        clock = FollowClock()
-        arm = TimedArm(clock, self.JACOBIAN, command_seconds=0.03)
-
-        class TurntableLink:
-            error = None
-
-            def __init__(self):
-                self.errors = []
-                self.lost_frames = 0
-
-            def frame_fast(self, **_kwargs):
-                clock.sleep(0.15)
-                x, y = arm.offset
-                # 首帧看见料后开始换位；底座 5:1 减速，80°/s = 3556 脉冲/s。
-                moving_seconds = min(max(clock.now - 0.15, 0.0), 1.5)
-                target_pulses = moving_seconds * 80.0 / 360.0 * 16000
-                x -= target_pulses * arm.jacobian.base_dx
-                self.errors.append(abs(x))
-                if abs(x) > 80.0:
-                    self.lost_frames += 1
-                    return ()
-                return (sighting(4, x, y, stamp=clock.now),)
-
-            def scene_stable(self):
-                return clock.now >= 1.65 and arm.settled
-
-        link = TurntableLink()
-        config = replace(
-            fixtures.SingleStepTests.config(), parallel_rotation_limit_pulses=2800,
-        )
-        with patch.object(algorithms, "time", clock):
-            try:
-                result = algorithms.follow_material_xy(
-                    arm, link, MaterialSelector(), VisualServoTarget(0.0, 0.0),
-                    self.JACOBIAN, config, timeout=8.0,
-                )
-            except VisualServoError as error:
-                self.fail(
-                    f"turntable tracking failed: {error}; "
-                    f"peak error={max(link.errors):.1f} mm, "
-                    f"lost frames={link.lost_frames}"
-                )
-        self.assertTrue(result.aligned)
-        self.assertEqual(link.lost_frames, 0)
-        self.assertTrue(arm.settled)
 
     def test_a_large_error_does_not_cut_the_available_tracking_speed(self):
         """远处目标以 80°/s 走一帧，修正后不能离它更远。"""
@@ -322,8 +266,12 @@ class SmoothFollowTests(unittest.TestCase):
         )
         with patch.object(algorithms, "time", clock):
             result = algorithms.follow_x_y(
-                arm, link, MaterialSelector(), VisualServoTarget(0.0, 0.0),
-                self.JACOBIAN, fixtures.SingleStepTests.config(),
+                arm,
+                link,
+                MaterialSelector(),
+                VisualServoTarget(0.0, 0.0),
+                self.JACOBIAN,
+                fixtures.SingleStepTests.config(),
                 rpm=algorithms.FOLLOW_RPM,
             )
             clock.sleep(max(0.0, 0.1 - clock.now))
@@ -341,82 +289,108 @@ class SmoothFollowTests(unittest.TestCase):
         motion = algorithms._FollowMotion()
         with patch.object(algorithms, "time", clock):
             algorithms.follow_x_y(
-                arm, link, MaterialSelector(), VisualServoTarget(0.0, 0.0),
-                self.JACOBIAN, fixtures.SingleStepTests.config(), _motion=motion,
+                arm,
+                link,
+                MaterialSelector(),
+                VisualServoTarget(0.0, 0.0),
+                self.JACOBIAN,
+                fixtures.SingleStepTests.config(),
+                _motion=motion,
             )
             finished_at = max(end for _axis, _start, end, _count, _rpm in arm.moves)
             motion.wait()
         self.assertAlmostEqual(clock.now, finished_at)
 
-    def test_camera_failure_waits_for_the_last_position_command(self):
-        clock = FollowClock()
-        arm = TimedArm(clock, self.JACOBIAN)
-        link = TimedLink(arm, clock, fail_after=1)
+    def test_an_in_tolerance_target_does_not_trigger_corrections(self):
+        clock, arm, link = self.rig(stop_at=0)
+        arm.position[0] = -25
         with patch.object(algorithms, "time", clock):
-            with self.assertRaisesRegex(RuntimeError, "camera disconnected"):
-                self.follow(arm, link, timeout=3.0)
-        self.assertTrue(arm.settled)
+            result = self.follow(arm, link, timeout=5)
+        self.assertTrue(result.aligned)
+        self.assertTrue(all(b == e == 0 for _, b, e in arm.commands))
 
-    def test_timeout_waits_for_the_last_position_command(self):
-        clock = FollowClock()
-        arm = TimedArm(clock, self.JACOBIAN)
-        link = TimedLink(arm, clock)
+    def test_follow_keeps_reading_while_it_moves(self):
+        clock, arm, link = self.rig()
         with patch.object(algorithms, "time", clock):
-            with self.assertRaises(VisualServoError):
-                self.follow(arm, link, timeout=0.05)
-        self.assertTrue(arm.settled)
+            result = self.follow(arm, link, timeout=7)
+        self.assertTrue(result.aligned)
+        self.assertGreater(link.frames_while_moving, 5)
+        self.assertGreaterEqual(len(arm.commands), 2)
+        self.assertTrue(all(abs(v) <= 50 for _, *axes in arm.commands for v in axes))
+        self.assertEqual(arm.velocity, (0, 0))
+
+    def test_turntable_stays_in_view_with_camera_and_command_latency(self):
+        clock, arm, link = self.rig()
+        original = arm.set_velocity
+
+        def delayed_velocity(base, extension):
+            actual = original(base, extension)
+            clock.sleep(0.06)
+            return actual
+
+        arm.set_velocity = delayed_velocity
+        with patch.object(algorithms, "time", clock):
+            result = self.follow(arm, link, timeout=8)
+        self.assertTrue(result.aligned)
+        self.assertLess(max(link.errors), 20)
+        self.assertEqual(arm.velocity, (0, 0))
+
+    def test_camera_failure_brakes_the_continuous_velocity(self):
+        clock, arm, link = self.rig(fail_at=0.5)
+        with patch.object(algorithms, "time", clock):
+            with self.assertRaisesRegex(RuntimeError, "camera failed"):
+                self.follow(arm, link, timeout=3)
+        self.assertTrue(any(any(v) for _, *v in arm.commands))
+        self.assertEqual(arm.velocity, (0, 0))
+        self.assertTrue(arm.closed)
+
+    def test_timeout_brakes_the_continuous_velocity(self):
+        clock, arm, link = self.rig()
+        with (
+            patch.object(algorithms, "time", clock),
+            self.assertRaises(VisualServoError),
+        ):
+            self.follow(arm, link, timeout=0.4)
+        self.assertTrue(any(any(v) for _, *v in arm.commands))
+        self.assertEqual(arm.velocity, (0, 0))
+        self.assertTrue(arm.closed)
 
     def test_four_seconds_start_at_the_first_visible_material(self):
-        clock = FollowClock()
-        arm = FakeArm(self.JACOBIAN)
-        arm.offset = [0.0, 0.0]
+        clock, arm, link = self.rig(stop_at=0, missing=((0, 1.0),))
+        first_seen = []
+        original = link.frame_fast
 
-        class Link:
-            first_seen_at = None
+        def observe(**kwargs):
+            result = original(**kwargs)
+            if result and not first_seen:
+                first_seen.append(result[0].received_at)
+            return result
 
-            def frame_fast(self, **_kwargs):
-                clock.sleep(0.04)
-                if clock.now < 1.0:
-                    return ()
-                if self.first_seen_at is None:
-                    self.first_seen_at = clock.now
-                return (sighting(4, 0.0, 0.0, stamp=clock.now),)
-
-            def scene_stable(self):
-                return True
-
-        link = Link()
+        link.frame_fast = observe
         with patch.object(algorithms, "time", clock):
-            result = self.follow(
-                arm, link, timeout=7.0, lost_base_pulses=0, lost_retract_pulses=0,
-            )
+            result = self.follow(arm, link, timeout=7)
         self.assertTrue(result.aligned)
-        self.assertGreaterEqual(clock.now - link.first_seen_at, 4.0)
+        self.assertGreaterEqual(clock.now - first_seen[0], 4.0)
 
-    def test_a_lost_material_is_not_chased_with_any_motion(self) -> None:
-        """默认盲扫量都是 0：找不到料就**原地不动**，一个底座/伸缩帧都不发。"""
-
-        class NeverSeenLink:
-            error = None
-
-            def frame(self, **_kwargs):
-                return ()
-
-        arm = FakeArm(self.JACOBIAN)
-        with patch.object(algorithms, "time", FollowClock()), \
-                self.assertRaisesRegex(VisualServoError, "跟了"):
-            self.follow(arm, NeverSeenLink(), timeout=1.0)
-        self.assertEqual(arm.calls, [])
+    def test_a_material_never_seen_is_not_chased_with_any_motion(self):
+        clock, arm, link = self.rig(missing=((0, 99),))
+        with (
+            patch.object(algorithms, "time", clock),
+            self.assertRaises(VisualServoError),
+        ):
+            self.follow(arm, link, timeout=1)
+        self.assertTrue(all(b == e == 0 for _, b, e in arm.commands))
 
     def test_a_moving_scene_cannot_finish_after_four_seconds(self):
-        clock = FollowClock()
-        arm = FakeArm(self.JACOBIAN)
-        arm.offset = [0.0, 0.0]
-        link = JumpyDepthLink(arm=arm)
+        clock, arm, link = self.rig(stop_at=0)
         link.scene_stable = lambda: False
-        with patch.object(algorithms, "time", clock):
-            with self.assertRaises(VisualServoError):
-                self.follow(arm, link, timeout=4.5)
+        with (
+            patch.object(algorithms, "time", clock),
+            self.assertRaises(VisualServoError),
+        ):
+            self.follow(arm, link, timeout=4.5)
+        self.assertGreater(link.fast_reads, 40)
+        self.assertTrue(arm.closed)
 
 
 if __name__ == "__main__":

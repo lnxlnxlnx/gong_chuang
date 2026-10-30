@@ -505,61 +505,18 @@ class Grasp:
         *,
         timeout: float = 20.0,
         tolerance_mm: float | None = None,
-        step_seconds: float | None = None,
-        coarse_step_seconds: float | None = None,
-        gain: float | None = None,
-        acceleration: int | None = None,
-        rpm: int | None = None,
-        lost_base_pulses: int | None = None,
-        lost_retract_pulses: int | None = None,
+        gain: float = 4.0,
+        acceleration: int = 220,
+        rpm: int = 50,
     ) -> VisualServoResult:
-        """**跟着走起来的物料走**，直到料自己停住：不动升降、只动平面。
+        """仅平面连续跟随，停盘后交给精确对准；短时遮挡沿实测顺时针圆弧追踪。
 
-        循环在 :func:`modules.grasp.drive.eye_in_hand.follow_material_xy` 里：
-        **短位置段与下一帧采集重叠**；误差大时也及时更新方向，退出前等最后一段完成。
-
-        首次看见指定物料后至少连续跟随四秒，跟丢重新计时；随后仍须满足：
-        这一步不需要发动作、读数也不变，**并且**整幅画面静止
-        （本机 ``Vision.scene_stable()``）。只看读数会在跟得准时误判：相机装在爪上，
-        料还在走、读数本来就不变。跟丢（转出去／被爪影挡住）的那几帧不算失败。
-
-        **料跑到后面去、看不见了**：默认**原地不动**——只继续取帧等它重新进画面，
-        一个动作帧都不发（料在转盘上绕一圈会自己回来；乱扫只会越带越远）。要盲找就把
-        ``lost_base_pulses`` / ``lost_retract_pulses`` 给上：连续丢几帧后朝上次跟随的方向
-        （转盘是顺时针的，默认 CW）扫底座，同时把伸得过长的伸缩回收一点；每丢一帧再扫一步，
-        直到重新看见。方向取自上一次成功的底座步向，所以底座装反只需要看第一次丢料时往哪边扫。
-
-        **一次升降帧都不发**：不悬停，也不做"转底盘前的安全高度检查"——那次检查会自己
-        升降，与"只做水平跟随"矛盾。高度由调用方负责：低位转底盘会撞到台面上的物块。
-
-        :param want_color: 跟哪一个物料：类别名（``"red"``）或从 1 开始的编号，
-            与 ``vision.locate(want_color)`` 同一套说法。
-        :param timeout: 最多跟多久（秒）；停不住就报错，不要一直追下去。
-        :param tolerance_mm: 这次的对准门槛；``None`` 用 ``eye_in_hand.json`` 的
-            ``tolerance_mm``。返回值里 ``aligned`` 说的是"料停住那一刻在不在门槛内"，
-            不在也不影响：精确对准由 :meth:`align_xy_for_turntable` 接手。
-        :param step_seconds: 细跟一步允许走多久（秒）；``None`` 用默认。
-        :param coarse_step_seconds: 误差大于 ``coarse_error_mm`` 时的粗调档；``None`` 用默认。
-        :param gain: 每帧误差修正比例（默认 0.7）。
-        :param acceleration: 加减速档位 0..255；越小越柔和，但起转越慢。``None`` 用默认。
-        :param rpm: 跟随转速；``None`` 用 40 rpm，仅影响这次跟随。
-        :param lost_base_pulses: 丢料盲扫时底座每次转多少脉冲（正 = CW）；默认 0（不扫）；
-            给 0 关掉底座盲扫。
-        :param lost_retract_pulses: 丢料盲扫时伸缩每次回收多少脉冲；默认 0（不回收），
-            给 0 关掉回收。两个都是 0 时，跟丢就是原地不动、只等料重新进画面。
-        :raises VisualServoError: 跟满 ``timeout`` 料还没停住（或一直看不见）。
+        rpm 最大 50，伸缩电机范围 30..990°，并保留硬件更严格的限位。
+        跟随退出时刹停并用编码器对账，随后抓取、回位继续使用位置模式。
+        gain 为每秒误差修正比例；高度由调用方预先保证。
         """
         arm, source = self._require_resources()
-        from modules.grasp.drive.eye_in_hand import (
-            FOLLOW_ACCELERATION,
-            FOLLOW_COARSE_STEP_SECONDS,
-            FOLLOW_GAIN,
-            FOLLOW_LOST_BASE_PULSES,
-            FOLLOW_LOST_RETRACT_PULSES,
-            FOLLOW_RPM,
-            FOLLOW_STEP_SECONDS,
-            follow_material_xy,
-        )
+        from modules.grasp.drive.eye_in_hand import follow_material_xy
 
         selector = self._selector_for(want_color, self._selector)
         return follow_material_xy(
@@ -571,25 +528,9 @@ class Grasp:
             self._config,
             timeout=timeout,
             tolerance_mm=tolerance_mm,
-            step_seconds=FOLLOW_STEP_SECONDS if step_seconds is None else step_seconds,
-            coarse_step_seconds=(
-                FOLLOW_COARSE_STEP_SECONDS
-                if coarse_step_seconds is None
-                else coarse_step_seconds
-            ),
-            gain=FOLLOW_GAIN if gain is None else gain,
-            acceleration=FOLLOW_ACCELERATION if acceleration is None else acceleration,
-            rpm=FOLLOW_RPM if rpm is None else rpm,
-            lost_base_pulses=(
-                FOLLOW_LOST_BASE_PULSES
-                if lost_base_pulses is None
-                else lost_base_pulses
-            ),
-            lost_retract_pulses=(
-                FOLLOW_LOST_RETRACT_PULSES
-                if lost_retract_pulses is None
-                else lost_retract_pulses
-            ),
+            gain=gain,
+            acceleration=acceleration,
+            rpm=rpm,
             on_message=self._say,
         )
 

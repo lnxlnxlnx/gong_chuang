@@ -259,6 +259,8 @@ class RobotArm:
         self._bus = bus
         self._owns_bus = bool(owns_bus) and bus is not None
         self._closed = False
+        self._planar_velocity_session = None
+        self._planar_position_valid = True
         #: 三轴的命令脉冲里程表：一个标定都不需要，所以永远有值（见 arm_state）。
         #: **启程读数**取自配置的 ``initial_motor_degrees``：程序启动那一刻轴若不在原点上
         #: （换爪子、重新对齿之后就是这种情况），就按那里的声明起算；回零 / 绝对归零会把
@@ -424,8 +426,16 @@ class RobotArm:
         """
         if self._closed:
             return
+        velocity_error = None
+        if self._planar_velocity_session is not None:
+            try:
+                self._planar_velocity_session.close()
+            except Exception as error:
+                velocity_error = error
         self._closed = True
-        errors = []
+        errors = (
+            [] if velocity_error is None else [("planar_velocity", velocity_error)]
+        )
         for stage, action in (
             ("stop", self._stop_axes),
             ("disable", self._disable_axes),
@@ -463,7 +473,43 @@ class RobotArm:
         急停之后驱动器可能丢步，里程表只记下发过的脉冲，与真实位置未必一致。
         """
         self._require_open()
+        if self._planar_velocity_session is not None:
+            self._planar_velocity_session.stop()
+            return
         self._stop_axes()
+
+    def planar_velocity(
+        self,
+        *,
+        max_rpm: int,
+        motor_limits: Mapping[str, Tuple[float, float]],
+        acceleration: int = 200,
+        command_timeout: float = 0.35,
+    ):
+        """借出平面两轴的有界速度会话；范围为不取模的绝对电机角度。"""
+        from modules.arm.drive.planar_velocity import PlanarVelocitySession
+
+        self._require_position_ready()
+        session = PlanarVelocitySession(
+            self,
+            max_rpm=max_rpm,
+            motor_limits=motor_limits,
+            acceleration=acceleration,
+            command_timeout=command_timeout,
+        )
+        self._planar_velocity_session = session
+        return session
+
+    def _require_position_ready(self) -> None:
+        """速度模式独占总线；编码器失联后禁止使用未对账的命令位置。"""
+        self._require_open()
+        if self._planar_velocity_session is not None:
+            raise RuntimeError("planar velocity session owns arm motion")
+        if not self._planar_position_valid:
+            raise RuntimeError(
+                "arm position invalid after planar encoder/stop failure; "
+                "reopen after referencing position"
+            )
 
     def _each_axis(self, action: Callable[["Emm42Driver"], None]) -> None:
         """按地址顺序逐轴发**单帧**命令，帧间留 ``inter_frame_seconds``。
@@ -474,6 +520,8 @@ class RobotArm:
         5 号会回包、6/7 号不回，弄坏的帧只留下一条 ``地址 00 EE 6B``（错误命令）
         没人读走，下一个用总线的人（底盘）就会把这条错误帧当成自己的 ACK。
         """
+        if self._planar_velocity_session is not None:
+            raise RuntimeError("planar velocity session owns arm bus")
         for index, axis_name in enumerate(AXIS_NAMES):
             if index:
                 self._sleep(self.inter_frame_seconds)
@@ -540,6 +588,7 @@ class RobotArm:
         self._require_open()
         if isinstance(pulses, bool) or not isinstance(pulses, int):
             raise ValueError("pulses must be an integer")
+        self._require_position_ready()
         delta = pulses - self.turns_state.of(axis_name).pulses
         return self._move_delta(
             axis_name, delta, rpm=rpm, acceleration=acceleration, wait=wait
@@ -714,6 +763,7 @@ class RobotArm:
             或者 ``mode=AXES_SERIAL`` 配 ``wait=False``（那两者互相矛盾）。
         """
         self._require_open()
+        self._require_position_ready()
         mode = _require_axes_mode(mode)
         if mode == AXES_SERIAL and not wait:
             raise ValueError(
@@ -914,6 +964,7 @@ class RobotArm:
         报告要等 ``ticket.wait()``（见模块文档字符串的"``wait=False`` 返回票据"一节）。
         """
         self._require_open()
+        self._require_position_ready()
         if pulses == 0:
             # 位移不足半个脉冲：调用方的意图是"已经到位"，既不发帧也不改位置。
             axis = self.config.axes[axis_name]
@@ -1001,6 +1052,7 @@ class RobotArm:
         要等一条广播 ``00 FF 66 6B`` 才会动——那是 :meth:`move_axes` 让多根轴
         同时起步的办法，所以它必然配 ``wait=False``（缓存帧还没开始走，没什么可等的）。
         """
+        self._require_position_ready()
         if synchronized and wait:
             # 缓存帧发出时轴还没动，睡一觉只是在浪费估算；等整组是调用方的事。
             raise ValueError("缓存帧（synchronized=True）不能配 wait=True")

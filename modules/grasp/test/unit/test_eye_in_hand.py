@@ -1232,82 +1232,53 @@ class FollowClock:
 
 
 class FollowMaterialTests(unittest.TestCase):
-    """``follow_material_xy``：每轮一帧、一小步，料停住才收工。"""
+    """Continuous following observes while moving and confirms a stopped scene."""
 
-    JACOBIAN = SingleStepTests.JACOBIAN
-    CONFIG = SingleStepTests.config()
+    def rig(self, **kwargs):
+        from modules.grasp.test.unit.test_continuous_follow import (
+            VelocityArm,
+            WorldLink,
+        )
+
+        clock = FollowClock()
+        arm = VelocityArm(clock)
+        return clock, arm, WorldLink(arm, **kwargs)
 
     def call(self, arm, link, **kwargs):
-        return follow_material_xy(
-            arm,
-            link,
-            MaterialSelector(),
-            VisualServoTarget(x_mm=0.0, y_mm=0.0),
-            self.JACOBIAN,
-            kwargs.pop("config", self.CONFIG),
-            **kwargs,
-        )
+        from modules.grasp.test.unit.test_continuous_follow import follow
 
-    def test_it_keeps_sending_while_the_material_moves(self) -> None:
-        """料一直在走：每轮都发一小步，跟满时限才放弃。"""
-        arm = FakeArm(self.JACOBIAN)
-        link = DriftingLink()
-        config = SingleStepTests.config(max_total_pulses=10_000_000)
+        return follow(arm, link, **kwargs)
 
-        with patch.object(algorithms, "time", FollowClock()), \
-                self.assertRaisesRegex(VisualServoError, "跟了"):
-            self.call(arm, link, config=config, timeout=0.35)
+    def test_it_keeps_sending_while_the_material_moves(self):
+        clock, arm, link = self.rig(stop_at=99)
+        with (
+            patch.object(algorithms, "time", clock),
+            self.assertRaisesRegex(VisualServoError, "跟了"),
+        ):
+            self.call(arm, link, timeout=0.6)
+        self.assertGreaterEqual(sum(any(v) for _, *v in arm.commands), 2)
+        self.assertTrue(arm.closed)
 
-        self.assertGreaterEqual(len(arm.calls), 2, "跟的时候每轮都要发一步")
+    def test_a_large_error_uses_the_bounded_continuous_speed(self):
+        clock, arm, link = self.rig(stop_at=99)
+        arm.position[0] = -1000
+        with (
+            patch.object(algorithms, "time", clock),
+            self.assertRaises(VisualServoError),
+        ):
+            self.call(arm, link, timeout=0.6)
+        speeds = [abs(v) for _, *axes in arm.commands for v in axes]
+        self.assertEqual(max(speeds), 50)
+        self.assertTrue(all(v <= 50 for v in speeds))
 
-    def test_a_large_error_takes_the_coarse_step(self) -> None:
-        """大误差允许稍长的短步，但仍按跟随转速和修正比例限幅。"""
-        arm = FakeArm(self.JACOBIAN)
-        link = DriftingLink()
-        config = SingleStepTests.config(max_total_pulses=10_000_000)
-
-        with patch.object(algorithms, "time", FollowClock()), \
-                self.assertRaisesRegex(VisualServoError, "跟了"):
-            self.call(arm, link, config=config, timeout=0.01)
-
-        fine = round(
-            int(algorithms.FOLLOW_STEP_SECONDS * algorithms.FOLLOW_RPM
-                * arm.pulses_per_revolution / 60) * algorithms.FOLLOW_GAIN
-        )
-        coarse = min(
-            int(
-                algorithms.FOLLOW_COARSE_STEP_SECONDS * algorithms.FOLLOW_RPM
-                * arm.pulses_per_revolution / 60
-            ),
-            config.parallel_rotation_limit_pulses,
-        )
-        self.assertTrue(arm.calls)
-        for _kind, pulses in arm.calls:
-            self.assertLessEqual(pulses, coarse)
-        self.assertGreater(max(pulses for _kind, pulses in arm.calls), fine)
-
-    def test_it_sweeps_clockwise_and_retracts_while_the_material_is_lost(self) -> None:
-        """料转到后面看不见：朝 CW 扫；伸缩**先一次性**拉回一大把，再重新看见就继续跟。"""
-        arm = FakeArm(self.JACOBIAN)
-        link = BlindFirstLink(misses=6)
-
-        with patch.object(algorithms, "time", FollowClock()):
-            result = self.call(
-                arm,
-                link,
-                timeout=8.0,
-                lost_frames=2,
-                lost_base_pulses=20,
-                lost_retract_pulses=2000,
-            )
-
+    def test_short_loss_follows_the_observed_clockwise_curve(self):
+        clock, arm, link = self.rig(missing=((0.9, 1.12),))
+        with patch.object(algorithms, "time", clock):
+            result = self.call(arm, link, timeout=7)
         self.assertTrue(result.aligned)
-        self.assertIn(("base:fwd", 20), arm.calls, "丢料时朝 CW（正脉冲）扫")
-        self.assertEqual(
-            arm.calls.count(("radial:back", 2000)),
-            1,
-            "每个丢失片段只拉回一次 2000 脉冲，不是每帧都拉",
-        )
+        blind = [v for stamp, *v in arm.commands if 0.95 <= stamp <= 1.18]
+        self.assertTrue(blind)
+        self.assertTrue(all(v[0] > 0 for v in blind))
 
     def test_the_follow_step_overshoots_on_purpose(self) -> None:
         """``gain>1``：料在动时多冲一点，别每帧都只走"刚好走完误差"。"""
@@ -1333,68 +1304,59 @@ class FollowMaterialTests(unittest.TestCase):
         self.assertGreater(abs(overshooting.base_pulses), abs(plain.base_pulses))
         self.assertGreater(abs(overshooting.radial_pulses), abs(plain.radial_pulses))
 
-    def test_a_steady_reading_does_not_mean_the_material_stopped(self) -> None:
-        """读数一直不变但每轮都在发动作：那是"跟得很准、料还在走"，不能收工。"""
-        arm = FakeArm(self.JACOBIAN)
-        link = MovingLink([(-40.0, 0.0)] * 50)
+    def test_a_steady_reading_does_not_mean_the_material_stopped(self):
+        clock, arm, link = self.rig(stop_at=99)
+        original_frame = link.frame_fast
 
-        with patch.object(algorithms, "time", FollowClock()), \
-                self.assertRaisesRegex(VisualServoError, "跟了"):
-            self.call(arm, link, timeout=0.35)
+        def steady_frame(**kwargs):
+            original_frame(**kwargs)
+            return (sighting(4, -40, 0, stamp=clock.now - 0.04),)
 
-        self.assertGreaterEqual(len(arm.calls), 2)
+        link.frame_fast = steady_frame
+        with (
+            patch.object(algorithms, "time", clock),
+            self.assertRaises(VisualServoError),
+        ):
+            self.call(arm, link, timeout=0.6)
+        self.assertGreaterEqual(sum(any(v) for _, *v in arm.commands), 2)
 
-    def test_following_uses_the_boxes_only_frame(self) -> None:
-        """有 ``frame_fast`` 的观测源：跟随走快路径，不再调会补霍夫的 ``frame``。"""
-        arm = FakeArm(self.JACOBIAN)
-        link = BoxesOnlyLink()
-
-        with patch.object(algorithms, "time", FollowClock()):
-            result = self.call(arm, link, timeout=5.0)
-
+    def test_following_uses_the_boxes_only_frame(self):
+        clock, arm, link = self.rig(stop_at=0)
+        with patch.object(algorithms, "time", clock):
+            result = self.call(arm, link, timeout=5)
         self.assertTrue(result.aligned)
-        self.assertGreaterEqual(link.fast_reads, 3, "四秒跟随期间持续取帧确认停稳")
-        self.assertEqual(link.slow_reads, 0, "跟随不该走会补颜色/霍夫的那条路")
+        self.assertGreaterEqual(link.fast_reads, 3)
+        self.assertEqual(link.slow_reads, 0)
 
-    def test_the_scene_must_be_still_before_it_reports_stopped(self) -> None:
-        """读数不变只是候选；``scene_stable()`` 说画面还在动就得继续跟。"""
-        arm = FakeArm(self.JACOBIAN)
-        link = MovingLink([(0.0, 0.0)] * 8)
+    def test_the_scene_must_be_still_before_it_reports_stopped(self):
+        clock, arm, link = self.rig(stop_at=0)
         checks = []
 
-        def scene_stable() -> bool:
+        def scene_stable():
             checks.append(True)
             return len(checks) >= 2
 
         link.scene_stable = scene_stable
-
-        with patch.object(algorithms, "time", FollowClock()):
-            result = self.call(arm, link, timeout=5.0)
-
-        self.assertEqual(len(checks), 2, "第一次判动、第二次判静，然后收工")
+        with patch.object(algorithms, "time", clock):
+            result = self.call(arm, link, timeout=5)
         self.assertTrue(result.aligned)
+        self.assertEqual(len(checks), 2)
 
-    def test_it_stops_when_the_material_stops(self) -> None:
-        arm = FakeArm(self.JACOBIAN)
-        link = MovingLink(
-            [(-40.0, -6.0), (-26.0, -6.0), (-12.0, -6.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]
-        )
-
-        with patch.object(algorithms, "time", FollowClock()):
-            result = self.call(arm, link, timeout=5.0)
-
+    def test_it_stops_when_the_material_stops(self):
+        clock, arm, link = self.rig()
+        with patch.object(algorithms, "time", clock):
+            result = self.call(arm, link, timeout=7)
         self.assertTrue(result.aligned)
-        self.assertTrue(result.unverified, "跟的过程本来就不再验证")
-        self.assertGreater(len(arm.calls), 0)
-        self.assertGreaterEqual(link.reads, 6, "读数一致之后仍须跟满四秒")
+        self.assertTrue(result.unverified)
+        self.assertTrue(any(any(v) for _, *v in arm.commands))
+        self.assertGreaterEqual(clock.now, 4)
+        self.assertEqual(arm.velocity, (0, 0))
 
-    def test_a_frame_where_the_material_is_missing_does_not_stop_the_follow(self) -> None:
-        arm = FakeArm(self.JACOBIAN)
-        link = IffyLink([(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)], misses=2)
-
-        result = self.call(arm, link, timeout=5.0)
-
-        self.assertTrue(result.aligned, "跟丢两帧之后看见料停住，照样收工")
+    def test_a_frame_where_the_material_is_missing_does_not_stop_the_follow(self):
+        clock, arm, link = self.rig(stop_at=0, missing=((0, 0.2),))
+        with patch.object(algorithms, "time", clock):
+            result = self.call(arm, link, timeout=5)
+        self.assertTrue(result.aligned)
 
 
 class TurntableAlignTests(unittest.TestCase):
@@ -2614,13 +2576,12 @@ class GraspFollowMaterialTests(unittest.TestCase):
             follow.assert_called_once()
             kwargs = follow.call_args.kwargs
             self.assertEqual(kwargs["timeout"], 4.0)
-            # 不传调参时用快版默认值：跟着动的料走靠的就是这几个数。
-            self.assertEqual(kwargs["step_seconds"], algorithms.FOLLOW_STEP_SECONDS)
-            self.assertEqual(
-                kwargs["coarse_step_seconds"], algorithms.FOLLOW_COARSE_STEP_SECONDS
-            )
-            self.assertEqual(kwargs["gain"], algorithms.FOLLOW_GAIN)
-            self.assertEqual(kwargs["acceleration"], algorithms.FOLLOW_ACCELERATION)
+            # Continuous follow has its own velocity-loop settings.
+            self.assertEqual(kwargs["gain"], 4.0)
+            self.assertEqual(kwargs["acceleration"], 220)
+            self.assertEqual(kwargs["rpm"], 50)
+            self.assertNotIn("step_seconds", kwargs)
+            self.assertNotIn("coarse_step_seconds", kwargs)
             # 按次给的 want 必须真的变成判别条件：否则跟的是配置里那个默认物料。
             self.assertEqual(follow.call_args.args[2], MaterialSelector(color="green"))
             for stage in ("hover", "raise", "align", "down", "back"):
