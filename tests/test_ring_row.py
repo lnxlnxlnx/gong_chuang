@@ -353,35 +353,93 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
 
     def run_it(
         self, orders, *, extension_pulses=4800, base_pulses=1000,
-        **kwargs,
+        corrected_pulses=None, **kwargs,
     ):
         robot = Mock()
         robot.vision.ring_center_spacing_mm = 150.0
         robot.arm = RowStepPulsesTests().robot().arm
         robot.arm.config = load_arm_config()
         robot.arm.turns_state = Mock()
+        current = {"base": base_pulses, "extension": extension_pulses}
         robot.arm.turns_state.of.side_effect = lambda name: SimpleNamespace(
-            pulses={"base": base_pulses, "extension": extension_pulses}[name]
+            pulses=current[name]
         )
-        robot.grasp.align_ring.return_value = RingAlignResult(
-            aligned=True, final_error_mm=0.5, note=""
-        )
+
+        def align_ring(*, require_digit, **_kwargs):
+            if require_digit == 2:
+                current.update(base=base_pulses, extension=extension_pulses)
+            elif corrected_pulses is not None:
+                current.update(corrected_pulses[require_digit])
+            return RingAlignResult(aligned=True, final_error_mm=0.5)
+
+        def move_axes(_robot, pose):
+            for axis in ("base", "extension"):
+                if axis in pose:
+                    current[axis] = round(pose[axis] * 3200 / 360)
+            return Mock()
+
+        robot.grasp.align_ring.side_effect = align_ring
 
         with patch.object(app_gripper, "move_axes_to") as move, \
                 patch.object(app_gripper, "_grab_material_from_car") as grab, \
                 patch("time.sleep"):
-            move.return_value.wait.return_value = None
+            move.side_effect = move_axes
             app_gripper.place_material_from_repo_to_floor_from_center_ring(
                 robot, orders=orders, **kwargs
             )
-        return robot, [call.args[1] for call in move.call_args_list], grab
+        targets = [call.args[1] for call in move.call_args_list]
+        placed = [pose for pose in targets if set(pose) == {"base", "extension"}]
+        return robot, [targets[0], *placed, targets[-1]], grab
+
+    def test_side_placements_use_the_visually_measured_joint_positions(self) -> None:
+        corrected = {
+            1: {"base": -1900, "extension": 6000},
+            3: {"base": 800, "extension": 5000},
+        }
+        robot, targets, _grab = self.run_it(
+            (3, 1, 2), base_pulses=-738, extension_pulses=3294,
+            corrected_pulses=corrected,
+        )
+        for digit, pose in zip((3, 1), targets[1:3]):
+            for axis in ("base", "extension"):
+                self.assertAlmostEqual(pose[axis], corrected[digit][axis] * 360 / 3200)
+        self.assertEqual(
+            [call.kwargs["require_digit"] for call in robot.grasp.align_ring.call_args_list],
+            [2, 1, 3],
+        )
+
+    def test_an_unaligned_side_aborts_before_any_pickup_or_release(self) -> None:
+        for failed_digit in (1, 3):
+            with self.subTest(failed_digit=failed_digit):
+                robot = Mock()
+                robot.vision.ring_center_spacing_mm = 150.0
+                robot.arm.config = load_arm_config()
+                robot.arm.pulses_per_revolution = 3200
+                robot.arm.turns_state.of.side_effect = lambda name: SimpleNamespace(
+                    pulses={"base": -738, "extension": 3294}[name]
+                )
+                robot.grasp.align_ring.side_effect = lambda require_digit, **_: RingAlignResult(
+                    aligned=require_digit != failed_digit,
+                    final_error_mm=20.0 if require_digit == failed_digit else 0.5,
+                )
+                with patch.object(app_gripper, "move_axes_to") as move, \
+                        patch.object(app_gripper, "_grab_material_from_car") as grab, \
+                        patch("time.sleep"):
+                    with self.assertRaisesRegex(RuntimeError, f"{failed_digit} 号环.*未对准"):
+                        app_gripper.place_material_from_repo_to_floor_from_center_ring(robot)
+                grab.assert_not_called()
+                robot.gripper.open_jaws.assert_not_called()
+                self.assertEqual(move.call_args.args[1], app_gripper.SAFE_RETRACT)
 
     def test_ring_two_is_aligned_then_the_three_poses_are_on_one_line(self) -> None:
         robot, targets, _grab = self.run_it(
             (1, 2, 3), row_normal_base_motor_degrees=112.5
         )
 
-        robot.grasp.align_ring.assert_called_once()
+        self.assertEqual(
+            [call.kwargs["require_digit"] for call in robot.grasp.align_ring.call_args_list],
+            [2, 1, 3],
+        )
         self.assertIn("require_digit", robot.grasp.align_ring.call_args.kwargs)
         self.assertEqual(targets[0], app_gripper.RING2_APPROACH_POSE)
         self.assertEqual(targets[-1], app_gripper.SAFE_RETRACT)

@@ -904,6 +904,34 @@ def _row_step_pulses(
     return base_pulses, extension_pulses
 
 
+def _align_floor_ring(
+    robot: Robot, *, digit: int, tolerance_mm: float
+) -> tuple[int, int]:
+    """保存已通过视觉验收的关节位置，未对准的目标不能用于后续抓放。"""
+    aligned = robot.grasp.align_ring(
+        require_digit=digit, tolerance_mm=tolerance_mm, max_iterations=6
+    )
+    for step in aligned.steps:
+        print(f"  {step.line()}")
+    if aligned.plan is not None:
+        target_x, target_y = aligned.plan.target
+        print(f"  {digit} 号环视觉目标读数：({target_x:+.2f}, {target_y:+.2f}) mm")
+    if not aligned.aligned:
+        residual = (
+            "未知" if aligned.final_error_mm is None
+            else f"{aligned.final_error_mm:.1f} mm"
+        )
+        raise RuntimeError(
+            f"{digit} 号环未对准（残差 {residual}，门槛 {tolerance_mm:.1f} mm）：停止放料"
+            + (f"；{aligned.note}" if aligned.note else "")
+        )
+    print(f"  {digit} 号环视觉已对准（视觉残差 {aligned.final_error_mm:.1f} mm）")
+    return (
+        robot.arm.turns_state.of("base").pulses,
+        robot.arm.turns_state.of("extension").pulses,
+    )
+
+
 def place_material_from_repo_to_floor_from_center_ring(
     robot: Robot,
     *,
@@ -913,17 +941,17 @@ def place_material_from_repo_to_floor_from_center_ring(
     need_calibrate: bool = False,
     row_normal_base_motor_degrees: float = -17.0,
 ):
-    """把物料从仓库放到地面圆环里：**先闭环对准 2 号环，再按几何算出 1/3 号**。
+    """先对准中环，用几何找到两端，再逐环视觉实测落点后从仓库放料。
 
     前提是车头与环排垂直；``row_normal_base_motor_degrees`` 是机械臂伸缩方向
     垂直环排时的实测底座**电机角度**，不是输出轴角度，也不是对准 2 环时的角度。
 
     1. 摆到 :data:`RING2_APPROACH_POSE`，``align_ring(require_digit=2)`` 闭环对准
        —— 2 号环的位置是**量出来**的；
-    2. 用实测法线方向建立平面坐标，1/3 号在中环两侧各平移一格，再分别反算圆柱关节
-       位置（:func:`_row_step_pulses`），两端的底座和伸缩增量通常不对称；
-    3. 按 ``orders`` 一趟一趟放：去仓库抓料 → 走到该环的绝对关节位置 → 降到
-       ``place_lift`` 松爪 → 抬起。车不动，中间也不再拍帧。
+    2. 用实测法线方向建立平面坐标，反算 1/3 号的几何初值，然后在相同观察高度
+       分别闭环对准所需环，保存最终关节位置。几何初值只用于取景，不能代表实物到位；
+    3. 所需环全部通过视觉验收后，按 ``orders`` 去仓库抓料 → 回到实测的绝对关节
+       位置 → 降到 ``place_lift`` 松爪 → 抬起。车不动，抓料后也不再拍帧。
 
     第 2 步必须**转+伸一起走**：只转底座的话末端是沿圆弧走的，三个料就会落在一条弧上
     （只调底座是修不好的）。``r`` 根据对准后的伸缩位置和硬件配置里的实测半径参考计算。
@@ -938,29 +966,11 @@ def place_material_from_repo_to_floor_from_center_ring(
         square_chassis_to_ring_row(robot)
     time.sleep(1)  # 先让臂停稳再看
     try:
-        aligned = robot.grasp.align_ring(
-            require_digit=2, tolerance_mm=tolerance_mm, max_iterations=6
+        base, extension = _align_floor_ring(
+            robot, digit=2, tolerance_mm=tolerance_mm
         )
-        for step in aligned.steps:
-            print(f"  {step.line()}")
-        if aligned.plan is not None:
-            target_x, target_y = aligned.plan.target
-            print(f"  2 号环视觉目标读数：({target_x:+.2f}, {target_y:+.2f}) mm")
-        if not aligned.aligned:
-            # 中环是三处落点的共同基准，未对准就不能据此抓料和放料。
-            residual = (
-                "未知"
-                if aligned.final_error_mm is None
-                else f"{aligned.final_error_mm:.1f} mm"
-            )
-            raise RuntimeError(
-                f"2 号环未对准（残差 {residual}，门槛 {tolerance_mm:.1f} mm）：停止放料"
-                + (f"；{aligned.note}" if aligned.note else "")
-            )
         arm = robot.arm
         spacing = float(robot.vision.ring_center_spacing_mm)
-        base = arm.turns_state.of("base").pulses
-        extension = arm.turns_state.of("extension").pulses
         radius = arm.config.extension_radius_mm(extension)
         degrees_per_pulse = 360.0 / arm.pulses_per_revolution
         middle_yaw = (
@@ -974,11 +984,30 @@ def place_material_from_repo_to_floor_from_center_ring(
             )
             poses[digit] = (base + step_base, extension + step_extension)
         print(
-            f"2 号环视觉已对准（视觉残差 {aligned.final_error_mm:.1f} mm）："
-            f"当前半径 {radius:.2f} mm；"
+            f"2 号环几何基准：当前半径 {radius:.2f} mm；"
             f"环排法线底座电机角 {row_normal_base_motor_degrees:+.2f}°；"
             f"中环相对法线夹角 {middle_yaw:+.2f}°（输出轴）"
         )
+        # 先空爪实测所有落点；任一环不合格时，仓库内的物料仍未被抓起。
+        for digit in (1, 3):
+            if digit not in digits:
+                continue
+            seed_base, seed_extension = poses[digit]
+            move_axes_to(robot, {
+                "lift": RING2_APPROACH_POSE["lift"],
+                "base": seed_base * degrees_per_pulse,
+                "extension": seed_extension * degrees_per_pulse,
+            }).wait()
+            time.sleep(1)
+            poses[digit] = _align_floor_ring(
+                robot, digit=digit, tolerance_mm=tolerance_mm
+            )
+            measured_base, measured_extension = poses[digit]
+            print(
+                f"  {digit} 号环实测相对几何初值："
+                f"底座 {measured_base - seed_base:+d} 脉冲、"
+                f"伸缩 {measured_extension - seed_extension:+d} 脉冲"
+            )
         for digit in digits:
             base_pulses, extension_pulses = poses[digit]
             # 抓料会把这几个轴都开走；这里用的是**绝对**位置，中间怎么走都对得上。
