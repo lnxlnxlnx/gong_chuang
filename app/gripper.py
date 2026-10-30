@@ -910,7 +910,8 @@ def place_material_from_repo_to_floor_from_center_ring(
     orders: tuple[int, int, int] = (1, 2, 3),
     place_lift: float = 95.0,
     tolerance_mm: float = 2.0,
-    need_calibrate: bool = False
+    need_calibrate: bool = False,
+    row_normal_base_motor_degrees: float = -17.0,
 ):
     """把物料从仓库放到地面圆环里：**先闭环对准 2 号环，再按几何算出 1/3 号**。
 

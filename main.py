@@ -170,7 +170,8 @@ def run_map():
         # center_chassis_on_ring(robot, require_digit=2)
         # robot.chassis.left(rpm = 40, pulses = 400)
         # place_and_grab_material(robot)
-        place_material_from_repo_to_floor_from_center_ring(robot, need_calibrate=False)
+        grab_material_from_turntable_to_repo_follow(robot)
+        # place_material_from_repo_to_floor_from_center_ring(robot, need_calibrate=False)
         input("结束!!!!!!!!!!!!!!!")
         
         ###################
