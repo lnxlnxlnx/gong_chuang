@@ -7,6 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from modules.grasp.drive import eye_in_hand as algorithms
+from modules.grasp.drive.visual_servo_model import RADIAL_AXIS
+from modules.grasp.drive.visual_servo_motion import (
+    RADIAL_MIN_MOTOR_DEGREES,
+    _send_axis,
+    clamp_radial_retract,
+)
 from modules.grasp.test.unit import test_eye_in_hand as fixtures
 from modules.grasp.drive.visual_servo_model import (
     MaterialSelector,
@@ -91,6 +97,73 @@ class TimedLink:
         self.clock.sleep(0.04)
         x, y = self.arm.offset
         return (sighting(4, x, y, stamp=self.clock.now),)
+
+
+class RadialFloorTests(unittest.TestCase):
+    """伸缩回收不能顶到 0°：到了机械端位还发位置帧就是堵转（现场复现过）。"""
+
+    class Arm:
+        """只实现"读里程表 + 发伸缩帧"，够 :func:`_send_axis` 走完这一条路。"""
+
+        def __init__(self, degrees: float) -> None:
+            self.degrees = degrees
+            self.pulses_per_revolution = 3200
+            self.moves = []
+            self.base_moves = []
+
+        def read_abs_state(self, axis):
+            self.last_axis = axis
+            return SimpleNamespace(motor_degrees=self.degrees)
+
+        def move_backward(self, pulses, **_kwargs):
+            self.moves.append(-pulses)
+
+        def move_forward(self, pulses, **_kwargs):
+            self.moves.append(pulses)
+
+        def rotate_cw(self, pulses, **_kwargs):
+            self.base_moves.append(pulses)
+
+        def rotate_ccw(self, pulses, **_kwargs):
+            self.base_moves.append(-pulses)
+
+
+    def test_a_long_retract_is_clamped_to_the_remaining_room(self) -> None:
+        """90° 起步、下限 30°：−2000 脉冲（225°）只能走 60° = 533 脉冲。"""
+        arm = self.Arm(degrees=90.0)
+        self.assertEqual(clamp_radial_retract(arm, -2000), -533)
+
+        _send_axis(arm, RADIAL_AXIS, -2000)
+        self.assertEqual(arm.moves, [-533])
+        self.assertEqual(arm.last_axis, "extension")
+
+    def test_nothing_is_sent_once_the_extension_is_at_the_floor(self) -> None:
+        arm = self.Arm(degrees=RADIAL_MIN_MOTOR_DEGREES)
+        self.assertEqual(_send_axis(arm, RADIAL_AXIS, -2000), 0.0)
+        self.assertEqual(arm.moves, [])
+
+    def test_extending_is_never_clamped(self) -> None:
+        arm = self.Arm(degrees=40.0)
+        _send_axis(arm, RADIAL_AXIS, 500)
+        self.assertEqual(arm.moves, [500])
+
+    def test_the_blind_search_waits_for_what_it_really_sends(self) -> None:
+        """回收被夹掉之后不能还按 2000 脉冲等：那是白丢一次取帧的机会。"""
+        arm = self.Arm(degrees=RADIAL_MIN_MOTOR_DEGREES)
+        clock = FollowClock()
+        with patch.object(algorithms, "time", clock):
+            waited = algorithms._blind_search_step(
+                arm,
+                base_pulses=20,
+                radial_pulses=-2000,
+                rpm=40,
+                pulses_per_revolution=3200,
+                acceleration=255,
+                inter_frame_seconds=0.03,
+            )
+        self.assertEqual(arm.moves, [])            # 伸缩一动不动
+        self.assertLess(waited, 0.2)               # 只按底座那 20 脉冲等
+        self.assertLess(clock.now, 0.2)
 
 
 class SmoothFollowTests(unittest.TestCase):

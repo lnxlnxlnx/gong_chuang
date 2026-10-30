@@ -19,6 +19,35 @@ from typing import Optional
 from modules.grasp.drive.visual_servo_model import BASE_AXIS, RADIAL_AXIS, VisualServoConfig
 
 
+#: 伸缩轴在机械臂上的真实轴名（``RADIAL_AXIS`` 是伺服这边的抽象名）。
+EXTENSION_AXIS = "extension"
+
+#: 伸缩轴的**安全下限**（电机口径：3200 脉冲 = 360°，与 ``read_abs_state`` 同一把尺）。
+#:
+#: 0° ≈ 完全缩回的机械端位，再往里发位置帧只会顶在端位上堵转——现场看到的就是
+#: "跟随退到 extension=0，电机一直响"。跟随的丢料盲扫一次发 −2000 脉冲（225°），
+#: 从 90° 起步算出 −135°，所以必须在**发帧之前**按当前读数夹一次。留 30°（≈5 mm）
+#: 余量：换机构/换伸缩节就改这一个数，别按加工图纸改——真机的端位只有撞到才知道。
+RADIAL_MIN_MOTOR_DEGREES = 30.0
+
+
+def clamp_radial_retract(arm, signed_pulses: int) -> int:
+    """把一次**回收**的伸缩脉冲夹到行程下限之上；伸出方向原样返回。
+
+    依据是机械臂的**命令里程表**（``read_abs_state``，只读内存、不发串口），不是编码器：
+    真堵过之后里程表会比实际更靠里，那只让后续回收更保守，不会反向往外顶。
+    """
+    if signed_pulses >= 0:
+        return signed_pulses
+    read_state = getattr(arm, "read_abs_state", None)
+    if read_state is None:  # 测试替身没有里程表：没有位置可夹，按原值发
+        return signed_pulses
+    current = read_state(EXTENSION_AXIS).motor_degrees
+    room = int((current - RADIAL_MIN_MOTOR_DEGREES) * arm.pulses_per_revolution / 360.0)
+    if room <= 0:
+        return 0
+    return max(signed_pulses, -room)
+
 
 def _move_axis(arm, axis: str, signed_pulses: int) -> float:
     """驱动一个轴并等它走完（按估算耗时）；返回等了多久。"""
@@ -42,9 +71,16 @@ def _send_axis(
 
     ``rpm`` / ``acceleration`` 原样交给机械臂的动作方法：跟随要压短每一步的起转时间，
     就会传更高的档位；不传则用 ``modules/arm/config.json`` 里的默认值。
+
+    伸缩在这里**统一夹一次行程下限**（:func:`clamp_radial_retract`）：跟随、盲扫、
+    对准所有伸缩动作都从这一处出去，所以"退到 0° 堵转"只需要在这一个地方拦。
     """
     if signed_pulses == 0:
         return 0.0
+    if axis == RADIAL_AXIS:
+        signed_pulses = clamp_radial_retract(arm, signed_pulses)
+        if signed_pulses == 0:
+            return 0.0
     if axis == BASE_AXIS:
         action = arm.rotate_cw if signed_pulses > 0 else arm.rotate_ccw
     else:

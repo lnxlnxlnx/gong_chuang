@@ -98,6 +98,7 @@ from modules.grasp.drive.visual_servo_motion import (
     _move_lift,
     _send_axis,
     _send_lift,
+    clamp_radial_retract,
 )
 from modules.grasp.drive.visual_servo_observation import (
     VISIBILITY_PROBE_FRAMES,
@@ -743,9 +744,11 @@ FOLLOW_LOST_BASE_PULSES = 20
 #: 丢料后**一次性**把伸缩拉回多少脉冲（正数 = 往里缩）。料跑到后面时伸缩常常已经
 #: 伸得太长，视野里根本没有它；120 脉冲（2.3 mm）不解套，按现场经验一次拉回
 #: 2000 脉冲（≈38 mm）才够。每个"丢失片段"只拉一次，重新看见料后复位。
+#: 实际发出去的量还会被 :func:`clamp_radial_retract` 夹到行程下限之上——从 90° 起步
+#: 只走得到 60°（≈10 mm），所以这个数是"想拉多少"的上限，不是保证量。
 FOLLOW_LOST_RETRACT_PULSES = 2000
-#: 一次跟随里最多拉回几次（安全阀）：3 × 2000 脉冲 ≈ 114 mm，再往下就快压到
-#: 伸缩行程下限了。到顶之后只扫底座，不再继续收——收过头会顶在限位上。
+#: 一次跟随里最多拉回几次（安全阀）：3 × 2000 脉冲 ≈ 114 mm。到顶之后只扫底座，
+#: 不再继续收——真正的下限由 :data:`RADIAL_MIN_MOTOR_DEGREES` 兜底，这里管次数。
 FOLLOW_LOST_MAX_RETRACTS = 3
 
 
@@ -1251,7 +1254,11 @@ def _blind_search_step(
     ``base_pulses`` 的符号就是搜索方向（正 = 机械臂 CW）。转盘只会顺时针把料带走，
     所以这里默认也朝 CW 扫；伸缩往回缩是为了把因为伸得太长而丢掉的视野收回来。
     两条都只发一小段、按实际动作时长等，和 :func:`follow_x_y` 同一个节奏。
+
+    伸缩的回收**先夹到行程下限**，等待也按夹过之后的脉冲算：夹成 0 还在原地等
+    2000 脉冲那么久，等于白丢一次取帧的机会（那正是"越跟越差"的一段）。
     """
+    radial_pulses = clamp_radial_retract(arm, radial_pulses)
     _send_axis(arm, BASE_AXIS, base_pulses, rpm=rpm, acceleration=acceleration)
     if base_pulses and radial_pulses:
         time.sleep(inter_frame_seconds)
