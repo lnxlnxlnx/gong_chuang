@@ -42,7 +42,9 @@ def clamp_radial_retract(arm, signed_pulses: int) -> int:
     read_state = getattr(arm, "read_abs_state", None)
     if read_state is None:  # 测试替身没有里程表：没有位置可夹，按原值发
         return signed_pulses
-    current = read_state(EXTENSION_AXIS).motor_degrees
+    current = getattr(read_state(EXTENSION_AXIS), "motor_degrees", None)
+    if not isinstance(current, (int, float)) or isinstance(current, bool):
+        return signed_pulses  # 同上：Mock 替身读到的是 Mock，不是位置
     room = int((current - RADIAL_MIN_MOTOR_DEGREES) * arm.pulses_per_revolution / 360.0)
     if room <= 0:
         return 0

@@ -940,6 +940,7 @@ def place_material_from_repo_to_floor_from_center_ring(
     tolerance_mm: float = 2.0,
     need_calibrate: bool = False,
     row_yaw_correction_deg: float = 0.0,
+    row_normal_base_motor_degrees: float = -17.0,
 ):
     """只闭环对准中环一次，按可调补偿角计算三环落点，再从仓库放料。
 
