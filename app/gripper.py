@@ -938,7 +938,7 @@ def place_material_from_repo_to_floor_from_center_ring(
     orders: tuple[int, int, int] = (1, 2, 3),
     place_lift: float = 95.0,
     tolerance_mm: float = 2.0,
-    row_normal_base_motor_degrees: float = -17.0,
+    need_calibrate: bool = False
 ):
     """先对准中环，用几何找到两端，再逐环视觉实测落点后从仓库放料。
 
@@ -960,6 +960,9 @@ def place_material_from_repo_to_floor_from_center_ring(
         raise ValueError("row_normal_base_motor_degrees 必须是有限的电机角度")
     robot.arm.move_axis_to_motor_degrees("lift", 760)
     move_axes_to(robot, RING2_APPROACH_POSE).wait()
+    if need_calibrate:
+        robot.arm.move_axis_to_motor_degrees("lift", 960)
+        square_chassis_to_ring_row(robot)
     time.sleep(1)  # 先让臂停稳再看
     try:
         base, extension = _align_floor_ring(
