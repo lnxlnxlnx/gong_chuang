@@ -1312,7 +1312,7 @@ def follow_material_xy(
     jacobian: VisualServoJacobian,
     config: VisualServoConfig,
     *,
-    timeout: float = 20.0,
+    timeout: float = 90.0,
     tolerance_mm: Optional[float] = None,
     gain: float = 4.0,
     acceleration: int = 220,

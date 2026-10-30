@@ -503,7 +503,7 @@ class Grasp:
         self,
         want_color,
         *,
-        timeout: float = 20.0,
+        timeout: float = 90.0,
         tolerance_mm: float | None = None,
         gain: float = 4.0,
         acceleration: int = 220,
