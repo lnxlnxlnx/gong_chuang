@@ -166,6 +166,52 @@ class RadialFloorTests(unittest.TestCase):
         self.assertLess(clock.now, 0.2)
 
 
+class CycleStepTests(unittest.TestCase):
+    """步长按"上一段下发到现在"的真实间隔折算：相机慢，机械臂别停着等它。"""
+
+    JACOBIAN = VisualServoJacobian(
+        base_dx=0.08, base_dy=0.0, radial_dx=0.0, radial_dy=0.02,
+    )
+    PPR = 3200
+
+    def step_for(self, *, cycle_seconds: float):
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [0.0, -20.0]          # 只剩 y 方向 20 mm：伸缩吃满单步上限
+        clock = FollowClock()
+        clock.sleep(cycle_seconds)         # 上一段下发之后过了这么久才轮到这一段
+        with patch.object(algorithms, "time", clock):
+            return algorithms.follow_x_y(
+                arm,
+                JumpyDepthLink(arm=arm),
+                MaterialSelector(),
+                VisualServoTarget(0.0, 0.0),
+                self.JACOBIAN,
+                fixtures.SingleStepTests.config(),
+                rpm=algorithms.FOLLOW_RPM,
+                gain=1.0,
+                since=0.0,
+            )
+
+    def limit_for(self, seconds: float) -> int:
+        return int(seconds * algorithms.FOLLOW_RPM * self.PPR / 60)
+
+    def test_a_slow_frame_earns_a_longer_step(self) -> None:
+        """取一帧要 0.18 s 时，这一段就该走 0.18 s 的量，不是固定 0.06 s。"""
+        quick = self.step_for(cycle_seconds=0.06)
+        slow = self.step_for(cycle_seconds=0.18)
+
+        self.assertEqual(abs(quick.radial_pulses), self.limit_for(0.08))  # 粗调档
+        self.assertEqual(abs(slow.radial_pulses), self.limit_for(0.18))
+        self.assertGreater(abs(slow.radial_pulses), abs(quick.radial_pulses))
+
+    def test_a_stuck_frame_cannot_blow_the_step_up(self) -> None:
+        """某帧卡了很久（比如相机重连）：步长封顶，别一步甩出去。"""
+        result = self.step_for(cycle_seconds=9.0)
+        self.assertEqual(
+            abs(result.radial_pulses), self.limit_for(algorithms.FOLLOW_MAX_STEP_SECONDS)
+        )
+
+
 class SmoothFollowTests(unittest.TestCase):
     JACOBIAN = VisualServoJacobian(
         base_dx=0.08, base_dy=0.0, radial_dx=0.0, radial_dy=0.02,

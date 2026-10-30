@@ -353,7 +353,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
 
     def run_it(
         self, orders, *, extension_pulses=4800, base_pulses=1000,
-        **kwargs,
+        use_default_offsets=False, **kwargs,
     ):
         robot = Mock()
         robot.vision.ring_center_spacing_mm = 150.0
@@ -382,13 +382,54 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
                 patch.object(app_gripper, "_grab_material_from_car") as grab, \
                 patch("time.sleep"):
             move.side_effect = move_axes
-            kwargs.setdefault("ring3_right_offset_mm", 0.0)
+            kwargs.setdefault("row_yaw_correction_deg", 0.0)
+            if not use_default_offsets:
+                kwargs.setdefault("ring3_right_offset_mm", 0.0)
+                kwargs.setdefault("ring3_down_offset_mm", 0.0)
             app_gripper.place_material_from_repo_to_floor_from_center_ring(
                 robot, orders=orders, **kwargs
             )
         targets = [call.args[1] for call in move.call_args_list]
         placed = [pose for pose in targets if set(pose) == {"base", "extension"}]
         return robot, [targets[0], *placed, targets[-1]], grab
+
+    def test_ring_three_down_offset_is_independent_of_right_offset(self) -> None:
+        for yaw in (0.0, -6.5):
+            for down in (10.0, -4.0, 0.0, None):
+                with self.subTest(yaw=yaw, down=down):
+                    offsets = {} if down is None else {"ring3_down_offset_mm": down}
+                    robot, targets, _grab = self.run_it(
+                        (3, 2, 1), base_pulses=-738, extension_pulses=3294,
+                        row_yaw_correction_deg=yaw, use_default_offsets=True,
+                        **offsets,
+                    )
+                    _robot, original, _grab = self.run_it(
+                        (3, 2, 1), base_pulses=-738, extension_pulses=3294,
+                        row_yaw_correction_deg=yaw,
+                    )
+                    self.assertEqual(targets[2:4], original[2:4])
+                    positions = []
+                    for pose in (original[1], targets[1]):
+                        radius = 235.0 + (pose["extension"] - 270.0) * 61.0 / 360.0
+                        theta = math.radians((pose["base"] + 83.025) / 5.0 + yaw)
+                        positions.append((radius * math.cos(theta), radius * math.sin(theta)))
+                    before, after = positions
+                    expected_down = 10.0 if down is None else down
+                    self.assertAlmostEqual(after[0] - before[0], -expected_down, delta=0.15)
+                    self.assertAlmostEqual(after[1] - before[1], 15.0, delta=0.15)
+                    self.assertEqual(
+                        [call.kwargs["require_digit"] for call in robot.grasp.align_ring.call_args_list],
+                        [2],
+                    )
+
+    def test_invalid_ring_three_down_offset_is_rejected_before_motion(self) -> None:
+        robot = Mock()
+        for offset in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(offset=offset), self.assertRaises(ValueError):
+                app_gripper.place_material_from_repo_to_floor_from_center_ring(
+                    robot, ring3_down_offset_mm=offset
+                )
+        robot.arm.move_axis_to_motor_degrees.assert_not_called()
 
     def test_ring_three_offset_moves_only_ring_three_along_the_row(self) -> None:
         for yaw in (0.0, -6.5):

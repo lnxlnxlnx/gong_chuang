@@ -721,6 +721,14 @@ def align_x_y(
 #: 跟随用短位置段及时更新方向；取下一帧与上一段运动重叠，不再用大步减少取帧次数。
 FOLLOW_STEP_SECONDS = 0.06
 FOLLOW_COARSE_STEP_SECONDS = 0.08
+#: 一步最多按多长的**真实帧间隔**折算（秒）。
+#:
+#: 跟随的一轮是"取帧 → 推理 → 发一段动作"，相机和推理那段时间机械臂本来是停着的，
+#: 而步长只按 ``FOLLOW_STEP_SECONDS`` 折算；取一帧要 0.15 s 左右时，机械臂实际只用到
+#: 上限的三分之一，看起来就是"怎么都追不上转盘"。给 :func:`follow_x_y` 传 ``since``
+#: （上一段下发的时刻）后，步长改成按这一轮真实花掉的时间算——这段时间本来就该走掉。
+#: 上限防"某帧卡了 2 s，一步甩出去"：0.25 s 在 40 rpm 下 ≈ 533 脉冲（12° 底座）。
+FOLLOW_MAX_STEP_SECONDS = 0.25
 #: 仅跟随循环使用的转速；静止料快速对准仍用机械臂配置的转速。
 FOLLOW_RPM = 40
 #: 从首次看见当前物料起计时；没看见的时间不能算作有效跟随。
@@ -783,6 +791,7 @@ def follow_x_y(
     acceleration: int = FOLLOW_ACCELERATION,
     rpm: Optional[int] = None,
     after: Optional[float] = None,
+    since: Optional[float] = None,
     force: bool = True,
     on_message: Optional[Callable[[str], None]] = None,
     _motion: Optional[_FollowMotion] = None,
@@ -816,6 +825,9 @@ def follow_x_y(
     :param rpm: 这一步的转速；``None`` 用机械臂配置。
     :param after: 只接受不早于这个时刻的观测；上一小步走完之后的时间戳能挡住
         "动作之前的旧帧"（走网络镜头 ``CameraLink`` 时那一层才真的按它过滤）。
+    :param since: 上一段动作**下发**的时刻。给了就按"到现在真的过了多久"折算步长
+        （上限 :data:`FOLLOW_MAX_STEP_SECONDS`）：取帧和推理那段时间机械臂本来是停着的，
+        只按 ``step_seconds`` 折算等于每轮都白停一次，追不上走起来的料。
     :param force: ``True`` = **忽略容差、至少走一步**（背隙地板以下仍然不动）。
         静止料对准要求"即使首帧已在容差内也校准一次"时用；跟随不要开。
     :raises VisualServoError: 这一帧看不到该物料、雅可比奇异。
@@ -868,6 +880,12 @@ def follow_x_y(
     # 上限取"时间预算折算的脉冲"与"允许并行的旋转上限"里小的那个：跟着料走时底座
     # 每步都转，超过并行上限就只能串行走，一轮立刻翻倍。
     step = coarse_step_seconds if error > config.coarse_error_mm else step_seconds
+    # 这一轮真的花了多久（上一段下发到现在，含取帧 + 推理 + 等上一段走完）：那段时间
+    # 机械臂本来就是闲着的，步长按它折算才走得掉。``since`` 没给就还是按 step_seconds。
+    cycle: Optional[float] = None
+    if since is not None:
+        cycle = min(max(0.0, time.monotonic() - since), FOLLOW_MAX_STEP_SECONDS)
+        step = max(step, cycle)
     limit = int(step * speed * pulses_per_revolution / 60.0)
     limit = max(1, min(limit, config.parallel_rotation_limit_pulses))
     base_step, radial_step = _plan_planar_step(
@@ -878,7 +896,9 @@ def follow_x_y(
         radial_step = _clamp_pulses(radial_step * gain, limit)
     say(
         f"跟随：误差 {error:.2f} mm → 底座 {base_step:+d}、伸缩 {radial_step:+d} 脉冲"
-        f"（单步上限 {limit}，修正比例 {gain:g}，{speed} rpm）"
+        f"（单步上限 {limit}"
+        + (f"，本轮 {cycle:.2f} s" if cycle is not None else "")
+        + f"，修正比例 {gain:g}，{speed} rpm）"
     )
     # 两轴各发一条（先底座、隔一个帧间隔再伸缩），都不等动作走完；等待按**这次动作的
     # 实际时长**算（见模块常量）。注意轴名：``BASE_AXIS``/``RADIAL_AXIS`` 是伺服这边的
@@ -1303,6 +1323,11 @@ def follow_material_xy(
     每一步交给 :func:`follow_x_y`，以较低转速走短位置段。上一段运动时就取下一帧，
     下发下一段前只补等尚未结束的运动时间，减少停下来等相机的间隙。退出前等最后一段结束。
 
+    **步长按这一轮真的花了多久折算**（``since=`` 上一段下发的时刻，上限
+    :data:`FOLLOW_MAX_STEP_SECONDS`）：一轮是"取帧→推理→发一段动作"，相机和推理那
+    段时间机械臂本来停着；只按固定 ``step_seconds`` 发动作的话，取帧慢一点机械臂就
+    只能用到速度上限的三分之一，看起来永远追不上转盘。
+
     **料跑到后面去、看不见了**：默认**原地不动**——一个动作帧都不发，只继续取帧等它
     重新进画面（料在转盘上绕一圈会自己回来，乱扫只会把自己带到离料更远的地方）。
     要盲找就把 ``lost_base_pulses`` / ``lost_retract_pulses`` 给上：连续丢
@@ -1331,7 +1356,8 @@ def follow_material_xy(
 
     :param timeout: 整个过程最多多久（秒），包含等待物料首次出现的时间。
     :param tolerance_mm: 到位门槛；``None`` 用 ``config.tolerance_mm``。
-    :param step_seconds: 细跟一步允许走多久（秒），折算成单轴脉冲上限。
+    :param step_seconds: 细跟一步**至少**走多久（秒），折算成单轴脉冲上限；实际取
+        "上一段下发到现在真实花掉的时间"，封顶 :data:`FOLLOW_MAX_STEP_SECONDS`。
     :param coarse_step_seconds: 误差大于 ``config.coarse_error_mm`` 时用的粗调档。
     :param gain: 每帧误差修正比例（默认 0.7）。
     :param acceleration: 加减速档位 0..255；越小越柔和，但起转越慢、跟得越顿。
@@ -1393,6 +1419,7 @@ def follow_material_xy(
                     acceleration=acceleration,
                     rpm=rpm,
                     after=checkpoint,
+                    since=checkpoint,
                     force=False,
                     on_message=say,
                     _motion=motion,
