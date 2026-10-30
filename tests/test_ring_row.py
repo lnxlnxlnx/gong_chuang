@@ -353,7 +353,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
 
     def run_it(
         self, orders, *, extension_pulses=4800, base_pulses=1000,
-        corrected_pulses=None, **kwargs,
+        **kwargs,
     ):
         robot = Mock()
         robot.vision.ring_center_spacing_mm = 150.0
@@ -368,8 +368,6 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         def align_ring(*, require_digit, **_kwargs):
             if require_digit == 2:
                 current.update(base=base_pulses, extension=extension_pulses)
-            elif corrected_pulses is not None:
-                current.update(corrected_pulses[require_digit])
             return RingAlignResult(aligned=True, final_error_mm=0.5)
 
         def move_axes(_robot, pose):
@@ -391,54 +389,39 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         placed = [pose for pose in targets if set(pose) == {"base", "extension"}]
         return robot, [targets[0], *placed, targets[-1]], grab
 
-    def test_side_placements_use_the_visually_measured_joint_positions(self) -> None:
-        corrected = {
-            1: {"base": -1900, "extension": 6000},
-            3: {"base": 800, "extension": 5000},
-        }
-        robot, targets, _grab = self.run_it(
-            (3, 1, 2), base_pulses=-738, extension_pulses=3294,
-            corrected_pulses=corrected,
-        )
-        for digit, pose in zip((3, 1), targets[1:3]):
-            for axis in ("base", "extension"):
-                self.assertAlmostEqual(pose[axis], corrected[digit][axis] * 360 / 3200)
-        self.assertEqual(
-            [call.kwargs["require_digit"] for call in robot.grasp.align_ring.call_args_list],
-            [2, 1, 3],
-        )
+    def test_tunable_angle_changes_the_row_direction_with_only_middle_alignment(self) -> None:
+        for angle in (0.0, -6.5, -13.205):
+            with self.subTest(angle=angle):
+                robot, targets, grab = self.run_it(
+                    (1, 2, 3), base_pulses=-738, extension_pulses=3294,
+                    row_yaw_correction_deg=angle, need_calibrate=False,
+                )
+                self.assertEqual(
+                    [call.kwargs["require_digit"] for call in robot.grasp.align_ring.call_args_list],
+                    [2],
+                )
+                self.assertEqual(grab.call_count, 3)
+                self.assertAlmostEqual(targets[2]["base"], -83.025)
+                self.assertAlmostEqual(targets[2]["extension"], 370.575)
+                self.assert_row_geometry(
+                    targets, normal_motor_degrees=-83.025 - angle * 5.0
+                )
 
-    def test_an_unaligned_side_aborts_before_any_pickup_or_release(self) -> None:
-        for failed_digit in (1, 3):
-            with self.subTest(failed_digit=failed_digit):
-                robot = Mock()
-                robot.vision.ring_center_spacing_mm = 150.0
-                robot.arm.config = load_arm_config()
-                robot.arm.pulses_per_revolution = 3200
-                robot.arm.turns_state.of.side_effect = lambda name: SimpleNamespace(
-                    pulses={"base": -738, "extension": 3294}[name]
+    def test_invalid_angle_is_rejected_before_motion(self) -> None:
+        robot = Mock()
+        for angle in (float("nan"), float("inf")):
+            with self.subTest(angle=angle), self.assertRaises(ValueError):
+                app_gripper.place_material_from_repo_to_floor_from_center_ring(
+                    robot, row_yaw_correction_deg=angle
                 )
-                robot.grasp.align_ring.side_effect = lambda require_digit, **_: RingAlignResult(
-                    aligned=require_digit != failed_digit,
-                    final_error_mm=20.0 if require_digit == failed_digit else 0.5,
-                )
-                with patch.object(app_gripper, "move_axes_to") as move, \
-                        patch.object(app_gripper, "_grab_material_from_car") as grab, \
-                        patch("time.sleep"):
-                    with self.assertRaisesRegex(RuntimeError, f"{failed_digit} 号环.*未对准"):
-                        app_gripper.place_material_from_repo_to_floor_from_center_ring(robot)
-                grab.assert_not_called()
-                robot.gripper.open_jaws.assert_not_called()
-                self.assertEqual(move.call_args.args[1], app_gripper.SAFE_RETRACT)
+        robot.arm.move_axis_to_motor_degrees.assert_not_called()
 
     def test_ring_two_is_aligned_then_the_three_poses_are_on_one_line(self) -> None:
-        robot, targets, _grab = self.run_it(
-            (1, 2, 3), row_normal_base_motor_degrees=112.5
-        )
+        robot, targets, _grab = self.run_it((1, 2, 3))
 
         self.assertEqual(
             [call.kwargs["require_digit"] for call in robot.grasp.align_ring.call_args_list],
-            [2, 1, 3],
+            [2],
         )
         self.assertIn("require_digit", robot.grasp.align_ring.call_args.kwargs)
         self.assertEqual(targets[0], app_gripper.RING2_APPROACH_POSE)
@@ -454,7 +437,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         self.assertAlmostEqual(ring2["extension"], 4800 * 360.0 / 3200.0)
         self.assert_row_geometry(targets, normal_motor_degrees=112.5)
 
-    def assert_row_geometry(self, targets, *, normal_motor_degrees=-17.0):
+    def assert_row_geometry(self, targets, *, normal_motor_degrees=112.5):
         """正向还原末端坐标，检查共线、间距以及相对实测法线的方向。"""
         positions = []
         for pose in targets[1:-1]:
@@ -482,7 +465,8 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
     def test_logged_middle_pose_keeps_both_ends_on_the_actual_ring_row(self) -> None:
         """现场中环不在环排法线上：落点仍须沿实测 -17° 电机角的垂线展开。"""
         _robot, targets, _grab = self.run_it(
-            (1, 2, 3), base_pulses=-781, extension_pulses=3566
+            (1, 2, 3), base_pulses=-781, extension_pulses=3566,
+            row_yaw_correction_deg=-14.1725,
         )
         positions = []
         for pose in targets[1:-1]:
