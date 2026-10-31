@@ -264,6 +264,42 @@ class MonitoredGrabTests(unittest.TestCase):
         self.assertFalse(self.grab())
         self.assert_back_at_observation_height()
 
+    def test_v2_custom_grab_tolerance_accepts_logged_offset_without_changing_alignment(self):
+        """重放现场 6.83 mm 偏差，只放宽下降检查，不改跟随对准容差。"""
+        self.camera.offset = lambda: (-1.75, 6.61)
+        self.assertFalse(self.grasp.check_material_for_grab("red").grabbable)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(app_gripper, "_follow_material_until_stable"))
+            stow = stack.enter_context(patch.object(app_gripper, "_stow_material_to_repo"))
+            stack.enter_context(patch.object(app_gripper, "move_axes_to"))
+            app_gripper.grab_material_from_turntable_to_repo_follow_v2(
+                self.robot, ("red",), home=None, grab_tolerance_mm=8.0,
+            )
+        self.robot.gripper.close_jaws.assert_called_once()
+        stow.assert_called_once()
+        self.assertFalse(self.grasp.check_material_for_grab("red").grabbable)
+
+    def test_custom_grab_tolerance_still_cancels_above_its_limit(self):
+        self.camera.offset = lambda: (8.01, 0)
+        with patch("builtins.print") as printed:
+            self.assertFalse(app_gripper._descend_and_grab_from_turntable_monitored(
+                self.robot, "red", deadline=self.clock() + 5, grab_tolerance_mm=8.0,
+            ))
+        self.assert_back_at_observation_height()
+        message = " ".join(str(c.args) for c in printed.call_args_list)
+        self.assertIn("允许 8.00 mm", message)
+
+    def test_invalid_grab_tolerance_fails_before_moving(self):
+        for tolerance in (0, -1, math.nan, math.inf, -math.inf):
+            with self.subTest(tolerance=tolerance):
+                with self.assertRaisesRegex(ValueError, "grab_tolerance_mm"):
+                    app_gripper.grab_material_from_turntable_to_repo_follow_v2(
+                        self.robot, ("red",), grab_tolerance_mm=tolerance,
+                    )
+        self.assertEqual(self.motor.moves, [])
+        self.assertEqual(self.camera.samples, [])
+        self.robot.gripper.close_jaws.assert_not_called()
+
     def test_cancellation_log_distinguishes_offset_from_missing_and_reports_measured_height(self):
         self.camera.offset = lambda: (7, 0)
         with patch("builtins.print") as printed:
