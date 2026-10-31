@@ -173,7 +173,7 @@ ROW_ROTATE_MAX_PULSES = 2000
 #: 一帧看清三环、随后一次性放完三个环之前要摆的姿态（``lift``/``extension``/``base``，
 #: 电机角度）：伸缩比逐环对准时短一点、镜头离地面远一些，整排 2×150 mm 才进得了画面。
 #: 现场按取景改这一份；换场地只需要动它和 ``station.center_spacing_mm``。
-RING_ROW_OBSERVE_POSE = {"lift": 980, "extension": 580, "base": -32}
+RING_ROW_OBSERVE_POSE = {"lift": 980, "extension": 595, "base": -32}
 
 
 def _read_ring(robot: Robot, *, digit: int | None = None, attempts: int = RING_READ_ATTEMPTS):
@@ -517,7 +517,7 @@ FOLLOW_SECONDS = 150.0
 
 def _follow_material_until_stable(
     robot: Robot, want_color, *, timeout: float = FOLLOW_SECONDS,
-    min_follow_seconds: float = 5.8, stable_seconds: float = 0.3,
+    min_follow_seconds: float = 6.2, stable_seconds: float = 0.3,
 ) -> None:
     """**跟着转盘上的料走**，直到料自己停住（停住那一刻才下降到抓）。
 
@@ -1332,7 +1332,7 @@ def place_material_on_material_by_order(
     robot: Robot,
     *,
     orders: tuple[int, int, int] = (1, 2, 3),
-    home: dict[str, float] | None = {"lift": 800, "extension": 270.0, "base": 0},
+    home: dict[str, float] | None = {"lift": 960, "extension": 270.0, "base": 0},
 ):
     """从仓库抓料，叠到台面上第 ``order`` 号位置的物料上；``orders`` 是**放置顺序**。
 
@@ -1357,6 +1357,7 @@ def place_material_on_material_by_order(
             base_deg = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
             _grab_material_from_car(robot)
+            robot.arm.move_axis_to_motor_degrees("lift", 950)
             move_axes_to(
                 robot,
                 {"extension": extension_deg, "base": base_deg},
