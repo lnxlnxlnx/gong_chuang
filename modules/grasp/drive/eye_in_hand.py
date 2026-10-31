@@ -1408,21 +1408,17 @@ def follow_material_xy(
                 offset = (observation.x_mm, observation.y_mm)
                 if not all(math.isfinite(v) for v in offset):
                     raise VisualServoError("连续跟随观测坐标必须为有限数")
-                correction = jacobian.pulses_for(
-                    offset[0] - target.x_mm, offset[1] - target.y_mm
-                )
-                world = geometry.world(
-                    measured[0] + correction[0], measured[1] + correction[1]
+                world = geometry.material_world(
+                    (offset[0] - target.x_mm, offset[1] - target.y_mm),
+                    measured[0], measured[1], jacobian,
                 )
                 trajectory.observe(stamp, world)
                 readings.append(offset)
                 if tracking_started is None:
                     tracking_started = stamp
                 # 用曝光时的实测关节位置还原物料位置；臂在纠偏时也能累计停稳证据。
-                desired, _ = geometry.joints(world, (0, 0), current.base_pulses)
-                error_xy = jacobian.displacement_for(
-                    current.base_pulses - desired[0],
-                    current.extension_pulses - desired[1],
+                error_xy = geometry.material_offset(
+                    world, current.base_pulses, current.extension_pulses, jacobian,
                 )
                 error = math.hypot(*error_xy)
                 if (
@@ -1432,9 +1428,8 @@ def follow_material_xy(
                 ):
                     motion.stop()
                     stopped = motion.sample()
-                    error_xy = jacobian.displacement_for(
-                        stopped.base_pulses - desired[0],
-                        stopped.extension_pulses - desired[1],
+                    error_xy = geometry.material_offset(
+                        world, stopped.base_pulses, stopped.extension_pulses, jacobian,
                     )
                     error = math.hypot(*error_xy)
                     # 刹停后的真实位置仍须对准；不用会被臂运动影响的整幅画面判据。

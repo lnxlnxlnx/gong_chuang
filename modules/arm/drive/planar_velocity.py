@@ -89,15 +89,11 @@ class PlanarVelocitySession:
         self._axis_history = {axis: deque(maxlen=512) for axis in AXES}
         self._baseline = {}
         self._anchor = {axis: arm.turns_state.of(axis).pulses for axis in AXES}
-        # 读取最多重试三次，期间会持有会话锁，watchdog 也不能插入停机帧。
-        # 必须预留两轴的全部读取与静默时间，再加两轴刹停所需时间。
+        # 运动中读失败直接刹停，不再持锁重试三次；限速按这条实际故障路径留余量。
+        # 两轴各一次读取、静默和刹停仍须全部计入，不能仅按正常串口耗时算。
         read_cost = sum(
-            Emm42Driver.READ_MAX_ATTEMPTS
-            * (
-                2 * float(getattr(m, "timeout", 0.1))
-                + Emm42Driver.QUIET_TIMEOUT_SECONDS
-            )
-            + (Emm42Driver.READ_MAX_ATTEMPTS - 1) * Emm42Driver.RETRY_SETTLE_SECONDS
+            2 * float(getattr(m, "timeout", 0.1))
+            + Emm42Driver.QUIET_TIMEOUT_SECONDS
             for m in self._motors.values()
         )
         stop_cost = sum(
@@ -143,9 +139,10 @@ class PlanarVelocitySession:
         started = time.monotonic()
         measured = {}
         stamps = {}
+        moving = any(self._speeds.values())
         for axis, motor in self._motors.items():
             read_started = time.monotonic()
-            raw = motor.read_position()
+            raw = motor.read_position(attempts=1) if moving else motor.read_position()
             # 两轴共用串口，不能把第一轴的测量错标为第二轴读完的时间。
             stamps[axis] = (read_started + time.monotonic()) / 2
             measured[axis] = (

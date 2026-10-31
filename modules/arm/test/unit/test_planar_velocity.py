@@ -21,7 +21,7 @@ class EncoderMotor:
         self.stop_error = None
         self.moves = []
 
-    def read_position(self):
+    def read_position(self, *, attempts=3):
         if self.read_error:
             raise self.read_error
         return self.position
@@ -285,7 +285,7 @@ class PlanarVelocityTests(unittest.TestCase):
             self.assertEqual(self.motors["base"].stops, 1)
             self.assertEqual(self.motors["extension"].stops, 1)
 
-    def test_unacknowledged_axes_reserve_read_retries_in_braking_room(self):
+    def test_unacknowledged_axes_reserve_one_failed_read_before_braking(self):
         self.arm.turns_state.record("extension", round(510 * 3200 / 360))
         for motor in self.motors.values():
             motor.expect_ack = False
@@ -293,8 +293,39 @@ class PlanarVelocityTests(unittest.TestCase):
         session = self.start(
             max_rpm=50, motor_limits={"base": (-900, 900), "extension": (30, 990)}
         )
-        # 三次读取及两次静默后仍须能刹住，伸缩轴剩余 480 度不足以维持 50 rpm。
-        self.assertEqual(session.set_velocity(50, 50), (50, 35))
+        # 运动中只读取一次；剩余行程足以覆盖 50 rpm 的命令租期和故障刹停。
+        self.assertEqual(session.set_velocity(50, 50), (50, 50))
+
+    def test_extension_can_catch_up_outward_without_reserving_read_retries(self):
+        self.arm.turns_state.record("extension", round(800 * 3200 / 360))
+        for motor in self.motors.values():
+            motor.expect_ack = False
+            motor.timeout = 0.1
+        session = self.start(
+            max_rpm=90, motor_limits={"base": (-900, 900), "extension": (30, 990)},
+        )
+        _, speed = session.set_velocity(0, 90)
+        self.assertGreaterEqual(speed, 25)
+        self.assertLessEqual(speed, 90)
+
+    def test_an_encoder_failure_while_moving_brakes_without_retrying(self):
+        serial = FakeSerial(read_replies={0x36: [
+            bytes.fromhex("05 36 00 00 00 00 00 6B"),
+            bytes.fromhex("05 9B 00 01 F7 0F 6B"),
+            bytes.fromhex("05 36 00 00 00 40 00 6B"),
+        ]})
+        self.motors["base"] = Emm42Driver(
+            "test", 5, serial_port=serial, expect_ack=False, sleep=lambda _: None,
+        )
+        self.arm = RobotArm(fixture_config(), motors=self.motors, sleep=lambda _: None)
+        session = self.start()
+        session.set_velocity(3, 4)
+        with self.assertRaisesRegex(RuntimeError, "1 consecutive"):
+            session.sample()
+        reads = [frame for frame in serial.writes if frame[1] == 0x36]
+        self.assertEqual(len(reads), 2)
+        self.assertIn(bytes.fromhex("05 FE 98 00 6B"), serial.writes)
+        self.assertEqual(self.motors["extension"].stops, 1)
 
     def test_reducing_speed_reserves_room_for_the_previous_moving_speed(self):
         session = self.start(
@@ -313,7 +344,7 @@ class PlanarVelocityTests(unittest.TestCase):
         entered, release = threading.Event(), threading.Event()
         errors = []
 
-        def blocked_read():
+        def blocked_read(**_kwargs):
             entered.set()
             if not release.wait(0.5):
                 raise RuntimeError("test read was not released")

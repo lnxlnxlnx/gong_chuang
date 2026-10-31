@@ -410,7 +410,7 @@ class Emm42Driver:
         """
         return int.from_bytes(self._read(0x31), "big")
 
-    def read_position(self) -> int:
+    def read_position(self, *, attempts: int = READ_MAX_ATTEMPTS) -> int:
         """读电机**实时位置**(``0x36``)，单位是 1/65536 电机圈，带符号。
 
         这是编码器测出来的位置，不是"发下去多少脉冲"——所以它是判断
@@ -420,7 +420,8 @@ class Emm42Driver:
 
         帧: addr 36 6B  ->  addr 36 符号 + 位置(4B 大端) 6B
         """
-        payload = self._read(0x36)
+        # 连续速度控制可只读一次，失败立即刹停，避免持锁重读时轴仍在运动。
+        payload = self._read(0x36, attempts=attempts)
         return _decode_signed(
             payload[0], payload[1:], name="position", motor_id=self.motor_id
         )
@@ -499,13 +500,15 @@ class Emm42Driver:
 
         return status
 
-    def _read(self, function: int) -> bytes:
+    def _read(self, function: int, *, attempts: int = READ_MAX_ATTEMPTS) -> bytes:
         """有限重读通信失败；只返回本次有效数据，不使用上一次的位置代替。"""
-        for attempt in range(1, self.READ_MAX_ATTEMPTS + 1):
+        if type(attempts) is not int or not 1 <= attempts <= self.READ_MAX_ATTEMPTS:
+            raise ValueError(f"attempts must be in 1..{self.READ_MAX_ATTEMPTS}")
+        for attempt in range(1, attempts + 1):
             try:
                 return self._read_once(function)
             except (_ReadCommunicationError, OSError) as error:
-                if attempt == self.READ_MAX_ATTEMPTS:
+                if attempt == attempts:
                     raise RuntimeError(
                         f"Emm42 motor {self.motor_id} read command 0x{function:02X} "
                         f"failed after {attempt} consecutive communication failures: "
@@ -514,7 +517,7 @@ class Emm42Driver:
                 _logger.warning(
                     "Emm42 motor %s read command 0x%02X communication failure "
                     "%s/%s: %s; retrying",
-                    self.motor_id, function, attempt, self.READ_MAX_ATTEMPTS, error,
+                    self.motor_id, function, attempt, attempts, error,
                 )
                 # 迟到的残帧可能仍在路上；沿用写命令的静默间隔再重新查询。
                 self._sleep(self.RETRY_SETTLE_SECONDS)

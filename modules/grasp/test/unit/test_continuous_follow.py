@@ -124,19 +124,15 @@ class WorldLink:
         stamp = self.clock.now
         if self.fail_at and stamp >= self.fail_at:
             raise RuntimeError("camera failed")
-        theta = -0.65 * min(stamp, self.stop_at)
-        x = self.origin_radius - 35 + 35 * math.cos(theta)
-        y = 35 * math.sin(theta)
+        x, y = self.material_point(stamp)
         ppr = self.arm.pulses_per_revolution
-        target_base = (
-            -math.atan2(y, x) * ppr * self.arm.config.base_reduction / (2 * math.pi)
-        )
-        target_ext = (
-            500 * ppr / 360 + (math.hypot(x, y) - self.origin_radius) * ppr / 61
-        )
-        offset = JACOBIAN.displacement_for(
-            self.arm.position[0] - target_base, self.arm.position[1] - target_ext
-        )
+        # 独立的相机刚体模型：先旋转世界坐标，再投影到相机，不能用待测逆解造读数。
+        angle = -self.arm.position[0] * 2 * math.pi / (ppr * 5)
+        radius = 235 + (self.arm.position[1] * 360 / ppr - 270) * 61 / 360
+        radial = x * math.cos(angle) + y * math.sin(angle) - radius
+        tangent = -x * math.sin(angle) + y * math.cos(angle)
+        scale = 0.02 * ppr / 61
+        offset = (-tangent * scale, -radial * scale)
         self.errors.append(math.hypot(*offset))
         if any(self.arm.velocity):
             self.frames_while_moving += 1
@@ -144,6 +140,13 @@ class WorldLink:
         if any(low <= stamp <= high for low, high in self.missing):
             return ()
         return (sighting(4, *offset, stamp=stamp),)
+
+    def material_point(self, stamp):
+        theta = -0.65 * min(stamp, self.stop_at)
+        return (
+            self.origin_radius - 35 + 35 * math.cos(theta),
+            35 * math.sin(theta),
+        )
 
     def frame(self, **kwargs):
         self.slow_reads += 1
@@ -361,8 +364,8 @@ class ContinuousFollowTests(unittest.TestCase):
 
     def test_excess_rpm_is_rejected_before_opening_session(self):
         clock, arm, link = self.rig()
-        with self.assertRaisesRegex(ValueError, "80"):
-            follow(arm, link, rpm=81)
+        with self.assertRaisesRegex(ValueError, "120"):
+            follow(arm, link, rpm=121)
         self.assertFalse(hasattr(arm, "options"))
 
     def test_80_rpm_reaches_the_bounded_speed_session(self):
@@ -443,9 +446,44 @@ class ContinuousFollowTests(unittest.TestCase):
 
     def test_real_arm_session_tracks_with_encoder_and_serial_exchange_latency(self):
         """算法接真实速度会话，仅电机和相机使用物理运动仿真。"""
+        clock, plant, link = self.rig(missing=((1.0, 1.18),))
+        self.run_real_arm_follow(clock, plant, link)
+
+    def test_real_arm_extends_fast_enough_to_keep_the_front_arc_in_view(self):
+        """前方圆弧要求快速外伸；视野只有 10 mm，跟慢了就真的读不到料。"""
+        clock, plant, _ = self.rig()
+        plant.position[1] = 780 * plant.pulses_per_revolution / 360
+        link = WorldLink(plant, stop_at=0.9)
+
+        def front_arc(stamp):
+            angle = math.pi / 2 - 1.5 * min(stamp, link.stop_at)
+            return (
+                link.origin_radius + 20 * math.cos(angle),
+                -20 + 20 * math.sin(angle),
+            )
+
+        link.material_point = front_arc
+        original = link.frame_fast
+        losses = []
+
+        def finite_view(**kwargs):
+            frame = original(**kwargs)
+            if link.errors[-1] > 10:
+                losses.append(clock.now)
+                return ()
+            return frame
+
+        link.frame_fast = finite_view
+        self.run_real_arm_follow(
+            clock, plant, link, rpm=90, gain=5,
+            min_follow_seconds=4.6, stable_seconds=0.3,
+        )
+        self.assertFalse(losses, "extension 向外跟慢后物料已跑出视野")
+        self.assertGreater(plant.position[1] * 360 / plant.pulses_per_revolution, 880)
+
+    def run_real_arm_follow(self, clock, plant, link, **kwargs):
         from modules.arm.drive import planar_velocity
 
-        clock, plant, link = self.rig(missing=((1.0, 1.18),))
         starts = tuple(plant.position)
 
         class Motor:
@@ -456,7 +494,7 @@ class ContinuousFollowTests(unittest.TestCase):
                 self.axis = axis
                 self.speeds = []
 
-            def read_position(self):
+            def read_position(self, *, attempts=3):
                 clock.sleep(0.004)
                 plant._advance()
                 return round(
@@ -490,18 +528,44 @@ class ContinuousFollowTests(unittest.TestCase):
             patch.object(algorithms, "time", clock),
             patch.object(planar_velocity, "time", clock),
         ):
-            result = follow(arm, link, timeout=8)
+            result = follow(arm, link, timeout=8, **kwargs)
         self.assertTrue(result.aligned)
         self.assertEqual(plant.velocity, (0, 0))
         self.assertGreater(link.frames_while_moving, 5)
         self.assertLess(max(link.errors), 20)
         self.assertEqual(arm.turns_state.of("base").pulses, round(plant.position[0]))
         self.assertTrue(
-            all(speed <= 50 for motor in motors.values() for speed in motor.speeds)
+            all(
+                speed <= kwargs.get("rpm", 50)
+                for motor in motors.values() for speed in motor.speeds
+            )
         )
 
 
 class TrajectoryTests(unittest.TestCase):
+    def test_a_fixed_material_remains_fixed_as_the_camera_rotates_and_extends(self):
+        geometry = PlanarGeometry(load_arm_config())
+        for base_degrees, extension_degrees in ((0, 300), (60, 500), (100, 750)):
+            with self.subTest(base=base_degrees, extension=extension_degrees):
+                base = base_degrees * geometry.ppr / 360
+                extension = extension_degrees * geometry.ppr / 360
+                angle = -math.radians(base_degrees / 5)
+                radius = 235 + (extension_degrees - 270) * 61 / 360
+                radial = 245 * math.cos(angle) + 20 * math.sin(angle) - radius
+                tangent = -245 * math.sin(angle) + 20 * math.cos(angle)
+                scale = 0.02 * 3200 / 61
+                point = geometry.material_world(
+                    (-tangent * scale, -radial * scale), base, extension, JACOBIAN,
+                )
+                self.assertAlmostEqual(point[0], 245)
+                self.assertAlmostEqual(point[1], 20)
+
+    def test_slow_observations_do_not_erase_visible_stationary_evidence(self):
+        track = ClockwiseTrajectory(stationary_seconds=0.3)
+        for i in range(12):
+            track.observe(i * 0.4, (250, 20))
+        self.assertTrue(track.stationary)
+
     def test_consistent_slow_motion_is_not_removed_as_detection_jitter(self):
         track = ClockwiseTrajectory()
         for i in range(8):

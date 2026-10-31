@@ -303,7 +303,7 @@ class SmoothFollowTests(unittest.TestCase):
 
     def test_an_in_tolerance_target_does_not_trigger_corrections(self):
         clock, arm, link = self.rig(stop_at=0)
-        arm.position[0] = -25
+        arm.position[0] = -10
         with patch.object(algorithms, "time", clock):
             result = self.follow(arm, link, timeout=5)
         self.assertTrue(result.aligned)

@@ -32,6 +32,34 @@ class PlanarGeometry:
         angle = -base / self.angular_scale  # 电机 CW 为正，数学平面逆时针为正。
         return radius * math.cos(angle), radius * math.sin(angle)
 
+    def material_world(self, offset, base, extension, jacobian):
+        """把相机平面位移旋到世界系，不把标定处的小角度雅可比当成绝对关节位置。"""
+        correction = jacobian.pulses_for(*offset)
+        radial = correction[1] / self.radial_scale
+        # 伸缩传动提供物理尺度；底座列只提供相机内的切向方向。
+        tangent = (
+            -correction[0] * jacobian.base_norm
+            / (jacobian.radial_norm * self.radial_scale)
+        )
+        origin = self.world(base, extension)
+        angle = -base / self.angular_scale
+        return (
+            origin[0] + radial * math.cos(angle) - tangent * math.sin(angle),
+            origin[1] + radial * math.sin(angle) + tangent * math.cos(angle),
+        )
+
+    def material_offset(self, point, base, extension, jacobian):
+        """按当前臂姿重投影物料，得到此刻的相机误差。"""
+        origin = self.world(base, extension)
+        dx, dy = point[0] - origin[0], point[1] - origin[1]
+        angle = -base / self.angular_scale
+        radial = dx * math.cos(angle) + dy * math.sin(angle)
+        tangent = -dx * math.sin(angle) + dy * math.cos(angle)
+        return jacobian.displacement_for(
+            tangent * jacobian.radial_norm * self.radial_scale / jacobian.base_norm,
+            -radial * self.radial_scale,
+        )
+
     def joints(self, point, velocity, reference_base):
         x, y = point
         vx, vy = velocity
@@ -99,9 +127,7 @@ class ClockwiseTrajectory:
     def observe(self, stamp, point):
         if self.points and stamp <= self.points[-1][0]:
             raise ValueError("跟随观测的时间戳必须递增")
-        if self.points and stamp - self.points[-1][0] > 0.35:
-            self.points.clear()
-            self.reset_stability()
+        # 是否跟丢由调用方显式告知；低帧率的有效观测不能被当作丢料。
         self.points.append((stamp, *point))
         self._stationary_points.append((stamp, *point))
         # 停稳窗口本身就是用户设置的时长，不能先等速度窗口结束再另等半秒。

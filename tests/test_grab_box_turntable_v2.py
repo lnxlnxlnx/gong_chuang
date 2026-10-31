@@ -36,7 +36,7 @@ class FollowUntilStableTests(unittest.TestCase):
         app_gripper._follow_material_until_stable(robot, "red", timeout=3.0)
 
         robot.grasp.follow_material.assert_called_once_with(
-            "red", timeout=3.0, min_follow_seconds=4.0, stable_seconds=0.5,
+            "red", timeout=3.0, min_follow_seconds=4.6, stable_seconds=0.3,
         )
         robot.vision.scene_stable.assert_not_called()
 
@@ -72,7 +72,7 @@ class FollowGrabGateTests(unittest.TestCase):
             patch("builtins.input", return_value=""),
         ):
             app_gripper.grab_material_from_turntable_to_repo_follow(
-                robot, ("red",), home=None,
+                robot, ("red",), home=None, stable_seconds=0.5,
             )
         robot.gripper.close_jaws.assert_called_once()
         robot.grasp.align_xy_for_turntable.assert_not_called()
