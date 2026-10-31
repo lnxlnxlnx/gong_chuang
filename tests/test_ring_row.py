@@ -293,6 +293,11 @@ class SquareChassisToRingRowTests(unittest.TestCase):
     def test_no_usable_row_raises_before_any_wheel_turns(self) -> None:
         plant = RowPlant(yaw_deg=0.0)
         robot = Mock()
+        robot.arm.config = load_arm_config()
+        robot.arm.inter_frame_seconds = 0.0
+        robot.arm.read_abs_state.side_effect = lambda axis: SimpleNamespace(
+            motor_degrees=app_gripper.RING_ROW_OBSERVE_POSE[axis]
+        )
         robot.vision.locate_rings.return_value = {}
 
         with patch("time.sleep"), self.assertRaisesRegex(RuntimeError, "三环直线"):

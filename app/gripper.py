@@ -174,6 +174,11 @@ ROW_ROTATE_MAX_PULSES = 2000
 #: 电机角度）：伸缩比逐环对准时短一点、镜头离地面远一些，整排 2×150 mm 才进得了画面。
 #: 现场按取景改这一份；换场地只需要动它和 ``station.center_spacing_mm``。
 RING_ROW_OBSERVE_POSE = {"lift": 960, "extension": 550, "base": -32}
+#: 观察失败时相对当前姿态扫描，单位均为电机角度；先伸缩，再小幅转底座。
+RING_ROW_VIEW_OFFSETS = (
+    (-90.0, 0.0), (90.0, 0.0), (-180.0, 0.0), (180.0, 0.0),
+    (0.0, -60.0), (0.0, 60.0), (-90.0, -60.0), (-90.0, 60.0),
+)
 
 
 def _read_ring(robot: Robot, *, digit: int | None = None, attempts: int = RING_READ_ATTEMPTS):
@@ -302,6 +307,10 @@ def center_chassis_on_ring(
     return float(best_residual if best_residual is not None else x_mm)
 
 
+class _RingRowNotVisibleError(RuntimeError):
+    """同帧可用环心不足，允许通过改变观察姿态重新取景。"""
+
+
 def _read_ring_row(robot: Robot, *, attempts: int = RING_READ_ATTEMPTS):
     """读**一帧**、把三环圆心那条直线解出来；凑不齐就重试几帧。
 
@@ -343,7 +352,52 @@ def _read_ring_row(robot: Robot, *, attempts: int = RING_READ_ATTEMPTS):
         }
         row = derive_ring_row(readings, spacing_mm=robot.vision.ring_center_spacing_mm)
         return row, targets[2]
-    raise RuntimeError(f"三环直线解不出来：{last_problem}")
+    raise _RingRowNotVisibleError(f"三环直线解不出来：{last_problem}")
+
+
+def _seek_ring_row_view(robot: Robot):
+    """在硬件行程内扫描伸缩和底座，返回同帧环排及观察方向的输出轴改变量。"""
+    arm = robot.arm
+    initial = {
+        axis: float(arm.read_abs_state(axis).motor_degrees)
+        for axis in ("extension", "base")
+    }
+    if not all(math.isfinite(value) for value in initial.values()):
+        raise RuntimeError("环排取景需要有效的底座和伸缩位置")
+    config = arm.config
+    if config.radial_limit is None or config.base_limit is None:
+        raise RuntimeError("环排取景需要配置伸缩和底座的硬件行程")
+    found = False
+    last_problem = "硬件行程内没有可用的扫描姿态"
+    try:
+        for extension_delta, base_delta in RING_ROW_VIEW_OFFSETS:
+            pose = {
+                "extension": initial["extension"] + extension_delta,
+                "base": initial["base"] + base_delta,
+            }
+            extension_pulses = round(
+                pose["extension"] * config.pulses_per_revolution / 360.0
+            )
+            if not config.radial_limit.contains(
+                config.extension_radius_mm(extension_pulses)
+            ) or not config.base_limit.contains(pose["base"] / config.base_reduction):
+                continue
+            print(
+                "  环排取景："
+                f"extension={pose['extension']:.1f}°，base={pose['base']:.1f}°（电机）"
+            )
+            move_axes_to(robot, pose).wait()
+            try:
+                row, middle = _read_ring_row(robot)
+            except _RingRowNotVisibleError as error:
+                last_problem = str(error)
+                continue
+            found = True
+            return row, middle, base_delta / config.base_reduction
+        raise _RingRowNotVisibleError(f"三环直线主动取景后仍不可用：{last_problem}")
+    finally:
+        if not found:
+            move_axes_to(robot, initial).wait()
 
 
 def square_chassis_to_ring_row(
@@ -368,7 +422,9 @@ def square_chassis_to_ring_row(
 
     与 :func:`center_chassis_on_ring` 只差在动哪个轴：那个用横移把环心推到光轴上，
     这个用自转把环排的倾角转到目标角。调用前先把臂摆到能同时看见 2 号与至少一个相邻环
-    的姿态（见 :data:`RING_ROW_OBSERVE_POSE`）。只想读一个数、不想让车转（标定要的就是
+    的姿态（见 :data:`RING_ROW_OBSERVE_POSE`）。读不到相邻环时自动扫描伸缩和底座；
+    底座转动带来的画面角度变化会折回调用时的观察朝向，找到后保持该取景姿态。
+    只想读一个数、不想让车转（标定要的就是
     这个）就传 ``tolerance_deg=180``：取一帧就返回，倾角打在打印里。
 
     :returns: 最后量到的倾角**相对目标**的残差（度）；``0`` = 已经垂直。
@@ -378,9 +434,15 @@ def square_chassis_to_ring_row(
     previous: tuple[float, int] | None = None
     yaw = 0.0
     residual = 0.0
+    view_base_shift_deg = 0.0
     for attempt in range(1, max(1, int(max_iterations)) + 1):
-        row, _middle = _read_ring_row(robot)
-        yaw = row.yaw_deg
+        try:
+            row, _middle = _read_ring_row(robot)
+        except _RingRowNotVisibleError:
+            row, _middle, base_shift = _seek_ring_row_view(robot)
+            view_base_shift_deg += base_shift
+        # 底座顺时针转动会让环排在画面中逆时针转动，折回原朝向后才能比较车头角度。
+        yaw = (row.yaw_deg + view_base_shift_deg + 90.0) % 180.0 - 90.0
         residual = (yaw - yaw_offset_deg + 90.0) % 180.0 - 90.0
         # 先结算上一步：车真的转了多少度；一步都没转就别再猜。
         if previous is not None and previous[1]:
