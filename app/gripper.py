@@ -158,6 +158,8 @@ LATERAL_MAX_PULSES = 3000
 RING_READ_ATTEMPTS = 5
 #: 两次读环之间的间隔（秒）；一个来回约一次取帧，别把相机读空。
 RING_READ_INTERVAL_SECONDS = 0.15
+#: 贴边取景不使用框尺寸估算距离，每次只平移一小段再观察。
+RING_VIEW_STEP_PULSES = 300
 #: 车头与"三环圆心连线"的夹角门槛（度）。垂直就行了，所以目标倾角是 0。
 RING_ROW_SQUARE_TOLERANCE_DEG = 1.0
 #: 车头与"相机画面水平轴"的固定差角（度）。装出来的臂不是正对车头时补这个。
@@ -1070,10 +1072,71 @@ def _row_step_pulses(
     return base_pulses, extension_pulses
 
 
+def _ensure_floor_ring_in_view(
+    robot: Robot, *, digit: int, max_iterations: int = 20, rpm: int = 30,
+) -> None:
+    """底盘前后、左右小步平移，直到指定环完整入镜；不移动机械臂。
+
+    贴边框只提供方向，不参与毫米解算。用框心而非精修环心检查运动响应，
+    避免从贴边变为完整框时，定位方法变化被误判为底盘反向。
+    """
+    previous: tuple[int, float, int] | None = None
+    next_axis = 0
+    limit = max(0, int(max_iterations))
+    for attempt in range(limit + 1):
+        target = _read_ring(robot, digit=digit)
+        if target is None:
+            raise RuntimeError(f"取景时看不到 {digit} 号环" + _ring_diagnosis(robot))
+        if int(target.digit) != digit:
+            raise RuntimeError(f"取景要求 {digit} 号环，实际读到 {target.digit} 号环")
+        center = target.box_center_px or target.center_px
+        if previous is not None:
+            axis, before, sign = previous
+            change = (center[axis] - before) * sign
+            if not math.isfinite(change) or change <= 0:
+                raise RuntimeError(
+                    f"{digit} 号环取景移动没有有效响应或方向相反："
+                    f"{'X' if axis == 0 else 'Y'} 框心 "
+                    f"{before:.1f} → {center[axis]:.1f} px"
+                )
+        if not target.clipped:
+            if target.reading() is None:
+                raise RuntimeError(f"{digit} 号环已完整入镜，但缺少可用于对准的比例尺")
+            return
+        if attempt == limit:
+            raise RuntimeError(f"{digit} 号环移动 {limit} 次后仍然贴边，停止放料")
+        sides = target.clipped_sides
+        if not sides or ({"left", "right"} <= set(sides)
+                         or {"top", "bottom"} <= set(sides)):
+            raise RuntimeError(
+                f"{digit} 号环贴边方向不明确或尺寸超出视野，不能靠平移取景"
+            )
+        lateral = "left" in sides or "right" in sides
+        longitudinal = "top" in sides or "bottom" in sides
+        axis = next_axis if lateral and longitudinal else (0 if lateral else 1)
+        if axis == 0:
+            positive = "left" in sides
+            move = robot.chassis.strafe_left if positive else robot.chassis.strafe_right
+            direction = "左移" if positive else "右移"
+        else:
+            # 当前俯视姿态下，前进让地面目标向画面下方移动；下一帧必须验证响应。
+            positive = "top" in sides
+            move = robot.chassis.forward if positive else robot.chassis.backward
+            direction = "前进" if positive else "后退"
+        print(
+            f"  {digit} 号环贴边 {','.join(sides)}："
+            f"底盘{direction} {RING_VIEW_STEP_PULSES} 脉冲"
+        )
+        move(rpm=rpm, pulses=RING_VIEW_STEP_PULSES)
+        previous = (axis, float(center[axis]), 1 if positive else -1)
+        next_axis = 1 - axis
+
+
 def _align_floor_ring(
     robot: Robot, *, digit: int, tolerance_mm: float
 ) -> tuple[int, int]:
-    """保存中环对准后的关节位置；未进容差时使用闭环保留的最佳姿态。"""
+    """先让中环完整入镜，再保存对准位置；未进容差时使用闭环保留的最佳姿态。"""
+    _ensure_floor_ring_in_view(robot, digit=digit)
     aligned = robot.grasp.align_ring(
         require_digit=digit, tolerance_mm=tolerance_mm, max_iterations=6,gain=0.6,
     )
