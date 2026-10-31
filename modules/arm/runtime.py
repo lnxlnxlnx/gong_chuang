@@ -657,6 +657,7 @@ class RobotArm:
         self._require_position_ready()
         start = self.turns_state.of(axis_name).pulses
         measured_start = self.read_measured_pulses(axis_name)
+        started = self._clock()
         ticket = self.move_axis_to_motor_degrees(
             axis_name, degrees, rpm=rpm, wait=False
         )
@@ -665,6 +666,22 @@ class RobotArm:
             self._clock() + ticket.estimated_seconds * IN_POSITION_TIMEOUT_FACTOR
             + IN_POSITION_TIMEOUT_MARGIN_SECONDS
         )
+        status: Optional[MotorStatus] = None
+
+        def diagnosis() -> str:
+            # 使用本轮已读到的数据，不再查询，避免故障后的状态覆盖超时现场。
+            flags = "尚未读取" if status is None else (
+                f"使能={int(status.enabled)}、到位={int(status.in_position)}、"
+                f"堵转={int(status.stalled)}、堵转保护={int(status.stall_protected)}"
+            )
+            return (
+                f"指令增量 {target - start:+.1f} 脉冲，"
+                f"实测增量 {measured - start:+.1f} 脉冲，"
+                f"剩余 {target - measured:+.1f} 脉冲；"
+                f"估算 {ticket.estimated_seconds:.3f} s，"
+                f"已等待 {self._clock() - started:.3f} s；0x3A：{flags}"
+            )
+
         try:
             while True:
                 if not keep_moving():
@@ -673,12 +690,12 @@ class RobotArm:
                 if ticket.remaining <= 0:
                     status = self._motors[axis_name].read_status()
                     if status.stalled or status.stall_protected:
-                        raise RuntimeError(f"{axis_name} 监控移动发生堵转")
+                        raise RuntimeError(f"{axis_name} 监控移动发生堵转；{diagnosis()}")
                     # 到位窗口由驱动器决定；还须实测离开起点，排除旧的到位位。
                     if status.in_position and (target == start or abs(measured - start) >= 1):
                         return True
                 if self._clock() >= deadline:
-                    raise TimeoutError(f"{axis_name} 监控移动未实测到位")
+                    raise TimeoutError(f"{axis_name} 监控移动未实测到位；{diagnosis()}")
                 self._sleep(0.01)
         finally:
             # 先停再读；编码器与软件原点可能不同，因此只使用本段的实测增量。

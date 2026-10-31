@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -75,6 +80,48 @@ class ShowTests(unittest.TestCase):
         self.assertEqual(imshow.call_args[0][0], TEXT_WINDOW_NAME)
         # waitKey 只等 1 ms：显示完就返回，窗口留给调用方继续用。
         self.assertEqual(wait_key.call_args[0][0], 1)
+
+
+@unittest.skipUnless(
+    sys.platform == "win32" and os.environ.get("ROBOT_TEXT_SCREEN_GUI_TEST") == "1",
+    "需要 Windows 桌面；设置 ROBOT_TEXT_SCREEN_GUI_TEST=1 运行真实窗口验收",
+)
+class WindowsDisplayTests(unittest.TestCase):
+    def test_window_responds_after_one_call_without_main_thread_gui_events(self) -> None:
+        """主程序停止泵事件六秒后，文字窗仍须响应，且不受预览收尾影响。"""
+        script = textwrap.dedent('''\
+            import ctypes
+            import time
+            import cv2
+            from robot import Robot
+            from modules.vision import Vision
+            from modules.vision.config import VisionConfig
+
+            user32 = ctypes.windll.user32
+            user32.FindWindowW.restype = ctypes.c_void_p
+            user32.IsHungAppWindow.argtypes = [ctypes.c_void_p]
+            robot = Robot(vision=Vision(VisionConfig()))
+            assert robot.vision.show_text('123+321+213+132') == 'vision-text'
+            window = user32.FindWindowW(None, 'vision-text')
+            assert window, '文字窗口未创建'
+            time.sleep(6)
+            assert not user32.IsHungAppWindow(window), '调用返回后文字窗口失去响应'
+            cv2.destroyAllWindows()
+            assert user32.FindWindowW(None, 'vision-text'), '预览收尾关闭了文字窗'
+            robot.vision.show_text('321+123', size=(320, 240))
+            assert user32.FindWindowW(None, 'vision-text') == window, '更新新建了窗口'
+            robot.close()
+            print('responsive, isolated, reused', flush=True)
+        ''')
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[4],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("responsive, isolated, reused", result.stdout)
 
 
 if __name__ == "__main__":

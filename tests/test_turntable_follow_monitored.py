@@ -53,6 +53,7 @@ class SimulatedLift:
     def read_status(self):
         self.update()
         return SimpleNamespace(
+            enabled=True,
             in_position=abs(self.position - self.target) <= self.ppr * 0.3 / 360,
             stalled=False, stall_protected=False,
         )
@@ -115,9 +116,37 @@ class RingMonitoredMotionTests(unittest.TestCase):
 
         self.motor.stalled = True
         with patch.object(motion, "time", SimpleNamespace(sleep=self.sleep)):
-            with self.assertRaises(TimeoutError):
+            with self.assertRaises(TimeoutError) as caught:
                 motion._move_ring_axis(self.arm, "base", 49)
 
+        self.assertEqual(len(self.motor.moves), 1)
+        self.assertTrue(self.motor.stops)
+        message = str(caught.exception)
+        self.assertIn("净修正 +49 脉冲", message)
+        self.assertIn("第 1/2 段 +349 脉冲", message)
+        self.assertIn("指令增量 +349.0", message)
+        self.assertIn("实测增量 +0.0", message)
+        self.assertIn("剩余 +349.0", message)
+        self.assertIn("使能=1、到位=0", message)
+
+    def test_motor_at_target_without_arrival_flag_reports_zero_remaining(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        normal_status = self.motor.read_status
+
+        def without_arrival_flag():
+            status = normal_status()
+            status.in_position = False
+            return status
+
+        self.motor.read_status = without_arrival_flag
+        with self.assertRaises(TimeoutError) as caught:
+            motion._move_ring_axis(self.arm, "base", 49)
+
+        message = str(caught.exception)
+        self.assertIn("实测增量 +349.0", message)
+        self.assertIn("剩余 +0.0", message)
+        self.assertIn("使能=1、到位=0", message)
         self.assertEqual(len(self.motor.moves), 1)
         self.assertTrue(self.motor.stops)
 
@@ -273,7 +302,7 @@ class MonitoredGrabTests(unittest.TestCase):
     def test_unchanged_encoder_with_stale_arrival_flag_does_not_allow_grabbing(self):
         self.motor.stalled = True
         self.motor.read_status = lambda: SimpleNamespace(
-            in_position=True, stalled=False, stall_protected=False,
+            enabled=True, in_position=True, stalled=False, stall_protected=False,
         )
         with self.assertRaises(TimeoutError):
             self.grab()

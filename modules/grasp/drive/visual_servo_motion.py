@@ -66,13 +66,22 @@ def _move_ring_axis(arm, axis: str, signed_pulses: int) -> None:
     if abs(signed_pulses) < 50:
         extra = 300 if signed_pulses > 0 else -300
         segments = (signed_pulses + extra, -extra)
-    for pulses in segments:
+    for index, pulses in enumerate(segments, start=1):
         # 监控接口在返回时按编码器增量修正里程表，下一段必须从实测位置继续。
         target = arm.turns_state.of(axis).pulses + pulses
-        arm.move_axis_to_motor_degrees_monitored(
-            axis, target * 360.0 / arm.pulses_per_revolution,
-            keep_moving=lambda: True,
+        context = (
+            f"圆环对准 {axis}：净修正 {signed_pulses:+d} 脉冲，"
+            f"第 {index}/{len(segments)} 段 {pulses:+d} 脉冲；"
         )
+        try:
+            arm.move_axis_to_motor_degrees_monitored(
+                axis, target * 360.0 / arm.pulses_per_revolution,
+                keep_moving=lambda: True,
+            )
+        except TimeoutError as error:
+            raise TimeoutError(context + str(error)) from error
+        except RuntimeError as error:
+            raise RuntimeError(context + str(error)) from error
 
 
 def _send_axis(
