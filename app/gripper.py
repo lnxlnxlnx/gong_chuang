@@ -174,10 +174,10 @@ ROW_ROTATE_MAX_PULSES = 2000
 #: 电机角度）：伸缩比逐环对准时短一点、镜头离地面远一些，整排 2×150 mm 才进得了画面。
 #: 现场按取景改这一份；换场地只需要动它和 ``station.center_spacing_mm``。
 RING_ROW_OBSERVE_POSE = {"lift": 980, "extension": 595, "base": -32}
-#: 观察失败时相对当前姿态扫描，单位均为电机角度；先伸缩，再小幅转底座。
+#: 观察失败时优先增大伸缩角度，再尝试反向和底座扫描；单位均为电机角度。
 RING_ROW_VIEW_OFFSETS = (
-    (-90.0, 0.0), (90.0, 0.0), (-180.0, 0.0), (180.0, 0.0),
-    (0.0, -60.0), (0.0, 60.0), (-90.0, -60.0), (-90.0, 60.0),
+    (90.0, 0.0), (180.0, 0.0), (-90.0, 0.0), (-180.0, 0.0),
+    (0.0, -60.0), (0.0, 60.0), (90.0, -60.0), (90.0, 60.0),
 )
 
 
@@ -428,7 +428,8 @@ def square_chassis_to_ring_row(
     这个）就传 ``tolerance_deg=180``：取一帧就返回，倾角打在打印里。
 
     :returns: 最后量到的倾角**相对目标**的残差（度）；``0`` = 已经垂直。
-    :raises RuntimeError: 凑不出三环直线、车转了却量不到角度变化、或转满步数仍不垂直。
+    转满步数仍不垂直时打印提示并返回，后续落点仍按设定的法线角度和倾角补偿计算。
+    :raises RuntimeError: 凑不出三环直线、车转了却量不到角度变化。
     """
     gain: float | None = None  # 每 +1 脉冲（顺时针转）让直线倾角变化多少度
     previous: tuple[float, int] | None = None
@@ -476,11 +477,12 @@ def square_chassis_to_ring_row(
             step = -magnitude
         previous = (residual, step)
 
-    raise RuntimeError(
-        f"{max_iterations} 步还没把车头转到与三环直线垂直：最后倾角 {yaw:+.2f}°"
+    print(
+        f"  {max_iterations} 步后车头仍未与三环直线垂直：最后读到倾角 {yaw:+.2f}°"
         f"（目标 {yaw_offset_deg:+.2f}°、残差 {residual:+.2f}°、门槛 {tolerance_deg:.2f}°）："
-        "检查轮子是不是打滑或撞到东西"
+        "继续按设定的法线角度和倾角补偿计算落点"
     )
+    return residual
 
 
 def _grab_material_from_floor(robot: Robot):
