@@ -581,18 +581,25 @@ def grab_material_from_turntable_to_repo_follow_v2(
     follow_seconds: float = FOLLOW_SECONDS,
     stable_seconds: float = 0.3,
     monitor_until_lift: float | None = None,
+    grab_tolerance_mm: float | None = None,
 ):
     """停稳即抓；下降时持续看料，偏离或丢失就抬回观察高度重新跟随。
 
     不设最短跟随时长。每块料的跟随、下降和重抓共用 follow_seconds 预算；
     monitor_until_lift 是停盘标定得到的最后可见高度；先监控下降到这里并确认目标，
     再按固定行程降到 550° 合爪。None 保持全程监控，不猜测遮挡高度。
+    grab_tolerance_mm 单独控制下降期间允许的平面误差（毫米，越大越宽松），
+    不影响跟随对准；None 使用配置中 tolerance_mm 与 z_center_tolerance_mm 的较小值。
     成功后沿用既有入库动作。异常直接抛出，不继续下一块。
     """
     if not math.isfinite(follow_seconds) or follow_seconds <= 0:
         raise ValueError("follow_seconds 必须为正的有限数")
     if not math.isfinite(stable_seconds) or stable_seconds <= 0:
         raise ValueError("stable_seconds 必须为正的有限数")
+    if grab_tolerance_mm is not None and (
+        not math.isfinite(grab_tolerance_mm) or grab_tolerance_mm <= 0
+    ):
+        raise ValueError("grab_tolerance_mm 必须为正的有限数")
     if monitor_until_lift is not None and (
         not math.isfinite(monitor_until_lift) or monitor_until_lift < 550
     ):
@@ -612,6 +619,7 @@ def grab_material_from_turntable_to_repo_follow_v2(
             )
             if _descend_and_grab_from_turntable_monitored(
                 robot, color, deadline=deadline, monitor_until_lift=monitor_until_lift,
+                grab_tolerance_mm=grab_tolerance_mm,
             ):
                 break
             print(f"  {color} 偏离可抓范围或检测不到：已抬回，重新跟随")
@@ -622,6 +630,7 @@ def grab_material_from_turntable_to_repo_follow_v2(
 
 def _descend_and_grab_from_turntable_monitored(
     robot: Robot, want_color, *, deadline: float, monitor_until_lift: float | None = None,
+    grab_tolerance_mm: float | None = None,
 ) -> bool:
     """独立的监控下降段；失败先抬回原观察高度，成功才合爪并抬到 800°。"""
     observation_lift = robot.arm.read_abs_state("lift").motor_degrees
@@ -643,7 +652,9 @@ def _descend_and_grab_from_turntable_monitored(
             failure = "本块物料的抓取预算耗尽"
             return False
         before = measured_lift()
-        check = robot.grasp.check_material_for_grab(want_color)
+        check = robot.grasp.check_material_for_grab(
+            want_color, tolerance_mm=grab_tolerance_mm,
+        )
         after = measured_lift()
         if not check.grabbable:
             failure = f"{check.summary()}；本帧期间实测 lift {before:.1f}° → {after:.1f}°"

@@ -567,17 +567,25 @@ class Grasp:
         """用最新单帧判断指定物料是否在可抓范围，不驱动机械臂。"""
         return self.check_material_for_grab(want_color).grabbable
 
-    def check_material_for_grab(self, want_color) -> GrabRangeCheck:
+    def check_material_for_grab(
+        self, want_color, *, tolerance_mm: float | None = None,
+    ) -> GrabRangeCheck:
         """用最新单帧确认指定物料仍在可抓范围；不等待停稳、不驱动机械臂。
 
         下降时按当前高度重新测量毫米偏差；结果区分目标缺失与偏离，
         相机故障、旧帧和无效坐标则报错，不能当作一次普通重抓。
+        tolerance_mm 只覆盖本次检查的平面容差，不修改跟随或升降对准配置。
         """
         from modules.grasp.drive.visual_servo_model import MaterialMissingError
         from modules.grasp.drive.visual_servo_observation import _read_material
 
+        tolerance = (
+            min(self._config.tolerance_mm, self._config.z_center_tolerance_mm)
+            if tolerance_mm is None else tolerance_mm
+        )
+        if not math.isfinite(tolerance) or tolerance <= 0:
+            raise ValueError("tolerance_mm 必须为正的有限数")
         _, source = self._require_resources()
-        tolerance = min(self._config.tolerance_mm, self._config.z_center_tolerance_mm)
         checkpoint = time.monotonic()
         try:
             sighting = _read_material(
