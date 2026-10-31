@@ -510,7 +510,7 @@ def grab_material_from_turntable_to_repo(
 
 #: 跟随转盘上那块料最多跟多久（秒）。转盘一次换位是 1.5 s，跟 20 s 还没停稳就是出事了
 #: （料被带出可达范围、或画面一直有东西在动），报错比一直转下去好。
-FOLLOW_SECONDS = 20.0
+FOLLOW_SECONDS = 80.0
 
 
 def _follow_material_until_stable(
@@ -537,7 +537,7 @@ def _follow_material_until_stable(
 
 def grab_material_from_turntable_to_repo_follow(
     robot: Robot,
-    want_colors=("red", "green", "blue"),
+    want_colors=("green", "blue", "red"),
     *,
     home: dict[str, float] | None = {"lift": 830, "extension": 120.0, "base": 420},
     follow_seconds: float = FOLLOW_SECONDS,
@@ -557,7 +557,7 @@ def grab_material_from_turntable_to_repo_follow(
         robot.arm.move_axis_to_motor_degrees("lift", 460)
     _go_home(robot, home)
 
-    input("继续")
+    # input("继续")
     try:
         for color in want_colors:
             _follow_material_until_stable(
