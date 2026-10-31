@@ -654,8 +654,8 @@ class Grasp:
         - 环心读数的比例尺与雅可比是不是同一把尺（``ring box`` 是估的，±10%）。
 
         任一对不上，一步就走不准——这正是"转一次再算一次、偏差还是很大"的原因。
-        这里每走一步都用**实测位移 / 预测位移**把响应比在线学出来，下一步按它折算，
-        所以两三步就能收敛；而且把响应比打印出来：**它不是 1，就说明该重标了**。
+        只有实测位移足够大、且与预测方向一致时，才用响应比折算下一步。
+        两轴响应不一致时不能共享这一个比例，否则单轴弱响应会放大另一轴的步长。
 
         与 :meth:`plan_ring` 相同的拒绝（没有环 / 读数不可用 / 环号不符 / 尺不对 /
         雅可比奇异），另外：
@@ -713,6 +713,7 @@ class Grasp:
         response: float | None = None
         previous_reading: tuple[float, float] | None = None
         previous_step: tuple[int, int] | None = None
+        previous_motor_positions: dict[str, float] | None = None
         note = ""
         aligned = False
         final_reading: tuple[float, float] | None = None
@@ -748,11 +749,19 @@ class Grasp:
                         plan.reading[0] - previous_reading[0],
                         plan.reading[1] - previous_reading[1],
                     )
-                    if (math.hypot(*predicted) >= min_learn_mm
-                            and math.hypot(*measured) < min_learn_mm):
-                        # 两帧接近也可能都是旧位置；先保持不动复测，再记最优位置和判响应。
-                        self._say("  环心位移不足学习门槛：保持位置复测，不追加运动")
-                        continue
+                    predicted_length = math.hypot(*predicted)
+                    if predicted_length >= min_learn_mm:
+                        parallel_mm = (
+                            measured[0] * predicted[0] + measured[1] * predicted[1]
+                        ) / predicted_length
+                        perpendicular_mm = abs(
+                            measured[0] * predicted[1] - measured[1] * predicted[0]
+                        ) / predicted_length
+                        if (abs(parallel_mm) < min_learn_mm
+                                or perpendicular_mm > min_learn_mm):
+                            # 单轴旧读数也会被另一轴的移动掩盖，复测须同时检查长度和方向。
+                            self._say("  环心响应不足或方向不一致：保持位置复测，不追加运动")
+                            continue
                 break
             if assumed is not None and int(target.digit) != assumed and wrong_digit is None:
                 # 模型读错号不是这次对准的失败：环心照样是它给的，补偿按姿态用 assumed。
@@ -765,6 +774,13 @@ class Grasp:
             digit = plan.digit
             final_reading = plan.reading
             final_plan = plan
+            motor_positions = {axis: arm.read_measured_pulses(axis) for axis in wanted}
+            measured_motor_pulses = None
+            if previous_motor_positions is not None:
+                measured_motor_pulses = tuple(
+                    motor_positions.get(axis, 0.0) - previous_motor_positions.get(axis, 0.0)
+                    for axis in ("base", "extension")
+                )
             error = math.hypot(plan.error_mm[0], plan.error_mm[1])
             if best_error is None or error < best_error:
                 # 量到这次误差时两根轴就在**现在**这个位置（不是 ``plan.pulses``：那是
@@ -781,6 +797,7 @@ class Grasp:
                 error_mm=error,
                 base_pulses=0,
                 extension_pulses=0,
+                measured_motor_pulses=measured_motor_pulses,
             )
             # 先结算**上一步**的账：实测挪了多少，按雅可比该挪多少。
             if attempt > 1 and previous_step is not None and previous_reading is not None:
@@ -796,8 +813,16 @@ class Grasp:
                     response = (
                         measured[0] * predicted[0] + measured[1] * predicted[1]
                     ) / denominator
+                    perpendicular_mm = abs(
+                        measured[0] * predicted[1] - measured[1] * predicted[0]
+                    ) / predicted_length
+                    learn_response = (
+                        response > 0.05 and response * predicted_length >= min_learn_mm
+                        and perpendicular_mm <= min_learn_mm
+                    )
                     step = replace(
-                        step, measured_mm=measured, predicted_mm=predicted, response=response
+                        step, measured_mm=measured, predicted_mm=predicted,
+                        response=response, response_used=learn_response,
                     )
                     if response <= 0.05 and error > tolerance:
                         steps.append(step)
@@ -806,8 +831,8 @@ class Grasp:
                             "检查动作是否执行、取帧是否滞后，以及雅可比标定与接线方向"
                         )
                         break
-                    # 响应比 = 真实的灵敏度 / 配置的灵敏度；下一步按它折算。
-                    if math.hypot(*measured) >= min_learn_mm and response > 0.05:
+                    # 一个比例只能解释沿预测方向的缩放，不能解释两轴独立丢步或滞后。
+                    if learn_response and response > 0.05:
                         scale = min(5.0, max(0.2, 1.0 / response))
             if error <= tolerance:
                 aligned = True
@@ -832,6 +857,7 @@ class Grasp:
             )
             previous_reading = plan.reading
             previous_step = (base_step, extension_step)
+            previous_motor_positions = motor_positions
         else:
             note = note or f"走了 {max_iterations} 步还没进容差，先看响应比是不是一直不变"
 

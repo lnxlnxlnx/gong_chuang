@@ -389,7 +389,21 @@ class RobotArmInPositionWaitTests(unittest.TestCase):
 
 
 class ReadAbsStateTests(ArmTestCase):
-    """``read_abs_state``：一根轴现在在哪（里程表口径，与绝对定位同一把尺）。"""
+    """区分命令里程表与编码器实测位置。"""
+
+    def test_measured_pulses_come_from_the_encoder_without_changing_odometry(self) -> None:
+        arm = self.make_arm()
+        before = arm.read_abs_state("base").pulses
+        with patch.object(arm._motors["base"], "read_position", return_value=-98304):
+            self.assertEqual(arm.read_measured_pulses("base"), -4800.0)
+        self.assertEqual(arm.read_abs_state("base").pulses, before)
+
+    def test_encoder_failure_is_not_replaced_with_command_odometry(self) -> None:
+        arm = self.make_arm()
+        with patch.object(arm._motors["base"], "read_position",
+                          side_effect=RuntimeError("编码器读数失败")):
+            with self.assertRaisesRegex(RuntimeError, "编码器读数失败"):
+                arm.read_measured_pulses("base")
 
     def test_it_reports_where_the_axis_was_told_to_go(self) -> None:
         arm = self.make_arm()

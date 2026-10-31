@@ -120,7 +120,10 @@ from modules.arm.drive.kinematics import (
     motor_degrees_for_pulses,
     motor_pulses_for_degrees,
 )
-from modules.motor.drive.emm42 import Direction, Emm42Driver, MotorStatus, SerialPort
+from modules.motor.drive.emm42 import (
+    POSITION_UNITS_PER_REVOLUTION,
+    Direction, Emm42Driver, MotorStatus, SerialPort,
+)
 from modules.motor.drive.motion import (
     DEFAULT_INTER_FRAME_SECONDS,
     DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES,
@@ -562,6 +565,14 @@ class RobotArm:
         """
         self._require_open()
         return self.turns_state.of(axis_name)
+
+    def read_measured_pulses(self, axis_name: str) -> float:
+        """读取编码器位置并换算为命令脉冲；只比较增量，不与命令里程表混用原点。"""
+        self._require_position_ready()
+        return (
+            self._motors[axis_name].read_position()
+            * self.pulses_per_revolution / POSITION_UNITS_PER_REVOLUTION
+        )
 
     # ------------------------------------------------- 按里程表走绝对脉冲位置
     def move_axis_to_motor_pulses(

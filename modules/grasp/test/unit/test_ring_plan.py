@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from dataclasses import replace
 from unittest.mock import Mock, patch
 
 from modules.grasp.drive.ring_plan import RingBasePlan, plan_ring_base
@@ -384,6 +385,7 @@ class SimulatedPlantArm:
         self.plant = plant
         self.reading = [float(reading[0]), float(reading[1])]
         self.pulses = {"base": base_pulses, "extension": extension_pulses}
+        self.encoder_pulses = dict(self.pulses)
         self.moves: list[tuple[str, int]] = []
         self.turns_state = Mock()
         self.turns_state.of.side_effect = lambda name: Mock(pulses=self.pulses[name])
@@ -393,12 +395,16 @@ class SimulatedPlantArm:
     def _apply(self, axis: str, signed: int) -> None:
         self.moves.append((axis, signed))
         self.pulses[axis] += signed
+        self.encoder_pulses[axis] += signed
         moved = self.plant.displacement_for(
             signed if axis == "base" else 0,
             signed if axis == "extension" else 0,
         )
         self.reading[0] += moved[0]
         self.reading[1] += moved[1]
+
+    def read_measured_pulses(self, axis: str) -> float:
+        return self.encoder_pulses[axis]
 
     # ``_move_axis`` 只会调这四个方向原语，且 ``wait=False``（不等，返回的耗时是 0）。
     def rotate_cw(self, pulses, wait=False, **_kwargs):
@@ -503,51 +509,63 @@ class ClosedLoopTests(unittest.TestCase):
         self.assertGreater(result.response or 0.0, 0.5)
 
     def test_a_pair_of_stale_frames_does_not_report_a_stalled_axis(self) -> None:
-        """一步之后连续读到旧位置时，先复测，不能把旧帧当成电机没有响应。"""
-        grasp, arm = make_closed_loop(1.0)
+        """整帧或只有一个方向的读数滞后时，都应保持位置复测。"""
+        for stale_x_only in (False, True):
+            with self.subTest(stale_x_only=stale_x_only):
+                grasp, arm = make_closed_loop(1.0)
 
-        class DelayedSource(LiveRingSource):
-            stale_reads = 0
-            previous_target = None
+                class DelayedSource(LiveRingSource):
+                    stale_reads = 0
+                    previous_target = None
 
-            def locate_ring(self, **kwargs):
-                if len(self.arm.moves) == 4 and self.stale_reads < 2:
-                    self.stale_reads += 1
-                    return self.previous_target
-                target = super().locate_ring(**kwargs)
-                self.previous_target = target
-                return target
+                    def locate_ring(self, **kwargs):
+                        if len(self.arm.moves) == 4 and self.stale_reads < 2:
+                            self.stale_reads += 1
+                            if stale_x_only:
+                                return replace(self.previous_target, y_mm=self.arm.reading[1])
+                            return self.previous_target
+                        target = super().locate_ring(**kwargs)
+                        self.previous_target = target
+                        return target
 
-        grasp._source = DelayedSource(arm)
-        result = grasp.align_ring(max_iterations=6, gain=0.6, tolerance_mm=2.0)
+                grasp._source = DelayedSource(arm)
+                result = grasp.align_ring(max_iterations=6, gain=0.6, tolerance_mm=2.0)
 
-        self.assertTrue(result.aligned, result.summary())
-        self.assertLessEqual(math.hypot(*arm.reading), 2.0)
+                self.assertTrue(result.aligned, result.summary())
+                self.assertLessEqual(math.hypot(*arm.reading), 2.0)
 
     def test_one_weak_base_move_does_not_amplify_the_next_correction(self) -> None:
         """复现现场小步几乎没响应：不能把一次低响应倒数当作下一步的大增益。"""
-        grasp, arm = make_closed_loop(1.0)
-        arm.reading = [-24.33, -2.88]
-        grasp._config = VisualServoConfig(ring_offset_x_mm=6.5, ring_offset_y_mm=-7.0)
-        original_apply = arm._apply
+        for reading in ((-24.33, -2.88), (-39.52, 11.32)):
+            with self.subTest(reading=reading):
+                grasp, arm = make_closed_loop(1.0)
+                arm.reading = list(reading)
+                grasp._config = VisualServoConfig(ring_offset_x_mm=6.5, ring_offset_y_mm=-7.0)
+                original_apply = arm._apply
 
-        def apply_with_one_weak_base(axis, signed):
-            if axis == "base" and len(arm.moves) == 2:
-                arm.moves.append((axis, signed))
-                arm.pulses[axis] += signed
-                moved = arm.plant.displacement_for(signed * 0.1, 0)
-                arm.reading[0] += moved[0]
-                arm.reading[1] += moved[1]
-                return
-            original_apply(axis, signed)
+                def apply_with_one_weak_base(axis, signed):
+                    if axis == "base" and len(arm.moves) == 2:
+                        arm.moves.append((axis, signed))
+                        arm.pulses[axis] += signed
+                        arm.encoder_pulses[axis] += signed * 0.1
+                        moved = arm.plant.displacement_for(signed * 0.1, 0)
+                        arm.reading[0] += moved[0]
+                        arm.reading[1] += moved[1]
+                        return
+                    original_apply(axis, signed)
 
-        arm._apply = apply_with_one_weak_base
-        result = grasp.align_ring(max_iterations=6, gain=0.6, tolerance_mm=2.0)
+                arm._apply = apply_with_one_weak_base
+                result = grasp.align_ring(max_iterations=6, gain=0.6, tolerance_mm=2.0)
 
-        for step in result.steps:
-            predicted = JACOBIAN.displacement_for(step.base_pulses, step.extension_pulses)
-            self.assertLessEqual(math.hypot(*predicted), step.error_mm + 0.1)
-        self.assertTrue(result.aligned, result.summary())
+                for step in result.steps:
+                    predicted = JACOBIAN.displacement_for(step.base_pulses, step.extension_pulses)
+                    self.assertLessEqual(math.hypot(*predicted), step.error_mm + 0.1)
+                self.assertTrue(result.aligned, result.summary())
+                # 第三次观测应报告上步的真实小位移，不能打印命令里程表冒充编码器。
+                self.assertAlmostEqual(
+                    result.steps[2].measured_motor_pulses[0],
+                    result.steps[1].base_pulses * 0.1,
+                )
 
     def test_a_stationary_machine_still_aborts_after_remeasurement(self) -> None:
         """复测只排除旧帧；设备持续不动时必须停止，不能靠追加运动掩盖故障。"""

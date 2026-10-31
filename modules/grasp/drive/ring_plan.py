@@ -284,6 +284,10 @@ class RingAlignStep:
     predicted_mm: Optional[Tuple[float, float]] = None
     #: 实测 / 预测 的投影比：``1`` 说明尺是对的，``0.5`` 说明实际灵敏度只有一半。
     response: Optional[float] = None
+    #: 响应只在信号足够大且方向一致时用于更新步长；None 表示未评估。
+    response_used: Optional[bool] = None
+    #: 上一步运动前后编码器实测的底座、伸缩位移（命令脉冲单位），不使用命令里程表。
+    measured_motor_pulses: Optional[Tuple[float, float]] = None
 
     def line(self) -> str:
         moved = ""
@@ -294,6 +298,13 @@ class RingAlignStep:
             )
             if self.response is not None:
                 moved += f"，响应比 {self.response:.2f}"
+                if self.response_used is False:
+                    moved += "（未用于更新步长）"
+        if self.measured_motor_pulses is not None:
+            moved += (
+                f"，上步编码器位移：底座 {self.measured_motor_pulses[0]:+.1f}、"
+                f"伸缩 {self.measured_motor_pulses[1]:+.1f} 脉冲"
+            )
         return (
             f"第 {self.attempt} 步：读数 ({self.reading[0]:+.2f},{self.reading[1]:+.2f}) mm，"
             f"误差 {self.error_mm:.2f} mm → 底座 {self.base_pulses:+d}、"
