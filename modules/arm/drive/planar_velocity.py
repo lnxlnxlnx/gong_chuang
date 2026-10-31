@@ -89,10 +89,15 @@ class PlanarVelocitySession:
         self._axis_history = {axis: deque(maxlen=512) for axis in AXES}
         self._baseline = {}
         self._anchor = {axis: arm.turns_state.of(axis).pulses for axis in AXES}
-        # Reserve both reads and both retrying brakes, including serial's final
-        # blocking read, before the second axis can be guaranteed to have braked.
+        # 读取最多重试三次，期间会持有会话锁，watchdog 也不能插入停机帧。
+        # 必须预留两轴的全部读取与静默时间，再加两轴刹停所需时间。
         read_cost = sum(
-            2 * float(getattr(m, "timeout", 0.1)) + Emm42Driver.QUIET_TIMEOUT_SECONDS
+            Emm42Driver.READ_MAX_ATTEMPTS
+            * (
+                2 * float(getattr(m, "timeout", 0.1))
+                + Emm42Driver.QUIET_TIMEOUT_SECONDS
+            )
+            + (Emm42Driver.READ_MAX_ATTEMPTS - 1) * Emm42Driver.RETRY_SETTLE_SECONDS
             for m in self._motors.values()
         )
         stop_cost = sum(

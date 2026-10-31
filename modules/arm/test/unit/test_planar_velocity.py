@@ -8,6 +8,7 @@ from modules.arm.runtime import RobotArm
 from modules.arm.test.unit.test_robot_arm import fixture_config
 from modules.motor.drive.emm42 import Direction
 from modules.motor.drive.emm42 import Emm42Driver
+from modules.motor.test.unit.test_emm42 import FakeSerial
 
 
 class EncoderMotor:
@@ -190,6 +191,45 @@ class PlanarVelocityTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "position|位置"):
             self.arm.move_axis_to_motor_pulses("base", 100)
 
+    def test_transient_encoder_errors_recover_without_invalidating_position(self):
+        serial = FakeSerial(read_replies={0x36: [
+            bytes.fromhex("05 36 00 00 00 00 00 6B"),
+            bytes.fromhex("05 9B 00 01 F7 0F 6B"), b"",
+            bytes.fromhex("05 36 00 00 00 40 00 6B"),
+        ]})
+        self.motors["base"] = Emm42Driver(
+            "test", 5, serial_port=serial, expect_ack=False, sleep=lambda _: None,
+        )
+        self.arm = RobotArm(fixture_config(), motors=self.motors, sleep=lambda _: None)
+        session = self.start()
+        with self.assertLogs("modules.motor.drive.emm42", level="WARNING"):
+            snapshot = session.sample()
+        self.assertEqual(snapshot.base_pulses, 800)
+        self.assertEqual(self.arm.turns_state.of("base").pulses, 800)
+        self.assertEqual(self.motors["extension"].stops, 0)
+        session.close()
+        self.arm.move_axis_to_motor_pulses("base", 850)
+        self.assertEqual(serial.writes[-1][1], 0xFD)
+
+    def test_persistent_encoder_errors_still_brake_both_and_block_position_moves(self):
+        serial = FakeSerial(read_replies={0x36: [
+            bytes.fromhex("05 36 00 00 00 00 00 6B"),
+            bytes.fromhex("05 9B 00 01 F7 0F 6B"),
+        ]})
+        self.motors["base"] = Emm42Driver(
+            "test", 5, serial_port=serial, expect_ack=False, sleep=lambda _: None,
+        )
+        self.arm = RobotArm(fixture_config(), motors=self.motors, sleep=lambda _: None)
+        session = self.start()
+        with self.assertLogs("modules.motor.drive.emm42", level="WARNING"):
+            with self.assertRaisesRegex(RuntimeError, "3 consecutive"):
+                session.sample()
+        self.assertIn(bytes.fromhex("05 FE 98 00 6B"), serial.writes)
+        self.assertEqual(self.motors["extension"].stops, 1)
+        session.close()
+        with self.assertRaisesRegex(RuntimeError, "position"):
+            self.arm.move_axis_to_motor_pulses("base", 100)
+
     def test_first_stop_failure_does_not_skip_second_axis(self):
         session = self.start()
         session.set_velocity(3, 4)
@@ -245,7 +285,7 @@ class PlanarVelocityTests(unittest.TestCase):
             self.assertEqual(self.motors["base"].stops, 1)
             self.assertEqual(self.motors["extension"].stops, 1)
 
-    def test_unacknowledged_axes_allow_50_rpm_with_full_braking_room(self):
+    def test_unacknowledged_axes_reserve_read_retries_in_braking_room(self):
         self.arm.turns_state.record("extension", round(510 * 3200 / 360))
         for motor in self.motors.values():
             motor.expect_ack = False
@@ -253,7 +293,8 @@ class PlanarVelocityTests(unittest.TestCase):
         session = self.start(
             max_rpm=50, motor_limits={"base": (-900, 900), "extension": (30, 990)}
         )
-        self.assertEqual(session.set_velocity(50, 50), (50, 50))
+        # 三次读取及两次静默后仍须能刹住，伸缩轴剩余 480 度不足以维持 50 rpm。
+        self.assertEqual(session.set_velocity(50, 50), (50, 35))
 
     def test_reducing_speed_reserves_room_for_the_previous_moving_speed(self):
         session = self.start(

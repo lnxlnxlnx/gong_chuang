@@ -2,6 +2,7 @@
 
 import math
 import json
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
@@ -187,6 +188,52 @@ class ContinuousFollowTests(unittest.TestCase):
         self.assertEqual(arm.options["motor_limits"]["extension"], (30, 990))
         self.assertEqual(arm.options["motor_limits"]["base"], (-900, 900))
         self.assertLess(max(link.errors), 20)
+
+    def test_stopped_material_with_detection_jitter_settles_without_hunting(self):
+        for noise in (0.4, 0.8, 1.2):
+            with self.subTest(noise=noise):
+                clock, arm, link = self.rig(stop_at=0)
+                original = link.frame_fast
+
+                def noisy_frame(**kwargs):
+                    frame = original(**kwargs)
+                    item = frame[0]
+                    return (
+                        replace(
+                            item,
+                            x_mm=item.x_mm + noise * math.sin(link.reads * 1.7),
+                            y_mm=item.y_mm + noise * math.sin(link.reads * 2.3),
+                        ),
+                    )
+
+                link.frame_fast = noisy_frame
+                with patch.object(algorithms, "time", clock):
+                    result = follow(arm, link, timeout=6, rpm=80)
+                self.assertTrue(result.aligned)
+                self.assertTrue(all(b == e == 0 for _, b, e in arm.commands))
+                self.assertGreater(link.scene_checks, 0)
+
+    def test_jitter_after_a_real_turntable_move_does_not_prevent_stopping(self):
+        clock, arm, link = self.rig()
+        original = link.frame_fast
+
+        def noisy_frame(**kwargs):
+            frame = original(**kwargs)
+            item = frame[0]
+            return (
+                replace(
+                    item,
+                    x_mm=item.x_mm + 0.8 * math.sin(link.reads * 1.7),
+                    y_mm=item.y_mm + 0.8 * math.sin(link.reads * 2.3),
+                ),
+            )
+
+        link.frame_fast = noisy_frame
+        with patch.object(algorithms, "time", clock):
+            result = follow(arm, link, timeout=7, rpm=80)
+        self.assertTrue(result.aligned)
+        self.assertGreater(link.frames_while_moving, 5)
+        self.assertTrue(all(b == e == 0 for t, b, e in arm.commands if t > 3.0))
 
     def test_short_blackout_continues_observed_clockwise_curve(self):
         clock, arm, link = self.rig(missing=((0.9, 1.12),))
@@ -374,6 +421,21 @@ class ContinuousFollowTests(unittest.TestCase):
 
 
 class TrajectoryTests(unittest.TestCase):
+    def test_consistent_slow_motion_is_not_removed_as_detection_jitter(self):
+        track = ClockwiseTrajectory()
+        for i in range(8):
+            stamp = i * 0.09
+            track.observe(stamp, (220 + 2 * stamp, 50))
+        self.assertFalse(track.stationary)
+        self.assertAlmostEqual(track.velocity[0], 2)
+
+    def test_unconfirmed_startup_noise_is_not_velocity_feedforward(self):
+        track = ClockwiseTrajectory()
+        for stamp, x in ((0, 220), (0.09, 221), (0.18, 219)):
+            track.observe(stamp, (x, 50))
+        self.assertEqual(track.velocity, (0, 0))
+        self.assertFalse(track.stationary, "帧数不足时不能声称已停稳")
+
     def observed_arc(self, omega):
         track = ClockwiseTrajectory()
         for i in range(9):

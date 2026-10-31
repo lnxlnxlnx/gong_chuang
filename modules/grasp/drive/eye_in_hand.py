@@ -1372,7 +1372,6 @@ def follow_material_xy(
     deadline = time.monotonic() + timeout
     tracking_started = None
     still = 0
-    previous = None
     readings = []
     completed = False
     with arm.planar_velocity(
@@ -1396,7 +1395,6 @@ def follow_material_xy(
                 break
             if observation is None:
                 still = 0
-                previous = None
                 tracking_started = None
                 prediction = trajectory.predict(now, invisible=True)
             else:
@@ -1417,16 +1415,11 @@ def follow_material_xy(
                 readings.append(offset)
                 if tracking_started is None:
                     tracking_started = stamp
-                # 检查固定平面中的位移，相机读数不变并不表示停盘。
-                moved = math.inf if previous is None else math.dist(world, previous)
-                previous = world
-                speed = math.hypot(*trajectory.velocity)
+                # 多帧估计排除识别抖动，最终仍须整幅画面确认停盘。
                 error = math.hypot(offset[0] - target.x_mm, offset[1] - target.y_mm)
                 still = (
                     still + 1
-                    if moved <= config.settle_tolerance_mm
-                    and speed < 1.0
-                    and error <= tolerance
+                    if trajectory.stationary and error <= tolerance
                     else 0
                 )
                 if still >= 2 and now - tracking_started >= FOLLOW_MIN_SECONDS:

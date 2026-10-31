@@ -67,6 +67,7 @@ class ClockwiseTrajectory:
         self.points = deque(maxlen=40)
         self.circle = None
         self.velocity = (0.0, 0.0)
+        self.stationary = False
 
     def observe(self, stamp, point):
         if self.points and stamp <= self.points[-1][0]:
@@ -77,11 +78,25 @@ class ClockwiseTrajectory:
         while self.points and stamp - self.points[0][0] > 0.8:
             self.points.popleft()
         recent = [p for p in self.points if stamp - p[0] <= 0.4]
+        if len(recent) < 4:
+            recent = list(self.points)[-4:]
         self.velocity = (0.0, 0.0)
-        if len(recent) >= 2:
+        self.stationary = False
+        if len(recent) >= 4:
             values = np.array(recent)
             times = values[:, 0] - values[:, 0].mean()
-            self.velocity = tuple(times @ values[:, 1:] / (times @ times))
+            centered_positions = values[:, 1:] - values[:, 1:].mean(axis=0)
+            time_energy = times @ times
+            velocity = times @ centered_positions / time_energy
+            residual = centered_positions - times[:, None] * velocity
+            # 用残差估计速度的不确定度；检测框抖动不能成为换向的速度前馈。
+            speed_uncertainty = math.sqrt(
+                float((residual * residual).sum()) / (len(recent) - 2) / time_energy
+            )
+            if math.hypot(*velocity) > max(1.0, 3 * speed_uncertainty):
+                self.velocity = tuple(velocity)
+            else:
+                self.stationary = True
         self.circle = None
         if len(self.points) < 4:
             return

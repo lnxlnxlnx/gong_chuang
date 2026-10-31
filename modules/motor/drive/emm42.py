@@ -54,10 +54,18 @@ Emm42 V5.0 闭环步进驱动器串口协议(ZDT Emm 固件)：
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Callable, Final, List, Optional, Protocol, Tuple
+
+
+_logger = logging.getLogger(__name__)
+
+
+class _ReadCommunicationError(RuntimeError):
+    """读取未得到合格回包；与驱动器明确拒绝命令区分，以便有限重试。"""
 
 
 class SerialPort(Protocol):
@@ -222,6 +230,9 @@ class Emm42Driver:
     #: 回包被打坏时驱动器几乎肯定已经执行过前一遍，重发一遍结果一样；而相对位置帧重发一次
     #: 就是让那根轴多走一段，所以它永远只发一遍。
     MAX_ATTEMPTS: Final = 3
+
+    #: 读取不改变电机运动；前两次通信失败记录告警，第三次仍失败才上抛。
+    READ_MAX_ATTEMPTS: Final = 3
 
     #: 重发之前的静默（秒）：坏掉的那一次交换可能还有字节在路上，先让总线安静一下。
     RETRY_SETTLE_SECONDS: Final = 0.03
@@ -489,6 +500,26 @@ class Emm42Driver:
         return status
 
     def _read(self, function: int) -> bytes:
+        """有限重读通信失败；只返回本次有效数据，不使用上一次的位置代替。"""
+        for attempt in range(1, self.READ_MAX_ATTEMPTS + 1):
+            try:
+                return self._read_once(function)
+            except (_ReadCommunicationError, OSError) as error:
+                if attempt == self.READ_MAX_ATTEMPTS:
+                    raise RuntimeError(
+                        f"Emm42 motor {self.motor_id} read command 0x{function:02X} "
+                        f"failed after {attempt} consecutive communication failures: "
+                        f"{error}"
+                    ) from error
+                _logger.warning(
+                    "Emm42 motor %s read command 0x%02X communication failure "
+                    "%s/%s: %s; retrying",
+                    self.motor_id, function, attempt, self.READ_MAX_ATTEMPTS, error,
+                )
+                # 迟到的残帧可能仍在路上；沿用写命令的静默间隔再重新查询。
+                self._sleep(self.RETRY_SETTLE_SECONDS)
+
+    def _read_once(self, function: int) -> bytes:
         """发一条读取命令，返回**去掉地址/功能码/校验之后**的数据字节。
 
         读取类命令不受 ``Response`` 菜单影响（见模块文档字符串），所以
@@ -512,22 +543,23 @@ class Emm42Driver:
         # ``NN FF 02 6B`` 之类）会被当成这条读命令的回包。
         reply, seen = self._read_reply_for(self.motor_id, total, function=function)
         note = _discarded_note(seen)
+        raw = b"".join(seen)
+        rejection = bytes((self.motor_id, 0x00, 0xEE, self.CHECKSUM))
+        if reply == rejection:
+            raise RuntimeError(
+                f"Emm42 motor {self.motor_id} rejected read command 0x{function:02X}: "
+                f"{reply.hex(' ')}" + note
+            )
         if not reply:
             # 走到这里说明"没读到一条结构完整、地址对得上的回包"：驱动器回的
             # ``地址 00 EE 6B``（错误命令）比正常帧短，先单独认出来再谈别的。
-            raw = b"".join(seen)
             if not raw:
-                raise RuntimeError(
+                raise _ReadCommunicationError(
                     f"Emm42 motor {self.motor_id} read command "
                     f"0x{function:02X} received no reply"
                 )
             extra = note if len(seen) > 1 else ""
-            if raw[:3] == bytes((self.motor_id, 0x00, 0xEE)):
-                raise RuntimeError(
-                    f"Emm42 motor {self.motor_id} rejected read command 0x{function:02X}: "
-                    f"{raw.hex(' ')}" + extra
-                )
-            raise RuntimeError(
+            raise _ReadCommunicationError(
                 f"Emm42 motor {self.motor_id} read command 0x{function:02X} returned "
                 f"unexpected reply: {raw.hex(' ')}" + extra
             )
@@ -537,9 +569,15 @@ class Emm42Driver:
             or reply[1] != function
             or reply[-1] != self.CHECKSUM
         ):
-            raise RuntimeError(
+            raise _ReadCommunicationError(
                 f"Emm42 motor {self.motor_id} read command 0x{function:02X} returned "
                 f"unexpected reply: {reply.hex(' ')}" + note
+            )
+        # 符号也是协议字段，须在重试边界内校验，避免坏符号直接使位置失效。
+        if function == 0x36 and reply[2] not in (0x00, 0x01):
+            raise _ReadCommunicationError(
+                f"Emm42 motor {self.motor_id} returned an invalid position sign byte "
+                f"0x{reply[2]:02X}"
             )
         return reply[2:-1]
 
@@ -740,7 +778,17 @@ class Emm42Driver:
                 # 读超时（pyserial 的 read 会等满 timeout）：这条命令不会再回包了。
                 break
             buffer.extend(chunk)
-            while len(buffer) >= length:
+            while len(buffer) >= self.ACK_LENGTH:
+                # 拒绝帧固定为四字节，需在当前帧头识别，不能在位置数据内搜字节串。
+                short = bytes(buffer[:self.ACK_LENGTH])
+                if short[1:] == bytes((0x00, 0xEE, self.CHECKSUM)):
+                    del buffer[:self.ACK_LENGTH]
+                    if expected_address != 0 and short[0] != expected_address:
+                        self._keep_discarded(discarded, junk, short)
+                        continue
+                    return short, self._flush_leftovers(discarded, junk, buffer)
+                if len(buffer) < length:
+                    break
                 candidate = bytes(buffer[:length])
                 if candidate[-1] != self.CHECKSUM:
                     # 不是帧尾：这一个字节是垃圾或半帧残留，丢掉重新对齐。

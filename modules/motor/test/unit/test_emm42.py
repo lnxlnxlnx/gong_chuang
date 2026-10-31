@@ -552,6 +552,114 @@ class Emm42GarbledReplyTests(unittest.TestCase):
 class Emm42ReadCommandTests(unittest.TestCase):
     """读取类命令：帧格式、返回长度、符号解码与错误帧（说明书 6.3.2 / 6.3.4）。"""
 
+    def test_read_recovers_from_two_communication_failures_and_logs_them(self):
+        for bad_reply in (
+            b"",
+            bytes.fromhex("05 9B 00 01 F7 0F 6B"),
+            bytes.fromhex("06 36 00 00 00 0C 80 6B"),
+            bytes.fromhex("05 36 00 00 00 0C 80 00"),
+            bytes.fromhex("05 36 02 00 00 0C 80 6B"),
+        ):
+            with self.subTest(reply=bad_reply.hex(" ")):
+                serial = FakeSerial(read_replies={0x36: [
+                    bad_reply, bad_reply,
+                    bytes.fromhex("05 36 00 00 00 0C 80 6B"),
+                ]})
+                clock = FakeClock()
+                motor = Emm42Driver(
+                    "test", motor_id=5, serial_port=serial,
+                    expect_ack=False, sleep=clock.sleep,
+                )
+                with self.assertLogs(
+                    "modules.motor.drive.emm42", level="WARNING",
+                ) as logs:
+                    self.assertEqual(motor.read_position(), 3200)
+                self.assertEqual(len(logs.records), 2)
+                self.assertIn("1/3", logs.output[0])
+                self.assertIn("2/3", logs.output[1])
+                self.assertEqual(serial.writes, [bytes.fromhex("05 36 6B")] * 3)
+                self.assertEqual(clock.sleeps, [0.03, 0.03])
+
+    def test_read_raises_after_three_consecutive_failures_without_a_fourth_send(self):
+        serial = FakeSerial(read_replies={0x36: [
+            bytes.fromhex("05 9B 00 01 F7 0F 6B"),
+            b"", b"",
+            bytes.fromhex("05 36 00 00 00 0C 80 6B"),
+        ]})
+        motor = Emm42Driver(
+            "test", motor_id=5, serial_port=serial, sleep=lambda _: None,
+        )
+        with self.assertLogs("modules.motor.drive.emm42", level="WARNING"):
+            with self.assertRaisesRegex(RuntimeError, "3 consecutive"):
+                motor.read_position()
+        self.assertEqual(serial.writes, [bytes.fromhex("05 36 6B")] * 3)
+
+    def test_success_resets_the_read_failure_count(self):
+        bad = bytes.fromhex("01 9B 00 01 F7 0F 6B")
+        serial = FakeSerial(read_replies={0x36: [
+            bad, bad, bytes.fromhex("01 36 00 00 00 0C 80 6B"),
+            bad, bad, bytes.fromhex("01 36 01 00 01 00 00 6B"),
+        ]})
+        motor = Emm42Driver(
+            "test", motor_id=1, serial_port=serial, sleep=lambda _: None,
+        )
+        with self.assertLogs("modules.motor.drive.emm42", level="WARNING") as logs:
+            self.assertEqual(motor.read_position(), 3200)
+            self.assertEqual(motor.read_position(), -65536)
+        self.assertEqual(len(logs.records), 4)
+        self.assertIn("1/3", logs.output[2])
+        self.assertEqual(len(serial.writes), 6)
+
+    def test_serial_read_errors_are_retried(self):
+        class ReadFailureSerial(FakeSerial):
+            failures = 2
+
+            def read(self, size):
+                if self.failures:
+                    self.failures -= 1
+                    raise OSError("serial read failed")
+                return super().read(size)
+
+        serial = ReadFailureSerial(read_replies={
+            0x36: [bytes.fromhex("05 36 00 00 00 0C 80 6B")],
+        })
+        motor = Emm42Driver(
+            "test", motor_id=5, serial_port=serial, sleep=lambda _: None,
+        )
+        with self.assertLogs("modules.motor.drive.emm42", level="WARNING"):
+            self.assertEqual(motor.read_position(), 3200)
+
+    def test_explicit_read_rejection_is_not_retried(self):
+        serial = FakeSerial(read_replies={0x36: [
+            bytes.fromhex("01 00 EE 6B"),
+            bytes.fromhex("01 36 00 00 00 0C 80 6B"),
+        ]})
+        motor = Emm42Driver("test", motor_id=1, serial_port=serial)
+        with self.assertRaisesRegex(RuntimeError, "rejected read command"):
+            motor.read_position()
+        self.assertEqual(serial.writes, [bytes.fromhex("01 36 6B")])
+
+    def test_foreign_frames_do_not_hide_an_explicit_read_rejection(self):
+        serial = FakeSerial(read_replies={0x36: [
+            bytes.fromhex("06 00 EE 6B 05 00 EE 6B"),
+            bytes.fromhex("05 36 00 00 00 0C 80 6B"),
+        ]})
+        motor = Emm42Driver(
+            "test", motor_id=5, serial_port=serial, sleep=lambda _: None,
+        )
+        with self.assertRaisesRegex(RuntimeError, "rejected read command"):
+            motor.read_position()
+        self.assertEqual(serial.writes, [bytes.fromhex("05 36 6B")])
+
+    def test_foreign_position_data_is_not_mistaken_for_a_read_rejection(self):
+        serial = FakeSerial(
+            read_replies={0x36: [bytes.fromhex("05 36 00 00 00 0C 80 6B")]},
+            write_foreign=[bytes.fromhex("06 36 00 00 05 00 EE 6B")],
+        )
+        motor = Emm42Driver("test", motor_id=5, serial_port=serial)
+        self.assertEqual(motor.read_position(), 3200)
+        self.assertEqual(serial.writes, [bytes.fromhex("05 36 6B")])
+
     def test_position_reply_is_eight_bytes_because_of_the_sign_byte(self) -> None:
         """7 字节是错的：位置值前面还有一个符号字节，少算一个字节整帧就错位。"""
         self.assertEqual(Emm42Driver.REPLY_LENGTHS[0x36], 8)
