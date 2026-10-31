@@ -320,6 +320,92 @@ class RowStepPulsesTests(unittest.TestCase):
 
 
 class PlaceMaterialFromCenterRingTests(unittest.TestCase):
+    def test_translated_chassis_keeps_the_row_in_the_chassis_frame(self) -> None:
+        """车身方向不变而停车位置平移：落点必须沿固定法线的垂线展开。"""
+        normal_motor_degrees = -17.0
+        for forward_mm in (245.0, 280.0, 310.0):
+            for lateral_mm in (-60.0, 0.0, 55.0):
+                with self.subTest(forward=forward_mm, lateral=lateral_mm):
+                    radius = math.hypot(forward_mm, lateral_mm)
+                    base_degrees = normal_motor_degrees + 5.0 * math.degrees(
+                        math.atan2(lateral_mm, forward_mm)
+                    )
+                    extension_degrees = 270.0 + (radius - 235.0) * 360.0 / 61.0
+                    _robot, targets, _grab = self.run_it(
+                        (1, 2, 3),
+                        base_pulses=round(base_degrees * 3200.0 / 360.0),
+                        extension_pulses=round(extension_degrees * 3200.0 / 360.0),
+                        row_normal_base_motor_degrees=normal_motor_degrees,
+                    )
+                    self.assert_row_geometry(
+                        targets, normal_motor_degrees=normal_motor_degrees
+                    )
+
+    def test_calibration_returns_to_the_middle_alignment_pose(self) -> None:
+        """960° 观察姿态只供转车，环心对准必须回到落料补偿使用的 600°。"""
+        robot = Mock()
+        robot.vision.ring_center_spacing_mm = 150.0
+        robot.arm.config = load_arm_config()
+        robot.arm.pulses_per_revolution = 3200
+        current = {}
+
+        def move_axes(_robot, pose):
+            current.update(pose)
+            return Mock()
+
+        def move_axis(axis, degrees):
+            current[axis] = degrees
+
+        def square(_robot):
+            self.assertEqual(current, app_gripper.RING_ROW_OBSERVE_POSE)
+
+        def align(_robot, **_kwargs):
+            self.assertEqual(current, app_gripper.RING2_APPROACH_POSE)
+            return -151, 4800
+
+        robot.arm.move_axis_to_motor_degrees.side_effect = move_axis
+        with patch.object(app_gripper, "move_axes_to", side_effect=move_axes), \
+                patch.object(app_gripper, "square_chassis_to_ring_row", side_effect=square), \
+                patch.object(app_gripper, "_align_floor_ring", side_effect=align), \
+                patch.object(app_gripper, "_grab_material_from_car"), \
+                patch("time.sleep"):
+            app_gripper.place_material_from_repo_to_floor_from_center_ring(
+                robot, orders=(2,), need_calibrate=True
+            )
+
+    def test_failed_chassis_calibration_retracts_before_any_pickup(self) -> None:
+        robot = Mock()
+        with patch.object(app_gripper, "move_axes_to") as move, \
+                patch.object(app_gripper, "square_chassis_to_ring_row",
+                             side_effect=RuntimeError("车身未垂直")), \
+                patch.object(app_gripper, "_align_floor_ring") as align, \
+                patch.object(app_gripper, "_grab_material_from_car") as grab, \
+                patch("time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "车身未垂直"):
+                app_gripper.place_material_from_repo_to_floor_from_center_ring(
+                    robot, need_calibrate=True
+                )
+        self.assertEqual(move.call_args.args[1], app_gripper.SAFE_RETRACT)
+        align.assert_not_called()
+        grab.assert_not_called()
+        robot.gripper.open_jaws.assert_not_called()
+
+    def test_default_offsets_do_not_move_any_ring_from_the_geometric_row(self) -> None:
+        _robot, targets, _grab = self.run_it(
+            (1, 2, 3), base_pulses=-419, extension_pulses=3645,
+            row_normal_base_motor_degrees=-17.0, use_default_offsets=True,
+        )
+        self.assert_row_geometry(targets, normal_motor_degrees=-17.0)
+
+    def test_invalid_row_normal_is_rejected_before_motion(self) -> None:
+        robot = Mock()
+        for angle in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(angle=angle), self.assertRaises(ValueError):
+                app_gripper.place_material_from_repo_to_floor_from_center_ring(
+                    robot, row_normal_base_motor_degrees=angle
+                )
+        robot.arm.move_axis_to_motor_degrees.assert_not_called()
+
     def test_unaligned_middle_aborts_before_pickup_or_release(self) -> None:
         robot = Mock()
         robot.vision.ring_center_spacing_mm = 150.0
@@ -382,7 +468,8 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
                 patch.object(app_gripper, "_grab_material_from_car") as grab, \
                 patch("time.sleep"):
             move.side_effect = move_axes
-            kwargs.setdefault("row_yaw_correction_deg", 0.0)
+            # 对称用例显式把中环放在法线上；平移用例会传入独立的固定法线。
+            kwargs.setdefault("row_normal_base_motor_degrees", base_pulses * 360.0 / 3200.0)
             if not use_default_offsets:
                 kwargs.setdefault("ring3_right_offset_mm", 0.0)
                 kwargs.setdefault("ring3_down_offset_mm", 0.0)
@@ -401,6 +488,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
                     robot, targets, _grab = self.run_it(
                         (3, 2, 1), base_pulses=-738, extension_pulses=3294,
                         row_yaw_correction_deg=yaw, use_default_offsets=True,
+                        ring3_right_offset_mm=15.0,
                         **offsets,
                     )
                     _robot, original, _grab = self.run_it(
@@ -414,7 +502,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
                         theta = math.radians((pose["base"] + 83.025) / 5.0 + yaw)
                         positions.append((radius * math.cos(theta), radius * math.sin(theta)))
                     before, after = positions
-                    expected_down = 10.0 if down is None else down
+                    expected_down = 0.0 if down is None else down
                     self.assertAlmostEqual(after[0] - before[0], -expected_down, delta=0.15)
                     self.assertAlmostEqual(after[1] - before[1], 15.0, delta=0.15)
                     self.assertEqual(
@@ -543,7 +631,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         """现场中环不在环排法线上：落点仍须沿实测 -17° 电机角的垂线展开。"""
         _robot, targets, _grab = self.run_it(
             (1, 2, 3), base_pulses=-781, extension_pulses=3566,
-            row_yaw_correction_deg=-14.1725,
+            row_normal_base_motor_degrees=-17.0,
         )
         positions = []
         for pose in targets[1:-1]:
@@ -573,6 +661,90 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
                     robot, orders=(0, 4)
                 )
         move.assert_not_called()
+
+
+class PlaceAndGrabMaterialTests(unittest.TestCase):
+    """使用真实放料、回抓流程，仅替换硬件动作，核对松爪与闭爪的落点。"""
+
+    def setUp(self) -> None:
+        self.robot = Mock()
+        self.robot.vision.ring_center_spacing_mm = 150.0
+        self.robot.arm.config = load_arm_config()
+        self.robot.arm.pulses_per_revolution = 3200
+        self.robot.arm.turns_state.of.side_effect = lambda name: SimpleNamespace(
+            pulses={"base": -738, "extension": 3294}[name]
+        )
+        self.robot.grasp.align_ring.return_value = RingAlignResult(
+            aligned=True, final_error_mm=0.5
+        )
+        current = {}
+        self.placed = []
+        self.picked = []
+
+        def move_axes(_robot, pose):
+            current.update(pose)
+            return Mock()
+
+        def position():
+            return {axis: current[axis] for axis in ("base", "extension")}
+
+        self.robot.gripper.open_jaws.side_effect = lambda: self.placed.append(position())
+        self.robot.gripper.close_jaws.side_effect = lambda: self.picked.append(position())
+        for patcher in (
+            patch.object(app_gripper, "move_axes_to", side_effect=move_axes),
+            patch.object(app_gripper, "_grab_material_from_car"),
+            patch.object(app_gripper, "_place_material_to_repo"),
+            patch("time.sleep"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_returned_locations_are_motor_degrees_keyed_by_placed_ring(self) -> None:
+        orders = (3, 2)
+        locations = app_gripper.place_material_from_repo_to_floor_from_center_ring(
+            self.robot, orders=orders
+        )
+
+        self.assertEqual(set(locations), {2, 3})
+        self.assertEqual([locations[digit] for digit in orders], self.placed)
+        self.assertAlmostEqual(locations[2]["base"], -83.025)
+        self.assertAlmostEqual(locations[2]["extension"], 370.575)
+
+    def test_default_grab_order_reuses_all_placed_locations_without_xy_alignment(self) -> None:
+        app_gripper.place_and_grab_material(self.robot)
+
+        self.assertEqual(len(self.placed), 3)
+        self.assertEqual(self.picked, self.placed)
+        self.robot.grasp.align_xy.assert_not_called()
+        self.assertEqual(
+            [call.kwargs["require_digit"] for call in self.robot.grasp.align_ring.call_args_list],
+            [2],
+        )
+
+    def test_different_grab_orders_follow_the_matching_ring_locations(self) -> None:
+        place_orders = (3, 1, 2)
+        for grab_orders in ((1, 2, 3), (2, 3, 1)):
+            with self.subTest(grab_orders=grab_orders):
+                self.placed.clear()
+                self.picked.clear()
+                app_gripper.place_and_grab_material(
+                    self.robot, place_orders=place_orders, grab_orders=grab_orders
+                )
+
+                locations = dict(zip(place_orders, self.placed))
+                self.assertEqual(self.picked, [locations[digit] for digit in grab_orders])
+
+    def test_failed_middle_alignment_aborts_before_any_floor_pickup(self) -> None:
+        self.robot.grasp.align_ring.return_value = RingAlignResult(
+            aligned=False, final_error_mm=20.0
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "2 号环.*未对准"):
+            app_gripper.place_and_grab_material(self.robot)
+
+        self.assertEqual(self.placed, [])
+        self.assertEqual(self.picked, [])
+        self.robot.grasp.align_xy.assert_not_called()
 
 
 if __name__ == "__main__":

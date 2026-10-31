@@ -946,28 +946,31 @@ def place_material_from_repo_to_floor_from_center_ring(
     place_lift: float = 95.0,
     tolerance_mm: float = 2,
     need_calibrate: bool = False,
-    row_yaw_correction_deg: float = 8.5,      # 往负数调，值越大1环离车越近
+    row_yaw_correction_deg: float = 0.0,
     row_normal_base_motor_degrees: float = -17.0,
-    ring3_down_offset_mm: float = 7.6,
-    ring3_right_offset_mm: float = 10.3,
-):
-    """只闭环对准中环一次，按可调补偿角计算三环落点，再从仓库放料。
+    ring3_down_offset_mm: float = 0.0,
+    ring3_right_offset_mm: float = 0.0,
+) -> dict[int, dict[str, float]]:
+    """闭环对准中环，再沿车身坐标系中的环排方向计算三环落点。
 
-    ``row_yaw_correction_deg`` 直接给环排的方向补偿，单位为输出轴角度（不再除减速比）。
-    0° 对应原先以中环朝向为法线的对称算法；此前日志中自动补偿为 -13.21°，
-    若该值过矫，可在 0° 与 -13.21° 之间调节。中环落点不受这个参数影响。
+    返回本次已放置环号对应的底座、伸缩绝对电机角度，供回抓复用。
+
+    车身须已与环排垂直，或用 ``need_calibrate=True`` 在固定观察姿态下校准。
+    ``row_normal_base_motor_degrees`` 是机械臂指向环排法线时的底座电机角度；
+    车辆平移后中环朝向会变化，但这个基准不随停车位置改变。
+    ``row_yaw_correction_deg`` 是在实测夹角上额外添加的输出轴角度，默认不补偿。
 
     ``ring3_right_offset_mm`` 单独补偿 3 号环的稳定左偏：沿环排 1→3 的方向为正，
-    默认右移 15 mm；0 关闭，负数左移。先在平面坐标中平移，再同时反算底座和伸缩，
+    默认不补偿；负数左移。先在平面坐标中平移，再同时反算底座和伸缩，
     因而不是只转底座走圆弧，也不会改变 1/2 号环的位置。
 
     ``ring3_down_offset_mm`` 单独补偿 3 号环的稳定上偏：正数沿环排法线向底座侧
-    平移（观察画面中的下方），默认 10 mm；0 关闭，负数向上。它与向右补偿垂直，
+    平移（观察画面中的下方），默认不补偿；负数向上。它与向右补偿垂直，
     同样先平移平面落点，再反算关节位置，不改变放料高度。
 
     1. 摆到 :data:`RING2_APPROACH_POSE`，``align_ring(require_digit=2)`` 闭环对准
        —— 2 号环的位置是**量出来**的；
-    2. 用中环的关节位置、环间距和方向补偿一次计算 1/3 号的底座与伸缩位置；
+    2. 用中环的关节位置、环间距和环排法线一次计算 1/3 号的底座与伸缩位置；
     3. 按 ``orders`` 去仓库抓料 → 回到已算好的绝对关节位置 → 降到
        ``place_lift`` 松爪 → 抬起。车不动，不再逐环对准。
 
@@ -977,17 +980,21 @@ def place_material_from_repo_to_floor_from_center_ring(
     digits = _check_order(orders)
     if not math.isfinite(row_yaw_correction_deg):
         raise ValueError("row_yaw_correction_deg 必须是有限的输出轴角度")
+    if not math.isfinite(row_normal_base_motor_degrees):
+        raise ValueError("row_normal_base_motor_degrees 必须是有限的电机角度")
     if not math.isfinite(ring3_right_offset_mm):
         raise ValueError("ring3_right_offset_mm 必须是有限的毫米数")
     if not math.isfinite(ring3_down_offset_mm):
         raise ValueError("ring3_down_offset_mm 必须是有限的毫米数")
     robot.arm.move_axis_to_motor_degrees("lift", 760)
-    move_axes_to(robot, RING2_APPROACH_POSE).wait()
-    if need_calibrate:
-        robot.arm.move_axis_to_motor_degrees("lift", 960)
-        square_chassis_to_ring_row(robot)
-    time.sleep(1)  # 先让臂停稳再看
     try:
+        if need_calibrate:
+            move_axes_to(robot, RING_ROW_OBSERVE_POSE).wait()
+            time.sleep(1)
+            square_chassis_to_ring_row(robot)
+        # 转车观察与环心对准使用不同高度；恢复姿态才能复用原落料补偿。
+        move_axes_to(robot, RING2_APPROACH_POSE).wait()
+        time.sleep(1)
         base, extension = _align_floor_ring(
             robot, digit=2, tolerance_mm=tolerance_mm
         )
@@ -995,6 +1002,11 @@ def place_material_from_repo_to_floor_from_center_ring(
         spacing = float(robot.vision.ring_center_spacing_mm)
         radius = arm.config.extension_radius_mm(extension)
         degrees_per_pulse = 360.0 / arm.pulses_per_revolution
+        middle_yaw_deg = (
+            (base * degrees_per_pulse - row_normal_base_motor_degrees)
+            / arm.config.base_reduction
+            + row_yaw_correction_deg
+        )
         poses = {2: (base, extension)}
         for digit in (1, 3):
             lateral_mm = (digit - 2) * spacing
@@ -1002,13 +1014,16 @@ def place_material_from_repo_to_floor_from_center_ring(
                 lateral_mm += ring3_right_offset_mm
             step_base, step_extension = _row_step_pulses(
                 robot, spacing_mm=lateral_mm,
-                radius_mm=radius, middle_yaw_deg=row_yaw_correction_deg,
+                radius_mm=radius, middle_yaw_deg=middle_yaw_deg,
                 normal_offset_mm=-ring3_down_offset_mm if digit == 3 else 0.0,
             )
             poses[digit] = (base + step_base, extension + step_extension)
         print(
             f"2 号环几何基准：当前半径 {radius:.2f} mm；"
-            f"环排补偿角 {row_yaw_correction_deg:+.2f}°（输出轴）；"
+            f"中环底座 {base * degrees_per_pulse:+.2f}°、"
+            f"法线基准 {row_normal_base_motor_degrees:+.2f}°（电机）；"
+            f"中环相对法线 {middle_yaw_deg:+.2f}°（输出轴，"
+            f"含额外补偿 {row_yaw_correction_deg:+.2f}°）；"
             f"3 号环向右补偿 {ring3_right_offset_mm:+.1f} mm、"
             f"向下补偿 {ring3_down_offset_mm:+.1f} mm"
         )
@@ -1033,7 +1048,13 @@ def place_material_from_repo_to_floor_from_center_ring(
         raise
 
     move_axes_to(robot, SAFE_RETRACT).wait()
-    return poses
+    return {
+        digit: {
+            "base": poses[digit][0] * degrees_per_pulse,
+            "extension": poses[digit][1] * degrees_per_pulse,
+        }
+        for digit in digits
+    }
 
 
 def grab_material_from_floor_to_repo_by_xy(
@@ -1124,7 +1145,10 @@ def place_material_on_material_by_order(
     
     
 def place_and_grab_material(robot:Robot, place_orders = (1, 2, 3), grab_orders = None):
+    """按指定顺序放料，再按环号复用放料落点回抓。"""
     if grab_orders is None:
         grab_orders = place_orders
-    pre_locations = place_material_from_repo_to_floor_by_pose(robot, orders=place_orders)   # 这边应该返回三个位置
-    grab_material_from_floor_to_repo_by_xy(robot, orders=grab_orders, pre_locations=pre_locations)   # 这边应该传入三个位置
+    locations = place_material_from_repo_to_floor_from_center_ring(robot, orders=place_orders)
+    # 回抓按列表顺序取位置，必须按 grab_orders 排列，不能沿用放料顺序。
+    pre_locations = [locations[digit] for digit in grab_orders]
+    grab_material_from_floor_to_repo_by_xy(robot, orders=grab_orders, pre_locations=pre_locations)
