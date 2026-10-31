@@ -128,6 +128,8 @@ from modules.motor.drive.motion import (
     DEFAULT_INTER_FRAME_SECONDS,
     DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES,
     DEFAULT_SETTLE_SECONDS,
+    IN_POSITION_TIMEOUT_FACTOR,
+    IN_POSITION_TIMEOUT_MARGIN_SECONDS,
     estimate_move_seconds,
     in_position_timeout_seconds,
 )
@@ -635,6 +637,56 @@ class RobotArm:
             acceleration=acceleration,
             wait=wait,
         )
+
+    def move_axis_to_motor_degrees_monitored(
+        self,
+        axis_name: str,
+        degrees: float,
+        *,
+        keep_moving: Callable[[], bool],
+        rpm: Optional[int] = None,
+    ) -> bool:
+        """边走边检查，检查失败立即刹停；返回是否实测到位。
+
+        回调只做观测，不得另发运动命令。退出时用编码器增量修正命令里程表，
+        避免取消半途动作后，下一次绝对定位仍从原目标位置计算位移。
+        """
+        target = motor_pulses_for_degrees(
+            degrees, pulses_per_revolution=self.pulses_per_revolution
+        )
+        self._require_position_ready()
+        start = self.turns_state.of(axis_name).pulses
+        measured_start = self.read_measured_pulses(axis_name)
+        ticket = self.move_axis_to_motor_degrees(
+            axis_name, degrees, rpm=rpm, wait=False
+        )
+        # 与常规到位轮询使用相同的估时倍率和余量，堵转不能无限等待。
+        deadline = (
+            self._clock() + ticket.estimated_seconds * IN_POSITION_TIMEOUT_FACTOR
+            + IN_POSITION_TIMEOUT_MARGIN_SECONDS
+        )
+        try:
+            while True:
+                if not keep_moving():
+                    return False
+                measured = start + self.read_measured_pulses(axis_name) - measured_start
+                if ticket.remaining <= 0:
+                    status = self._motors[axis_name].read_status()
+                    if status.stalled or status.stall_protected:
+                        raise RuntimeError(f"{axis_name} 监控移动发生堵转")
+                    # 到位窗口由驱动器决定；还须实测离开起点，排除旧的到位位。
+                    if status.in_position and (target == start or abs(measured - start) >= 1):
+                        return True
+                if self._clock() >= deadline:
+                    raise TimeoutError(f"{axis_name} 监控移动未实测到位")
+                self._sleep(0.01)
+        finally:
+            # 先停再读；编码器与软件原点可能不同，因此只使用本段的实测增量。
+            ticket.cancel()
+            actual = start + round(self.read_measured_pulses(axis_name) - measured_start)
+            self.turns_state.record(
+                axis_name, actual - self.turns_state.of(axis_name).pulses
+            )
 
     def _move_delta(
         self,

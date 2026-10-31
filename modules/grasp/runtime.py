@@ -539,6 +539,35 @@ class Grasp:
             on_message=self._say,
         )
 
+    def material_in_grab_range(self, want_color) -> bool:
+        """用最新单帧确认指定物料仍在可抓范围；不等待停稳、不驱动机械臂。
+
+        下降时按当前高度重新测量毫米偏差；目标缺失与偏离均返回 False，
+        相机故障、旧帧和无效坐标则报错，不能当作一次普通重抓。
+        """
+        from modules.grasp.drive.visual_servo_model import MaterialMissingError
+        from modules.grasp.drive.visual_servo_observation import _read_material
+
+        _, source = self._require_resources()
+        checkpoint = time.monotonic()
+        try:
+            sighting = _read_material(
+                source, self._selector_for(want_color, self._selector),
+                self._config, after=checkpoint, fast=True,
+            )
+        except MaterialMissingError:
+            return False
+        stamp = sighting.received_at
+        if stamp is None or not math.isfinite(stamp) or stamp < checkpoint:
+            raise VisualServoError("下降监控未取得新的有效采集时间戳")
+        if not all(math.isfinite(v) for v in (sighting.x_mm, sighting.y_mm)):
+            raise VisualServoError("下降监控坐标必须为有限数")
+        tolerance = min(self._config.tolerance_mm, self._config.z_center_tolerance_mm)
+        return math.hypot(
+            sighting.x_mm - self._target.x_mm,
+            sighting.y_mm - self._target.y_mm,
+        ) <= tolerance
+
     def align_xy_for_turntable(
         self,
         *,

@@ -573,6 +573,68 @@ def grab_material_from_turntable_to_repo_follow(
     move_axes_to(robot, SAFE_RETRACT).wait()
     robot.gripper.set_position(150)
 
+def grab_material_from_turntable_to_repo_follow_v2(
+    robot: Robot,
+    want_colors=("green", "blue", "red"),
+    *,
+    home: dict[str, float] | None = {"lift": 830, "extension": 120.0, "base": 420},
+    follow_seconds: float = FOLLOW_SECONDS,
+    stable_seconds: float = 0.3,
+):
+    """停稳即抓；下降时持续看料，偏离或丢失就抬回观察高度重新跟随。
+
+    不设最短跟随时长。每块料的跟随、下降和重抓共用 follow_seconds 预算；
+    合爪前最后确认一次，成功后沿用既有入库动作。异常直接抛出，不继续下一块。
+    """
+    if not math.isfinite(follow_seconds) or follow_seconds <= 0:
+        raise ValueError("follow_seconds 必须为正的有限数")
+    if not math.isfinite(stable_seconds) or stable_seconds <= 0:
+        raise ValueError("stable_seconds 必须为正的有限数")
+    if robot.arm.read_abs_state("lift").motor_degrees < 460:
+        robot.arm.move_axis_to_motor_degrees("lift", 460)
+    _go_home(robot, home)
+    for color in want_colors:
+        deadline = time.monotonic() + follow_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"{color} 在 {follow_seconds:.1f} s 内未完成抓取")
+            _follow_material_until_stable(
+                robot, color, timeout=remaining,
+                min_follow_seconds=0.0, stable_seconds=stable_seconds,
+            )
+            if _descend_and_grab_from_turntable_monitored(robot, color, deadline=deadline):
+                break
+            print(f"  {color} 偏离可抓范围或检测不到：已抬回，重新跟随")
+        _stow_material_to_repo(robot)
+    move_axes_to(robot, SAFE_RETRACT).wait()
+    robot.gripper.set_position(150)
+
+
+def _descend_and_grab_from_turntable_monitored(
+    robot: Robot, want_color, *, deadline: float,
+) -> bool:
+    """独立的监控下降段；失败先抬回原观察高度，成功才合爪并抬到 800°。"""
+    observation_lift = robot.arm.read_abs_state("lift").motor_degrees
+
+    def still_grabbable() -> bool:
+        """取帧前后都检查预算，迟到的观测不能放行合爪。"""
+        if time.monotonic() >= deadline:
+            return False
+        visible = robot.grasp.material_in_grab_range(want_color)
+        return visible and time.monotonic() < deadline
+
+    reached = robot.arm.move_axis_to_motor_degrees_monitored(
+        "lift", 550, rpm=120, keep_moving=still_grabbable,
+    )
+    if not reached or not still_grabbable():
+        robot.arm.move_axis_to_motor_degrees("lift", observation_lift, rpm=120)
+        return False
+    robot.gripper.close_jaws()
+    robot.arm.move_axis_to_motor_degrees("lift", 800, rpm=120)
+    return True
+
+
 def grab_material_from_floor_to_repo(
     robot: Robot,
     *,
