@@ -1337,8 +1337,8 @@ def follow_material_xy(
     tolerance = config.tolerance_mm if tolerance_mm is None else float(tolerance_mm)
     if not math.isfinite(tolerance) or tolerance <= 0:
         raise ValueError("tolerance_mm 必须是正数")
-    if isinstance(rpm, bool) or not isinstance(rpm, int) or not 1 <= rpm <= 80:
-        raise ValueError("连续跟随 rpm 必须为 1..80 的整数")
+    if isinstance(rpm, bool) or not isinstance(rpm, int) or not 1 <= rpm <= 120:
+        raise ValueError("连续跟随 rpm 必须为 1..120 的整数")
     if (
         not math.isfinite(timeout)
         or timeout <= 0

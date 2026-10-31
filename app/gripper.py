@@ -515,13 +515,13 @@ FOLLOW_SECONDS = 80.0
 
 def _follow_material_until_stable(
     robot: Robot, want_color, *, timeout: float = FOLLOW_SECONDS,
-    min_follow_seconds: float = 4.0, stable_seconds: float = 0.5,
+    min_follow_seconds: float = 4.6, stable_seconds: float = 0.3,
 ) -> None:
     """**跟着转盘上的料走**，直到料自己停住（停住那一刻才下降到抓）。
 
     跟踪在 :meth:`~modules.grasp.runtime.Grasp.follow_material` 里：
     运动期间取下一帧，用编码器扣除相机运动，边跟随边对准。
-    首次识别后至少跟随四秒，短暂跟丢只重算停稳时间；连续停稳 stable_seconds 才返回。
+    首次识别后至少跟随五秒，短暂跟丢只重算停稳时间；连续停稳 stable_seconds 才返回。
 
     :raises RuntimeError: 跟满 ``timeout`` 秒料还在动（带上最后一次跟丢的原因）。
     """
@@ -541,7 +541,7 @@ def grab_material_from_turntable_to_repo_follow(
     *,
     home: dict[str, float] | None = {"lift": 830, "extension": 120.0, "base": 420},
     follow_seconds: float = FOLLOW_SECONDS,
-    stable_seconds: float = 0.5,
+    stable_seconds: float = 0.3,
 ):
     """**跟着料走**：不等它转到位，一路跟到它上方，停住了才抓。
 
