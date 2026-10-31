@@ -25,7 +25,7 @@
 
     show_text("314+321+134+132")
 
-命令行自测（点击关闭按钮结束）::
+命令行自测（在终端按 Ctrl+C 结束）::
 
     python -m modules.vision.drive.text_screen "134+123+314+231"
 """
@@ -241,12 +241,12 @@ atexit.register(_close_display)
 
 
 def show_text(text: str, *, size: Sequence[int] = DEFAULT_SIZE) -> str:
-    """显示文字并返回窗口名；窗口事件在独立进程中持续处理。
+    """全屏显示文字并返回窗口名；窗口事件在独立进程中持续处理。
 
     首次调用需要启动显示进程，每次调用在绘制确认后返回，不等待按键。
     后续程序无需调用 waitKey；静态文字不反复绘制，也不读相机或运行推理。
     重复调用更新同一窗口，主进程的 destroyAllWindows 不影响它。
-    关闭文字窗可点击窗口关闭按钮，主程序退出时也会自动关闭。
+    全屏窗口隐藏标题栏和桌面面板，主程序退出时自动关闭。
 
     :raises ValueError: 文字为空，或画布尺寸装不下留白。
     :raises RuntimeError: 显示进程启动、绘制失败或超时。
@@ -302,9 +302,13 @@ def _run_display() -> int:
                 canvas = render_text(command["text"], size=command["size"])
                 if not opened:
                     open_preview(TEXT_WINDOW_NAME)
+                    # 全屏由窗口后端铺满实体屏幕，画布尺寸只负责文字排版。
+                    cv2.setWindowProperty(
+                        TEXT_WINDOW_NAME, cv2.WND_PROP_FULLSCREEN,
+                        cv2.WINDOW_FULLSCREEN,
+                    )
                     opened = True
                 cv2.imshow(TEXT_WINDOW_NAME, canvas)
-                cv2.resizeWindow(TEXT_WINDOW_NAME, canvas.shape[1], canvas.shape[0])
             # 每约 50 ms 泵一次事件；静态图不重画，空闲时阻塞等待，避免忙轮询。
             cv2.waitKey(1)
             # GTK2 不提供 WND_PROP_VISIBLE；图像区域能直接判断窗口是否还存在。
@@ -328,5 +332,5 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--worker":
         raise SystemExit(_run_display())
     show_text(sys.argv[1] if len(sys.argv) > 1 else "134+123+314+231")
-    print("关闭文字窗口以结束")
+    print("文字已全屏显示，在终端按 Ctrl+C 结束")
     _display.process.wait()

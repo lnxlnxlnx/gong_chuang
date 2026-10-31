@@ -130,14 +130,22 @@ class WindowsDisplayTests(unittest.TestCase):
             from modules.vision.config import VisionConfig
 
             user32 = ctypes.windll.user32
+            user32.SetProcessDPIAware()
             user32.FindWindowW.restype = ctypes.c_void_p
             user32.IsHungAppWindow.argtypes = [ctypes.c_void_p]
+            user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             robot = Robot(vision=Vision(VisionConfig()))
             assert robot.vision.show_text('123+321+213+132') == 'vision-text'
             window = user32.FindWindowW(None, 'vision-text')
             assert window, '文字窗口未创建'
             time.sleep(6)
             assert not user32.IsHungAppWindow(window), '调用返回后文字窗口失去响应'
+            from ctypes import wintypes
+            bounds = wintypes.RECT()
+            user32.GetWindowRect(window, ctypes.byref(bounds))
+            assert (bounds.left, bounds.top, bounds.right, bounds.bottom) == (
+                0, 0, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+            ), '文字窗口未覆盖整块屏幕'
             cv2.destroyAllWindows()
             assert user32.FindWindowW(None, 'vision-text'), '预览收尾关闭了文字窗'
             robot.vision.show_text('321+123', size=(320, 240))
