@@ -14,6 +14,7 @@ from app.gripper import (
     grab_material_from_floor_to_repo_by_xy,
     grab_material_from_turntable_to_repo,  # 圆盘->仓库
     grab_material_from_turntable_to_repo_follow,  # 圆盘->仓库（跟着料走）
+    grab_material_from_turntable_to_repo_follow_v2,
     move_axes_to,
     place_material_from_repo_to_floor,  # 仓库->地面圆环
     place_material_from_repo_to_floor_by_pose,  # 仓库->地面圆环
@@ -170,8 +171,10 @@ def run_map():
         # input("继续")
         # center_chassis_on_ring(robot, require_digit=2)
         # robot.chassis.left(rpm = 40, pulses = 400)
+        robot.vision.show_text("123+321+213+132")
         place_and_grab_material(robot, place_orders=(2, 3, 1))
         # grab_material_from_turntable_to_repo_follow(robot)
+        # grab_material_from_turntable_to_repo_follow_v2(robot)
         
         input("结束!!!!!!!!!!!!!!!")
         
