@@ -53,7 +53,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from statistics import median
 from typing import TYPE_CHECKING, TypedDict
@@ -76,6 +76,27 @@ if TYPE_CHECKING:
     from modules.arm.runtime import RobotArm
     from modules.grasp.drive.ring_plan import RingBasePlan
     from modules.vision.runtime import Vision
+
+
+@dataclass(frozen=True)
+class GrabRangeCheck:
+    """区分目标缺失与坐标超限，供下降诊断和可见高度标定使用。"""
+
+    offset: tuple[float, float] | None
+    tolerance_mm: float
+
+    @property
+    def grabbable(self) -> bool:
+        return self.offset is not None and math.hypot(*self.offset) <= self.tolerance_mm
+
+    def summary(self) -> str:
+        if self.offset is None:
+            return "这一帧未检测到指定物料"
+        x, y = self.offset
+        return (
+            f"读数 ({x:+.2f}, {y:+.2f}) mm，误差 {math.hypot(x, y):.2f} mm"
+            f"，允许 {self.tolerance_mm:.2f} mm"
+        )
 
 
 class GraspSettings(TypedDict):
@@ -511,9 +532,10 @@ class Grasp:
         acceleration: int = 220,
         rpm: int = 90,
     ) -> VisualServoResult:
-        """仅平面连续跟随，停盘且对准后可直接抓取；短时遮挡沿实测顺时针圆弧追踪。
+        """转盘物料的平面连续跟随；停盘且对准后可直接抓取。
 
-        rpm 最大 80，伸缩电机范围 30..990°，并保留硬件更严格的限位。
+        底座限于 220..680°，失去可用轨迹或目标超出抓料区时回 420°观察。
+        伸缩电机范围 30..990°，并保留硬件更严格的限位。
         跟随退出时刹停并用编码器对账，随后抓取、回位继续使用位置模式。
         gain 为每秒误差修正比例；高度由调用方预先保证。
         默认至少跟随四秒、连续停稳半秒；当前物料已跟满四秒时可传 min_follow_seconds=0。
@@ -536,19 +558,26 @@ class Grasp:
             gain=gain,
             acceleration=acceleration,
             rpm=rpm,
+            base_motor_limits=(220.0, 680.0),
+            search_base_degrees=420.0,
             on_message=self._say,
         )
 
     def material_in_grab_range(self, want_color) -> bool:
+        """用最新单帧判断指定物料是否在可抓范围，不驱动机械臂。"""
+        return self.check_material_for_grab(want_color).grabbable
+
+    def check_material_for_grab(self, want_color) -> GrabRangeCheck:
         """用最新单帧确认指定物料仍在可抓范围；不等待停稳、不驱动机械臂。
 
-        下降时按当前高度重新测量毫米偏差；目标缺失与偏离均返回 False，
+        下降时按当前高度重新测量毫米偏差；结果区分目标缺失与偏离，
         相机故障、旧帧和无效坐标则报错，不能当作一次普通重抓。
         """
         from modules.grasp.drive.visual_servo_model import MaterialMissingError
         from modules.grasp.drive.visual_servo_observation import _read_material
 
         _, source = self._require_resources()
+        tolerance = min(self._config.tolerance_mm, self._config.z_center_tolerance_mm)
         checkpoint = time.monotonic()
         try:
             sighting = _read_material(
@@ -556,17 +585,16 @@ class Grasp:
                 self._config, after=checkpoint, fast=True,
             )
         except MaterialMissingError:
-            return False
+            return GrabRangeCheck(None, tolerance)
         stamp = sighting.received_at
         if stamp is None or not math.isfinite(stamp) or stamp < checkpoint:
             raise VisualServoError("下降监控未取得新的有效采集时间戳")
         if not all(math.isfinite(v) for v in (sighting.x_mm, sighting.y_mm)):
             raise VisualServoError("下降监控坐标必须为有限数")
-        tolerance = min(self._config.tolerance_mm, self._config.z_center_tolerance_mm)
-        return math.hypot(
+        return GrabRangeCheck((
             sighting.x_mm - self._target.x_mm,
             sighting.y_mm - self._target.y_mm,
-        ) <= tolerance
+        ), tolerance)
 
     def align_xy_for_turntable(
         self,

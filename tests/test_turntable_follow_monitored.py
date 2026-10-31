@@ -138,6 +138,53 @@ class MonitoredGrabTests(unittest.TestCase):
         self.assertFalse(self.grab())
         self.assert_back_at_observation_height()
 
+    def test_cancellation_log_distinguishes_offset_from_missing_and_reports_measured_height(self):
+        self.camera.offset = lambda: (7, 0)
+        with patch("builtins.print") as printed:
+            self.assertFalse(self.grab())
+        message = " ".join(str(c.args) for c in printed.call_args_list)
+        self.assertIn("7.00 mm", message)
+        self.assertIn("实测 lift 830.0°", message)
+        self.assertNotIn("实测 lift 550.0°", message)
+
+    def test_calibration_finds_last_visible_height_and_returns_without_grabbing(self):
+        def visibility():
+            self.motor.update()
+            return (0, 0) if self.motor.position * 360 / self.motor.ppr >= 699.5 else None
+        self.camera.offset = visibility
+        with patch.object(app_gripper, "_follow_material_until_stable"):
+            cutoff = app_gripper.calibrate_turntable_grab_visibility(self.robot, "red")
+        self.assertAlmostEqual(cutoff, 700, delta=0.2)
+        self.assert_back_at_observation_height()
+
+    def test_calibration_rejects_offset_change_instead_of_calling_it_occlusion(self):
+        def offset():
+            self.motor.update()
+            return (0, 0) if self.motor.position * 360 / self.motor.ppr > 810 else (8, 0)
+        self.camera.offset = offset
+        with patch.object(app_gripper, "_follow_material_until_stable"):
+            with self.assertRaisesRegex(RuntimeError, "仍检测到料但坐标超限"):
+                app_gripper.calibrate_turntable_grab_visibility(self.robot, "red")
+        self.assert_back_at_observation_height()
+
+    def test_calibrated_terminal_segment_can_grab_when_camera_is_occluded_below_cutoff(self):
+        def visibility():
+            self.motor.update()
+            return (0, 0) if self.motor.position * 360 / self.motor.ppr >= 699.5 else None
+        self.camera.offset = visibility
+        self.assertTrue(app_gripper._descend_and_grab_from_turntable_monitored(
+            self.robot, "red", deadline=self.clock() + 5, monitor_until_lift=700,
+        ))
+        self.robot.gripper.close_jaws.assert_called_once()
+        self.assertTrue(all(point is not None for _, point in self.camera.samples))
+
+    def test_target_lost_above_cutoff_still_returns_without_grabbing(self):
+        self.camera.offset = lambda: None
+        self.assertFalse(app_gripper._descend_and_grab_from_turntable_monitored(
+            self.robot, "red", deadline=self.clock() + 5, monitor_until_lift=700,
+        ))
+        self.assert_back_at_observation_height()
+
     def test_final_frame_after_braking_can_cancel_the_grab(self):
         self.camera.offset = lambda: None if self.motor.stops else (0, 0)
         self.assertFalse(self.grab())

@@ -580,16 +580,23 @@ def grab_material_from_turntable_to_repo_follow_v2(
     home: dict[str, float] | None = {"lift": 830, "extension": 120.0, "base": 420},
     follow_seconds: float = FOLLOW_SECONDS,
     stable_seconds: float = 0.3,
+    monitor_until_lift: float | None = None,
 ):
     """停稳即抓；下降时持续看料，偏离或丢失就抬回观察高度重新跟随。
 
     不设最短跟随时长。每块料的跟随、下降和重抓共用 follow_seconds 预算；
-    合爪前最后确认一次，成功后沿用既有入库动作。异常直接抛出，不继续下一块。
+    monitor_until_lift 是停盘标定得到的最后可见高度；先监控下降到这里并确认目标，
+    再按固定行程降到 550° 合爪。None 保持全程监控，不猜测遮挡高度。
+    成功后沿用既有入库动作。异常直接抛出，不继续下一块。
     """
     if not math.isfinite(follow_seconds) or follow_seconds <= 0:
         raise ValueError("follow_seconds 必须为正的有限数")
     if not math.isfinite(stable_seconds) or stable_seconds <= 0:
         raise ValueError("stable_seconds 必须为正的有限数")
+    if monitor_until_lift is not None and (
+        not math.isfinite(monitor_until_lift) or monitor_until_lift < 550
+    ):
+        raise ValueError("monitor_until_lift 必须是大于等于 550° 的有限电机角度")
     if robot.arm.read_abs_state("lift").motor_degrees < 460:
         robot.arm.move_axis_to_motor_degrees("lift", 460)
     _go_home(robot, home)
@@ -603,7 +610,9 @@ def grab_material_from_turntable_to_repo_follow_v2(
                 robot, color, timeout=remaining,
                 min_follow_seconds=0.0, stable_seconds=stable_seconds,
             )
-            if _descend_and_grab_from_turntable_monitored(robot, color, deadline=deadline):
+            if _descend_and_grab_from_turntable_monitored(
+                robot, color, deadline=deadline, monitor_until_lift=monitor_until_lift,
+            ):
                 break
             print(f"  {color} 偏离可抓范围或检测不到：已抬回，重新跟随")
         _stow_material_to_repo(robot)
@@ -612,27 +621,104 @@ def grab_material_from_turntable_to_repo_follow_v2(
 
 
 def _descend_and_grab_from_turntable_monitored(
-    robot: Robot, want_color, *, deadline: float,
+    robot: Robot, want_color, *, deadline: float, monitor_until_lift: float | None = None,
 ) -> bool:
     """独立的监控下降段；失败先抬回原观察高度，成功才合爪并抬到 800°。"""
     observation_lift = robot.arm.read_abs_state("lift").motor_degrees
+    target_lift = 550.0 if monitor_until_lift is None else monitor_until_lift
+    if not math.isfinite(target_lift) or not 550 <= target_lift <= observation_lift:
+        raise ValueError("监控结束高度必须在 550° 与本次观察高度之间")
+    measured_start = robot.arm.read_measured_pulses("lift")
+    failure = ""
+
+    def measured_lift() -> float:
+        """异步运动的命令里程表已是终点，日志必须改用本段编码器增量。"""
+        delta = robot.arm.read_measured_pulses("lift") - measured_start
+        return observation_lift + delta * 360 / robot.arm.pulses_per_revolution
 
     def still_grabbable() -> bool:
         """取帧前后都检查预算，迟到的观测不能放行合爪。"""
+        nonlocal failure
         if time.monotonic() >= deadline:
+            failure = "本块物料的抓取预算耗尽"
             return False
-        visible = robot.grasp.material_in_grab_range(want_color)
-        return visible and time.monotonic() < deadline
+        before = measured_lift()
+        check = robot.grasp.check_material_for_grab(want_color)
+        after = measured_lift()
+        if not check.grabbable:
+            failure = f"{check.summary()}；本帧期间实测 lift {before:.1f}° → {after:.1f}°"
+            return False
+        if time.monotonic() >= deadline:
+            failure = "取帧期间抓取预算耗尽"
+            return False
+        return True
 
     reached = robot.arm.move_axis_to_motor_degrees_monitored(
-        "lift", 550, rpm=120, keep_moving=still_grabbable,
+        "lift", target_lift, rpm=120, keep_moving=still_grabbable,
     )
     if not reached or not still_grabbable():
+        print(f"  {want_color} 下降取消：{failure}")
         robot.arm.move_axis_to_motor_degrees("lift", observation_lift, rpm=120)
         return False
+    if target_lift > 550:
+        # 这里之后已进入经实测确认的遮挡区，不能再以“没框”判物料转走。
+        robot.arm.move_axis_to_motor_degrees("lift", 550, rpm=120)
+        if time.monotonic() >= deadline:
+            print(f"  {want_color} 固定行程结束时抓取预算耗尽，抬回观察高度")
+            robot.arm.move_axis_to_motor_degrees("lift", observation_lift, rpm=120)
+            return False
     robot.gripper.close_jaws()
     robot.arm.move_axis_to_motor_degrees("lift", 800, rpm=120)
     return True
+
+
+def calibrate_turntable_grab_visibility(
+    robot: Robot, want_color, *, lift_step: float = 10.0,
+) -> float:
+    """停盘、物料静止时测最后可见的 lift；只标定并抬回，不合爪、不入库。
+
+    调用前先摆好转盘观察姿态。每下降一小步先停稳再检测，区分自然遮挡、
+    运动模糊与坐标超限；只有目标缺失才输出末段监控高度，不把偏位当遮挡。
+    """
+    if not math.isfinite(lift_step) or lift_step <= 0:
+        raise ValueError("lift_step 必须为正的有限角度")
+    observation_lift = robot.arm.read_abs_state("lift").motor_degrees
+    if observation_lift <= 550:
+        raise ValueError("可见高度标定需要先把 lift 抬到高于 550° 的观察姿态")
+    robot.gripper.open_jaws()
+    _follow_material_until_stable(robot, want_color, min_follow_seconds=0.0, stable_seconds=0.3)
+    measured_start = robot.arm.read_measured_pulses("lift")
+    previous = observation_lift
+    try:
+        check = robot.grasp.check_material_for_grab(want_color)
+        if not check.grabbable:
+            raise RuntimeError(f"标定起点不可抓：{check.summary()}")
+        height = observation_lift
+        while height > 550:
+            height = max(550.0, height - lift_step)
+            robot.arm.move_axis_to_motor_degrees_monitored(
+                "lift", height, rpm=30, keep_moving=lambda: True,
+            )
+            delta = robot.arm.read_measured_pulses("lift") - measured_start
+            actual = observation_lift + delta * 360 / robot.arm.pulses_per_revolution
+            check = robot.grasp.check_material_for_grab(want_color)
+            print(f"  可见高度标定 lift={actual:.1f}°：{check.summary()}")
+            if check.offset is None:
+                print(
+                    f"  首次不可见约 {actual:.1f}°；最后可见监控高度 "
+                    f"monitor_until_lift={previous:.1f}°（仅适用于停盘且物料未动的标定）"
+                )
+                return previous
+            if not check.grabbable:
+                raise RuntimeError(
+                    f"lift={actual:.1f}° 时仍检测到料但坐标超限，不能当成遮挡：{check.summary()}"
+                )
+            # 保留本次停稳目标角度；若读回微小偏低，不应把阈值移入遮挡区。
+            previous = max(height, actual)
+        print("  直到 550° 仍可见：monitor_until_lift=550.0°")
+        return 550.0
+    finally:
+        robot.arm.move_axis_to_motor_degrees("lift", observation_lift, rpm=120)
 
 
 def grab_material_from_floor_to_repo(

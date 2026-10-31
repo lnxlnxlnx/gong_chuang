@@ -1319,13 +1319,16 @@ def follow_material_xy(
     gain: float = 4.0,
     acceleration: int = 220,
     rpm: int = 80,
+    base_motor_limits: Optional[Tuple[float, float]] = None,
+    search_base_degrees: Optional[float] = None,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> VisualServoResult:
     """以连续速度跟随平面物料；短时丢料只追实测支持的顺时针圆弧。
 
     编码器采样包围曝光/取帧时间，避免将相机随臂运动误当成物料运动。
     速度前馈消除逐帧追赶的滞后；gain 是每秒消除的关节误差比例。
-    伸缩取硬件范围与用户确认的 30..990 电机度的交集，底座沿用硬件限位。
+    伸缩取硬件范围与用户确认的 30..990 电机度的交集，底座可指定抓料范围。
+    search_base_degrees 给出没有可用目标时返回的观察方向；不在抓料区外盲追。
     退出、异常和中断都先刹停、对账，再允许位置模式接手；一次升降帧都不发。
     首次识别后的跟随时长与连续停稳时长分别计时，丢帧不重等四秒。
     """
@@ -1369,6 +1372,20 @@ def follow_material_xy(
             max(30.0, ref + (radial.minimum - geometry.reference_radius) * scale),
             min(990.0, ref + (radial.maximum - geometry.reference_radius) * scale),
         )
+    if base_motor_limits is not None:
+        low, high = base_motor_limits
+        low, high = max(low, limits["base"][0]), min(high, limits["base"][1])
+        if not all(math.isfinite(v) for v in (low, high)) or low >= high:
+            raise ValueError("抓料底座范围与硬件限位没有有效交集")
+        limits["base"] = (low, high)
+    if search_base_degrees is not None:
+        if not math.isfinite(search_base_degrees) or not (
+            limits["base"][0] <= search_base_degrees <= limits["base"][1]
+        ):
+            raise ValueError("搜索底座角度必须位于抓料范围内")
+        # 仓库动作允许走到抓料区外；开启有界速度会话前先回到观察方向。
+        if not limits["base"][0] <= arm.read_abs_state("base").motor_degrees <= limits["base"][1]:
+            arm.move_axis_to_motor_degrees("base", search_base_degrees)
     trajectory = ClockwiseTrajectory(
         prediction_seconds=config.follow_prediction_seconds,
         stationary_seconds=stable_seconds,
@@ -1378,6 +1395,7 @@ def follow_material_xy(
     tracking_started = None
     readings = []
     completed = False
+    searching = False
     with arm.planar_velocity(
         max_rpm=rpm,
         motor_limits=limits,
@@ -1443,12 +1461,53 @@ def follow_material_xy(
                     current = stopped
                 prediction = trajectory.predict(now)
             if prediction is None:
-                motion.set_velocity(0, 0)
+                desired = feedforward = None
             else:
                 point, velocity = prediction
                 desired, feedforward = geometry.joints(
                     point, velocity, current.base_pulses
                 )
+                base_degrees = desired[0] * 360 / geometry.ppr
+                if not limits["base"][0] <= base_degrees <= limits["base"][1]:
+                    desired = feedforward = None
+            if desired is None:
+                if search_base_degrees is None:
+                    motion.set_velocity(0, 0)
+                else:
+                    if not searching:
+                        say(f"  目标丢失或已出抓料区，回 base={search_base_degrees:.1f}° 重新观察")
+                        trajectory = ClockwiseTrajectory(
+                            prediction_seconds=config.follow_prediction_seconds,
+                            stationary_seconds=stable_seconds,
+                        )
+                    searching = True
+                    base_error = search_base_degrees - current.base_pulses * 360 / geometry.ppr
+                    search_rpm = 0.0 if abs(base_error) <= 1 else math.copysign(
+                        max(1.0, abs(gain * base_error / 6)), base_error,
+                    )
+                    motion.set_velocity(search_rpm, 0)
+            else:
+                searching = False
+                # 分方向消除小误差：伸缩尚未对准时，横向噪声不能驱动底座反转。
+                # 若两个分量都不超限、合成误差却超限，只修正较大的分量。
+                if observation is not None:
+                    feedback_error = error_xy
+                    if len(trajectory.points) >= 4 and math.hypot(*trajectory.velocity) < 1.0:
+                        # 已排除持续运动时，用世界系短窗口均值消除逐帧抖动；
+                        # 不放宽停稳放行条件，检测噪声不能变成真实的往返速度。
+                        recent = list(trajectory.points)[-4:]
+                        center = tuple(sum(p[i] for p in recent) / len(recent) for i in (1, 2))
+                        feedback_error = geometry.material_offset(
+                            center, current.base_pulses, current.extension_pulses, jacobian,
+                        )
+                    feedback_xy = [0.0 if abs(v) <= tolerance else v for v in feedback_error]
+                    if not any(feedback_xy) and math.hypot(*feedback_error) > tolerance:
+                        dominant = max(range(2), key=lambda i: abs(feedback_error[i]))
+                        feedback_xy[dominant] = feedback_error[dominant]
+                    feedback_point = geometry.material_world(
+                        feedback_xy, current.base_pulses, current.extension_pulses, jacobian,
+                    )
+                    desired, _ = geometry.joints(feedback_point, (0, 0), current.base_pulses)
                 correction = (
                     desired[0] - current.base_pulses,
                     desired[1] - current.extension_pulses,

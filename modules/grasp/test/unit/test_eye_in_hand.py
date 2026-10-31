@@ -2580,6 +2580,8 @@ class GraspFollowMaterialTests(unittest.TestCase):
             self.assertEqual(kwargs["gain"], 5.0)
             self.assertEqual(kwargs["acceleration"], 220)
             self.assertEqual(kwargs["rpm"], 90)
+            self.assertEqual(kwargs["base_motor_limits"], (220.0, 680.0))
+            self.assertEqual(kwargs["search_base_degrees"], 420.0)
             self.assertNotIn("step_seconds", kwargs)
             self.assertNotIn("coarse_step_seconds", kwargs)
             # 按次给的 want 必须真的变成判别条件：否则跟的是配置里那个默认物料。
