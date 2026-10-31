@@ -172,8 +172,8 @@ def run_map():
         # center_chassis_on_ring(robot, require_digit=2)
         # robot.chassis.left(rpm = 40, pulses = 400)
         robot.vision.show_text("123+321+213+132")
-        place_and_grab_material(robot, place_orders=(2, 3, 1))
-        # grab_material_from_turntable_to_repo_follow(robot)
+        # place_and_grab_material(robot, place_orders=(2, 3, 1))
+        grab_material_from_turntable_to_repo_follow(robot)
         # grab_material_from_turntable_to_repo_follow_v2(robot)
         
         input("结束!!!!!!!!!!!!!!!")

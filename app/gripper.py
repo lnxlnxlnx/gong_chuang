@@ -537,11 +537,11 @@ def _follow_material_until_stable(
 
 def grab_material_from_turntable_to_repo_follow(
     robot: Robot,
-    want_colors=("green", "blue", "red"),
+    want_colors=("red", "green", "blue"),
     *,
     home: dict[str, float] | None = {"lift": 830, "extension": 120.0, "base": 420},
     follow_seconds: float = FOLLOW_SECONDS,
-    stable_seconds: float = 0.15,
+    stable_seconds: float = 0.1,
 ):
     """**跟着料走**：不等它转到位，一路跟到它上方，停住了才抓。
 
