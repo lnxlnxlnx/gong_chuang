@@ -1328,26 +1328,26 @@ class FollowMaterialTests(unittest.TestCase):
         self.assertGreaterEqual(link.fast_reads, 3)
         self.assertEqual(link.slow_reads, 0)
 
-    def test_the_scene_must_be_still_before_it_reports_stopped(self):
+    def test_camera_motion_does_not_override_compensated_material_stability(self):
         clock, arm, link = self.rig(stop_at=0)
         checks = []
 
         def scene_stable():
             checks.append(True)
-            return len(checks) >= 2
+            return False
 
         link.scene_stable = scene_stable
         with patch.object(algorithms, "time", clock):
             result = self.call(arm, link, timeout=5)
         self.assertTrue(result.aligned)
-        self.assertEqual(len(checks), 2)
+        self.assertEqual(len(checks), 0)
 
     def test_it_stops_when_the_material_stops(self):
         clock, arm, link = self.rig()
         with patch.object(algorithms, "time", clock):
             result = self.call(arm, link, timeout=7)
         self.assertTrue(result.aligned)
-        self.assertTrue(result.unverified)
+        self.assertFalse(result.unverified)
         self.assertTrue(any(any(v) for _, *v in arm.commands))
         self.assertGreaterEqual(clock.now, 4)
         self.assertEqual(arm.velocity, (0, 0))

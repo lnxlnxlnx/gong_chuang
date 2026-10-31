@@ -1370,15 +1370,12 @@ def follow_material_xy(
             min(990.0, ref + (radial.maximum - geometry.reference_radius) * scale),
         )
     trajectory = ClockwiseTrajectory(
-        prediction_seconds=config.follow_prediction_seconds
+        prediction_seconds=config.follow_prediction_seconds,
+        stationary_seconds=stable_seconds,
     )
     say = on_message if on_message is not None else (lambda _message: None)
-    scene_stable = getattr(link, "scene_stable", None)
-    if not callable(scene_stable):
-        raise ValueError("连续跟随需要 scene_stable 判据确认停盘")
     deadline = time.monotonic() + timeout
     tracking_started = None
-    stable_since = None
     readings = []
     completed = False
     with arm.planar_velocity(
@@ -1401,7 +1398,7 @@ def follow_material_xy(
             if now >= deadline:
                 break
             if observation is None:
-                stable_since = None
+                trajectory.reset_stability()
                 prediction = trajectory.predict(now, invisible=True)
             else:
                 stamp = observation.received_at
@@ -1421,25 +1418,34 @@ def follow_material_xy(
                 readings.append(offset)
                 if tracking_started is None:
                     tracking_started = stamp
-                # 多帧估计排除识别抖动，最终仍须整幅画面确认停盘。
-                error = math.hypot(offset[0] - target.x_mm, offset[1] - target.y_mm)
-                if trajectory.stationary and error <= tolerance:
-                    if stable_since is None:
-                        stable_since = stamp
-                else:
-                    stable_since = None
-                # 两个窗口同时满足即可；四秒内已有的停稳证据不用重新积累。
+                # 用曝光时的实测关节位置还原物料位置；臂在纠偏时也能累计停稳证据。
+                desired, _ = geometry.joints(world, (0, 0), current.base_pulses)
+                error_xy = jacobian.displacement_for(
+                    current.base_pulses - desired[0],
+                    current.extension_pulses - desired[1],
+                )
+                error = math.hypot(*error_xy)
                 if (
-                    stable_since is not None
-                    and stamp - stable_since >= stable_seconds
+                    trajectory.stationary
+                    and error <= tolerance
                     and now - tracking_started >= min_follow_seconds
                 ):
                     motion.stop()
-                    if scene_stable():
+                    stopped = motion.sample()
+                    error_xy = jacobian.displacement_for(
+                        stopped.base_pulses - desired[0],
+                        stopped.extension_pulses - desired[1],
+                    )
+                    error = math.hypot(*error_xy)
+                    # 刹停后的真实位置仍须对准；不用会被臂运动影响的整幅画面判据。
+                    if error <= tolerance:
+                        readings[-1] = (
+                            target.x_mm + error_xy[0], target.y_mm + error_xy[1],
+                        )
                         completed = True
-                        say(f"  料停住了（误差 {error:.2f} mm）：交给精确对准")
+                        say(f"  物料已停稳且对准（误差 {error:.2f} mm）：可以直接抓取")
                         break
-                    stable_since = None
+                    current = stopped
                 prediction = trajectory.predict(now)
             if prediction is None:
                 motion.set_velocity(0, 0)
@@ -1481,7 +1487,7 @@ def follow_material_xy(
         radial_pulses=round(final.extension_pulses - initial.extension_pulses),
         iterations=len(readings),
         tolerance_mm=tolerance,
-        unverified=True,
+        unverified=False,
     )
 
 

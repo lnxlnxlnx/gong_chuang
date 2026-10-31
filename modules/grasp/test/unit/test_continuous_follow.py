@@ -185,21 +185,14 @@ class ContinuousFollowTests(unittest.TestCase):
         for duration in (0.5, 1.0):
             with self.subTest(duration=duration):
                 clock, arm, link = self.rig(stop_at=0)
-                checks = []
-
-                def scene_stable():
-                    checks.append(clock.now)
-                    return len(checks) > 1
-
-                link.scene_stable = scene_stable
                 with patch.object(algorithms, "time", clock):
                     result = follow(
-                        arm, link, timeout=7, stable_seconds=duration,
+                        arm, link, timeout=2, min_follow_seconds=0,
+                        stable_seconds=duration,
                     )
                 self.assertTrue(result.aligned)
-                self.assertGreaterEqual(checks[0], 4)
-                self.assertGreaterEqual(checks[1] - checks[0], duration)
-                self.assertLess(checks[1] - checks[0], duration + 0.2)
+                self.assertGreaterEqual(clock.now, duration)
+                self.assertLess(clock.now, duration + 0.2)
 
     def test_retry_can_skip_the_already_satisfied_four_second_gate(self):
         clock, arm, link = self.rig(stop_at=0)
@@ -215,7 +208,53 @@ class ContinuousFollowTests(unittest.TestCase):
             result = follow(arm, link, timeout=6)
         self.assertTrue(result.aligned)
         self.assertGreaterEqual(clock.now, 4.7)
-        self.assertLess(clock.now, 5.5)
+        self.assertLess(clock.now, 4.95)
+
+    def test_stability_is_accumulated_while_the_arm_is_still_aligning(self):
+        clock, arm, link = self.rig(stop_at=0)
+        arm.position[0] = -1500
+        aligned_at = []
+        original = link.frame_fast
+
+        def observe(**kwargs):
+            result = original(**kwargs)
+            if math.hypot(result[0].x_mm, result[0].y_mm) <= 6 and not aligned_at:
+                aligned_at.append(clock.now)
+            return result
+
+        link.frame_fast = observe
+        with patch.object(algorithms, "time", clock):
+            result = follow(arm, link, timeout=2, min_follow_seconds=0)
+        self.assertTrue(result.aligned)
+        self.assertGreater(link.frames_while_moving, 2)
+        self.assertLess(clock.now - aligned_at[0], 0.25)
+
+    def test_missing_material_restarts_only_the_stability_window(self):
+        clock, arm, link = self.rig(stop_at=0, missing=((0.3, 0.4),))
+        with patch.object(algorithms, "time", clock):
+            result = follow(arm, link, timeout=2, min_follow_seconds=0)
+        self.assertTrue(result.aligned)
+        self.assertGreaterEqual(clock.now, 0.9)
+        self.assertLess(clock.now, 1.2)
+
+    def test_braking_outside_tolerance_continues_alignment_before_handoff(self):
+        clock, arm, link = self.rig(stop_at=0)
+        original = arm.stop
+        disturbed = []
+
+        def stop():
+            original()
+            if not disturbed:
+                arm.position[0] += 300
+                disturbed.append(clock.now)
+
+        arm.stop = stop
+        with patch.object(algorithms, "time", clock):
+            result = follow(arm, link, timeout=3, min_follow_seconds=0)
+        self.assertTrue(result.aligned)
+        self.assertGreater(clock.now, disturbed[0])
+        self.assertLess(abs(JACOBIAN.displacement_for(arm.position[0], 0)[0]), 6)
+        self.assertEqual(arm.velocity, (0, 0))
 
     def test_primary_path_tracks_and_hands_back_measured_position(self):
         clock, arm, link = self.rig()
@@ -255,7 +294,7 @@ class ContinuousFollowTests(unittest.TestCase):
                     result = follow(arm, link, timeout=6, rpm=80)
                 self.assertTrue(result.aligned)
                 self.assertTrue(all(b == e == 0 for _, b, e in arm.commands))
-                self.assertGreater(link.scene_checks, 0)
+                self.assertEqual(link.scene_checks, 0)
 
     def test_jitter_after_a_real_turntable_move_does_not_prevent_stopping(self):
         clock, arm, link = self.rig()
@@ -389,18 +428,16 @@ class ContinuousFollowTests(unittest.TestCase):
         self.assertTrue(arm.closed)
         self.assertEqual(arm.velocity, (0, 0))
 
-    def test_a_scene_check_exception_stops(self):
+    def test_a_scene_check_exception_does_not_block_world_stability(self):
         clock, arm, link = self.rig(stop_at=0)
 
         def failed_scene():
             raise RuntimeError("scene failed")
 
         link.scene_stable = failed_scene
-        with (
-            patch.object(algorithms, "time", clock),
-            self.assertRaisesRegex(RuntimeError, "scene failed"),
-        ):
-            follow(arm, link, timeout=6)
+        with patch.object(algorithms, "time", clock):
+            result = follow(arm, link, timeout=6)
+        self.assertTrue(result.aligned)
         self.assertTrue(arm.closed)
         self.assertEqual(arm.velocity, (0, 0))
 

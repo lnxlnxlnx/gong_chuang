@@ -520,7 +520,7 @@ def _follow_material_until_stable(
     """**跟着转盘上的料走**，直到料自己停住（停住那一刻才下降到抓）。
 
     跟踪在 :meth:`~modules.grasp.runtime.Grasp.follow_material` 里：
-    短步运动期间取下一帧，
+    运动期间取下一帧，用编码器扣除相机运动，边跟随边对准。
     首次识别后至少跟随四秒，短暂跟丢只重算停稳时间；连续停稳 stable_seconds 才返回。
 
     :raises RuntimeError: 跟满 ``timeout`` 秒料还在动（带上最后一次跟丢的原因）。
@@ -548,8 +548,8 @@ def grab_material_from_turntable_to_repo_follow(
     与 :func:`grab_material_from_turntable_to_repo` 只差中间那一段：
 
     - 那个入口：站在原地等 ``wait_scene_stable`` 看到画面停稳 → 对准 → 抓；
-    - 这个入口：每块料先跟满四秒，连续停稳 stable_seconds（默认半秒）再精确对准；
-      下降前重新检查画面，物料再次运动就重新跟随，但不重等四秒。
+    - 这个入口：每块料先跟满四秒，边跟随边对准，物料连续停稳 stable_seconds
+      （默认半秒）且刹停后仍在容差内便直接抓取，不再另做一轮对准或整幅画面检查。
 
     换位/摆料这一段共用 :func:`_stow_material_to_repo`，两个入口不会各漂一份。
     """
@@ -560,20 +560,10 @@ def grab_material_from_turntable_to_repo_follow(
     input("继续")
     try:
         for color in want_colors:
-            min_follow_seconds = 4.0
-            while True:
-                _follow_material_until_stable(
-                    robot, color, timeout=follow_seconds,
-                    min_follow_seconds=min_follow_seconds, stable_seconds=stable_seconds,
-                )
-                # 当前物料已跨过四秒门槛，抓取重试只需重新确认停稳。
-                min_follow_seconds = 0.0
-                res = _grab_material_from_turntable(
-                    robot, want_color=color, require_stable=True,
-                )
-                if res:
-                    continue
-                break
+            _follow_material_until_stable(
+                robot, color, timeout=follow_seconds, stable_seconds=stable_seconds,
+            )
+            _descend_and_grab_from_turntable(robot)
             _stow_material_to_repo(robot)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
@@ -636,13 +626,10 @@ def grab_material_from_floor_to_repo(
 def _grab_material_from_turntable(
     robot: Robot,
     want_color=None,
-    *,
-    require_stable: bool = False,
 ):
     """内部函数：对准 → 下降 → 合爪（**不再**查停稳）。
 
-    跟随入口在精确对准之后、下降之前再确认画面停稳；若物料重新运动就返回重跟，
-    避免把四秒跟随结束时的静止状态当成此刻也静止。
+    跟随入口已在连续控制中完成对准与停稳确认，直接调用下降动作，不经过这里。
 
     对准走 :meth:`~modules.grasp.runtime.Grasp.align_xy_for_turntable` 的快速档：
     料已经停住（调用方先 ``wait_scene_stable``），所以每轮只取一帧、走一小步，
@@ -668,13 +655,15 @@ def _grab_material_from_turntable(
         move_axes_to(robot, SAFE_RETRACT).wait()
         return 1
 
-    if require_stable and not robot.vision.scene_stable():
-        print("  精确对准后物料仍在运动：重新跟随，这次不下降")
-        return 1
+    _descend_and_grab_from_turntable(robot)
+    return 0
+
+
+def _descend_and_grab_from_turntable(robot: Robot) -> None:
+    """共用同一段下降、合爪、抬升动作；调用方负责事先确认物料停稳且对准。"""
     robot.arm.move_axis_to_motor_degrees("lift", 550, rpm=120)
     robot.gripper.close_jaws()
     robot.arm.move_axis_to_motor_degrees("lift", 800, rpm=120)
-    return 0
 
 
 def _stow_material_to_repo(robot: Robot, position: dict[str, float] | None = None) -> None:

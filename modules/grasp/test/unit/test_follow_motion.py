@@ -381,9 +381,9 @@ class SmoothFollowTests(unittest.TestCase):
             self.follow(arm, link, timeout=1)
         self.assertTrue(all(b == e == 0 for _, b, e in arm.commands))
 
-    def test_a_moving_scene_cannot_finish_after_four_seconds(self):
-        clock, arm, link = self.rig(stop_at=0)
-        link.scene_stable = lambda: False
+    def test_a_moving_material_cannot_finish_after_four_seconds(self):
+        clock, arm, link = self.rig(stop_at=99)
+        link.scene_stable = lambda: True
         with (
             patch.object(algorithms, "time", clock),
             self.assertRaises(VisualServoError),

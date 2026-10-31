@@ -57,16 +57,43 @@ class PlanarGeometry:
         )
 
 
+def _estimate_velocity(points, *, reject_jitter=True):
+    """用拟合残差排除检测抖动，保留有观测支持的真实速度。"""
+    if len(points) < 4:
+        return (0.0, 0.0), False
+    values = np.array(points)
+    times = values[:, 0] - values[:, 0].mean()
+    centered = values[:, 1:] - values[:, 1:].mean(axis=0)
+    time_energy = times @ times
+    velocity = times @ centered / time_energy
+    residual = centered - times[:, None] * velocity
+    uncertainty = math.sqrt(
+        float((residual * residual).sum()) / (len(points) - 2) / time_energy
+    )
+    threshold = max(1.0, 3 * uncertainty) if reject_jitter else 1.0
+    stationary = math.hypot(*velocity) <= threshold
+    return ((0.0, 0.0) if stationary else tuple(velocity)), stationary
+
+
 class ClockwiseTrajectory:
     """窗口内的运动用于前馈；只有实测支持的顺时针圆弧能用于丢料预测。"""
 
-    def __init__(self, *, prediction_seconds=1.5):
+    def __init__(self, *, prediction_seconds=1.5, stationary_seconds=0.5):
         if not math.isfinite(prediction_seconds) or prediction_seconds <= 0:
             raise ValueError("prediction_seconds 必须为正的有限数")
         self.prediction_seconds = prediction_seconds
+        if not math.isfinite(stationary_seconds) or stationary_seconds <= 0:
+            raise ValueError("stationary_seconds 必须为正的有限数")
+        self.stationary_seconds = stationary_seconds
+        self._stationary_points = deque()
         self.points = deque(maxlen=40)
         self.circle = None
         self.velocity = (0.0, 0.0)
+        self.stationary = False
+
+    def reset_stability(self):
+        """丢料后重新积累停稳证据，保留运动历史供短时预测。"""
+        self._stationary_points.clear()
         self.stationary = False
 
     def observe(self, stamp, point):
@@ -74,29 +101,29 @@ class ClockwiseTrajectory:
             raise ValueError("跟随观测的时间戳必须递增")
         if self.points and stamp - self.points[-1][0] > 0.35:
             self.points.clear()
+            self.reset_stability()
         self.points.append((stamp, *point))
+        self._stationary_points.append((stamp, *point))
+        # 停稳窗口本身就是用户设置的时长，不能先等速度窗口结束再另等半秒。
+        while (
+            len(self._stationary_points) > 4
+            and self._stationary_points[1][0] <= stamp - self.stationary_seconds
+        ):
+            self._stationary_points.popleft()
         while self.points and stamp - self.points[0][0] > 0.8:
             self.points.popleft()
         recent = [p for p in self.points if stamp - p[0] <= 0.4]
         if len(recent) < 4:
             recent = list(self.points)[-4:]
-        self.velocity = (0.0, 0.0)
-        self.stationary = False
-        if len(recent) >= 4:
-            values = np.array(recent)
-            times = values[:, 0] - values[:, 0].mean()
-            centered_positions = values[:, 1:] - values[:, 1:].mean(axis=0)
-            time_energy = times @ times
-            velocity = times @ centered_positions / time_energy
-            residual = centered_positions - times[:, None] * velocity
-            # 用残差估计速度的不确定度；检测框抖动不能成为换向的速度前馈。
-            speed_uncertainty = math.sqrt(
-                float((residual * residual).sum()) / (len(recent) - 2) / time_energy
-            )
-            if math.hypot(*velocity) > max(1.0, 3 * speed_uncertainty):
-                self.velocity = tuple(velocity)
-            else:
-                self.stationary = True
+        self.velocity, _ = _estimate_velocity(recent)
+        # 停盘前的减速也会产生拟合残差，不能把它当作检测抖动而提前放行。
+        _, stationary = _estimate_velocity(
+            list(self._stationary_points), reject_jitter=False,
+        )
+        self.stationary = (
+            stationary
+            and stamp - self._stationary_points[0][0] >= self.stationary_seconds
+        )
         self.circle = None
         if len(self.points) < 4:
             return
