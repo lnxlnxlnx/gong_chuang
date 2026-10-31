@@ -513,16 +513,22 @@ def grab_material_from_turntable_to_repo(
 FOLLOW_SECONDS = 20.0
 
 
-def _follow_material_until_stable(robot: Robot, want_color, *, timeout: float = FOLLOW_SECONDS) -> None:
+def _follow_material_until_stable(
+    robot: Robot, want_color, *, timeout: float = FOLLOW_SECONDS,
+    min_follow_seconds: float = 4.0, stable_seconds: float = 0.5,
+) -> None:
     """**跟着转盘上的料走**，直到料自己停住（停住那一刻才下降到抓）。
 
     跟踪在 :meth:`~modules.grasp.runtime.Grasp.follow_material` 里：
     短步运动期间取下一帧，
-    首次识别后至少连续跟随四秒，跟丢重新计时。时间满足且读数、整幅画面都停稳才返回。
+    首次识别后至少跟随四秒，短暂跟丢只重算停稳时间；连续停稳 stable_seconds 才返回。
 
     :raises RuntimeError: 跟满 ``timeout`` 秒料还在动（带上最后一次跟丢的原因）。
     """
-    result = robot.grasp.follow_material(want_color, timeout=timeout)
+    result = robot.grasp.follow_material(
+        want_color, timeout=timeout,
+        min_follow_seconds=min_follow_seconds, stable_seconds=stable_seconds,
+    )
     print(
         f"  料停住了：读数 ({result.readings[-1][0]:+.2f}, {result.readings[-1][1]:+.2f}) mm，"
         f"误差 {result.error_mm:.2f} mm；跟了 {result.iterations} 帧"
@@ -535,14 +541,15 @@ def grab_material_from_turntable_to_repo_follow(
     *,
     home: dict[str, float] | None = {"lift": 830, "extension": 120.0, "base": 420},
     follow_seconds: float = FOLLOW_SECONDS,
+    stable_seconds: float = 0.5,
 ):
     """**跟着料走**：不等它转到位，一路跟到它上方，停住了才抓。
 
     与 :func:`grab_material_from_turntable_to_repo` 只差中间那一段：
 
     - 那个入口：站在原地等 ``wait_scene_stable`` 看到画面停稳 → 对准 → 抓；
-    - 这个入口：一路跟着料走，首次识别后连续跟满四秒且料停稳，再精确对准；
-      下降前重新检查画面，物料再次运动就重新跟随。
+    - 这个入口：每块料先跟满四秒，连续停稳 stable_seconds（默认半秒）再精确对准；
+      下降前重新检查画面，物料再次运动就重新跟随，但不重等四秒。
 
     换位/摆料这一段共用 :func:`_stow_material_to_repo`，两个入口不会各漂一份。
     """
@@ -553,8 +560,14 @@ def grab_material_from_turntable_to_repo_follow(
     input("继续")
     try:
         for color in want_colors:
+            min_follow_seconds = 4.0
             while True:
-                _follow_material_until_stable(robot, color, timeout=follow_seconds)
+                _follow_material_until_stable(
+                    robot, color, timeout=follow_seconds,
+                    min_follow_seconds=min_follow_seconds, stable_seconds=stable_seconds,
+                )
+                # 当前物料已跨过四秒门槛，抓取重试只需重新确认停稳。
+                min_follow_seconds = 0.0
                 res = _grab_material_from_turntable(
                     robot, want_color=color, require_stable=True,
                 )

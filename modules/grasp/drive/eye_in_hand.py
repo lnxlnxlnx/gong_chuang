@@ -731,7 +731,7 @@ FOLLOW_COARSE_STEP_SECONDS = 0.08
 FOLLOW_MAX_STEP_SECONDS = 0.4
 #: 短位置段原语的默认转速；连续跟随入口独立限制在 80 rpm。
 FOLLOW_RPM = 100
-#: 从首次看见当前物料起计时；没看见的时间不能算作有效跟随。
+#: 从首次看见当前物料起计时；短暂丢帧只重置停稳计时。
 FOLLOW_MIN_SECONDS = 4.0
 #: 动作估算里的减速余量；下一条位置指令必须等到这个余量也结束。
 FOLLOW_SETTLE_SECONDS = 0.02
@@ -1313,6 +1313,8 @@ def follow_material_xy(
     config: VisualServoConfig,
     *,
     timeout: float = 90.0,
+    min_follow_seconds: float = FOLLOW_MIN_SECONDS,
+    stable_seconds: float = 0.5,
     tolerance_mm: Optional[float] = None,
     gain: float = 4.0,
     acceleration: int = 220,
@@ -1325,6 +1327,7 @@ def follow_material_xy(
     速度前馈消除逐帧追赶的滞后；gain 是每秒消除的关节误差比例。
     伸缩取硬件范围与用户确认的 30..990 电机度的交集，底座沿用硬件限位。
     退出、异常和中断都先刹停、对账，再允许位置模式接手；一次升降帧都不发。
+    首次识别后的跟随时长与连续停稳时长分别计时，丢帧不重等四秒。
     """
     from modules.grasp.drive.follow_trajectory import (
         ClockwiseTrajectory,
@@ -1343,6 +1346,10 @@ def follow_material_xy(
         or gain <= 0
     ):
         raise ValueError("timeout 和 gain 必须为正的有限数")
+    if not math.isfinite(min_follow_seconds) or min_follow_seconds < 0:
+        raise ValueError("min_follow_seconds 必须为非负的有限数")
+    if not math.isfinite(stable_seconds) or stable_seconds <= 0:
+        raise ValueError("stable_seconds 必须为正的有限数")
     geometry = PlanarGeometry(arm.config)
     base_limit = arm.config.base_limit
     if base_limit is None:
@@ -1371,7 +1378,7 @@ def follow_material_xy(
         raise ValueError("连续跟随需要 scene_stable 判据确认停盘")
     deadline = time.monotonic() + timeout
     tracking_started = None
-    still = 0
+    stable_since = None
     readings = []
     completed = False
     with arm.planar_velocity(
@@ -1394,8 +1401,7 @@ def follow_material_xy(
             if now >= deadline:
                 break
             if observation is None:
-                still = 0
-                tracking_started = None
+                stable_since = None
                 prediction = trajectory.predict(now, invisible=True)
             else:
                 stamp = observation.received_at
@@ -1417,18 +1423,23 @@ def follow_material_xy(
                     tracking_started = stamp
                 # 多帧估计排除识别抖动，最终仍须整幅画面确认停盘。
                 error = math.hypot(offset[0] - target.x_mm, offset[1] - target.y_mm)
-                still = (
-                    still + 1
-                    if trajectory.stationary and error <= tolerance
-                    else 0
-                )
-                if still >= 2 and now - tracking_started >= FOLLOW_MIN_SECONDS:
+                if trajectory.stationary and error <= tolerance:
+                    if stable_since is None:
+                        stable_since = stamp
+                else:
+                    stable_since = None
+                # 两个窗口同时满足即可；四秒内已有的停稳证据不用重新积累。
+                if (
+                    stable_since is not None
+                    and stamp - stable_since >= stable_seconds
+                    and now - tracking_started >= min_follow_seconds
+                ):
                     motion.stop()
                     if scene_stable():
                         completed = True
                         say(f"  料停住了（误差 {error:.2f} mm）：交给精确对准")
                         break
-                    still = 0
+                    stable_since = None
                 prediction = trajectory.predict(now)
             if prediction is None:
                 motion.set_velocity(0, 0)

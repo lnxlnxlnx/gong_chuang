@@ -173,6 +173,50 @@ class ContinuousFollowTests(unittest.TestCase):
         arm = VelocityArm(clock)
         return clock, arm, WorldLink(arm, **kwargs)
 
+    def test_short_loss_does_not_restart_the_four_second_gate(self):
+        clock, arm, link = self.rig(stop_at=0, missing=((3.7, 3.85),))
+        with patch.object(algorithms, "time", clock):
+            result = follow(arm, link, timeout=5)
+        self.assertTrue(result.aligned)
+        self.assertGreaterEqual(clock.now, 4)
+        self.assertLess(clock.now, 4.8)
+
+    def test_stability_duration_is_required_and_adjustable(self):
+        for duration in (0.5, 1.0):
+            with self.subTest(duration=duration):
+                clock, arm, link = self.rig(stop_at=0)
+                checks = []
+
+                def scene_stable():
+                    checks.append(clock.now)
+                    return len(checks) > 1
+
+                link.scene_stable = scene_stable
+                with patch.object(algorithms, "time", clock):
+                    result = follow(
+                        arm, link, timeout=7, stable_seconds=duration,
+                    )
+                self.assertTrue(result.aligned)
+                self.assertGreaterEqual(checks[0], 4)
+                self.assertGreaterEqual(checks[1] - checks[0], duration)
+                self.assertLess(checks[1] - checks[0], duration + 0.2)
+
+    def test_retry_can_skip_the_already_satisfied_four_second_gate(self):
+        clock, arm, link = self.rig(stop_at=0)
+        with patch.object(algorithms, "time", clock):
+            result = follow(arm, link, timeout=2, min_follow_seconds=0)
+        self.assertTrue(result.aligned)
+        self.assertGreaterEqual(clock.now, 0.5)
+        self.assertLess(clock.now, 1.2)
+
+    def test_late_stop_still_requires_half_a_second(self):
+        clock, arm, link = self.rig(stop_at=4.2)
+        with patch.object(algorithms, "time", clock):
+            result = follow(arm, link, timeout=6)
+        self.assertTrue(result.aligned)
+        self.assertGreaterEqual(clock.now, 4.7)
+        self.assertLess(clock.now, 5.5)
+
     def test_primary_path_tracks_and_hands_back_measured_position(self):
         clock, arm, link = self.rig()
         start = tuple(arm.position)

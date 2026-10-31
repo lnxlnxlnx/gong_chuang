@@ -2593,10 +2593,14 @@ class GraspFollowMaterialTests(unittest.TestCase):
     def test_a_per_call_tolerance_reaches_the_servo(self) -> None:
         rig = GraspSessionRig()
         with rig as session:
-            session.grasp.follow_material("red", tolerance_mm=1.5)
+            session.grasp.follow_material(
+                "red", tolerance_mm=1.5, min_follow_seconds=0, stable_seconds=0.7,
+            )
             self.assertEqual(
                 session.mock("follow").call_args.kwargs["tolerance_mm"], 1.5
             )
+            self.assertEqual(session.mock("follow").call_args.kwargs["min_follow_seconds"], 0)
+            self.assertEqual(session.mock("follow").call_args.kwargs["stable_seconds"], 0.7)
 
     def test_a_bad_want_is_rejected_before_anything_moves(self) -> None:
         rig = GraspSessionRig()
