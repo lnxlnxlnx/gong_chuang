@@ -504,6 +504,8 @@ class Grasp:
         want_color,
         *,
         timeout: float = 90.0,
+        min_follow_seconds: float = 4.0,
+        stable_seconds: float = 0.5,
         tolerance_mm: float | None = None,
         gain: float = 4.0,
         acceleration: int = 220,
@@ -514,6 +516,7 @@ class Grasp:
         rpm 最大 80，伸缩电机范围 30..990°，并保留硬件更严格的限位。
         跟随退出时刹停并用编码器对账，随后抓取、回位继续使用位置模式。
         gain 为每秒误差修正比例；高度由调用方预先保证。
+        默认至少跟随四秒、连续停稳半秒；当前物料已跟满四秒时可传 min_follow_seconds=0。
         """
         arm, source = self._require_resources()
         from modules.grasp.drive.eye_in_hand import follow_material_xy
@@ -527,6 +530,8 @@ class Grasp:
             self._jacobian,
             self._config,
             timeout=timeout,
+            min_follow_seconds=min_follow_seconds,
+            stable_seconds=stable_seconds,
             tolerance_mm=tolerance_mm,
             gain=gain,
             acceleration=acceleration,

@@ -35,7 +35,9 @@ class FollowUntilStableTests(unittest.TestCase):
 
         app_gripper._follow_material_until_stable(robot, "red", timeout=3.0)
 
-        robot.grasp.follow_material.assert_called_once_with("red", timeout=3.0)
+        robot.grasp.follow_material.assert_called_once_with(
+            "red", timeout=3.0, min_follow_seconds=4.0, stable_seconds=0.5,
+        )
         robot.vision.scene_stable.assert_not_called()
 
     def test_a_tracking_failure_stops_the_run(self) -> None:
@@ -92,9 +94,11 @@ class PlaceAfterFollowTests(unittest.TestCase):
     def test_a_failed_grab_gate_follows_again_before_retrying(self):
         robot = make_robot()
         events = []
+        gates = []
 
-        def follow(*_args, **_kwargs):
+        def follow(*_args, **kwargs):
             events.append("follow")
+            gates.append((kwargs["min_follow_seconds"], kwargs["stable_seconds"]))
 
         def grab(*_args, **_kwargs):
             events.append("grab")
@@ -110,9 +114,10 @@ class PlaceAfterFollowTests(unittest.TestCase):
                 patch.object(app_gripper, "move_axes_to"), \
                 patch("builtins.input", return_value=""):
             app_gripper.grab_material_from_turntable_to_repo_follow(
-                robot, ("red",), home=None,
+                robot, ("red", "green"), home=None, stable_seconds=0.7,
             )
-        self.assertEqual(events, ["follow", "grab", "follow", "grab"])
+        self.assertEqual(events, ["follow", "grab", "follow", "grab", "follow", "grab"])
+        self.assertEqual(gates, [(4.0, 0.7), (0.0, 0.7), (4.0, 0.7)])
 
     def test_a_follow_timeout_stops_the_whole_run(self) -> None:
         robot = make_robot()
