@@ -29,6 +29,12 @@ from modules.vision.drive.numbered_ring import (
 )
 
 
+VISIBLE_MIDDLE_RING = RingTarget(
+    center_px=(640.0, 360.0), radius_px=200.0, digit=2, score=0.95,
+    clipped=False, x_mm=0.0, y_mm=0.0,
+)
+
+
 class DeriveRingRowTests(unittest.TestCase):
     def test_three_collinear_centers_keep_their_places(self) -> None:
         row = derive_ring_row(
@@ -409,6 +415,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
 
     def test_unaligned_middle_uses_the_best_position_for_placement(self) -> None:
         robot = Mock()
+        robot.vision.locate_ring.return_value = VISIBLE_MIDDLE_RING
         robot.vision.ring_center_spacing_mm = 150.0
         robot.arm.config = load_arm_config()
         robot.arm.pulses_per_revolution = 3200
@@ -432,6 +439,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
 
     def test_alignment_error_is_propagated_after_retract(self) -> None:
         robot = Mock()
+        robot.vision.locate_ring.return_value = VISIBLE_MIDDLE_RING
         robot.grasp.align_ring.side_effect = RuntimeError("环心读数不可用")
         with patch.object(app_gripper, "move_axes_to") as move, patch("time.sleep"):
             with self.assertRaisesRegex(RuntimeError, "环心读数不可用"):
@@ -445,6 +453,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         use_default_offsets=False, **kwargs,
     ):
         robot = Mock()
+        robot.vision.locate_ring.return_value = VISIBLE_MIDDLE_RING
         robot.vision.ring_center_spacing_mm = 150.0
         robot.arm = RowStepPulsesTests().robot().arm
         robot.arm.config = load_arm_config()
@@ -673,6 +682,7 @@ class PlaceAndGrabMaterialTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.robot = Mock()
+        self.robot.vision.locate_ring.return_value = VISIBLE_MIDDLE_RING
         self.robot.vision.ring_center_spacing_mm = 150.0
         self.robot.arm.config = load_arm_config()
         self.robot.arm.pulses_per_revolution = 3200
