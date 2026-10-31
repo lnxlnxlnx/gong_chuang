@@ -502,6 +502,63 @@ class ClosedLoopTests(unittest.TestCase):
         self.assertTrue(result.aligned, result.summary())
         self.assertGreater(result.response or 0.0, 0.5)
 
+    def test_a_pair_of_stale_frames_does_not_report_a_stalled_axis(self) -> None:
+        """一步之后连续读到旧位置时，先复测，不能把旧帧当成电机没有响应。"""
+        grasp, arm = make_closed_loop(1.0)
+
+        class DelayedSource(LiveRingSource):
+            stale_reads = 0
+            previous_target = None
+
+            def locate_ring(self, **kwargs):
+                if len(self.arm.moves) == 4 and self.stale_reads < 2:
+                    self.stale_reads += 1
+                    return self.previous_target
+                target = super().locate_ring(**kwargs)
+                self.previous_target = target
+                return target
+
+        grasp._source = DelayedSource(arm)
+        result = grasp.align_ring(max_iterations=6, gain=0.6, tolerance_mm=2.0)
+
+        self.assertTrue(result.aligned, result.summary())
+        self.assertLessEqual(math.hypot(*arm.reading), 2.0)
+
+    def test_one_weak_base_move_does_not_amplify_the_next_correction(self) -> None:
+        """复现现场小步几乎没响应：不能把一次低响应倒数当作下一步的大增益。"""
+        grasp, arm = make_closed_loop(1.0)
+        arm.reading = [-24.33, -2.88]
+        grasp._config = VisualServoConfig(ring_offset_x_mm=6.5, ring_offset_y_mm=-7.0)
+        original_apply = arm._apply
+
+        def apply_with_one_weak_base(axis, signed):
+            if axis == "base" and len(arm.moves) == 2:
+                arm.moves.append((axis, signed))
+                arm.pulses[axis] += signed
+                moved = arm.plant.displacement_for(signed * 0.1, 0)
+                arm.reading[0] += moved[0]
+                arm.reading[1] += moved[1]
+                return
+            original_apply(axis, signed)
+
+        arm._apply = apply_with_one_weak_base
+        result = grasp.align_ring(max_iterations=6, gain=0.6, tolerance_mm=2.0)
+
+        for step in result.steps:
+            predicted = JACOBIAN.displacement_for(step.base_pulses, step.extension_pulses)
+            self.assertLessEqual(math.hypot(*predicted), step.error_mm + 0.1)
+        self.assertTrue(result.aligned, result.summary())
+
+    def test_a_stationary_machine_still_aborts_after_remeasurement(self) -> None:
+        """复测只排除旧帧；设备持续不动时必须停止，不能靠追加运动掩盖故障。"""
+        grasp, arm = make_closed_loop(0.0)
+        result = grasp.align_ring(max_iterations=6, gain=0.6, tolerance_mm=2.0)
+
+        self.assertFalse(result.aligned)
+        self.assertIn("几乎没有", result.note)
+        self.assertAlmostEqual(result.final_error_mm, math.hypot(30.0, 20.0))
+        self.assertLessEqual(len(arm.moves), 4, "一轮修正后只允许退回，不能继续盲走")
+
     def test_a_reversed_axis_stops_instead_of_walking_away(self) -> None:
         """方向反了（接线/标定问题）必须停下并说清楚，而不是继续发帧。
 

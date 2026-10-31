@@ -725,14 +725,35 @@ class Grasp:
         best_reading: tuple[float, float] | None = None
         best_plan = None
         wrong_digit: int | None = None
+        min_learn_mm = max(
+            4.0 * self._config.settle_tolerance_mm,
+            2.0 * self._config.min_step_mm,
+        )
         for attempt in range(1, max(1, int(max_iterations)) + 1):
-            target = self._locate_ring_preferring(
-                source,
-                timeout=timeout,
-                require_digit=require_digit,
-                assume_digit=assumed,
-                settle=True,
-            )
+            for observation in range(2):
+                target = self._locate_ring_preferring(
+                    source,
+                    timeout=timeout,
+                    require_digit=require_digit,
+                    assume_digit=assumed,
+                    settle=True,
+                )
+                plan = self._plan_for_ring(
+                    arm, target, scale_mm_per_px=scale_mm_per_px, ring_digit=assumed
+                )
+                if (observation == 0 and previous_step is not None
+                        and previous_reading is not None):
+                    predicted = self._jacobian.displacement_for(*previous_step)
+                    measured = (
+                        plan.reading[0] - previous_reading[0],
+                        plan.reading[1] - previous_reading[1],
+                    )
+                    if (math.hypot(*predicted) >= min_learn_mm
+                            and math.hypot(*measured) < min_learn_mm):
+                        # 两帧接近也可能都是旧位置；先保持不动复测，再记最优位置和判响应。
+                        self._say("  环心位移不足学习门槛：保持位置复测，不追加运动")
+                        continue
+                break
             if assumed is not None and int(target.digit) != assumed and wrong_digit is None:
                 # 模型读错号不是这次对准的失败：环心照样是它给的，补偿按姿态用 assumed。
                 # 只在第一次说一句，免得闭环每一步都刷同一行。
@@ -741,9 +762,6 @@ class Grasp:
                     f"  模型把这一格读成 {wrong_digit} 号（姿态告诉的是 {assumed} 号）："
                     f"按画面里这个环对准，落料补偿用 {assumed} 号那一份"
                 )
-            plan = self._plan_for_ring(
-                arm, target, scale_mm_per_px=scale_mm_per_px, ring_digit=assumed
-            )
             digit = plan.digit
             final_reading = plan.reading
             final_plan = plan
@@ -773,12 +791,7 @@ class Grasp:
                 )
                 denominator = predicted[0] ** 2 + predicted[1] ** 2
                 predicted_length = math.hypot(predicted[0], predicted[1])
-                # 小步里背隙和读数噪声占大头：拿这种步去学响应比，scale 会被推到
-                # 0.2 或 5，下一步直接过冲/原地磨。低于这个量级只走、不学。
-                min_learn_mm = max(
-                    4.0 * self._config.settle_tolerance_mm,
-                    2.0 * self._config.min_step_mm,
-                )
+                # 预测步长与实测位移都要超过噪声量级，才能学习响应比。
                 if denominator > 1e-12 and predicted_length >= min_learn_mm:
                     response = (
                         measured[0] * predicted[0] + measured[1] * predicted[1]
@@ -786,15 +799,16 @@ class Grasp:
                     step = replace(
                         step, measured_mm=measured, predicted_mm=predicted, response=response
                     )
-                    if response <= 0.05:
+                    if response <= 0.05 and error > tolerance:
                         steps.append(step)
                         note = (
-                            "实测位移与雅可比预测**方向相反或几乎没有**，再走只会越走越远："
-                            "先重标雅可比（菜单 21 的 --calibrate），或检查底座/伸缩的接线方向"
+                            "实测位移与雅可比预测**方向相反或几乎没有**：停止对准；"
+                            "检查动作是否执行、取帧是否滞后，以及雅可比标定与接线方向"
                         )
                         break
                     # 响应比 = 真实的灵敏度 / 配置的灵敏度；下一步按它折算。
-                    scale = min(5.0, max(0.2, 1.0 / response))
+                    if math.hypot(*measured) >= min_learn_mm and response > 0.05:
+                        scale = min(5.0, max(0.2, 1.0 / response))
             if error <= tolerance:
                 aligned = True
                 steps.append(step)
