@@ -944,7 +944,7 @@ def place_material_from_repo_to_floor_from_center_ring(
     *,
     orders: tuple[int, int, int] = (3, 2, 1),
     place_lift: float = 95.0,
-    tolerance_mm: float = 2,
+    tolerance_mm: float = 4,
     need_calibrate: bool = False,
     row_yaw_correction_deg: float = 8.5,
     row_normal_base_motor_degrees: float = -17.0,
@@ -1149,7 +1149,7 @@ def place_and_grab_material(robot:Robot, place_orders = (1, 2, 3), grab_orders =
     """按指定顺序放料，再按环号复用放料落点回抓。"""
     if grab_orders is None:
         grab_orders = place_orders
-    locations = place_material_from_repo_to_floor_from_center_ring(robot, orders=place_orders)
+    locations = place_material_from_repo_to_floor_from_center_ring(robot, orders=place_orders, need_calibrate = True)
     # 回抓按列表顺序取位置，必须按 grab_orders 排列，不能沿用放料顺序。
     pre_locations = [locations[digit] for digit in grab_orders]
     grab_material_from_floor_to_repo_by_xy(robot, orders=grab_orders, pre_locations=pre_locations)
