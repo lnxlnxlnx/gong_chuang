@@ -173,7 +173,7 @@ ROW_ROTATE_MAX_PULSES = 2000
 #: 一帧看清三环、随后一次性放完三个环之前要摆的姿态（``lift``/``extension``/``base``，
 #: 电机角度）：伸缩比逐环对准时短一点、镜头离地面远一些，整排 2×150 mm 才进得了画面。
 #: 现场按取景改这一份；换场地只需要动它和 ``station.center_spacing_mm``。
-RING_ROW_OBSERVE_POSE = {"lift": 960, "extension": 550, "base": -32}
+RING_ROW_OBSERVE_POSE = {"lift": 980, "extension": 595, "base": -32}
 #: 观察失败时相对当前姿态扫描，单位均为电机角度；先伸缩，再小幅转底座。
 RING_ROW_VIEW_OFFSETS = (
     (-90.0, 0.0), (90.0, 0.0), (-180.0, 0.0), (180.0, 0.0),
@@ -514,7 +514,7 @@ def _scene_stability_detail(robot: Robot) -> str:
 
 def grab_material_from_turntable_to_repo(
     robot: Robot,
-    want_colors=("red", "green", "blue"),
+    want_colors=("red", "green", "yellow"),
     *,
     home: dict[str, float] | None = {"lift": 860, "extension": 90.0, "base": 420}
 ):  # 420是中心位置
@@ -574,12 +574,12 @@ def grab_material_from_turntable_to_repo(
 
 #: 跟随转盘上那块料最多跟多久（秒）。转盘一次换位是 1.5 s，跟 20 s 还没停稳就是出事了
 #: （料被带出可达范围、或画面一直有东西在动），报错比一直转下去好。
-FOLLOW_SECONDS = 110.0
+FOLLOW_SECONDS = 150.0
 
 
 def _follow_material_until_stable(
     robot: Robot, want_color, *, timeout: float = FOLLOW_SECONDS,
-    min_follow_seconds: float = 4.6, stable_seconds: float = 0.3,
+    min_follow_seconds: float = 6.2, stable_seconds: float = 0.3,
 ) -> None:
     """**跟着转盘上的料走**，直到料自己停住（停住那一刻才下降到抓）。
 
@@ -601,11 +601,11 @@ def _follow_material_until_stable(
 
 def grab_material_from_turntable_to_repo_follow(
     robot: Robot,
-    want_colors=("red", "green", "blue"),
+    want_colors=("red", "green", "yellow"),
     *,
     home: dict[str, float] | None = {"lift": 830, "extension": 120.0, "base": 420},
     follow_seconds: float = FOLLOW_SECONDS,
-    stable_seconds: float = 0.1,
+    stable_seconds: float = 0.03,
 ):
     """**跟着料走**：不等它转到位，一路跟到它上方，停住了才抓。
 
@@ -628,7 +628,10 @@ def grab_material_from_turntable_to_repo_follow(
                 robot, color, timeout=follow_seconds, stable_seconds=stable_seconds,
             )
             _descend_and_grab_from_turntable(robot)
-            _stow_material_to_repo(robot)
+            base_position = robot.arm.read_abs_state("base").motor_degrees
+            extension_position = robot.arm.read_abs_state("extension").motor_degrees
+            position = {"base": base_position, "extension": extension_position}
+            _stow_material_to_repo(robot, position=position)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()
@@ -643,9 +646,9 @@ def grab_material_from_turntable_to_repo_follow_v2(
     *,
     home: dict[str, float] | None = {"lift": 830, "extension": 120.0, "base": 420},
     follow_seconds: float = FOLLOW_SECONDS,
-    stable_seconds: float = 0.3,
+    stable_seconds: float = 0.1,
     monitor_until_lift: float | None = None,
-    grab_tolerance_mm: float | None = None,
+    grab_tolerance_mm: float | None = 20,
 ):
     """停稳即抓；下降时持续看料，偏离或丢失就抬回观察高度重新跟随。
 
@@ -1391,7 +1394,7 @@ def place_material_on_material_by_order(
     robot: Robot,
     *,
     orders: tuple[int, int, int] = (1, 2, 3),
-    home: dict[str, float] | None = {"lift": 800, "extension": 270.0, "base": 0},
+    home: dict[str, float] | None = {"lift": 960, "extension": 270.0, "base": 0},
 ):
     """从仓库抓料，叠到台面上第 ``order`` 号位置的物料上；``orders`` 是**放置顺序**。
 
@@ -1416,6 +1419,7 @@ def place_material_on_material_by_order(
             base_deg = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees
             _grab_material_from_car(robot)
+            robot.arm.move_axis_to_motor_degrees("lift", 950)
             move_axes_to(
                 robot,
                 {"extension": extension_deg, "base": base_deg},
