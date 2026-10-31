@@ -702,7 +702,7 @@ class Grasp:
         gain: float = 0.9,
         tolerance_mm: float | None = None,
     ) -> "RingAlignResult":
-        """闭环把环心推到目标读数：**测一帧 → 算 → 走 → 再测**，直到进容差。
+        """先用底座修正 X，重新取帧后用伸缩修正 Y，交替到总误差进入容差。
 
         一次 :meth:`plan_ring` 只做一次线性化解算，它同时依赖两件事：
 
@@ -731,8 +731,8 @@ class Grasp:
 
         两个只能给一个。
 
-        :param axes: 只动哪些轴；``("base",)`` = 只转底座。
-        :param max_iterations: 最多走几步（默认 4）。
+        :param axes: 只动哪些轴；``("base",)`` = 只用底座修正 X。
+        :param max_iterations: 最多修正几轮（默认 4），每轮最多各修正 X、Y 一次。
         :param gain: 每步取解算值的多少（默认 0.9，留一点余量防过冲）。
         :param tolerance_mm: 到位门槛；``None`` 用 ``eye_in_hand.json`` 的 ``tolerance_mm``。
 
@@ -745,12 +745,18 @@ class Grasp:
         from modules.grasp.drive.ring_plan import RingAlignResult, RingAlignStep
         from modules.grasp.drive.visual_servo_motion import _move_ring_axis
 
-        wanted = tuple(axes)
-        unknown = [name for name in wanted if name not in ("base", "extension")]
+        unknown = [name for name in axes if name not in ("base", "extension")]
         if unknown:
             raise ValueError(
                 f"align_ring 只认 base / extension，收到 {unknown}"
             )
+        wanted = tuple(name for name in ("base", "extension") if name in axes)
+        components = {"base": (0, self._jacobian.base_dx),
+                      "extension": (1, self._jacobian.radial_dy)}
+        for axis in wanted:
+            sensitivity = components[axis][1]
+            if not math.isfinite(sensitivity) or abs(sensitivity) <= 1e-12:
+                raise VisualServoError(f"{axis} 的主方向雅可比为零或无效，不能单轴对准")
         if assume_digit is not None and require_digit is not None:
             raise ValueError(
                 "assume_digit 与 require_digit 只能给一个：前者是「按姿态这一格就是几号环」，"
@@ -765,7 +771,11 @@ class Grasp:
             self._config.tolerance_mm if tolerance_mm is None else tolerance_mm
         )
         steps: list[RingAlignStep] = []
-        scale = 1.0  # 步长的在线折算：1/响应比
+        # 两轴分别学习响应，底座的小响应不能放大伸缩的修正量。
+        scales = {axis: 1.0 for axis in wanted}
+        previous_axis: str | None = None
+        next_axis = 0
+        max_moves = max(1, int(max_iterations)) * len(wanted)
         response: float | None = None
         previous_reading: tuple[float, float] | None = None
         previous_step: tuple[int, int] | None = None
@@ -786,7 +796,8 @@ class Grasp:
             4.0 * self._config.settle_tolerance_mm,
             2.0 * self._config.min_step_mm,
         )
-        for attempt in range(1, max(1, int(max_iterations)) + 1):
+        # 最后一次动作也必须观测，再决定是否到位或退回最佳姿态。
+        for attempt in range(1, max_moves + 2):
             for observation in range(2):
                 target = self._locate_ring_preferring(
                     source,
@@ -887,21 +898,31 @@ class Grasp:
                             "检查动作是否执行、取帧是否滞后，以及雅可比标定与接线方向"
                         )
                         break
-                    # 一个比例只能解释沿预测方向的缩放，不能解释两轴独立丢步或滞后。
-                    if learn_response and response > 0.05:
-                        scale = min(5.0, max(0.2, 1.0 / response))
+                    if learn_response and previous_axis is not None:
+                        scales[previous_axis] = min(5.0, max(0.2, 1.0 / response))
             if error <= tolerance:
                 aligned = True
                 steps.append(step)
                 break
-            base_step = (
-                _round_pulses(plan.base_pulses * gain * scale) if "base" in wanted else 0
-            )
-            extension_step = (
-                _round_pulses(plan.extension_pulses * gain * scale)
-                if "extension" in wanted
-                else 0
-            )
+            if attempt > max_moves:
+                steps.append(step)
+                note = f"走了 {max_iterations} 轮还没进容差，使用误差最小的姿态"
+                break
+            base_step = extension_step = 0
+            for offset in range(len(wanted)):
+                index = (next_axis + offset) % len(wanted)
+                axis = wanted[index]
+                component, sensitivity = components[axis]
+                # 单轴只消除自己的主方向误差，串扰留给下一次新观测处理。
+                pulses = _round_pulses(
+                    -plan.error_mm[component] / sensitivity * gain * scales[axis]
+                )
+                if pulses:
+                    base_step = pulses if axis == "base" else 0
+                    extension_step = pulses if axis == "extension" else 0
+                    previous_axis = axis
+                    next_axis = (index + 1) % len(wanted)
+                    break
             if base_step == 0 and extension_step == 0:
                 steps.append(step)
                 note = "步长不足一个脉冲，停下：把增益调大或检查读数是不是抖"
@@ -914,9 +935,6 @@ class Grasp:
             previous_reading = plan.reading
             previous_step = (base_step, extension_step)
             previous_motor_positions = motor_positions
-        else:
-            note = note or f"走了 {max_iterations} 步还没进容差，先看响应比是不是一直不变"
-
         if not aligned and best_pulses is not None:
             # 没进容差（走满步数 / 中途停下）：把臂**退回误差最小的那一次**。最后一步常常
             # 是过冲的那一步，停在上面对准结果只会更差。已经在那儿就一步都不走。

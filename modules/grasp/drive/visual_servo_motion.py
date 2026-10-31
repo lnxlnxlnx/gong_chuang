@@ -58,16 +58,21 @@ def _move_axis(arm, axis: str, signed_pulses: int) -> float:
     return seconds
 
 
-def _move_ring_axis(arm, axis: str, signed_pulses: int) -> float:
-    """圆环对准的小步先越过目标再返回，避免短指令被齿轮间隙吸收。"""
+def _move_ring_axis(arm, axis: str, signed_pulses: int) -> None:
+    """圆环对准逐段监控到位，小步先越过目标再返回以克服齿轮间隙。"""
     if signed_pulses == 0:
-        return 0.0
-    if abs(signed_pulses) >= 50:
-        return _move_axis(arm, axis, signed_pulses)
-    extra = 300 if signed_pulses > 0 else -300
-    # 两段分别等运动完成；命令里程表与视觉预测仍使用两段相加后的净脉冲。
-    seconds = _move_axis(arm, axis, signed_pulses + extra)
-    return seconds + _move_axis(arm, axis, -extra)
+        return
+    segments = (signed_pulses,)
+    if abs(signed_pulses) < 50:
+        extra = 300 if signed_pulses > 0 else -300
+        segments = (signed_pulses + extra, -extra)
+    for pulses in segments:
+        # 监控接口在返回时按编码器增量修正里程表，下一段必须从实测位置继续。
+        target = arm.turns_state.of(axis).pulses + pulses
+        arm.move_axis_to_motor_degrees_monitored(
+            axis, target * 360.0 / arm.pulses_per_revolution,
+            keep_moving=lambda: True,
+        )
 
 
 def _send_axis(

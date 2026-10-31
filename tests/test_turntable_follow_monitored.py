@@ -77,6 +77,51 @@ class SimulatedCamera:
         ),)
 
 
+class RingMonitoredMotionTests(unittest.TestCase):
+    """用真实机械臂监控路径确认补偿的每一段完成后才发下一段。"""
+
+    def setUp(self):
+        self.clock = FakeClock()
+        self.sleep = RecordingSleep(self.clock)
+        self.arm = RobotArm.from_settings(
+            config=fixture_config(acceleration=0),
+            port="FAKE", bus=FakeSerial(), clock=self.clock, sleep=self.sleep,
+        )
+
+        class SlowMotor(SimulatedLift):
+            def move_relative_pulses(self, *args, **kwargs):
+                self.update()
+                if abs(self.position - self.target) > self.ppr * 0.3 / 360:
+                    raise AssertionError("上一段尚未到位，不允许反转")
+                super().move_relative_pulses(*args, **kwargs)
+                self.speed *= 0.5
+
+        self.motor = SlowMotor(self.clock, 0, self.arm.pulses_per_revolution)
+        self.arm._motors["base"] = self.motor
+
+    def test_compensation_waits_for_both_legs_even_when_estimate_is_short(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        with patch.object(motion, "time", SimpleNamespace(sleep=self.sleep)):
+            motion._move_ring_axis(self.arm, "base", 49)
+
+        self.motor.update()
+        self.assertEqual([p for _stamp, p in self.motor.moves], [349, -300])
+        self.assertAlmostEqual(self.motor.position, 49, delta=3)
+        self.assertAlmostEqual(self.arm.read_abs_state("base").pulses, 49, delta=3)
+
+    def test_unfinished_first_leg_stops_without_sending_the_return_leg(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        self.motor.stalled = True
+        with patch.object(motion, "time", SimpleNamespace(sleep=self.sleep)):
+            with self.assertRaises(TimeoutError):
+                motion._move_ring_axis(self.arm, "base", 49)
+
+        self.assertEqual(len(self.motor.moves), 1)
+        self.assertTrue(self.motor.stops)
+
+
 class MonitoredGrabTests(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock()

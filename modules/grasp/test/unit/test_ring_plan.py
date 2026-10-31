@@ -406,6 +406,16 @@ class SimulatedPlantArm:
     def read_measured_pulses(self, axis: str) -> float:
         return self.encoder_pulses[axis]
 
+    def move_axis_to_motor_degrees_monitored(
+        self, axis, degrees, *, keep_moving, rpm=None
+    ):
+        """离线机构即时到位；保留监控动作使用的绝对目标语义。"""
+        if not keep_moving():
+            return False
+        target = round(degrees * self.pulses_per_revolution / 360.0)
+        self._apply(axis, target - self.pulses[axis])
+        return True
+
     # ``_move_axis`` 只会调这四个方向原语，且 ``wait=False``（不等，返回的耗时是 0）。
     def rotate_cw(self, pulses, wait=False, **_kwargs):
         self._apply("base", int(pulses))
@@ -470,6 +480,56 @@ def make_closed_loop(plant_scale: float = 1.0):
 
 class ClosedLoopTests(unittest.TestCase):
     """``align_ring``：一步不够时就靠"实测 / 预测"在线折算，两三步入位。"""
+
+    def test_y_correction_uses_a_new_reading_after_base_motion(self) -> None:
+        """底座造成的 Y 串扰必须在取帧后交给伸缩修正。"""
+        grasp, arm = make_closed_loop()
+        grasp._jacobian = arm.plant = VisualServoJacobian(-0.1, -0.05, 0.02, 0.1)
+        arm.reading = [10.0, 0.0]
+
+        class ObservedSource(LiveRingSource):
+            observed_move_counts = []
+
+            def locate_ring(self, **kwargs):
+                self.observed_move_counts.append(len(self.arm.moves))
+                return super().locate_ring(**kwargs)
+
+        source = ObservedSource(arm)
+        grasp._source = source
+        result = grasp.align_ring(gain=1.0, tolerance_mm=0.1)
+
+        self.assertEqual(result.steps[0].base_pulses, 100)
+        self.assertEqual(result.steps[0].extension_pulses, 0)
+        self.assertIn(1, source.observed_move_counts, "底座走完后必须先取帧")
+        self.assertEqual(result.steps[1].base_pulses, 0)
+        self.assertEqual(result.steps[1].extension_pulses, 50)
+        self.assertTrue(all(not (s.base_pulses and s.extension_pulses) for s in result.steps))
+        self.assertTrue(result.aligned, result.summary())
+        self.assertLessEqual(math.hypot(*arm.reading), 0.1)
+
+    def test_response_learning_is_independent_between_axes(self) -> None:
+        grasp, arm = make_closed_loop()
+        grasp._jacobian = VisualServoJacobian(-0.1, 0.0, 0.0, 0.1)
+        arm.plant = VisualServoJacobian(-0.05, 0.0, 0.0, 0.1)
+        arm.reading = [10.0, 10.0]
+
+        result = grasp.align_ring(gain=1.0, tolerance_mm=0.1)
+
+        self.assertEqual(result.steps[0].base_pulses, 100)
+        self.assertEqual(result.steps[1].extension_pulses, -100)
+        self.assertAlmostEqual(result.steps[1].response, 0.5)
+        self.assertTrue(result.aligned, result.summary())
+
+    def test_last_correction_is_observed_before_selecting_the_best_pose(self) -> None:
+        grasp, arm = make_closed_loop()
+        grasp._jacobian = arm.plant = VisualServoJacobian(-0.1, 0.0, 0.0, 0.1)
+        arm.reading = [0.0, 10.0]
+
+        result = grasp.align_ring(max_iterations=1, gain=1.0, tolerance_mm=0.1)
+
+        self.assertTrue(result.aligned, result.summary())
+        self.assertLessEqual(math.hypot(*arm.reading), 0.1)
+        self.assertEqual(arm.moves, [("extension", -100)])
 
     def test_small_corrections_overshoot_and_return_with_the_same_net_pulses(self) -> None:
         """两轴正反向小步都先越过目标再返回，50 脉冲边界仍直接发送。"""
@@ -543,7 +603,7 @@ class ClosedLoopTests(unittest.TestCase):
         """落料补偿改的是闭环的**终点**：读数停在「target + 补偿」，不是停在 0。"""
         grasp, arm = make_closed_loop(1.0)
         grasp._config = VisualServoConfig(ring_offset_x_mm=7.5)
-        result = grasp.align_ring(gain=1.0)
+        result = grasp.align_ring(gain=1.0, tolerance_mm=0.1)
         self.assertTrue(result.aligned, result.summary())
         # 脉冲要取整，落点差着半个脉冲的量级（0.036 mm），所以按 delta 比。
         self.assertAlmostEqual(arm.reading[0], 7.5, delta=0.1)
@@ -696,9 +756,8 @@ class ClosedLoopTests(unittest.TestCase):
         result = grasp.align_ring(max_iterations=4, gain=1.0)
         self.assertIsNotNone(result.plan, "闭环必须把最后那一份计划交出来")
         plan = result.plan
-        # 收敛之后"该走到的绝对位置"就是当前里程表（剩下的步长已经是 0）
-        self.assertEqual(plan.base_motor_pulses, arm.pulses["base"])
-        self.assertEqual(plan.extension_motor_pulses, arm.pulses["extension"])
+        # 容差内仍可能有小修正量，最终计划必须与当前姿态重新解算的结果一致。
+        self.assertEqual(plan, grasp.plan_ring())
         # 转发属性与 plan 一致，用起来和 plan_ring() 一样
         self.assertAlmostEqual(result.base, plan.base)
         self.assertAlmostEqual(result.extension, plan.extension)
@@ -762,7 +821,7 @@ class AssumedDigitTests(unittest.TestCase):
     def test_a_misread_digit_still_aligns_with_the_taught_ring_offset(self) -> None:
         grasp, arm, source = self.build()
 
-        result = grasp.align_ring(assume_digit=1, gain=1.0)
+        result = grasp.align_ring(assume_digit=1, gain=1.0, tolerance_mm=0.1)
 
         self.assertTrue(result.aligned, result.summary())
         self.assertEqual(result.digit, 1)
