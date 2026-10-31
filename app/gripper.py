@@ -946,10 +946,10 @@ def place_material_from_repo_to_floor_from_center_ring(
     place_lift: float = 95.0,
     tolerance_mm: float = 2,
     need_calibrate: bool = False,
-    row_yaw_correction_deg: float = 0.0,
+    row_yaw_correction_deg: float = 8.5,
     row_normal_base_motor_degrees: float = -17.0,
-    ring3_down_offset_mm: float = 0.0,
-    ring3_right_offset_mm: float = 0.0,
+    ring3_down_offset_mm: float = 7.6,
+    ring3_right_offset_mm: float = 10.3,
 ) -> dict[int, dict[str, float]]:
     """闭环对准中环，再沿车身坐标系中的环排方向计算三环落点。
 
@@ -958,14 +958,15 @@ def place_material_from_repo_to_floor_from_center_ring(
     车身须已与环排垂直，或用 ``need_calibrate=True`` 在固定观察姿态下校准。
     ``row_normal_base_motor_degrees`` 是机械臂指向环排法线时的底座电机角度；
     车辆平移后中环朝向会变化，但这个基准不随停车位置改变。
-    ``row_yaw_correction_deg`` 是在实测夹角上额外添加的输出轴角度，默认不补偿。
+    ``row_yaw_correction_deg`` 是在实测夹角上额外添加的输出轴角度，默认 +8.5°。
+    它只调整 1/3 号环相对中环的展开方向，不改变中环落点或车身校准目标。
 
     ``ring3_right_offset_mm`` 单独补偿 3 号环的稳定左偏：沿环排 1→3 的方向为正，
-    默认不补偿；负数左移。先在平面坐标中平移，再同时反算底座和伸缩，
+    默认右移 10.3 mm；0 关闭，负数左移。先在平面坐标中平移，再同时反算底座和伸缩，
     因而不是只转底座走圆弧，也不会改变 1/2 号环的位置。
 
     ``ring3_down_offset_mm`` 单独补偿 3 号环的稳定上偏：正数沿环排法线向底座侧
-    平移（观察画面中的下方），默认不补偿；负数向上。它与向右补偿垂直，
+    平移（观察画面中的下方），默认下移 7.6 mm；0 关闭，负数向上。它与向右补偿垂直，
     同样先平移平面落点，再反算关节位置，不改变放料高度。
 
     1. 摆到 :data:`RING2_APPROACH_POSE`，``align_ring(require_digit=2)`` 闭环对准

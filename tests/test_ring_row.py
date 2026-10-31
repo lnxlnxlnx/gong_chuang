@@ -336,6 +336,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
                         base_pulses=round(base_degrees * 3200.0 / 360.0),
                         extension_pulses=round(extension_degrees * 3200.0 / 360.0),
                         row_normal_base_motor_degrees=normal_motor_degrees,
+                        row_yaw_correction_deg=0.0,
                     )
                     self.assert_row_geometry(
                         targets, normal_motor_degrees=normal_motor_degrees
@@ -390,12 +391,12 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         grab.assert_not_called()
         robot.gripper.open_jaws.assert_not_called()
 
-    def test_default_offsets_do_not_move_any_ring_from_the_geometric_row(self) -> None:
+    def test_default_yaw_is_added_to_the_measured_middle_angle(self) -> None:
         _robot, targets, _grab = self.run_it(
             (1, 2, 3), base_pulses=-419, extension_pulses=3645,
-            row_normal_base_motor_degrees=-17.0, use_default_offsets=True,
+            row_normal_base_motor_degrees=-17.0,
         )
-        self.assert_row_geometry(targets, normal_motor_degrees=-17.0)
+        self.assert_row_geometry(targets, normal_motor_degrees=-17.0 - 8.5 * 5.0)
 
     def test_invalid_row_normal_is_rejected_before_motion(self) -> None:
         robot = Mock()
@@ -488,7 +489,6 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
                     robot, targets, _grab = self.run_it(
                         (3, 2, 1), base_pulses=-738, extension_pulses=3294,
                         row_yaw_correction_deg=yaw, use_default_offsets=True,
-                        ring3_right_offset_mm=15.0,
                         **offsets,
                     )
                     _robot, original, _grab = self.run_it(
@@ -502,9 +502,9 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
                         theta = math.radians((pose["base"] + 83.025) / 5.0 + yaw)
                         positions.append((radius * math.cos(theta), radius * math.sin(theta)))
                     before, after = positions
-                    expected_down = 0.0 if down is None else down
+                    expected_down = 7.6 if down is None else down
                     self.assertAlmostEqual(after[0] - before[0], -expected_down, delta=0.15)
-                    self.assertAlmostEqual(after[1] - before[1], 15.0, delta=0.15)
+                    self.assertAlmostEqual(after[1] - before[1], 10.3, delta=0.15)
                     self.assertEqual(
                         [call.kwargs["require_digit"] for call in robot.grasp.align_ring.call_args_list],
                         [2],
@@ -555,7 +555,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         robot.arm.move_axis_to_motor_degrees.assert_not_called()
 
     def test_tunable_angle_changes_the_row_direction_with_only_middle_alignment(self) -> None:
-        for angle in (0.0, -6.5, -13.205):
+        for angle in (0.0, 8.5, -6.5, -13.205):
             with self.subTest(angle=angle):
                 robot, targets, grab = self.run_it(
                     (1, 2, 3), base_pulses=-738, extension_pulses=3294,
@@ -582,7 +582,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         robot.arm.move_axis_to_motor_degrees.assert_not_called()
 
     def test_ring_two_is_aligned_then_the_three_poses_are_on_one_line(self) -> None:
-        robot, targets, _grab = self.run_it((1, 2, 3))
+        robot, targets, _grab = self.run_it((1, 2, 3), row_yaw_correction_deg=0.0)
 
         self.assertEqual(
             [call.kwargs["require_digit"] for call in robot.grasp.align_ring.call_args_list],
@@ -624,7 +624,9 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
     def test_row_stays_straight_at_different_aligned_extensions(self) -> None:
         for pulses in (2400, 4800, 6400):
             with self.subTest(extension_pulses=pulses):
-                _robot, targets, _grab = self.run_it((1, 2, 3), extension_pulses=pulses)
+                _robot, targets, _grab = self.run_it(
+                    (1, 2, 3), extension_pulses=pulses, row_yaw_correction_deg=0.0
+                )
                 self.assert_row_geometry(targets)
 
     def test_logged_middle_pose_keeps_both_ends_on_the_actual_ring_row(self) -> None:
@@ -632,6 +634,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         _robot, targets, _grab = self.run_it(
             (1, 2, 3), base_pulses=-781, extension_pulses=3566,
             row_normal_base_motor_degrees=-17.0,
+            row_yaw_correction_deg=0.0,
         )
         positions = []
         for pose in targets[1:-1]:
