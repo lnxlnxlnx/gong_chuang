@@ -739,12 +739,11 @@ class Grasp:
         **走满步数不报错**：闭环内部记着"目前误差最小的那一次"（残差 + 两根轴的绝对
         位置），没进容差就把臂退回那一次，返回 ``aligned=False`` 与那一次的计划。
         一路都是最后一步最好时，这次退回是 0 脉冲（臂本来就在那儿）。
-        :raises VisualServoError: 任何一步看不见环、解算失败；或响应比 ≤ 0（方向反了：
-            那是标定/接线问题，硬走只会越走越远）。
+        :raises VisualServoError: 任何一步看不见环或解算失败。
         """
         arm, source = self._require_resources()
         from modules.grasp.drive.ring_plan import RingAlignResult, RingAlignStep
-        from modules.grasp.drive.visual_servo_motion import _move_axis
+        from modules.grasp.drive.visual_servo_motion import _move_ring_axis
 
         wanted = tuple(axes)
         unknown = [name for name in wanted if name not in ("base", "extension")]
@@ -907,8 +906,8 @@ class Grasp:
                 steps.append(step)
                 note = "步长不足一个脉冲，停下：把增益调大或检查读数是不是抖"
                 break
-            _move_axis(arm, "base", base_step) if base_step else None
-            _move_axis(arm, "extension", extension_step) if extension_step else None
+            _move_ring_axis(arm, "base", base_step) if base_step else None
+            _move_ring_axis(arm, "extension", extension_step) if extension_step else None
             steps.append(
                 replace(step, base_pulses=base_step, extension_pulses=extension_step)
             )
@@ -925,7 +924,7 @@ class Grasp:
             for axis in wanted:
                 delta = int(best_pulses[axis]) - int(arm.turns_state.of(axis).pulses)
                 if delta:
-                    _move_axis(arm, axis, delta)
+                    _move_ring_axis(arm, axis, delta)
                     moved = True
             if moved:
                 # 退回到位后**重新量一次**（取中位数）：退回前的旧读数可能已经过时，

@@ -471,6 +471,66 @@ def make_closed_loop(plant_scale: float = 1.0):
 class ClosedLoopTests(unittest.TestCase):
     """``align_ring``：一步不够时就靠"实测 / 预测"在线折算，两三步入位。"""
 
+    def test_small_corrections_overshoot_and_return_with_the_same_net_pulses(self) -> None:
+        """两轴正反向小步都先越过目标再返回，50 脉冲边界仍直接发送。"""
+        for axis in ("base", "extension"):
+            for pulses in (-51, -50, -49, -1, 0, 1, 49, 50, 51):
+                with self.subTest(axis=axis, pulses=pulses):
+                    grasp, arm = make_closed_loop()
+                    displacement = JACOBIAN.displacement_for(
+                        pulses if axis == "base" else 0,
+                        pulses if axis == "extension" else 0,
+                    )
+                    arm.reading = [-value for value in displacement]
+
+                    result = grasp.align_ring(
+                        axes=(axis,), gain=1.0, tolerance_mm=1e-6
+                    )
+
+                    if 0 < abs(pulses) < 50:
+                        extra = 300 if pulses > 0 else -300
+                        expected = [(axis, pulses + extra), (axis, -extra)]
+                    else:
+                        expected = [(axis, pulses)] if pulses else []
+                    self.assertEqual(arm.moves, expected)
+                    self.assertEqual(arm.pulses[axis], pulses)
+                    self.assertTrue(result.aligned, result.summary())
+                    if pulses:
+                        self.assertEqual(
+                            getattr(result.steps[0], axis + "_pulses"), pulses
+                        )
+                    if result.steps[-1].predicted_mm is not None:
+                        self.assertEqual(result.steps[-1].predicted_mm, displacement)
+                        self.assertAlmostEqual(result.response, 1.0)
+
+    def test_small_corrections_converge_when_short_commands_have_no_effect(self) -> None:
+        """模拟电机有转动、短指令却不能推动末端的现场现象。"""
+        for axis in ("base", "extension"):
+            for pulses in (-49, 49):
+                with self.subTest(axis=axis, pulses=pulses):
+                    grasp, arm = make_closed_loop()
+                    displacement = JACOBIAN.displacement_for(
+                        pulses if axis == "base" else 0,
+                        pulses if axis == "extension" else 0,
+                    )
+                    arm.reading = [-value for value in displacement]
+                    original_apply = arm._apply
+
+                    def apply_with_short_command_dead_zone(axis, signed):
+                        previous = list(arm.reading)
+                        original_apply(axis, signed)
+                        if abs(signed) < 50:
+                            arm.reading[:] = previous
+
+                    arm._apply = apply_with_short_command_dead_zone
+                    result = grasp.align_ring(
+                        axes=(axis,), gain=1.0, tolerance_mm=0.1
+                    )
+
+                    self.assertTrue(result.aligned, result.summary())
+                    self.assertLessEqual(math.hypot(*arm.reading), 0.1)
+                    self.assertEqual(arm.read_measured_pulses(axis), pulses)
+
     def test_a_matching_machine_lands_in_one_step(self) -> None:
         grasp, arm = make_closed_loop(1.0)
         result = grasp.align_ring(gain=1.0)   # 一步到位：gain=1 意味着全量修正

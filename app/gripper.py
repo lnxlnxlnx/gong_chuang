@@ -1062,7 +1062,7 @@ def _row_step_pulses(
 def _align_floor_ring(
     robot: Robot, *, digit: int, tolerance_mm: float
 ) -> tuple[int, int]:
-    """保存中环对准后的关节位置，未对准时不能据此计算三环落点。"""
+    """保存中环对准后的关节位置；未进容差时使用闭环保留的最佳姿态。"""
     aligned = robot.grasp.align_ring(
         require_digit=digit, tolerance_mm=tolerance_mm, max_iterations=6,gain=0.6,
     )
@@ -1076,11 +1076,13 @@ def _align_floor_ring(
             "未知" if aligned.final_error_mm is None
             else f"{aligned.final_error_mm:.1f} mm"
         )
-        raise RuntimeError(
-            f"{digit} 号环未对准（残差 {residual}，门槛 {tolerance_mm:.1f} mm）：停止放料"
+        print(
+            f"  {digit} 号环未进容差（残差 {residual}，门槛 {tolerance_mm:.1f} mm）："
+            "使用误差最小的姿态继续放料"
             + (f"；{aligned.note}" if aligned.note else "")
         )
-    print(f"  {digit} 号环视觉已对准（视觉残差 {aligned.final_error_mm:.1f} mm）")
+    else:
+        print(f"  {digit} 号环视觉已对准（视觉残差 {aligned.final_error_mm:.1f} mm）")
     return (
         robot.arm.turns_state.of("base").pulses,
         robot.arm.turns_state.of("extension").pulses,

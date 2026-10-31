@@ -58,6 +58,18 @@ def _move_axis(arm, axis: str, signed_pulses: int) -> float:
     return seconds
 
 
+def _move_ring_axis(arm, axis: str, signed_pulses: int) -> float:
+    """圆环对准的小步先越过目标再返回，避免短指令被齿轮间隙吸收。"""
+    if signed_pulses == 0:
+        return 0.0
+    if abs(signed_pulses) >= 50:
+        return _move_axis(arm, axis, signed_pulses)
+    extra = 300 if signed_pulses > 0 else -300
+    # 两段分别等运动完成；命令里程表与视觉预测仍使用两段相加后的净脉冲。
+    seconds = _move_axis(arm, axis, signed_pulses + extra)
+    return seconds + _move_axis(arm, axis, -extra)
+
+
 def _send_axis(
     arm,
     axis: str,

@@ -407,7 +407,7 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
                 )
         robot.arm.move_axis_to_motor_degrees.assert_not_called()
 
-    def test_unaligned_middle_aborts_before_pickup_or_release(self) -> None:
+    def test_unaligned_middle_uses_the_best_position_for_placement(self) -> None:
         robot = Mock()
         robot.vision.ring_center_spacing_mm = 150.0
         robot.arm.config = load_arm_config()
@@ -421,11 +421,13 @@ class PlaceMaterialFromCenterRingTests(unittest.TestCase):
         with patch.object(app_gripper, "move_axes_to") as move, \
                 patch.object(app_gripper, "_grab_material_from_car") as grab, \
                 patch("time.sleep"):
-            with self.assertRaisesRegex(RuntimeError, "2 号环.*未对准"):
-                app_gripper.place_material_from_repo_to_floor_from_center_ring(robot)
+            locations = app_gripper.place_material_from_repo_to_floor_from_center_ring(
+                robot, orders=(2,)
+            )
 
-        grab.assert_not_called()
-        robot.gripper.open_jaws.assert_not_called()
+        self.assertEqual(locations[2], {"base": 112.5, "extension": 540.0})
+        grab.assert_called_once_with(robot)
+        robot.gripper.open_jaws.assert_called_once_with()
         self.assertEqual(move.call_args.args[1], app_gripper.SAFE_RETRACT)
 
     def test_alignment_error_is_propagated_after_retract(self) -> None:
@@ -695,6 +697,7 @@ class PlaceAndGrabMaterialTests(unittest.TestCase):
         self.robot.gripper.close_jaws.side_effect = lambda: self.picked.append(position())
         for patcher in (
             patch.object(app_gripper, "move_axes_to", side_effect=move_axes),
+            patch.object(app_gripper, "square_chassis_to_ring_row"),
             patch.object(app_gripper, "_grab_material_from_car"),
             patch.object(app_gripper, "_place_material_to_repo"),
             patch("time.sleep"),
@@ -737,16 +740,15 @@ class PlaceAndGrabMaterialTests(unittest.TestCase):
                 locations = dict(zip(place_orders, self.placed))
                 self.assertEqual(self.picked, [locations[digit] for digit in grab_orders])
 
-    def test_failed_middle_alignment_aborts_before_any_floor_pickup(self) -> None:
+    def test_unaligned_middle_continues_placement_and_pickup_at_best_locations(self) -> None:
         self.robot.grasp.align_ring.return_value = RingAlignResult(
             aligned=False, final_error_mm=20.0
         )
 
-        with self.assertRaisesRegex(RuntimeError, "2 号环.*未对准"):
-            app_gripper.place_and_grab_material(self.robot)
+        app_gripper.place_and_grab_material(self.robot)
 
-        self.assertEqual(self.placed, [])
-        self.assertEqual(self.picked, [])
+        self.assertEqual(len(self.placed), 3)
+        self.assertEqual(self.picked, self.placed)
         self.robot.grasp.align_xy.assert_not_called()
 
 
