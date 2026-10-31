@@ -916,7 +916,7 @@ def _align_floor_ring(
 ) -> tuple[int, int]:
     """保存中环对准后的关节位置，未对准时不能据此计算三环落点。"""
     aligned = robot.grasp.align_ring(
-        require_digit=digit, tolerance_mm=tolerance_mm, max_iterations=6
+        require_digit=digit, tolerance_mm=tolerance_mm, max_iterations=6,gain=0.6,
     )
     for step in aligned.steps:
         print(f"  {step.line()}")
@@ -946,7 +946,7 @@ def place_material_from_repo_to_floor_from_center_ring(
     place_lift: float = 95.0,
     tolerance_mm: float = 2,
     need_calibrate: bool = False,
-    row_yaw_correction_deg: float = 0,      # 往负数调，值越大1环离车越近
+    row_yaw_correction_deg: float = 8.5,      # 往负数调，值越大1环离车越近
     row_normal_base_motor_degrees: float = -17.0,
     ring3_down_offset_mm: float = 7.6,
     ring3_right_offset_mm: float = 10.3,
@@ -1033,6 +1033,7 @@ def place_material_from_repo_to_floor_from_center_ring(
         raise
 
     move_axes_to(robot, SAFE_RETRACT).wait()
+    return poses
 
 
 def grab_material_from_floor_to_repo_by_xy(
