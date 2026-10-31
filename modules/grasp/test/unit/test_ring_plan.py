@@ -407,7 +407,7 @@ class SimulatedPlantArm:
         return self.encoder_pulses[axis]
 
     def move_axis_to_motor_degrees_monitored(
-        self, axis, degrees, *, keep_moving, rpm=None
+        self, axis, degrees, *, keep_moving, rpm=None, stop_when_still=False
     ):
         """离线机构即时到位；保留监控动作使用的绝对目标语义。"""
         if not keep_moving():

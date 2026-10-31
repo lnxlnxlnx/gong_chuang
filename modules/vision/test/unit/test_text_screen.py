@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import io
+import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import textwrap
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -34,7 +36,9 @@ class FitTests(unittest.TestCase):
         widest, tallest = text_screen._measure(self.cv2, lines, scale, thickness)
         margin = text_screen._MARGIN
         self.assertLessEqual(widest, width - 2 * margin)
-        self.assertLessEqual(len(lines) * tallest * text_screen._LINE_GAP, height - 2 * margin)
+        self.assertLessEqual(
+            len(lines) * tallest * text_screen._LINE_GAP, height - 2 * margin,
+        )
 
 
 class RenderTests(unittest.TestCase):
@@ -70,16 +74,44 @@ class RenderTests(unittest.TestCase):
 
 class ShowTests(unittest.TestCase):
     def test_returns_without_waiting_for_a_key(self) -> None:
+        process = Mock()
+        process.poll.return_value = None
+        process.stdin = io.StringIO()
+        process.stdout = io.StringIO('{"ok": true}\n{"ok": true}\n')
+        self.addCleanup(text_screen._close_display)
         with patch("cv2.imshow") as imshow, \
                 patch("cv2.waitKey") as wait_key, \
-                patch("cv2.namedWindow"):
+                patch("subprocess.Popen", return_value=process) as popen:
             name = show_text("134+123+314+231", size=(320, 240))
+            show_text("123+321+213+132", size=(800, 600))
 
         self.assertEqual(name, TEXT_WINDOW_NAME)
-        self.assertEqual(imshow.call_count, 1)
-        self.assertEqual(imshow.call_args[0][0], TEXT_WINDOW_NAME)
-        # waitKey 只等 1 ms：显示完就返回，窗口留给调用方继续用。
-        self.assertEqual(wait_key.call_args[0][0], 1)
+        # 调用方不参与 GUI 事件处理；两次更新发送到同一个显示进程。
+        imshow.assert_not_called()
+        wait_key.assert_not_called()
+        self.assertEqual(popen.call_count, 1)
+        commands = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
+        self.assertEqual(commands, [
+            {"text": "134+123+314+231", "size": [320, 240]},
+            {"text": "123+321+213+132", "size": [800, 600]},
+        ])
+
+    def test_display_failure_is_reported_to_the_caller(self) -> None:
+        process = Mock()
+        process.stdin = io.StringIO()
+        process.stdout = io.StringIO('{"error": "no display backend"}\n')
+        self.addCleanup(text_screen._close_display)
+        with patch("subprocess.Popen", return_value=process):
+            with self.assertRaisesRegex(RuntimeError, "no display backend"):
+                show_text("123")
+
+    def test_invalid_input_does_not_start_a_display_process(self) -> None:
+        with patch("subprocess.Popen") as popen:
+            with self.assertRaises(ValueError):
+                show_text(" ")
+            with self.assertRaises(ValueError):
+                show_text("123", size=(10, 10))
+        popen.assert_not_called()
 
 
 @unittest.skipUnless(
@@ -87,7 +119,7 @@ class ShowTests(unittest.TestCase):
     "需要 Windows 桌面；设置 ROBOT_TEXT_SCREEN_GUI_TEST=1 运行真实窗口验收",
 )
 class WindowsDisplayTests(unittest.TestCase):
-    def test_window_responds_after_one_call_without_main_thread_gui_events(self) -> None:
+    def test_window_responds_without_main_thread_gui_events(self) -> None:
         """主程序停止泵事件六秒后，文字窗仍须响应，且不受预览收尾影响。"""
         script = textwrap.dedent('''\
             import ctypes

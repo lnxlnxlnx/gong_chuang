@@ -59,7 +59,7 @@ def _move_axis(arm, axis: str, signed_pulses: int) -> float:
 
 
 def _move_ring_axis(arm, axis: str, signed_pulses: int) -> None:
-    """圆环对准逐段监控到位，小步先越过目标再返回以克服齿轮间隙。"""
+    """圆环对准逐段等实测停稳，再由视觉判断误差；小步先越过目标再返回。"""
     if signed_pulses == 0:
         return
     segments = (signed_pulses,)
@@ -76,7 +76,7 @@ def _move_ring_axis(arm, axis: str, signed_pulses: int) -> None:
         try:
             arm.move_axis_to_motor_degrees_monitored(
                 axis, target * 360.0 / arm.pulses_per_revolution,
-                keep_moving=lambda: True,
+                keep_moving=lambda: True, stop_when_still=True,
             )
         except TimeoutError as error:
             raise TimeoutError(context + str(error)) from error

@@ -129,7 +129,7 @@ class RingMonitoredMotionTests(unittest.TestCase):
         self.assertIn("剩余 +349.0", message)
         self.assertIn("使能=1、到位=0", message)
 
-    def test_motor_at_target_without_arrival_flag_reports_zero_remaining(self):
+    def test_ring_can_remeasure_after_encoder_stops_without_arrival_flag(self):
         from modules.grasp.drive import visual_servo_motion as motion
 
         normal_status = self.motor.read_status
@@ -140,15 +140,67 @@ class RingMonitoredMotionTests(unittest.TestCase):
             return status
 
         self.motor.read_status = without_arrival_flag
-        with self.assertRaises(TimeoutError) as caught:
-            motion._move_ring_axis(self.arm, "base", 49)
+        motion._move_ring_axis(self.arm, "base", 49)
 
-        message = str(caught.exception)
-        self.assertIn("实测增量 +349.0", message)
-        self.assertIn("剩余 +0.0", message)
-        self.assertIn("使能=1、到位=0", message)
-        self.assertEqual(len(self.motor.moves), 1)
+        self.assertEqual([p for _stamp, p in self.motor.moves], [349, -300])
+        self.assertAlmostEqual(self.motor.position, 49, delta=3)
+
+    def test_ring_returns_measured_position_when_motor_stops_short_of_target(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        normal_update = self.motor.update
+        stopped_at = []
+
+        def stop_with_following_error():
+            normal_update()
+            if self.motor.speed and abs(self.motor.target - self.motor.position) <= 13.5:
+                self.motor.position = self.motor.target + 13.5
+                self.motor.speed = 0
+                stopped_at.append(self.clock())
+
+        self.motor.update = stop_with_following_error
+        motion._move_ring_axis(self.arm, "base", -70)
+
+        # 停止帧会将驱动器目标重置到当前位置，剩余误差须与原指令比较。
+        self.assertAlmostEqual(-70 - self.motor.position, -13.5)
+        self.assertAlmostEqual(self.motor.position, -56.5)
+        self.assertAlmostEqual(self.arm.read_abs_state("base").pulses, -56, delta=1)
+        self.assertGreaterEqual(self.clock() - stopped_at[0], self.arm.settle_seconds)
+
+    def test_continued_slow_motion_is_not_accepted_as_standstill(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        normal_move = self.motor.move_relative_pulses
+
+        def keep_moving_slowly(*args, **kwargs):
+            normal_move(*args, **kwargs)
+            self.motor.speed = 25.0
+
+        self.motor.move_relative_pulses = keep_moving_slowly
+        with self.assertRaises(TimeoutError):
+            motion._move_ring_axis(self.arm, "base", -70)
+
         self.assertTrue(self.motor.stops)
+
+    def test_disabled_or_stalled_motor_is_not_accepted_as_standstill(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        for enabled, stalled in ((False, False), (True, True)):
+            with self.subTest(enabled=enabled, stalled=stalled):
+                self.setUp()
+                normal_status = self.motor.read_status
+
+                def fault_status():
+                    status = normal_status()
+                    status.enabled, status.stalled = enabled, stalled
+                    return status
+
+                self.motor.read_status = fault_status
+                with self.assertRaises(RuntimeError):
+                    motion._move_ring_axis(self.arm, "base", 49)
+
+                self.assertEqual(len(self.motor.moves), 1)
+                self.assertTrue(self.motor.stops)
 
 
 class MonitoredGrabTests(unittest.TestCase):
@@ -298,6 +350,20 @@ class MonitoredGrabTests(unittest.TestCase):
         self.motor.read_status = in_window
         self.assertTrue(self.grab())
         self.robot.gripper.close_jaws.assert_called_once()
+
+    def test_grab_still_requires_driver_arrival_when_encoder_is_stationary(self):
+        normal_status = self.motor.read_status
+
+        def without_arrival_flag():
+            status = normal_status()
+            status.in_position = False
+            return status
+
+        self.motor.read_status = without_arrival_flag
+        with self.assertRaises(TimeoutError):
+            self.grab()
+
+        self.robot.gripper.close_jaws.assert_not_called()
 
     def test_unchanged_encoder_with_stale_arrival_flag_does_not_allow_grabbing(self):
         self.motor.stalled = True

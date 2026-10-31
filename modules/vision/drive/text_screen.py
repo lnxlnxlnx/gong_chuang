@@ -25,15 +25,21 @@
 
     show_text("314+321+134+132")
 
-命令行自测（按任意键之前窗口不关）::
+命令行自测（点击关闭按钮结束）::
 
     python -m modules.vision.drive.text_screen "134+123+314+231"
 """
 
 from __future__ import annotations
 
+import atexit
+import json
+from pathlib import Path
+from queue import Empty, Queue
+import subprocess
 import sys
-from typing import List, Sequence, Tuple
+from threading import Lock, Thread
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -61,10 +67,9 @@ _STROKE_RATIO = 3.8
 #: 行距是字高的几倍（实拍 120 / 92 ≈ 1.3）。
 _LINE_GAP = 1.3
 
-#: 已经建过的窗口。OpenCV 的 ``imshow`` 会隐式建窗，但不同后端建出来的标题与
-#: 初始尺寸不一致，所以第一条显示走 :func:`open_preview` 显式建窗（它也顺手拒掉
-#: 非 ASCII 名字），之后只覆盖图像。
-_created: set = set()
+# 窗口及事件循环由独立进程拥有，避免抢占控制线程或混用相机预览的 GUI 后端。
+_display: Optional[_TextDisplay] = None
+_display_lock = Lock()
 
 
 def _cv2():
@@ -89,7 +94,9 @@ def _canvas_size(size: Sequence[int]) -> Tuple[int, int]:
     return width, height
 
 
-def _measure(cv2, lines: Sequence[str], scale: float, thickness: int) -> Tuple[float, float]:
+def _measure(
+    cv2, lines: Sequence[str], scale: float, thickness: int,
+) -> Tuple[float, float]:
     """在给定字号下量出 ``(最宽行宽, 最高行高+基线下降)``；只用来排版。"""
     widest = 0.0
     tallest = 0.0
@@ -145,7 +152,9 @@ def render_text(text: str, *, size: Sequence[int] = DEFAULT_SIZE) -> np.ndarray:
     # putText 的 y 是**基线**，所以第一行的基线要再往下让出字高的一半左右。
     baseline = (height - step * len(lines)) // 2 + int(round(tallest))
     for line in lines:
-        (w, _h), _base = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+        (w, _h), _base = cv2.getTextSize(
+            line, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness,
+        )
         cv2.putText(
             canvas,
             line,
@@ -160,34 +169,164 @@ def render_text(text: str, *, size: Sequence[int] = DEFAULT_SIZE) -> np.ndarray:
     return canvas
 
 
+class _TextDisplay:
+    """只传文字和尺寸，显示进程确认绘制后返回，不传相机帧或模型。"""
+
+    def __init__(self) -> None:
+        self.process = subprocess.Popen(
+            [sys.executable, "-u", "-m",
+             "modules.vision.drive.text_screen", "--worker"],
+            cwd=Path(__file__).resolve().parents[3],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            # 隐藏 Windows 子进程控制台，HighGUI 窗口仍正常显示。
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        self.responses: Queue = Queue()
+        self.reader = Thread(target=self._read_responses, daemon=True)
+        self.reader.start()
+
+    def _read_responses(self) -> None:
+        """等待管道时休眠；EOF 也必须唤醒调用方，避免显示失败却返回成功。"""
+        try:
+            for line in self.process.stdout:
+                self.responses.put(json.loads(line))
+        except (OSError, ValueError) as exc:
+            self.responses.put({"error": str(exc)})
+        finally:
+            self.responses.put({
+                "error": "文字显示进程已退出，请检查显示后端和 DISPLAY",
+            })
+
+    def show(self, text: str, size: Tuple[int, int]) -> None:
+        """等待本次绘制确认，之后主程序无需再处理窗口事件。"""
+        try:
+            self.process.stdin.write(json.dumps({"text": text, "size": size}) + "\n")
+            self.process.stdin.flush()
+            response = self.responses.get(timeout=10)
+        except Empty as exc:
+            raise RuntimeError("文字显示进程在 10 秒内未完成绘制") from exc
+        except OSError as exc:
+            raise RuntimeError("无法向文字显示进程发送内容") from exc
+        if "error" in response:
+            raise RuntimeError(response["error"])
+
+    def close(self) -> None:
+        """关闭输入让窗口正常退出；显示后端卡住时也不能拖住机器人退出。"""
+        try:
+            self.process.stdin.close()
+        except OSError:
+            pass
+        try:
+            self.process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        self.reader.join(timeout=1)
+        self.process.stdout.close()
+
+
+def _close_display() -> None:
+    """显示窗口随主程序退出，避免留下占屏的孤儿进程。"""
+    global _display
+    with _display_lock:
+        if _display is not None:
+            _display.close()
+            _display = None
+
+
+atexit.register(_close_display)
+
+
 def show_text(text: str, *, size: Sequence[int] = DEFAULT_SIZE) -> str:
-    """把文字显示在板载屏幕上，**返回后窗口仍然留着**；返回窗口名。
+    """显示文字并返回窗口名；窗口事件在独立进程中持续处理。
 
-    不阻塞、不关闭：只刷一帧就返回，调用方可以接着做别的事，也可以再调一次覆盖
-    同一块屏。窗口随进程退出而消失；要提前关掉用
-    ``cv2.destroyWindow(modules.vision.drive.text_screen.TEXT_WINDOW_NAME)``。
-
-    **它不碰相机、模型和串口**：只画一张画布 + 一次 1 ms 的 ``waitKey``，所以和其余
-    模块互不阻塞。窗口层面只有一条要记住：别的工具收尾时调用的
-    ``preview.close_previews()`` 是 ``destroyAllWindows()``，会把它一起关掉；那时候
-    再调一次本函数就回来了（``imshow`` 会自己重建窗口）。
+    首次调用需要启动显示进程，每次调用在绘制确认后返回，不等待按键。
+    后续程序无需调用 waitKey；静态文字不反复绘制，也不读相机或运行推理。
+    重复调用更新同一窗口，主进程的 destroyAllWindows 不影响它。
+    关闭文字窗可点击窗口关闭按钮，主程序退出时也会自动关闭。
 
     :raises ValueError: 文字为空，或画布尺寸装不下留白。
-    :raises cv2.error: 板子上没有可用的显示后端（没接屏、没设 ``DISPLAY``）。
+    :raises RuntimeError: 显示进程启动、绘制失败或超时。
     """
-    canvas = render_text(text, size=size)
-    cv2 = _cv2()
-    if TEXT_WINDOW_NAME not in _created:
-        open_preview(TEXT_WINDOW_NAME)
-        _created.add(TEXT_WINDOW_NAME)
-    cv2.imshow(TEXT_WINDOW_NAME, canvas)
-    # 只 imshow 不泵事件，某些后端不会真的把这一帧画出来。等一下就够了，不等按键。
-    cv2.waitKey(1)
+    global _display
+    value = "\n".join(_lines(text))
+    dimensions = _canvas_size(size)
+    with _display_lock:
+        if _display is not None and _display.process.poll() is not None:
+            _display.close()
+            _display = None
+        if _display is None:
+            _display = _TextDisplay()
+        try:
+            _display.show(value, dimensions)
+        except Exception:
+            _display.close()
+            _display = None
+            raise
     return TEXT_WINDOW_NAME
 
 
+def _run_display() -> int:
+    """GUI 只在显示进程的主线程运行，兼容 Win32 和 Qt 后端。"""
+    commands: Queue = Queue()
+
+    def read_commands() -> None:
+        """输入线程只等管道，不调用 GUI；主进程退出后的 EOF 负责收尾。"""
+        try:
+            for line in sys.stdin:
+                commands.put(json.loads(line))
+        except (OSError, ValueError) as exc:
+            commands.put(exc)
+        finally:
+            commands.put(None)
+
+    Thread(target=read_commands, daemon=True).start()
+    cv2 = _cv2()
+    cv2.setNumThreads(1)
+    opened = False
+    idle = object()
+    try:
+        while True:
+            try:
+                command = commands.get(timeout=0.05) if opened else commands.get()
+            except Empty:
+                command = idle
+            if command is None:
+                return 0
+            if isinstance(command, Exception):
+                raise command
+            if command is not idle:
+                canvas = render_text(command["text"], size=command["size"])
+                if not opened:
+                    open_preview(TEXT_WINDOW_NAME)
+                    opened = True
+                cv2.imshow(TEXT_WINDOW_NAME, canvas)
+                cv2.resizeWindow(TEXT_WINDOW_NAME, canvas.shape[1], canvas.shape[0])
+            # 每约 50 ms 泵一次事件；静态图不重画，空闲时阻塞等待，避免忙轮询。
+            cv2.waitKey(1)
+            # GTK2 不提供 WND_PROP_VISIBLE；图像区域能直接判断窗口是否还存在。
+            try:
+                _x, _y, width, height = cv2.getWindowImageRect(TEXT_WINDOW_NAME)
+            except cv2.error:
+                return 0
+            if width < 0 or height < 0:
+                return 0
+            if command is not idle:
+                print(json.dumps({"ok": True}), flush=True)
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}), flush=True)
+        return 1
+    finally:
+        if opened:
+            cv2.destroyAllWindows()
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--worker":
+        raise SystemExit(_run_display())
     show_text(sys.argv[1] if len(sys.argv) > 1 else "134+123+314+231")
-    print("按任意键关闭窗口")
-    _cv2().waitKey(0)
-    _cv2().destroyAllWindows()
+    print("关闭文字窗口以结束")
+    _display.process.wait()

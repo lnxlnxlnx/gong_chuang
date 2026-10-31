@@ -645,11 +645,14 @@ class RobotArm:
         *,
         keep_moving: Callable[[], bool],
         rpm: Optional[int] = None,
+        stop_when_still: bool = False,
     ) -> bool:
-        """边走边检查，检查失败立即刹停；返回是否实测到位。
+        """边走边检查，检查失败立即刹停；默认要求驱动器确认到位。
 
         回调只做观测，不得另发运动命令。退出时用编码器增量修正命令里程表，
         避免取消半途动作后，下一次绝对定位仍从原目标位置计算位移。
+        ``stop_when_still`` 用于后续还会视觉闭环的修正动作：实测有运动且编码器
+        在 ``settle_seconds`` 内变化不超过一个命令脉冲即可返回，不代表目标已到位。
         """
         target = motor_pulses_for_degrees(
             degrees, pulses_per_revolution=self.pulses_per_revolution
@@ -667,6 +670,8 @@ class RobotArm:
             + IN_POSITION_TIMEOUT_MARGIN_SECONDS
         )
         status: Optional[MotorStatus] = None
+        stable_since: Optional[float] = None
+        stable_reference = start
 
         def diagnosis() -> str:
             # 使用本轮已读到的数据，不再查询，避免故障后的状态覆盖超时现场。
@@ -691,11 +696,21 @@ class RobotArm:
                     status = self._motors[axis_name].read_status()
                     if status.stalled or status.stall_protected:
                         raise RuntimeError(f"{axis_name} 监控移动发生堵转；{diagnosis()}")
-                    # 到位窗口由驱动器决定；还须实测离开起点，排除旧的到位位。
-                    if status.in_position and (target == start or abs(measured - start) >= 1):
+                    moved = abs(measured - start) >= 1
+                    if stop_when_still:
+                        if not status.enabled:
+                            raise RuntimeError(f"{axis_name} 监控移动时电机未使能；{diagnosis()}")
+                        if stable_since is None or abs(measured - stable_reference) > 1.0:
+                            stable_reference = measured
+                            stable_since = self._clock()
+                        elif moved and self._clock() - stable_since >= self.settle_seconds:
+                            return True
+                    # 抓取、下降等动作仍以驱动器到位窗口为准，不能只凭停住继续。
+                    elif status.in_position and (target == start or moved):
                         return True
                 if self._clock() >= deadline:
-                    raise TimeoutError(f"{axis_name} 监控移动未实测到位；{diagnosis()}")
+                    reason = "未实测停稳" if stop_when_still else "未实测到位"
+                    raise TimeoutError(f"{axis_name} 监控移动{reason}；{diagnosis()}")
                 self._sleep(0.01)
         finally:
             # 先停再读；编码器与软件原点可能不同，因此只使用本段的实测增量。
