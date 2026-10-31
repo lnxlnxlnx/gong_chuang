@@ -349,7 +349,7 @@ def square_chassis_to_ring_row(
     *,
     yaw_offset_deg: float = ROW_SQUARE_YAW_OFFSET_DEG,
     tolerance_deg: float = RING_ROW_SQUARE_TOLERANCE_DEG,
-    max_iterations: int = 6,
+    max_iterations: int = 7,
     rpm: int = 15,
 ) -> float:
     """转**车**让车头与三环圆心那条直线垂直：读一帧倾角，按实测响应比一步到位。
@@ -715,9 +715,9 @@ def _grab_material_from_car(robot: Robot):
     robot.arm.move_axis_to_motor_degrees("lift", 980)
     robot.arm.move_axis_to_motor_degrees("base", 800)
     _turntable_position_index = (_turntable_position_index + 1) % len(TURNTABLE_POSITIONS)
+    robot.turntable.go_to(TURNTABLE_POSITIONS[_turntable_position_index], wait=False)
     batch.add(robot.arm.move_axis_to_motor_degrees("lift", 760, wait=False))
     batch.add(robot.arm.move_axis_to_motor_degrees("base", 400, wait=False))
-    batch.add(robot.turntable.go_to(TURNTABLE_POSITIONS[_turntable_position_index], wait=False))
     batch.wait()
 
 def _place_material_to_repo(robot: Robot, *, verbose: bool = False):
@@ -943,7 +943,7 @@ def place_material_from_repo_to_floor_from_center_ring(
     robot: Robot,
     *,
     orders: tuple[int, int, int] = (3, 2, 1),
-    place_lift: float = 95.0,
+    place_lift: float = 90.0,
     tolerance_mm: float = 4,
     need_calibrate: bool = False,
     row_yaw_correction_deg: float = 8.5,
@@ -991,11 +991,11 @@ def place_material_from_repo_to_floor_from_center_ring(
     try:
         if need_calibrate:
             move_axes_to(robot, RING_ROW_OBSERVE_POSE).wait()
-            time.sleep(1)
+            # time.sleep(1)
             square_chassis_to_ring_row(robot)
         # 转车观察与环心对准使用不同高度；恢复姿态才能复用原落料补偿。
         move_axes_to(robot, RING2_APPROACH_POSE).wait()
-        time.sleep(1)
+        # time.sleep(1)
         base, extension = _align_floor_ring(
             robot, digit=2, tolerance_mm=tolerance_mm
         )
@@ -1075,15 +1075,15 @@ def grab_material_from_floor_to_repo_by_xy(
     ring_position = [(-190, 580, 720), (-32, 580, 540), (110, 580, 720)]
     try:
         for order in orders:
-            move_axes_to(robot, {"lift": ring_position[order - 1][1], "extension": ring_position[order - 1][2], "base": ring_position[order - 1][0]}).wait()
             if pre_locations is None:
+                move_axes_to(robot, {"lift": ring_position[order - 1][1], "extension": ring_position[order - 1][2], "base": ring_position[order - 1][0]}).wait()
                 time.sleep(1)  # 先让车停稳
                 result = robot.grasp.align_xy(tolerance_mm=3.0)
             else:
                 position = pre_locations.pop(0)
                 print(position)
                 move_axes_to(robot, position).wait()
-            robot.arm.move_axis_to_motor_degrees("lift", 90, rpm = 75)
+            robot.arm.move_axis_to_motor_degrees("lift", 90, rpm = 95)
             robot.gripper.close_jaws()
             _place_material_to_repo(robot, verbose=True)
             _go_home(robot, home)
