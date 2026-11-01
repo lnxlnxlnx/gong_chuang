@@ -1361,7 +1361,7 @@ def grab_material_from_floor_to_repo_by_xy(
     *,
     orders: tuple[int, int, int] = (3, 2, 1),
     pre_locations: list[dict[str, float]] | None = None,
-    home: dict[str, float] | None = {"lift": 760, "extension": 400, "base": -32},
+    home: dict[str, float] | None = {"lift": 760, "extension": 500, "base": -32},
 ):
     """把物料从地面圆环放到仓库里。不需要考虑初始状态。
 

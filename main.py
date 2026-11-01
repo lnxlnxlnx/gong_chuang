@@ -207,13 +207,13 @@ def run_map():
         move_axes_to(robot, {"lift": 495, "extension": 580, "base": -52})
         robot.chassis.forward(pulses=24000)
         robot.arm.move_axis_to_motor_degrees("lift", 950, wait=False)  # 先让环进视野
-        robot.chassis.left(pulses=1200)
+        robot.chassis.left(pulses=1600)
         place_and_grab_material(robot, need_calibrate=False)
         
         
         # 到细加工区
-        robot.chassis.right(pulses=13800)
-        robot.chassis.rotate_cw(pulses=ROTATE_PULSE + ROTATE_OFFSET)
+        robot.chassis.right(pulses=13850)
+        robot.chassis.rotate_cw(pulses=ROTATE_PULSE + ROTATE_OFFSET - 100)
         move_axes_to(robot, {"lift": 495, "extension": 630, "base": -52})
         robot.chassis.right(pulses=10600)
         move_axes_to(robot, {"lift": 960, "base": -52}).wait()  # 先让环进视野
@@ -223,24 +223,24 @@ def run_map():
         
         # 第二次到圆盘
         robot.chassis.right(pulses=12600)
-        robot.chassis.backward(pulses=12300)
+        robot.chassis.backward(pulses=11800)
         grab_material_from_turntable_to_repo_follow_v2(robot, want_colors=("green", "yellow", "red"))     # 完成后在extension=270的位置
-        robot.chassis.rotate_ccw(pulses=ROTATE_PULSE + 50)
+        robot.chassis.rotate_ccw(pulses=ROTATE_PULSE + 60)
         
         # 第二次到粗加工区
         robot.gripper.set_position(250, wait=False)
         robot.chassis.forward(pulses=23700)
         move_axes_to(robot, {"lift": 495, "extension": 580, "base": -80})
-        robot.chassis.left(pulses=800)
+        robot.chassis.left(pulses=1200)
         robot.arm.move_axis_to_motor_degrees("lift", 950)
         place_and_grab_material(robot, need_calibrate=False, place_orders=(2, 3, 1), grab_orders=(1, 3, 2))
         
         # 第二次到细加工区
-        robot.chassis.right(pulses=13000)
-        robot.chassis.rotate_cw(pulses=ROTATE_PULSE + ROTATE_OFFSET + 10)
+        robot.chassis.right(pulses=13650)
+        robot.chassis.rotate_cw(pulses=ROTATE_PULSE + ROTATE_OFFSET - 60)
         move_axes_to(robot, {"lift": 495, "extension": 580, "base": 80})
         robot.chassis.right(pulses=10600)
-        robot.arm.move_axis_to_motor_degrees("lift", 950)
+        robot.arm.move_axis_to_motor_degrees("lift", 850)
         place_material_on_material_by_order(robot, orders=(1, 2, 3))
         
         # 回到起点
@@ -344,5 +344,5 @@ def run_map_no_act():
 
 if __name__ == "__main__":
     # main()
-    # run_map()
-    run_map_no_act()
+    run_map()
+    # run_map_no_act()
