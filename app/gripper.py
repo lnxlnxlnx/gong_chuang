@@ -1440,16 +1440,15 @@ def place_material_on_material_by_order(
     # move_axes_to(robot, SAFE_RETRACT).wait()
     
     
-def place_and_grab_material(robot:Robot, place_orders = (1, 2, 3), grab_orders = None, need_calibrate = True):
+def place_and_grab_material(robot:Robot, place_orders = (1, 2, 3), grab_orders = None, need_calibrate = False):
     """按指定顺序放料，再按环号复用放料落点回抓。"""
     if grab_orders is None:
         grab_orders = place_orders
     # 放宽中环容差并限制修正轮数，省去末段微调；回抓继续复用同一落点。
     locations = place_material_from_repo_to_floor_from_center_ring(
-        robot, orders=place_orders, need_calibrate=True,
+        robot, orders=place_orders, need_calibrate=need_calibrate,
         tolerance_mm=8.0, align_max_iterations=3,
     )
-    locations = place_material_from_repo_to_floor_from_center_ring(robot, orders=place_orders, need_calibrate = need_calibrate)
     # 回抓按列表顺序取位置，必须按 grab_orders 排列，不能沿用放料顺序。
     pre_locations = [locations[digit] for digit in grab_orders]
     grab_material_from_floor_to_repo_by_xy(robot, orders=grab_orders, pre_locations=pre_locations)
