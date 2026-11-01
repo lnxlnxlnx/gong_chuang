@@ -1387,7 +1387,7 @@ def grab_material_from_floor_to_repo_by_xy(
                 position = pre_locations.pop(0)
                 print(position)
                 move_axes_to(robot, position).wait()
-            robot.arm.move_axis_to_motor_degrees("lift", 95)
+            robot.arm.move_axis_to_motor_degrees("lift", 100)
             robot.gripper.close_jaws()
             _place_material_to_repo(robot, verbose=True)
             # _go_home(robot, home)
