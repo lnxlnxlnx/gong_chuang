@@ -754,7 +754,7 @@ def _descend_and_grab_from_turntable_monitored(
             return False
     robot.gripper.close_jaws()
     robot.arm.move_axis_to_motor_degrees("lift", 900, rpm=120)
-    time.sleep(0.2)  # 合爪后先停一下
+    time.sleep(0.5)  # 合爪后先停一下
     return True
 
 
@@ -942,7 +942,7 @@ def _grab_material_from_car(robot: Robot):
     batch.wait()
     report = move_axes_to(robot, {"lift": 980, "extension": 5, "base": 1045}).wait()
     robot.gripper.set_position(120)
-    robot.arm.move_axis_to_motor_degrees("lift", 845)
+    robot.arm.move_axis_to_motor_degrees("lift", 880)
     
     robot.gripper.close_jaws()
     
@@ -950,7 +950,7 @@ def _grab_material_from_car(robot: Robot):
     robot.arm.move_axis_to_motor_degrees("base", 800)
     _turntable_position_index = (_turntable_position_index + 1) % len(TURNTABLE_POSITIONS)
     robot.turntable.go_to(TURNTABLE_POSITIONS[_turntable_position_index], wait=False)
-    batch.add(robot.arm.move_axis_to_motor_degrees("lift", 760, wait=False))
+    batch.add(robot.arm.move_axis_to_motor_degrees("lift", 940, wait=False))
     batch.add(robot.arm.move_axis_to_motor_degrees("base", 400, wait=False))
     batch.wait()
 
@@ -964,7 +964,7 @@ def _place_material_to_repo(robot: Robot, *, verbose: bool = False):
     #    工作区是空的（伸出状态下横扫会把整条臂扫过去）。
     robot.arm.move_axis_to_motor_degrees("lift", 500)
     move_axes_to(robot, {"extension": 270.0, "base": 400, "lift": 900}).wait()
-    report = move_axes_to(robot, {"lift": 905, "extension": 10, "base": 1048}).wait()
+    report = move_axes_to(robot, {"lift": 915, "extension": 10, "base": 1048}).wait()
     if verbose:
         _print_report("放料前", report)
 
@@ -1240,7 +1240,7 @@ def place_material_from_repo_to_floor_from_center_ring(
     robot: Robot,
     *,
     orders: tuple[int, int, int] = (3, 2, 1),
-    place_lift: float = 90.0,
+    place_lift: float = 98.0,
     tolerance_mm: float = 4,
     align_max_iterations: int = 6,
     need_calibrate: bool = False,
@@ -1381,7 +1381,7 @@ def grab_material_from_floor_to_repo_by_xy(
                 position = pre_locations.pop(0)
                 print(position)
                 move_axes_to(robot, position).wait()
-            robot.arm.move_axis_to_motor_degrees("lift", 90)
+            robot.arm.move_axis_to_motor_degrees("lift", 95)
             robot.gripper.close_jaws()
             _place_material_to_repo(robot, verbose=True)
             # _go_home(robot, home)
@@ -1425,7 +1425,7 @@ def place_material_on_material_by_order(
             # time.sleep(1)  # 先让车停稳
             # 最多修正五次；未进容差时先回到本轮最佳落点，再保存关节位置。
             aligned = robot.grasp.align_xy(
-                tolerance_mm=2.0, max_iterations=5, return_best=True,
+                tolerance_mm=2.0, max_iterations=4, return_best=True,
             )
             print(f"  {aligned.summary()}")
             # 抓料会把这几个轴都开走，所以先记下来：这趟的落点就是现在这个角度。
