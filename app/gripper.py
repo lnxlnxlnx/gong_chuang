@@ -693,7 +693,11 @@ def grab_material_from_turntable_to_repo_follow_v2(
             ):
                 break
             print(f"  {color} 偏离可抓范围或检测不到：已抬回，重新跟随")
-        _stow_material_to_repo(robot)
+        # 入库后回到本次抓取位置，供下一块物料继续跟随。
+        base_position = robot.arm.read_abs_state("base").motor_degrees
+        extension_position = robot.arm.read_abs_state("extension").motor_degrees
+        position = {"base": base_position, "extension": extension_position}
+        _stow_material_to_repo(robot, position=position)
     move_axes_to(robot, SAFE_RETRACT).wait()
     robot.gripper.set_position(150)
 
