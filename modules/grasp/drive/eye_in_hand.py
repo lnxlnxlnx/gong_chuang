@@ -420,6 +420,7 @@ def align_x_y(
     lift_scale: Optional[LiftScale] = None,
     single_step: bool = False,
     reading: Optional[Sequence[float]] = None,
+    return_best: bool = False,
     on_message: Optional[Callable[[str], None]] = None,
 ) -> VisualServoResult:
     """闭环把物块伺服到 ``(tx, ty)``；只动 底座 与 伸缩，不碰高度。
@@ -443,7 +444,9 @@ def align_x_y(
             robot.grasp.align_xy(reading=(report.best.x_mm, report.best.y_mm))
 
         放进循环就是跟随：每轮只取**一帧**、只走**一步**，中间没有第二次测量。
-    :raises VisualServoError: 看不到物块、雅可比奇异、脉冲预算用完，或迭代用尽仍未进容差。
+    :param return_best: 最多调整 ``max_iterations`` 次并测量最后落点；仍未达标时，
+        回到已测得误差最小的位置返回，供堆叠继续放料。其他异常仍然抛出。
+    :raises VisualServoError: 看不到物块、雅可比奇异、脉冲预算用完，或普通对准迭代用尽。
     :raises ValueError: ``reading`` 不是两个数。
 
     物块**中途看不见**分两种，处理方式不同：
@@ -559,7 +562,10 @@ def align_x_y(
     #: 之后误差还大就换粗档——粗档少等几帧，而每帧都要跑一次定位。
     settle_tolerance = fine_settle_tolerance
 
-    for attempt in range(1, config.max_iterations + 1):
+    best = None
+    # 堆叠在最后一次调整后多测一次，才能把最后落点也纳入最佳位置比较。
+    measurement_limit = config.max_iterations + int(return_best)
+    for attempt in range(1, measurement_limit + 1):
         started = time.monotonic()
         try:
             sighting = _settled_sighting(
@@ -606,6 +612,8 @@ def align_x_y(
         error_x = offset[0] - target.x_mm
         error_y = offset[1] - target.y_mm
         error = math.hypot(error_x, error_y)
+        if return_best and (best is None or error < best[0]):
+            best = (error, offset, total_base, total_radial)
         # 下一轮判"停稳"用哪一档：还差得远就用粗档（少等几帧），近了回到细档。
         settle_tolerance = (
             config.coarse_settle_tolerance_mm
@@ -627,6 +635,9 @@ def align_x_y(
                 iterations=attempt,
                 tolerance_mm=config.tolerance_mm,
             )
+
+        if return_best and attempt == measurement_limit:
+            break
 
         # 上一次那一步到底把画面挪到哪了：**连续两步**都与雅可比预测方向相反才停下。
         # 一步不算：物块被爪子推动、检测跳到画面里别的圆上，都会让单独一步看起来相反。
@@ -708,6 +719,25 @@ def align_x_y(
         previous_step = (base_step, radial_step)
         # 两个动作都已等完，从这一刻起才允许读新帧。
         checkpoint = time.monotonic() + config.frame_margin_seconds
+
+    if return_best and best is not None:
+        _, offset, best_base, best_radial = best
+        retreat_base = best_base - total_base
+        retreat_radial = best_radial - total_radial
+        if retreat_base or retreat_radial:
+            _move_axes(arm, retreat_base, retreat_radial, config)
+            # 末项引用回退姿态的历史读数，并非回退后重新测量。
+            readings.append(offset)
+        say(
+            f"  x/y 调整 {config.max_iterations} 次未进容差；"
+            f"已回到最小误差 {best[0]:.2f} mm 的位置，继续放料"
+        )
+        return VisualServoResult(
+            target=target, readings=tuple(readings),
+            error_x=offset[0] - target.x_mm, error_y=offset[1] - target.y_mm,
+            base_pulses=best_base, radial_pulses=best_radial,
+            iterations=attempt, tolerance_mm=config.tolerance_mm,
+        )
 
     last = readings[-1]
     raise VisualServoError(

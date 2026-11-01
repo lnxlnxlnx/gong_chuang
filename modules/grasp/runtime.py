@@ -425,11 +425,15 @@ class Grasp:
         reading=None,
         want=None,
         tolerance_mm: float | None = None,
+        max_iterations: int | None = None,
+        return_best: bool = False,
     ) -> VisualServoResult:
         """只做 x/y 对准：**默认一步都不动高度**，高度由调用方负责。
 
         只动平面（底座 + 伸缩），**不下降、不后缩**。
 
+        :param max_iterations: 本次调整次数上限；不传时沿用配置，不修改共享配置。
+        :param return_best: 达到调整上限后回到已测得的最佳位置，允许未进容差时继续放料。
         :param hover: 要不要先把高度伺服到 ``hover_z_mm``。那一步会**自己升降**——物块放得
             高时它会一路往上抬到行程端点（抬升方向没有上限），所以默认不做；要做就传
             ``hover=True``。配置里没写 ``hover_z_mm`` 时这一步本来就不发生。
@@ -492,6 +496,8 @@ class Grasp:
             lift_scale=self._lift_scale,
             on_message=self._say,
         )
+        if return_best:
+            options["return_best"] = True
         # 门槛只改这一次：``VisualServoConfig`` 是 frozen 的，``replace`` 顺带跑它自己的校验
         # （<=0 直接 ValueError），也顺带把由它派生的"停稳细档"（0.25×容差）一起改掉。
         config = (
@@ -499,6 +505,8 @@ class Grasp:
             if tolerance_mm is None
             else replace(self._config, tolerance_mm=float(tolerance_mm))
         )
+        if max_iterations is not None:
+            config = replace(config, max_iterations=max_iterations)
         if not ensure_safe_height:
             return align_x_y(
                 arm,

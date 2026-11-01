@@ -1677,6 +1677,45 @@ class AlignXYTests(unittest.TestCase):
     TRUTH = VisualServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
     TARGET = VisualServoTarget(x_mm=2.0, y_mm=-1.0)
 
+    def test_best_effort_restores_the_best_measured_pose_after_five_adjustments(self) -> None:
+        # 最后一轮也要实测；最佳位置可能在中途、最后，也可能就是起点。
+        for errors in (
+            (10, 8, 6, 4, 7, 5), (10, 9, 8, 7, 6, 5),
+            (3, 8, 6, 4, 7, 5), (10, 8, 6, 4, 7, 1),
+        ):
+            with self.subTest(errors=errors):
+                position = [0, 0]
+                measured_positions = []
+                moves = []
+                values = iter(errors)
+
+                def measure(*_args, **_kwargs):
+                    measured_positions.append(tuple(position))
+                    return sighting(1, next(values), 0)
+
+                def move(_arm, base, radial, _config):
+                    moves.append((base, radial))
+                    position[0] += base
+                    position[1] += radial
+                    return 0.0
+
+                with patch.object(algorithms, "_settled_sighting", side_effect=measure), \
+                        patch.object(algorithms, "_move_axes", side_effect=move):
+                    result = align_x_y(
+                        object(), object(), MaterialSelector(), VisualServoTarget(0, 0),
+                        VisualServoJacobian(0.01, 0, 0, 0.01),
+                        VisualServoConfig(tolerance_mm=2, max_iterations=5),
+                        ensure_safe_height=False, return_best=True,
+                    )
+                best_index = errors.index(min(errors))
+                self.assertEqual(len(measured_positions), 6)
+                self.assertEqual(tuple(position), measured_positions[best_index])
+                self.assertEqual((result.base_pulses, result.radial_pulses), tuple(position))
+                self.assertAlmostEqual(result.error_mm, min(errors))
+                self.assertEqual(result.readings[-1], (min(errors), 0))
+                self.assertEqual(result.aligned, min(errors) <= 2)
+                self.assertEqual(len(moves), 5 + (best_index != 5))
+
     def test_converges_and_guards_every_post_move_read(self) -> None:
         arm = FakeArm(self.TRUTH)
         link = BufferedLink(arm)
@@ -2533,6 +2572,19 @@ class GraspAlignXYSessionTests(unittest.TestCase):
                 session.mock("align").call_args.args[5].tolerance_mm,
                 session.grasp._config.tolerance_mm,
             )
+
+    def test_best_effort_and_five_adjustments_apply_only_to_this_call(self) -> None:
+        rig = self.build(hover_z_mm=None)
+        with rig as session:
+            session.grasp.align_xy(max_iterations=5, return_best=True)
+            self.assertEqual(session.mock("align").call_args.args[5].max_iterations, 5)
+            self.assertTrue(session.mock("align").call_args.kwargs["return_best"])
+            session.grasp.align_xy()
+            self.assertEqual(
+                session.mock("align").call_args.args[5].max_iterations,
+                session.grasp._config.max_iterations,
+            )
+            self.assertFalse(session.mock("align").call_args.kwargs.get("return_best", False))
 
     def test_a_non_positive_tolerance_is_rejected_before_anything_moves(self) -> None:
         rig = self.build(hover_z_mm=None)

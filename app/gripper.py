@@ -1423,7 +1423,11 @@ def place_material_on_material_by_order(
             base, lift, extension = _PLACE_POSITION[order - 1]
             move_axes_to(robot, {"lift": lift, "extension": extension, "base": base}).wait()
             # time.sleep(1)  # 先让车停稳
-            robot.grasp.align_xy(tolerance_mm=2.0)
+            # 最多修正五次；未进容差时先回到本轮最佳落点，再保存关节位置。
+            aligned = robot.grasp.align_xy(
+                tolerance_mm=2.0, max_iterations=5, return_best=True,
+            )
+            print(f"  {aligned.summary()}")
             # 抓料会把这几个轴都开走，所以先记下来：这趟的落点就是现在这个角度。
             base_deg = robot.arm.turns_state.of("base").motor_degrees
             extension_deg = robot.arm.turns_state.of("extension").motor_degrees

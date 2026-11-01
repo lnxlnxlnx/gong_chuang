@@ -57,6 +57,8 @@ class PlaceBoxToBoxV2Tests(unittest.TestCase):
 
         robot.grasp.align_xy.assert_called_once()
         self.assertIn("tolerance_mm", robot.grasp.align_xy.call_args.kwargs)
+        self.assertEqual(robot.grasp.align_xy.call_args.kwargs["max_iterations"], 5)
+        self.assertTrue(robot.grasp.align_xy.call_args.kwargs["return_best"])
         robot.gripper.open_jaws.assert_called_once()
 
     def test_a_bad_order_is_rejected_before_anything_moves(self) -> None:
