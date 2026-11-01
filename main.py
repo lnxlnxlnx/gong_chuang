@@ -187,7 +187,7 @@ def run_map(debug = False):
         ###################
         ###################运行区##########
         # 移动到二维码区
-        time.sleep(2)
+        time.sleep(3)
         robot.chassis.left(pulses = 13000)
         robot.chassis.rotate_ccw(pulses = 205)
         robot.vision.show_text("124+123+421+231")

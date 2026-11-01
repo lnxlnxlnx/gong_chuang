@@ -760,7 +760,7 @@ def _descend_and_grab_from_turntable_monitored(
             return False
     robot.gripper.close_jaws()
     robot.arm.move_axis_to_motor_degrees("lift", 900, rpm=120)
-    time.sleep(0.4)  # 合爪后先停一下
+    time.sleep(0.5)  # 合爪后先停一下
     return True
 
 
