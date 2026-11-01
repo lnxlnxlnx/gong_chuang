@@ -653,6 +653,7 @@ class RobotArm:
         避免取消半途动作后，下一次绝对定位仍从原目标位置计算位移。
         ``stop_when_still`` 用于后续还会视觉闭环的修正动作：实测有运动且编码器
         在 ``settle_seconds`` 内变化不超过一个命令脉冲即可返回，不代表目标已到位。
+        驱动器已确认到位时直接返回，不再要求额外的编码器停稳窗口。
         """
         target = motor_pulses_for_degrees(
             degrees, pulses_per_revolution=self.pulses_per_revolution
@@ -700,6 +701,9 @@ class RobotArm:
                     if stop_when_still:
                         if not status.enabled:
                             raise RuntimeError(f"{axis_name} 监控移动时电机未使能；{diagnosis()}")
+                        # 已到位后的反馈微抖不应中断圆环视觉闭环。
+                        if status.in_position and (target == start or moved):
+                            return True
                         if stable_since is None or abs(measured - stable_reference) > 1.0:
                             stable_reference = measured
                             stable_since = self._clock()

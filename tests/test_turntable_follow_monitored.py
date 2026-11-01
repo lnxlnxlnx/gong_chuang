@@ -182,6 +182,28 @@ class RingMonitoredMotionTests(unittest.TestCase):
 
         self.assertTrue(self.motor.stops)
 
+    def test_arrived_motor_does_not_require_encoder_standstill(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        normal_read = self.motor.read_position
+        samples = []
+
+        def jittering_encoder():
+            measured = normal_read()
+            if self.motor.moves:
+                samples.append(measured)
+                # 驱动器已到位，但反馈交替抖动，始终无法满足一脉冲的停稳窗口。
+                jitter = 2 if len(samples) % 2 else -2
+                measured += jitter * 65536 / self.arm.pulses_per_revolution
+            return measured
+
+        self.motor.read_position = jittering_encoder
+        motion._move_ring_axis(self.arm, "base", 411)
+
+        self.assertAlmostEqual(self.motor.position, 411, delta=3)
+        self.assertTrue(self.motor.stops)
+        self.assertAlmostEqual(self.arm.read_abs_state("base").pulses, 411, delta=3)
+
     def test_disabled_or_stalled_motor_is_not_accepted_as_standstill(self):
         from modules.grasp.drive import visual_servo_motion as motion
 
