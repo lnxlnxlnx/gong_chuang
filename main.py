@@ -162,7 +162,7 @@ def run_map():
         # # place_material_from_repo_to_floor_by_pose(robot)
         # # grab_material_from_floor_to_repo_by_xy(robot)
         # place_and_grab_material(robot)
-        if (True):
+        if (False):
             move_axes_to(robot, {"lift": 595, "extension": 350, "base": 0}).wait()
             square_chassis_to_ring_row(robot, tolerance_deg= 180)
             place_material_on_material_by_order(robot, orders=(3, 2, 1))
@@ -188,8 +188,8 @@ def run_map():
         # input("移动到二维码区")
         robot.chassis.rotate_ccw(pulses = 200)
         robot.chassis.right(pulses = 11500)
-        robot.vision.show_text("213+213+312+312")
-        input("出发")
+        robot.vision.show_text("124+123+421+231")
+        # input("出发")
         
         
         # 移动到物料盘
@@ -197,11 +197,11 @@ def run_map():
         robot.chassis.forward(pulses=13000)     # 240
 
         # 抓取物料
-        grab_material_from_turntable_to_repo_follow(robot)     # 完成后在extension=270的位置
+        grab_material_from_turntable_to_repo_follow_v2(robot)     # 完成后在extension=270的位置
         robot.chassis.rotate_ccw(pulses=ROTATE_PULSE)
         
         # 移动到粗加工区
-        input("移动到粗加工区")
+        # input("移动到粗加工区")
         # time.sleep(0.3)
         # batch = robot.motion.begin()
         # batch.add(robot.chassis.forward(rpm= 60, pulses=22500, wait=False))
@@ -209,46 +209,45 @@ def run_map():
         # batch.wait()
         
         # place_and_grab_material(robot)
+        robot.gripper.set_position(250, wait=False)
         robot.chassis.forward(pulses=23600)
         robot.chassis.left(pulses=1600)
         move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
-        move_axes_to(robot, {"lift": 980, "base": -80}).wait()  # 先让环进视野
-        center_chassis_on_ring(robot, require_digit=2)
-        robot.chassis.left(pulses=600)
-        place_and_grab_material(robot)
+        move_axes_to(robot, {"lift": 980, "base": -52}).wait()  # 先让环进视野
+        # center_chassis_on_ring(robot, require_digit=2)
+        # robot.chassis.left(pulses=600)
+        place_and_grab_material(robot, need_calibrate=False)
         # 到细加工区
-        robot.chassis.right(pulses=13500)
+        robot.chassis.right(pulses=14000)
         robot.chassis.rotate_cw(pulses=ROTATE_PULSE + ROTATE_OFFSET)
         robot.chassis.right(pulses=10600)
         move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
-        move_axes_to(robot, {"lift": 950, "base": -80}).wait()  # 先让环进视野
+        move_axes_to(robot, {"lift": 950, "base": -52}).wait()  # 先让环进视野
         # center_chassis_on_ring(robot, require_digit=2)
-        robot.chassis.left(pulses=500)
-        place_material_from_repo_to_floor_from_center_ring(robot, need_calibrate = True)
+        # robot.chassis.left(pulses=500)
+        place_material_from_repo_to_floor_from_center_ring(robot, need_calibrate = False, orders = (1, 2, 3))
         
         
         # 第二次到圆盘
         robot.chassis.right(pulses=13000)
         robot.chassis.backward(pulses=12300)
-        grab_material_from_turntable_to_repo_follow(robot)
-        robot.chassis.rotate_ccw(pulses=ROTATE_PULSE - 250)
+        grab_material_from_turntable_to_repo_follow_v2(robot, want_colors=("green", "yellow", "red"))     # 完成后在extension=270的位置
+        robot.chassis.rotate_ccw(pulses=ROTATE_PULSE)
         
         # 第二次到粗加工区
+        robot.gripper.set_position(250, wait=False)
         robot.chassis.forward(pulses=24000)
+        move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0})
+        move_axes_to(robot, {"lift": 980, "base": -80})  # 先让环进视野
         robot.chassis.left(pulses=1000)
-        move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
-        move_axes_to(robot, {"lift": 980, "base": -80}).wait()  # 先让环进视野
-        center_chassis_on_ring(robot, require_digit=2)
-        robot.chassis.left(pulses=600)
-        place_and_grab_material(robot)
+        place_and_grab_material(robot, need_calibrate=False, place_orders=(2, 3, 1), grab_orders=(1, 2, 3))
         
         # 第二次到细加工区
-        robot.chassis.right(pulses=13500)
+        robot.chassis.right(pulses=14000)
         robot.chassis.rotate_cw(pulses=ROTATE_PULSE + ROTATE_OFFSET)
+        move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0})
+        move_axes_to(robot, {"lift": 950, "base": -80})  # 先让环进视野
         robot.chassis.right(pulses=10600)
-        move_axes_to(robot, {"lift": 495, "extension": 580, "base": 0}).wait()
-        move_axes_to(robot, {"lift": 950, "base": -80}).wait()  # 先让环进视野
-        robot.chassis.left(pulses=500)
         place_material_on_material_by_order(robot, orders=(3, 2, 1))
         
         # 回到起点
@@ -257,6 +256,7 @@ def run_map():
         robot.arm.move_axis_to_motor_degrees("lift", 400.0, wait=False)
         robot.gripper.set_position(50, wait=False)
         robot.arm.move_axis_to_motor_degrees("base", 0, wait=False)
+        robot.arm.move_axis_to_motor_degrees("extension", 280, wait=False)
         robot.chassis.backward(pulses=23500)
         robot.arm.move_axis_to_motor_degrees("lift", 100.0, wait=False)
         robot.chassis.right(pulses=1300)

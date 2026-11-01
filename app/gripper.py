@@ -165,8 +165,8 @@ RING_ROW_SQUARE_TOLERANCE_DEG = 1.0
 #: 车头与"相机画面水平轴"的固定差角（度）。装出来的臂不是正对车头时补这个。
 #: 它等于**车头摆正时**该量到的直线倾角：人眼把车头摆到与环排垂直，跑一次
 #: :func:`square_chassis_to_ring_row` 读打印出来的倾角，把那个数填这里。
-# ROW_SQUARE_YAW_OFFSET_DEG = 4.01
-ROW_SQUARE_YAW_OFFSET_DEG = -2.5
+ROW_SQUARE_YAW_OFFSET_DEG = 4.01
+# ROW_SQUARE_YAW_OFFSET_DEG = -2.5
 #: 还不知道"每脉冲让倾角变多少度"时的第一步试转量（脉冲）。
 ROW_ROTATE_TRIAL_PULSES = 150
 #: 单步最多转多少脉冲：离得再远也别一把扫过去。
@@ -174,7 +174,7 @@ ROW_ROTATE_MAX_PULSES = 2000
 #: 一帧看清三环、随后一次性放完三个环之前要摆的姿态（``lift``/``extension``/``base``，
 #: 电机角度）：伸缩比逐环对准时短一点、镜头离地面远一些，整排 2×150 mm 才进得了画面。
 #: 现场按取景改这一份；换场地只需要动它和 ``station.center_spacing_mm``。
-RING_ROW_OBSERVE_POSE = {"lift": 980, "extension": 595, "base": -82}
+RING_ROW_OBSERVE_POSE = {"lift": 980, "extension": 595, "base": -52}
 #: 观察失败时优先增大伸缩角度，再尝试反向和底座扫描；单位均为电机角度。
 RING_ROW_VIEW_OFFSETS = (
     (90.0, 0.0), (180.0, 0.0), (-90.0, 0.0), (-180.0, 0.0),
@@ -645,11 +645,11 @@ def grab_material_from_turntable_to_repo_follow(
 
 def grab_material_from_turntable_to_repo_follow_v2(
     robot: Robot,
-    want_colors=("green", "blue", "red"),
+    want_colors=("red", "yellow", "green"),
     *,
     home: dict[str, float] | None = {"lift": 830, "extension": 120.0, "base": 420},
     follow_seconds: float = FOLLOW_SECONDS,
-    stable_seconds: float = 0.1,
+    stable_seconds: float = 0.01,
     monitor_until_lift: float | None = None,
     grab_tolerance_mm: float | None = 20,
 ):
@@ -749,7 +749,8 @@ def _descend_and_grab_from_turntable_monitored(
             robot.arm.move_axis_to_motor_degrees("lift", observation_lift, rpm=120)
             return False
     robot.gripper.close_jaws()
-    robot.arm.move_axis_to_motor_degrees("lift", 800, rpm=120)
+    robot.arm.move_axis_to_motor_degrees("lift", 900, rpm=120)
+    time.sleep(0.4)  # 合爪后先停一下
     return True
 
 
@@ -1439,7 +1440,7 @@ def place_material_on_material_by_order(
     # move_axes_to(robot, SAFE_RETRACT).wait()
     
     
-def place_and_grab_material(robot:Robot, place_orders = (1, 2, 3), grab_orders = None):
+def place_and_grab_material(robot:Robot, place_orders = (1, 2, 3), grab_orders = None, need_calibrate = True):
     """按指定顺序放料，再按环号复用放料落点回抓。"""
     if grab_orders is None:
         grab_orders = place_orders
@@ -1448,6 +1449,7 @@ def place_and_grab_material(robot:Robot, place_orders = (1, 2, 3), grab_orders =
         robot, orders=place_orders, need_calibrate=True,
         tolerance_mm=8.0, align_max_iterations=3,
     )
+    locations = place_material_from_repo_to_floor_from_center_ring(robot, orders=place_orders, need_calibrate = need_calibrate)
     # 回抓按列表顺序取位置，必须按 grab_orders 排列，不能沿用放料顺序。
     pre_locations = [locations[digit] for digit in grab_orders]
     grab_material_from_floor_to_repo_by_xy(robot, orders=grab_orders, pre_locations=pre_locations)
