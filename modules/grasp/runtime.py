@@ -539,10 +539,12 @@ class Grasp:
         gain: float = 5.0,
         acceleration: int = 220,
         rpm: int = 90,
+        search_base_degrees: float | None = 420.0,
     ) -> VisualServoResult:
         """转盘物料的平面连续跟随；停盘且对准后可直接抓取。
 
         底座限于 220..680°，失去可用轨迹或目标超出抓料区时回 420°观察。
+        重抓可传 search_base_degrees=None，失去可用轨迹时原地等待重识别。
         伸缩电机范围 30..990°，并保留硬件更严格的限位。
         跟随退出时刹停并用编码器对账，随后抓取、回位继续使用位置模式。
         gain 为每秒误差修正比例；高度由调用方预先保证。
@@ -567,7 +569,7 @@ class Grasp:
             acceleration=acceleration,
             rpm=rpm,
             base_motor_limits=(220.0, 680.0),
-            search_base_degrees=420.0,
+            search_base_degrees=search_base_degrees,
             on_message=self._say,
         )
 

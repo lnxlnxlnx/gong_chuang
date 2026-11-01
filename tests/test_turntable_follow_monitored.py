@@ -456,10 +456,10 @@ class MonitoredGrabTests(unittest.TestCase):
             self.camera.offset = lambda: None if len(follow_options) == 1 else (0, 0)
         with ExitStack() as stack:
             stack.enter_context(patch.object(app_gripper, "_follow_material_until_stable", side_effect=follow))
-            stack.enter_context(patch.object(app_gripper, "_stow_material_to_repo", side_effect=lambda _r: events.append("stow")))
+            stack.enter_context(patch.object(app_gripper, "_stow_material_to_repo", side_effect=lambda _r, **_kw: events.append("stow")))
             stack.enter_context(patch.object(app_gripper, "move_axes_to"))
             app_gripper.grab_material_from_turntable_to_repo_follow_v2(
-                self.robot, ("red",), home=None,
+                self.robot, ("red",), home=None, stable_seconds=0.3,
             )
         self.assertEqual(events, [("follow", "red", 830), ("follow", "red", 830), "stow"])
         self.assertEqual([kw["min_follow_seconds"] for kw in follow_options], [0, 0])
@@ -483,12 +483,13 @@ class MonitoredGrabTests(unittest.TestCase):
 class ShortStableGateTests(unittest.TestCase):
     def test_a_stopped_target_is_released_after_point_three_seconds_without_four_second_gate(self):
         from modules.grasp.drive import eye_in_hand as algorithms
-        from modules.grasp.test.unit.test_continuous_follow import VelocityArm, WorldLink, follow
+        from modules.grasp.test.unit.test_continuous_follow import follow
         from modules.grasp.test.unit.test_eye_in_hand import FollowClock
+        from tests.test_turntable_follow_search import GrabZoneArm, GrabZoneLink
 
         clock = FollowClock()
-        arm = VelocityArm(clock)
-        link = WorldLink(arm, stop_at=0)
+        arm = GrabZoneArm(clock)
+        link = GrabZoneLink(arm, stop_at=0)
         robot = Mock()
         robot.arm.read_abs_state.return_value.motor_degrees = 830
         robot.grasp.follow_material.side_effect = lambda _color, **kw: follow(arm, link, **kw)
