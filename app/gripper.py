@@ -579,7 +579,7 @@ FOLLOW_SECONDS = 150.0
 
 def _follow_material_until_stable(
     robot: Robot, want_color, *, timeout: float = FOLLOW_SECONDS,
-    min_follow_seconds: float = 6.2, stable_seconds: float = 0.3,
+    min_follow_seconds: float = 7.8, stable_seconds: float = 0.3,
 ) -> None:
     """**跟着转盘上的料走**，直到料自己停住（停住那一刻才下降到抓）。
 
