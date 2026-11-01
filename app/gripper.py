@@ -1454,6 +1454,76 @@ def place_material_on_material_by_order(
     # move_axes_to(robot, SAFE_RETRACT).wait()
     
     
+def place_material_on_material_from_center(
+    robot: Robot,
+    *,
+    orders: tuple[int, int, int] = (1, 2, 3),
+    tolerance_mm: float = 2.0,
+    align_max_iterations: int = 4,
+    row_yaw_correction_deg: float = 8.5,
+    row_normal_base_motor_degrees: float = -17.0,
+) -> dict[int, dict[str, float]]:
+    """只视觉对准中间物料，按 150 mm 间距计算两侧落点并依次叠放。
+
+    车身须已与物料排垂直；排向参数与中心圆环版本含义相同。
+    中心沿用原叠放流程的观察高度与最佳位置回归，不使用圆环专用补偿。
+    返回已放置位置的绝对电机角度，编号 1/2/3 仍表示左/中/右。
+    """
+    digits = _check_order(orders)
+    if not math.isfinite(row_yaw_correction_deg):
+        raise ValueError("row_yaw_correction_deg 必须是有限的输出轴角度")
+    if not math.isfinite(row_normal_base_motor_degrees):
+        raise ValueError("row_normal_base_motor_degrees 必须是有限的电机角度")
+    try:
+        base_deg, lift, extension_deg = _PLACE_POSITION[1]
+        # 先抬高再转伸，避免从上一段低位姿态横扫已有物料。
+        robot.arm.move_axis_to_motor_degrees("lift", 950)
+        move_axes_to(robot, {"base": base_deg, "extension": extension_deg}).wait()
+        robot.arm.move_axis_to_motor_degrees("lift", lift)
+        aligned = robot.grasp.align_xy(
+            tolerance_mm=tolerance_mm, max_iterations=align_max_iterations,
+            return_best=True,
+        )
+        print(f"  中心物料：{aligned.summary()}")
+        arm = robot.arm
+        base = arm.turns_state.of("base").pulses
+        extension = arm.turns_state.of("extension").pulses
+        degrees_per_pulse = 360.0 / arm.pulses_per_revolution
+        radius = arm.config.extension_radius_mm(extension)
+        middle_yaw_deg = (
+            (base * degrees_per_pulse - row_normal_base_motor_degrees)
+            / arm.config.base_reduction + row_yaw_correction_deg
+        )
+        poses = {2: (base, extension)}
+        for digit in (1, 3):
+            step_base, step_extension = _row_step_pulses(
+                robot, spacing_mm=(digit - 2) * 150.0,
+                radius_mm=radius, middle_yaw_deg=middle_yaw_deg,
+            )
+            poses[digit] = (base + step_base, extension + step_extension)
+        # 中心低位只用于观察；取料前抬高，后续每趟均在高位转伸。
+        robot.arm.move_axis_to_motor_degrees("lift", 950)
+        for digit in digits:
+            _grab_material_from_car(robot)
+            robot.arm.move_axis_to_motor_degrees("lift", 950)
+            base_pulses, extension_pulses = poses[digit]
+            move_axes_to(robot, {
+                "base": base_pulses * degrees_per_pulse,
+                "extension": extension_pulses * degrees_per_pulse,
+            }).wait()
+            robot.arm.move_axis_to_motor_degrees("lift", lift)
+            robot.gripper.open_jaws()
+            robot.arm.move_axis_to_motor_degrees("lift", 950)
+    except Exception:
+        move_axes_to(robot, SAFE_RETRACT).wait()
+        raise
+    return {
+        digit: {"base": poses[digit][0] * degrees_per_pulse,
+                "extension": poses[digit][1] * degrees_per_pulse}
+        for digit in digits
+    }
+
+
 def place_and_grab_material(robot:Robot, place_orders = (1, 2, 3), grab_orders = None, need_calibrate = False):
     """按指定顺序放料，再按环号复用放料落点回抓。"""
     if grab_orders is None:
