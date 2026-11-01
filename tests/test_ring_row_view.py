@@ -12,6 +12,32 @@ from tests.test_ring_row import RowPlant, RowVision
 
 
 class RingRowViewTests(unittest.TestCase):
+    def test_iteration_limit_returns_residual_and_continues_placement(self):
+        robot, pose, moves, move = self.make_scene(
+            yaw=14.0, visible=lambda pose: True,
+        )
+        robot.arm.pulses_per_revolution = 3200
+        robot.gripper = Mock()
+        square = gripper.square_chassis_to_ring_row
+        with patch("time.sleep"), \
+                patch.object(gripper, "move_axes_to", side_effect=move), \
+                patch.object(gripper, "square_chassis_to_ring_row", side_effect=lambda robot: square(
+                    robot, yaw_offset_deg=4.0, max_iterations=1,
+                )), \
+                patch.object(gripper, "_align_floor_ring", return_value=(-151, 4800)), \
+                patch.object(gripper, "_grab_material_from_car"), \
+                patch.object(gripper, "_row_step_pulses", return_value=(10, 20)) as step:
+            locations = gripper.place_material_from_repo_to_floor_from_center_ring(
+                robot, orders=(1, 2, 3), need_calibrate=True,
+                row_yaw_correction_deg=6.0, row_normal_base_motor_degrees=-32.0,
+            )
+        self.assertEqual(set(locations), {1, 2, 3})
+        self.assertEqual(len(robot.chassis.moves), 1)
+        expected_yaw = (-151 * 360.0 / 3200 + 32.0) / robot.arm.config.base_reduction + 6.0
+        self.assertEqual(step.call_count, 2)
+        for call in step.call_args_list:
+            self.assertAlmostEqual(call.kwargs["middle_yaw_deg"], expected_yaw)
+
     def make_scene(self, yaw=4.0, visible=lambda pose: False):
         plant = RowPlant(yaw_deg=yaw)
         pose = {"extension": 550.0, "base": -32.0}
@@ -57,6 +83,31 @@ class RingRowViewTests(unittest.TestCase):
             residual = gripper.square_chassis_to_ring_row(robot, yaw_offset_deg=4.0)
         self.assertAlmostEqual(residual, 0.0)
         self.assertNotEqual(pose["base"], -32)
+        self.assertEqual(robot.chassis.moves, [])
+
+    def test_extension_search_extends_before_trying_retraction(self):
+        robot, pose, moves, move = self.make_scene(
+            visible=lambda pose: pose["extension"] >= 730.0,
+        )
+        with patch("time.sleep"), \
+                patch.object(gripper, "move_axes_to", side_effect=move):
+            residual = gripper.square_chassis_to_ring_row(robot, yaw_offset_deg=4.0)
+        self.assertAlmostEqual(residual, 0.0)
+        self.assertEqual([target["extension"] for target in moves], [640.0, 730.0])
+        self.assertEqual(robot.chassis.moves, [])
+
+    def test_combined_search_uses_extension_increase(self):
+        robot, pose, moves, move = self.make_scene(
+            visible=lambda pose: (
+                pose["extension"] > 550.0 and pose["base"] != -32.0
+            ),
+        )
+        with patch("time.sleep"), \
+                patch.object(gripper, "move_axes_to", side_effect=move):
+            residual = gripper.square_chassis_to_ring_row(robot, yaw_offset_deg=4.0)
+        self.assertAlmostEqual(residual, 0.0)
+        self.assertGreater(pose["extension"], 550.0)
+        self.assertNotEqual(pose["base"], -32.0)
         self.assertEqual(robot.chassis.moves, [])
 
     def test_chassis_feedback_uses_the_original_angle_after_base_adjustment(self):
