@@ -1201,12 +1201,12 @@ def _ensure_floor_ring_in_view(
 
 
 def _align_floor_ring(
-    robot: Robot, *, digit: int, tolerance_mm: float
+    robot: Robot, *, digit: int, tolerance_mm: float, max_iterations: int = 6
 ) -> tuple[int, int]:
     """先让中环完整入镜，再保存对准位置；未进容差时使用闭环保留的最佳姿态。"""
     _ensure_floor_ring_in_view(robot, digit=digit)
     aligned = robot.grasp.align_ring(
-        require_digit=digit, tolerance_mm=tolerance_mm, max_iterations=6,gain=0.6,
+        require_digit=digit, tolerance_mm=tolerance_mm, max_iterations=max_iterations, gain=0.6,
     )
     for step in aligned.steps:
         print(f"  {step.line()}")
@@ -1237,6 +1237,7 @@ def place_material_from_repo_to_floor_from_center_ring(
     orders: tuple[int, int, int] = (3, 2, 1),
     place_lift: float = 90.0,
     tolerance_mm: float = 4,
+    align_max_iterations: int = 6,
     need_calibrate: bool = False,
     row_yaw_correction_deg: float = 8.5,
     row_normal_base_motor_degrees: float = -17.0,
@@ -1289,7 +1290,7 @@ def place_material_from_repo_to_floor_from_center_ring(
         move_axes_to(robot, RING2_APPROACH_POSE).wait()
         # time.sleep(1)
         base, extension = _align_floor_ring(
-            robot, digit=2, tolerance_mm=tolerance_mm
+            robot, digit=2, tolerance_mm=tolerance_mm, max_iterations=align_max_iterations
         )
         arm = robot.arm
         spacing = float(robot.vision.ring_center_spacing_mm)
@@ -1442,7 +1443,11 @@ def place_and_grab_material(robot:Robot, place_orders = (1, 2, 3), grab_orders =
     """按指定顺序放料，再按环号复用放料落点回抓。"""
     if grab_orders is None:
         grab_orders = place_orders
-    locations = place_material_from_repo_to_floor_from_center_ring(robot, orders=place_orders, need_calibrate = True)
+    # 放宽中环容差并限制修正轮数，省去末段微调；回抓继续复用同一落点。
+    locations = place_material_from_repo_to_floor_from_center_ring(
+        robot, orders=place_orders, need_calibrate=True,
+        tolerance_mm=8.0, align_max_iterations=3,
+    )
     # 回抓按列表顺序取位置，必须按 grab_orders 排列，不能沿用放料顺序。
     pre_locations = [locations[digit] for digit in grab_orders]
     grab_material_from_floor_to_repo_by_xy(robot, orders=grab_orders, pre_locations=pre_locations)
