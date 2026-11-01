@@ -165,7 +165,8 @@ RING_ROW_SQUARE_TOLERANCE_DEG = 1.0
 #: 车头与"相机画面水平轴"的固定差角（度）。装出来的臂不是正对车头时补这个。
 #: 它等于**车头摆正时**该量到的直线倾角：人眼把车头摆到与环排垂直，跑一次
 #: :func:`square_chassis_to_ring_row` 读打印出来的倾角，把那个数填这里。
-ROW_SQUARE_YAW_OFFSET_DEG = 4.01
+# ROW_SQUARE_YAW_OFFSET_DEG = 4.01
+ROW_SQUARE_YAW_OFFSET_DEG = -2.5
 #: 还不知道"每脉冲让倾角变多少度"时的第一步试转量（脉冲）。
 ROW_ROTATE_TRIAL_PULSES = 150
 #: 单步最多转多少脉冲：离得再远也别一把扫过去。
@@ -173,7 +174,7 @@ ROW_ROTATE_MAX_PULSES = 2000
 #: 一帧看清三环、随后一次性放完三个环之前要摆的姿态（``lift``/``extension``/``base``，
 #: 电机角度）：伸缩比逐环对准时短一点、镜头离地面远一些，整排 2×150 mm 才进得了画面。
 #: 现场按取景改这一份；换场地只需要动它和 ``station.center_spacing_mm``。
-RING_ROW_OBSERVE_POSE = {"lift": 980, "extension": 595, "base": -32}
+RING_ROW_OBSERVE_POSE = {"lift": 980, "extension": 595, "base": -82}
 #: 观察失败时优先增大伸缩角度，再尝试反向和底座扫描；单位均为电机角度。
 RING_ROW_VIEW_OFFSETS = (
     (90.0, 0.0), (180.0, 0.0), (-90.0, 0.0), (-180.0, 0.0),
@@ -891,7 +892,7 @@ def _descend_and_grab_from_turntable(robot: Robot) -> None:
     """共用同一段下降、合爪、抬升动作；调用方负责事先确认物料停稳且对准。"""
     robot.arm.move_axis_to_motor_degrees("lift", 550, rpm=120)
     robot.gripper.close_jaws()
-    robot.arm.move_axis_to_motor_degrees("lift", 800, rpm=120)
+    robot.arm.move_axis_to_motor_degrees("lift", 950, rpm=120)
 
 
 def _stow_material_to_repo(robot: Robot, position: dict[str, float] | None = None) -> None:
@@ -1100,7 +1101,7 @@ def place_material_from_repo_to_floor_by_pose(
 #: 放料前先把臂摆到 2 号环前的姿态（``base``/``lift``/``extension``，电机角度）。
 #: 取 :func:`place_material_from_repo_to_floor_by_pose` 里 2 号环那一份：相机在这个姿态下看得到 2 号环，
 #: ``align_ring`` 从这里开始闭环；``ring_offsets`` 的那个补偿也是在这个高度上标出来的。
-RING2_APPROACH_POSE = {"base": -32, "lift": 600, "extension": 540}
+RING2_APPROACH_POSE = {"base": -82, "lift": 800, "extension": 540}
 
 def _row_step_pulses(
     robot: Robot, *, spacing_mm: float, radius_mm: float, middle_yaw_deg: float,
@@ -1377,7 +1378,7 @@ def grab_material_from_floor_to_repo_by_xy(
             robot.arm.move_axis_to_motor_degrees("lift", 90, rpm = 95)
             robot.gripper.close_jaws()
             _place_material_to_repo(robot, verbose=True)
-            _go_home(robot, home)
+            # _go_home(robot, home)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()
@@ -1415,7 +1416,7 @@ def place_material_on_material_by_order(
         for order in digits:
             base, lift, extension = _PLACE_POSITION[order - 1]
             move_axes_to(robot, {"lift": lift, "extension": extension, "base": base}).wait()
-            time.sleep(1)  # 先让车停稳
+            # time.sleep(1)  # 先让车停稳
             robot.grasp.align_xy(tolerance_mm=2.0)
             # 抓料会把这几个轴都开走，所以先记下来：这趟的落点就是现在这个角度。
             base_deg = robot.arm.turns_state.of("base").motor_degrees
@@ -1428,13 +1429,13 @@ def place_material_on_material_by_order(
             ).wait()
             robot.arm.move_axis_to_motor_degrees("lift", lift)
             robot.gripper.open_jaws()
-            robot.arm.move_axis_to_motor_degrees("lift", 800)
-            _go_home(robot, home)
+            robot.arm.move_axis_to_motor_degrees("lift", 950)
+            # _go_home(robot, home)
     except Exception as e:
         print(f"Error occurred during pick and place operation: {e}")
         move_axes_to(robot, SAFE_RETRACT).wait()
         return
-    move_axes_to(robot, SAFE_RETRACT).wait()
+    # move_axes_to(robot, SAFE_RETRACT).wait()
     
     
 def place_and_grab_material(robot:Robot, place_orders = (1, 2, 3), grab_orders = None):
