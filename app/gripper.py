@@ -760,7 +760,7 @@ def _descend_and_grab_from_turntable_monitored(
             return False
     robot.gripper.close_jaws()
     robot.arm.move_axis_to_motor_degrees("lift", 900, rpm=120)
-    time.sleep(0.5)  # 合爪后先停一下
+    time.sleep(0.4)  # 合爪后先停一下
     return True
 
 
@@ -925,7 +925,7 @@ def _stow_material_to_repo(robot: Robot, position: dict[str, float] | None = Non
     else:
         batch.add(robot.arm.move_axis_to_motor_degrees("base", 420, wait=False))
         batch.add(robot.arm.move_axis_to_motor_degrees("extension", 90.0, wait=False))
-    batch.add(robot.arm.move_axis_to_motor_degrees("lift", 830, wait=False))
+    batch.add(robot.arm.move_axis_to_motor_degrees("lift", 845, wait=False))
     batch.add(
         robot.turntable.go_to(TURNTABLE_POSITIONS[_turntable_position_index], wait=False)
     )
@@ -947,7 +947,7 @@ def _grab_material_from_car(robot: Robot):
     batch.add(robot.gripper.set_position(150, wait=False))
     batch.wait()
     report = move_axes_to(robot, {"lift": 980, "extension": 5, "base": 1045}).wait()
-    robot.gripper.set_position(120)
+    robot.gripper.set_position(140)
     robot.arm.move_axis_to_motor_degrees("lift", 880)
     
     robot.gripper.close_jaws()
@@ -1247,8 +1247,8 @@ def place_material_from_repo_to_floor_from_center_ring(
     *,
     orders: tuple[int, int, int] = (3, 2, 1),
     place_lift: float = 98.0,
-    tolerance_mm: float = 4,
-    align_max_iterations: int = 6,
+    tolerance_mm: float = 2,
+    align_max_iterations: int = 3,
     need_calibrate: bool = False,
     row_yaw_correction_deg: float = 8.5,
     row_normal_base_motor_degrees: float = -17.0,
@@ -1387,7 +1387,7 @@ def grab_material_from_floor_to_repo_by_xy(
                 position = pre_locations.pop(0)
                 print(position)
                 move_axes_to(robot, position).wait()
-            robot.arm.move_axis_to_motor_degrees("lift", 100)
+            robot.arm.move_axis_to_motor_degrees("lift", 110)
             robot.gripper.close_jaws()
             _place_material_to_repo(robot, verbose=True)
             # _go_home(robot, home)

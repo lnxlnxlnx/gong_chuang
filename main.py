@@ -187,6 +187,7 @@ def run_map(debug = False):
         ###################
         ###################运行区##########
         # 移动到二维码区
+        time.sleep(2)
         robot.chassis.left(pulses = 13000)
         robot.chassis.rotate_ccw(pulses = 205)
         robot.vision.show_text("124+123+421+231")
@@ -201,6 +202,7 @@ def run_map(debug = False):
         # 抓取物料
         if (not debug):
             grab_material_from_turntable_to_repo_follow_v2(robot)     # 完成后在extension=270的位置
+            time.sleep(0.3)
         else:
             time.sleep(1)
         robot.chassis.rotate_ccw(pulses=ROTATE_PULSE + 60)
@@ -213,6 +215,7 @@ def run_map(debug = False):
         robot.chassis.left(pulses=1600)
         if (not debug):
             place_and_grab_material(robot, need_calibrate=False)
+            time.sleep(0.3)
         else:
             time.sleep(1)
         
@@ -221,11 +224,12 @@ def run_map(debug = False):
         robot.chassis.right(pulses=13450)
         robot.chassis.rotate_cw(pulses=ROTATE_PULSE + ROTATE_OFFSET - 115)
         move_axes_to(robot, {"lift": 495, "extension": 630, "base": -52})
-        robot.chassis.right(pulses=10600)
+        robot.chassis.right(pulses=10400)
         move_axes_to(robot, {"lift": 960, "base": -52}).wait()  # 先让环进视野
         # robot.chassis.left(pulses=500)
         if (not debug):
             place_material_from_repo_to_floor_from_center_ring(robot, need_calibrate = False, orders = (1, 2, 3))
+            time.sleep(0.3)
         else:
             time.sleep(1)
         
@@ -237,6 +241,7 @@ def run_map(debug = False):
         robot.chassis.backward(pulses=11800)
         if (not debug):
             grab_material_from_turntable_to_repo_follow_v2(robot, want_colors=("green", "yellow", "red"))     # 完成后在extension=270的位置
+            time.sleep(0.3)
         else:
             time.sleep(1)
         robot.chassis.rotate_ccw(pulses=ROTATE_PULSE + 60)
@@ -249,6 +254,7 @@ def run_map(debug = False):
         robot.arm.move_axis_to_motor_degrees("lift", 950)
         if (not debug):
             place_and_grab_material(robot, need_calibrate=False, place_orders=(2, 3, 1), grab_orders=(1, 3, 2))
+            time.sleep(0.3)
         else:
             time.sleep(1)
         
@@ -260,6 +266,7 @@ def run_map(debug = False):
         robot.arm.move_axis_to_motor_degrees("lift", 850)
         if (not debug):
             place_material_on_material_by_order(robot, orders=(1, 2, 3))
+            time.sleep(0.3)
         else:
             time.sleep(1)
         
@@ -364,6 +371,6 @@ def run_map_no_act():
 
 if __name__ == "__main__":
     # main()
-    run_map(debug=True)
-    # run_map()
+    # run_map(debug=True)
+    run_map()
     # run_map_no_act()
