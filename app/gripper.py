@@ -583,6 +583,7 @@ FOLLOW_SECONDS = 150.0
 def _follow_material_until_stable(
     robot: Robot, want_color, *, timeout: float = FOLLOW_SECONDS,
     min_follow_seconds: float = 7.8, stable_seconds: float = 0.3,
+    search_base_degrees: float | None = 420.0,
 ) -> None:
     """**跟着转盘上的料走**，直到料自己停住（停住那一刻才下降到抓）。
 
@@ -595,6 +596,7 @@ def _follow_material_until_stable(
     result = robot.grasp.follow_material(
         want_color, timeout=timeout,
         min_follow_seconds=min_follow_seconds, stable_seconds=stable_seconds,
+        search_base_degrees=search_base_degrees,
     )
     print(
         f"  料停住了：读数 ({result.readings[-1][0]:+.2f}, {result.readings[-1][1]:+.2f}) mm，"
@@ -679,6 +681,7 @@ def grab_material_from_turntable_to_repo_follow_v2(
     _go_home(robot, home)
     for color in want_colors:
         deadline = time.monotonic() + follow_seconds
+        search_base_degrees = 420.0
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -686,12 +689,15 @@ def grab_material_from_turntable_to_repo_follow_v2(
             _follow_material_until_stable(
                 robot, color, timeout=remaining,
                 min_follow_seconds=0.0, stable_seconds=stable_seconds,
+                search_base_degrees=search_base_degrees,
             )
             if _descend_and_grab_from_turntable_monitored(
                 robot, color, deadline=deadline, monitor_until_lift=monitor_until_lift,
                 grab_tolerance_mm=grab_tolerance_mm,
             ):
                 break
+            # 抬升后可能暂时没框；留在本次跟随位置重识别，避免回中错过物料。
+            search_base_degrees = None
             print(f"  {color} 偏离可抓范围或检测不到：已抬回，重新跟随")
         # 入库后回到本次抓取位置，供下一块物料继续跟随。
         base_position = robot.arm.read_abs_state("base").motor_degrees

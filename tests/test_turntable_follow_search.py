@@ -4,11 +4,16 @@ import math
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import app.gripper as app_gripper
+from modules.grasp import Grasp
 
 from modules.grasp.drive import eye_in_hand as algorithms
-from modules.grasp.drive.visual_servo_model import VisualServoError
-from modules.grasp.test.unit.test_continuous_follow import VelocityArm, WorldLink, follow
+from modules.grasp.drive.visual_servo_model import (
+    MaterialSelector, VisualServoConfig, VisualServoError, VisualServoTarget,
+)
+from modules.grasp.test.unit.test_continuous_follow import JACOBIAN, VelocityArm, WorldLink, follow
 from modules.grasp.test.unit.test_eye_in_hand import FollowClock
 
 
@@ -37,6 +42,46 @@ class GrabZoneLink(WorldLink):
 
 
 class TurntableFollowSearchTests(unittest.TestCase):
+    def test_cancelled_grab_resumes_at_current_position_after_temporary_loss(self):
+        """重试首帧丢失不能把机械臂带回默认区域，目标再现后应原地接续。"""
+        clock = FollowClock()
+        arm = GrabZoneArm(clock, base=600)
+        link = GrabZoneLink(arm, stop_at=0)
+        radius = link.origin_radius
+        angle = -math.radians(600 / 5)
+        link.material_point = lambda stamp: (radius * math.cos(angle), radius * math.sin(angle))
+        grasp = Grasp(
+            config=VisualServoConfig(inter_frame_seconds=0.01),
+            selector=MaterialSelector(), target=VisualServoTarget(0, 0),
+            jacobian=JACOBIAN, lift_scale=None,
+        )
+        grasp._arm, grasp._source = arm, link
+        robot = SimpleNamespace(arm=arm, grasp=grasp, gripper=Mock())
+        attempts = []
+
+        def descend(_robot, color, **_kwargs):
+            attempts.append((color, clock.now))
+            if len(attempts) == 1:
+                link.missing = ((clock.now, clock.now + 0.24),)
+                return False
+            return True
+
+        with patch.object(algorithms, "time", clock), patch.object(app_gripper, "time", clock):
+            with patch.object(app_gripper, "_descend_and_grab_from_turntable_monitored", side_effect=descend):
+                with patch.object(app_gripper, "_stow_material_to_repo") as stow:
+                    with patch.object(app_gripper, "move_axes_to"):
+                        app_gripper.grab_material_from_turntable_to_repo_follow_v2(
+                            robot, ("green",), home=None, follow_seconds=4, stable_seconds=0.1,
+                        )
+        self.assertEqual([color for color, _ in attempts], ["green", "green"])
+        stow.assert_called_once()
+        retry_bases = [
+            sample.base_pulses * 360 / arm.pulses_per_revolution
+            for sample in arm.samples if sample.stamp >= attempts[0][1]
+        ]
+        self.assertTrue(retry_bases)
+        self.assertTrue(all(abs(base - 600) <= 1 for base in retry_bases), retry_bases)
+
     def run_follow(self, arm, link, **kwargs):
         with patch.object(algorithms, "time", arm.clock):
             return follow(
