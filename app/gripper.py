@@ -754,7 +754,7 @@ def _descend_and_grab_from_turntable_monitored(
             return False
     robot.gripper.close_jaws()
     robot.arm.move_axis_to_motor_degrees("lift", 900, rpm=120)
-    time.sleep(0.4)  # 合爪后先停一下
+    time.sleep(0.2)  # 合爪后先停一下
     return True
 
 
@@ -964,16 +964,16 @@ def _place_material_to_repo(robot: Robot, *, verbose: bool = False):
     #    工作区是空的（伸出状态下横扫会把整条臂扫过去）。
     robot.arm.move_axis_to_motor_degrees("lift", 500)
     move_axes_to(robot, {"extension": 270.0, "base": 400, "lift": 900}).wait()
-    report = move_axes_to(robot, {"lift": 900, "extension": 10, "base": 1048}).wait()
+    report = move_axes_to(robot, {"lift": 905, "extension": 10, "base": 1048}).wait()
     if verbose:
         _print_report("放料前", report)
 
     # ② 三轴都到位之后才松爪。open_jaws 默认 wait=True，自己等到舵机走完并读回。
-    robot.gripper.set_position(100)
+    robot.gripper.set_position(130)
     
     robot.arm.move_axis_to_motor_degrees("lift", 980)
     
-    robot.arm.move_axis_to_motor_degrees("base", 800)
+    robot.arm.move_axis_to_motor_degrees("base", 800, wait=False)
     _turntable_position_index = (_turntable_position_index + 1) % len(TURNTABLE_POSITIONS)
     batch = robot.motion.begin()
     batch.add(robot.arm.move_axis_to_motor_degrees("base", 200, wait=False))
@@ -1375,13 +1375,13 @@ def grab_material_from_floor_to_repo_by_xy(
         for order in orders:
             if pre_locations is None:
                 move_axes_to(robot, {"lift": ring_position[order - 1][1], "extension": ring_position[order - 1][2], "base": ring_position[order - 1][0]}).wait()
-                time.sleep(1)  # 先让车停稳
+                # time.sleep(1)  # 先让车停稳
                 result = robot.grasp.align_xy(tolerance_mm=3.0)
             else:
                 position = pre_locations.pop(0)
                 print(position)
                 move_axes_to(robot, position).wait()
-            robot.arm.move_axis_to_motor_degrees("lift", 90, rpm = 95)
+            robot.arm.move_axis_to_motor_degrees("lift", 90)
             robot.gripper.close_jaws()
             _place_material_to_repo(robot, verbose=True)
             # _go_home(robot, home)
@@ -1451,7 +1451,7 @@ def place_and_grab_material(robot:Robot, place_orders = (1, 2, 3), grab_orders =
     # 放宽中环容差并限制修正轮数，省去末段微调；回抓继续复用同一落点。
     locations = place_material_from_repo_to_floor_from_center_ring(
         robot, orders=place_orders, need_calibrate=need_calibrate,
-        tolerance_mm=8.0, align_max_iterations=3,
+        tolerance_mm=2.0, align_max_iterations=3,
     )
     # 回抓按列表顺序取位置，必须按 grab_orders 排列，不能沿用放料顺序。
     pre_locations = [locations[digit] for digit in grab_orders]
