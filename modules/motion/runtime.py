@@ -39,7 +39,7 @@ reports = ticket.wait()
 
 ## 超时与失败
 
-- ``wait(timeout=...)`` 超时抛 :class:`MotionTimeout`，票据**仍是 pending**，可以再等；
+- ``wait(timeout=...)`` 超时抛 :class:`MotionTimeoutError`，票据**仍是 pending**，可以再等；
 - 收尾函数抛错时票据进 :data:`FAILED`，错误原样保存，**再 wait 还是抛同一个错误**
   （不吞掉，也不重跑收尾——收尾几乎都有副作用）;
 - :meth:`MotionBatch.wait` 与仓库里 ``close`` 的规矩一致：**一项失败不阻断其它项**，
@@ -76,7 +76,7 @@ STATES = (PENDING, DONE, FAILED, CANCELLED)
 DEFAULT_POLL_INTERVAL = 0.02
 
 
-class MotionTimeout(TimeoutError):
+class MotionTimeoutError(TimeoutError):
     """在 ``timeout`` 内没等到票据到期。票据仍然可以继续等。"""
 
 
@@ -193,7 +193,7 @@ class MotionTicket:
         """等到预计完成时刻，跑一次收尾函数，返回它的结果。
 
         :param timeout: 本次最多等多久（秒）；``None`` 表示一直等到到点。
-        :raises MotionTimeout: ``timeout`` 内没到点。票据**保持 pending**，可以再等。
+        :raises MotionTimeoutError: ``timeout`` 内没到点。票据**保持 pending**，可以再等。
         :raises BaseException: 收尾函数抛出的原始错误（再 wait 还是同一个错误）。
 
         已经收尾过的票据直接返回上次的结果（收尾只跑一次），所以"多等几次"是安全的。
@@ -207,7 +207,7 @@ class MotionTicket:
                 if now >= self._deadline:
                     break
                 if limit is not None and now >= limit:
-                    raise MotionTimeout(
+                    raise MotionTimeoutError(
                         f"等待 {self.subject} 超时：预计完成时刻还差 "
                         f"{self._deadline - now:.3f} s"
                     )
@@ -379,7 +379,7 @@ class MotionBatch:
 
         ```python
         batch = robot.motion.begin()
-        batch.add_all(_move_axes_to(robot, {"lift": 760, "base": 450}))   # 动作组
+        batch.add_all(move_axes_to(robot, {"lift": 760, "base": 450}))   # 动作组
         batch.add_all(robot.turntable.go_to(500, wait=False))             # 单张票据
         batch.wait()
         ```
@@ -430,7 +430,7 @@ class MotionBatch:
         挂在异常的 ``report`` 上。
 
         :param timeout: 整组最多等多久（秒）；``None`` 表示等到最后一项到点。
-        :raises MotionTimeout: 整组超时（会记进报告，并以 :class:`MotionBatchError` 抛出）。
+        :raises MotionTimeoutError: 整组超时（会记进报告，并以 :class:`MotionBatchError` 抛出）。
         """
         if timeout is not None and timeout < 0:
             raise ValueError("timeout must not be negative")
@@ -442,7 +442,7 @@ class MotionBatch:
             remaining = None if limit is None else limit - self._clock()
             if remaining is not None and remaining <= 0:
                 errors.append(
-                    (ticket.subject, MotionTimeout(f"动作组超时：{ticket.subject} 还没到点"))
+                    (ticket.subject, MotionTimeoutError(f"动作组超时：{ticket.subject} 还没到点"))
                 )
                 continue
             try:

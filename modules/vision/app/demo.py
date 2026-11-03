@@ -104,14 +104,14 @@ def demo_material(
     一直读的就是这些值，这里与它保持一致。
 
     本次的 ``model_path`` / ``camera_id`` / ``focal_px`` 只作用**这一轮**：先后落到
-    配置快照上，再进入 :meth:`modules.vision.runtime.Vision._open_config`
+    配置快照上，再进入 :meth:`modules.vision.runtime.Vision.from_settings`
     这条唯一的真实会话创建路径——不写回文件、不再开一套相机或模型。
     配置读不出来就**直接失败**：预览里按默认值继续跑会让人以为"配置生效了"。
     """
-    from modules.vision.runtime import Vision, _load_settings, _override_settings
+    from modules.vision.runtime import Vision, load_vision_settings, _override_settings
 
     settings = _override_settings(
-        _load_settings(), model_path=model_path, camera_id=camera_id
+        load_vision_settings(), model_path=model_path, camera_id=camera_id
     )
     camera_id = settings.camera_id("windows" if os.name == "nt" else "jetson")
     import cv2
@@ -130,7 +130,7 @@ def demo_material(
     blank_frames = 0
     warned_blank = False
     try:
-        with Vision._open_config(settings, focal_px=focal_px) as vision:
+        with Vision.from_settings(settings, focal_px=focal_px) as vision:
             print(f"摄像头编号 {camera_id}；预览窗口 {window!r}，按 q 退出")
             print("画面里只画 ASCII；按 p 打印所有物料的完整结果，按 q 退出。")
             if targets.material_palette or targets.material_bgr is not None:

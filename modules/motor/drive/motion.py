@@ -66,7 +66,7 @@ DEFAULT_SETTLE_SECONDS: Final = 0.15
 MAX_PULSES: Final = 0xFFFFFFFF
 
 #: 连续两条位置帧之间该留的间隔（秒）。CH340 这类 USB-TTL 上，**背靠背发两条位置帧会让
-#: 两条都失效**（现场实测，见 ``modules/grasp/drive/servo_motion.py`` 的同名参数）。
+#: 两条都失效**（现场实测，见 ``modules/grasp/drive/visual_servo_motion.py`` 的同名参数）。
 #: 单轴动作本来就是一发一等，感觉不到它；而"多轴同时启动"要连发 2..4 条缓存帧，
 #: 所以帧间必须留这个间隔——90 ms 对秒级的动作可以忽略，丢一条帧却要整段重来。
 DEFAULT_INTER_FRAME_SECONDS: Final = 0.03

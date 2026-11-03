@@ -91,7 +91,7 @@ class VisionPublicExportsTests(unittest.TestCase):
         """导入不读配置；``Vision.open`` 才读。用假配置路径证明这一点。"""
         from unittest.mock import patch
 
-        with patch("modules.vision.runtime._load_settings") as load:
+        with patch("modules.vision.runtime.load_vision_settings") as load:
             load.return_value = VisionConfig()
             with self.assertRaises(ValueError):
                 # 空 camera_ids：配置读完了、编号缺了，于是**在开设备之前**就失败。

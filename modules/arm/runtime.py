@@ -1,6 +1,6 @@
 """机械臂上层：统一生命周期、相对脉冲原语与绝对脉冲目标。
 
-真实定义就在这里（原 ``modules/arm/drive/robot_arm.py`` 已退出）。驱动层
+驱动层
 (:mod:`modules.motor.drive.emm42`) 只负责协议帧，本模块负责"这条轴走多少"。
 
 ## 生命周期
@@ -23,9 +23,8 @@ with RobotArm.open() as arm:          # 读配置 + 开（或借）一条串口
   所以同一个目标反复调用是幂等的。超出单帧上限会自动拆段。
   零点由配置的 ``initial_motor_degrees`` 声明，回零之后即 0。
 
-绝对 XYZ / 圆柱坐标那套（``motion_plan``、位姿推算、回零建参考）已经退出：抓取走的是
-**脉冲闭环**（相机看画面挪多少像素 → 每像素多少脉冲），不需要毫米级绝对位姿。标定记录
-（``homing`` / ``limits`` / ``safe_pose``）仍留在 hardware.json 里，代码不再读它们。
+抓取走的是**脉冲闭环**（相机看画面挪多少像素 → 每像素多少脉冲），不需要毫米级绝对
+位姿；hardware.json 里的 ``homing`` / ``limits`` / ``safe_pose`` 只是历史标定记录，代码不读。
 
 ## 一次让多根轴动：``move_axes``
 
@@ -121,11 +120,16 @@ from modules.arm.drive.kinematics import (
     motor_degrees_for_pulses,
     motor_pulses_for_degrees,
 )
-from modules.motor.drive.emm42 import Direction, Emm42Driver, MotorStatus, SerialPort
+from modules.motor.drive.emm42 import (
+    POSITION_UNITS_PER_REVOLUTION,
+    Direction, Emm42Driver, MotorStatus, SerialPort,
+)
 from modules.motor.drive.motion import (
     DEFAULT_INTER_FRAME_SECONDS,
     DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES,
     DEFAULT_SETTLE_SECONDS,
+    IN_POSITION_TIMEOUT_FACTOR,
+    IN_POSITION_TIMEOUT_MARGIN_SECONDS,
     estimate_move_seconds,
     in_position_timeout_seconds,
 )
@@ -260,6 +264,8 @@ class RobotArm:
         self._bus = bus
         self._owns_bus = bool(owns_bus) and bus is not None
         self._closed = False
+        self._planar_velocity_session = None
+        self._planar_position_valid = True
         #: 三轴的命令脉冲里程表：一个标定都不需要，所以永远有值（见 arm_state）。
         #: **启程读数**取自配置的 ``initial_motor_degrees``：程序启动那一刻轴若不在原点上
         #: （换爪子、重新对齿之后就是这种情况），就按那里的声明起算；回零 / 绝对归零会把
@@ -302,19 +308,23 @@ class RobotArm:
         :param parallel_rotation_limit_pulses: 底座旋转与伸缩可并行的脉冲上限；
             ``None`` 用 :data:`modules.motor.drive.motion.DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`。
         """
-        from modules.motor.config import DEFAULT_HARDWARE_PATH as motor_default
+        from modules.motor.config import DEFAULT_HARDWARE_PATH as MOTOR_DEFAULT_HARDWARE_PATH
         from modules.motor.config import load_bus_config
 
         arm_path = Path(config_path) if config_path is not None else None
         config = load_arm_config(**({} if arm_path is None else {"config_path": arm_path}))
-        bus_path = Path(motor_config_path) if motor_config_path is not None else motor_default
+        bus_path = (
+            Path(motor_config_path)
+            if motor_config_path is not None
+            else MOTOR_DEFAULT_HARDWARE_PATH
+        )
         port = load_bus_config(hardware_path=bus_path).port
         tuning = {}
         if inter_frame_seconds is not None:
             tuning["inter_frame_seconds"] = inter_frame_seconds
         if parallel_rotation_limit_pulses is not None:
             tuning["parallel_rotation_limit_pulses"] = parallel_rotation_limit_pulses
-        session = cls._from_settings(
+        session = cls.from_settings(
             config=config,
             port=port,
             bus=bus,
@@ -326,7 +336,7 @@ class RobotArm:
         return session
 
     @classmethod
-    def _from_settings(
+    def from_settings(
         cls,
         *,
         config: ArmConfig,
@@ -421,8 +431,16 @@ class RobotArm:
         """
         if self._closed:
             return
+        velocity_error = None
+        if self._planar_velocity_session is not None:
+            try:
+                self._planar_velocity_session.close()
+            except Exception as error:
+                velocity_error = error
         self._closed = True
-        errors = []
+        errors = (
+            [] if velocity_error is None else [("planar_velocity", velocity_error)]
+        )
         for stage, action in (
             ("stop", self._stop_axes),
             ("disable", self._disable_axes),
@@ -460,7 +478,43 @@ class RobotArm:
         急停之后驱动器可能丢步，里程表只记下发过的脉冲，与真实位置未必一致。
         """
         self._require_open()
+        if self._planar_velocity_session is not None:
+            self._planar_velocity_session.stop()
+            return
         self._stop_axes()
+
+    def planar_velocity(
+        self,
+        *,
+        max_rpm: int,
+        motor_limits: Mapping[str, Tuple[float, float]],
+        acceleration: int = 200,
+        command_timeout: float = 0.35,
+    ):
+        """借出平面两轴的有界速度会话；范围为不取模的绝对电机角度。"""
+        from modules.arm.drive.planar_velocity import PlanarVelocitySession
+
+        self._require_position_ready()
+        session = PlanarVelocitySession(
+            self,
+            max_rpm=max_rpm,
+            motor_limits=motor_limits,
+            acceleration=acceleration,
+            command_timeout=command_timeout,
+        )
+        self._planar_velocity_session = session
+        return session
+
+    def _require_position_ready(self) -> None:
+        """速度模式独占总线；编码器失联后禁止使用未对账的命令位置。"""
+        self._require_open()
+        if self._planar_velocity_session is not None:
+            raise RuntimeError("planar velocity session owns arm motion")
+        if not self._planar_position_valid:
+            raise RuntimeError(
+                "arm position invalid after planar encoder/stop failure; "
+                "reopen after referencing position"
+            )
 
     def _each_axis(self, action: Callable[["Emm42Driver"], None]) -> None:
         """按地址顺序逐轴发**单帧**命令，帧间留 ``inter_frame_seconds``。
@@ -471,6 +525,8 @@ class RobotArm:
         5 号会回包、6/7 号不回，弄坏的帧只留下一条 ``地址 00 EE 6B``（错误命令）
         没人读走，下一个用总线的人（底盘）就会把这条错误帧当成自己的 ACK。
         """
+        if self._planar_velocity_session is not None:
+            raise RuntimeError("planar velocity session owns arm bus")
         for index, axis_name in enumerate(AXIS_NAMES):
             if index:
                 self._sleep(self.inter_frame_seconds)
@@ -512,6 +568,14 @@ class RobotArm:
         self._require_open()
         return self.turns_state.of(axis_name)
 
+    def read_measured_pulses(self, axis_name: str) -> float:
+        """读取编码器位置并换算为命令脉冲；只比较增量，不与命令里程表混用原点。"""
+        self._require_position_ready()
+        return (
+            self._motors[axis_name].read_position()
+            * self.pulses_per_revolution / POSITION_UNITS_PER_REVOLUTION
+        )
+
     # ------------------------------------------------- 按里程表走绝对脉冲位置
     def move_axis_to_motor_pulses(
         self,
@@ -537,6 +601,7 @@ class RobotArm:
         self._require_open()
         if isinstance(pulses, bool) or not isinstance(pulses, int):
             raise ValueError("pulses must be an integer")
+        self._require_position_ready()
         delta = pulses - self.turns_state.of(axis_name).pulses
         return self._move_delta(
             axis_name, delta, rpm=rpm, acceleration=acceleration, wait=wait
@@ -572,6 +637,92 @@ class RobotArm:
             acceleration=acceleration,
             wait=wait,
         )
+
+    def move_axis_to_motor_degrees_monitored(
+        self,
+        axis_name: str,
+        degrees: float,
+        *,
+        keep_moving: Callable[[], bool],
+        rpm: Optional[int] = None,
+        stop_when_still: bool = False,
+    ) -> bool:
+        """边走边检查，检查失败立即刹停；默认要求驱动器确认到位。
+
+        回调只做观测，不得另发运动命令。退出时用编码器增量修正命令里程表，
+        避免取消半途动作后，下一次绝对定位仍从原目标位置计算位移。
+        ``stop_when_still`` 用于后续还会视觉闭环的修正动作：实测有运动且编码器
+        在 ``settle_seconds`` 内变化不超过一个命令脉冲即可返回，不代表目标已到位。
+        驱动器已确认到位时直接返回，不再要求额外的编码器停稳窗口。
+        """
+        target = motor_pulses_for_degrees(
+            degrees, pulses_per_revolution=self.pulses_per_revolution
+        )
+        self._require_position_ready()
+        start = self.turns_state.of(axis_name).pulses
+        measured_start = self.read_measured_pulses(axis_name)
+        started = self._clock()
+        ticket = self.move_axis_to_motor_degrees(
+            axis_name, degrees, rpm=rpm, wait=False
+        )
+        # 与常规到位轮询使用相同的估时倍率和余量，堵转不能无限等待。
+        deadline = (
+            self._clock() + ticket.estimated_seconds * IN_POSITION_TIMEOUT_FACTOR
+            + IN_POSITION_TIMEOUT_MARGIN_SECONDS
+        )
+        status: Optional[MotorStatus] = None
+        stable_since: Optional[float] = None
+        stable_reference = start
+
+        def diagnosis() -> str:
+            # 使用本轮已读到的数据，不再查询，避免故障后的状态覆盖超时现场。
+            flags = "尚未读取" if status is None else (
+                f"使能={int(status.enabled)}、到位={int(status.in_position)}、"
+                f"堵转={int(status.stalled)}、堵转保护={int(status.stall_protected)}"
+            )
+            return (
+                f"指令增量 {target - start:+.1f} 脉冲，"
+                f"实测增量 {measured - start:+.1f} 脉冲，"
+                f"剩余 {target - measured:+.1f} 脉冲；"
+                f"估算 {ticket.estimated_seconds:.3f} s，"
+                f"已等待 {self._clock() - started:.3f} s；0x3A：{flags}"
+            )
+
+        try:
+            while True:
+                if not keep_moving():
+                    return False
+                measured = start + self.read_measured_pulses(axis_name) - measured_start
+                if ticket.remaining <= 0:
+                    status = self._motors[axis_name].read_status()
+                    if status.stalled or status.stall_protected:
+                        raise RuntimeError(f"{axis_name} 监控移动发生堵转；{diagnosis()}")
+                    moved = abs(measured - start) >= 1
+                    if stop_when_still:
+                        if not status.enabled:
+                            raise RuntimeError(f"{axis_name} 监控移动时电机未使能；{diagnosis()}")
+                        # 已到位后的反馈微抖不应中断圆环视觉闭环。
+                        if status.in_position and (target == start or moved):
+                            return True
+                        if stable_since is None or abs(measured - stable_reference) > 1.0:
+                            stable_reference = measured
+                            stable_since = self._clock()
+                        elif moved and self._clock() - stable_since >= self.settle_seconds:
+                            return True
+                    # 抓取、下降等动作仍以驱动器到位窗口为准，不能只凭停住继续。
+                    elif status.in_position and (target == start or moved):
+                        return True
+                if self._clock() >= deadline:
+                    reason = "未实测停稳" if stop_when_still else "未实测到位"
+                    raise TimeoutError(f"{axis_name} 监控移动{reason}；{diagnosis()}")
+                self._sleep(0.01)
+        finally:
+            # 先停再读；编码器与软件原点可能不同，因此只使用本段的实测增量。
+            ticket.cancel()
+            actual = start + round(self.read_measured_pulses(axis_name) - measured_start)
+            self.turns_state.record(
+                axis_name, actual - self.turns_state.of(axis_name).pulses
+            )
 
     def _move_delta(
         self,
@@ -711,6 +862,7 @@ class RobotArm:
             或者 ``mode=AXES_SERIAL`` 配 ``wait=False``（那两者互相矛盾）。
         """
         self._require_open()
+        self._require_position_ready()
         mode = _require_axes_mode(mode)
         if mode == AXES_SERIAL and not wait:
             raise ValueError(
@@ -851,7 +1003,7 @@ class RobotArm:
     def _require_axes_can_run_together(self, moves: List[Tuple[str, int]]) -> None:
         """底座大角度旋转不许和伸缩并行——伸出状态下横扫会把整条臂扫过工作区。
 
-        与 :mod:`modules.grasp.drive.servo_motion` 是同一条规矩，阈值见
+        与 :mod:`modules.grasp.drive.visual_servo_motion` 是同一条规矩，阈值见
         :data:`modules.motor.drive.motion.DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`。
         """
         by_axis = dict(moves)
@@ -911,6 +1063,7 @@ class RobotArm:
         报告要等 ``ticket.wait()``（见模块文档字符串的"``wait=False`` 返回票据"一节）。
         """
         self._require_open()
+        self._require_position_ready()
         if pulses == 0:
             # 位移不足半个脉冲：调用方的意图是"已经到位"，既不发帧也不改位置。
             axis = self.config.axes[axis_name]
@@ -998,6 +1151,7 @@ class RobotArm:
         要等一条广播 ``00 FF 66 6B`` 才会动——那是 :meth:`move_axes` 让多根轴
         同时起步的办法，所以它必然配 ``wait=False``（缓存帧还没开始走，没什么可等的）。
         """
+        self._require_position_ready()
         if synchronized and wait:
             # 缓存帧发出时轴还没动，睡一觉只是在浪费估算；等整组是调用方的事。
             raise ValueError("缓存帧（synchronized=True）不能配 wait=True")

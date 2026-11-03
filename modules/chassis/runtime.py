@@ -96,7 +96,7 @@ class MecanumChassis:
         path = MOTOR_HARDWARE_PATH if motor_config_path is None else Path(motor_config_path)
         # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
         port = load_bus_config(hardware_path=path).port
-        return cls._from_settings(
+        return cls.from_settings(
             profile=profile, port=port, bus=bus, owns_bus=owns_bus,
             sleep=sleep, settle_seconds=settle_seconds,
         )
@@ -116,7 +116,7 @@ class MecanumChassis:
         )
 
     @classmethod
-    def _from_settings(
+    def from_settings(
         cls,
         *,
         profile: HardwareProfile,
@@ -139,6 +139,7 @@ class MecanumChassis:
             port,
             motor_ids=profile.motor_ids,
             wheel_signs=profile.wheel_signs,
+            wheel_gains=profile.wheel_gains,
             acceleration=profile.acceleration,
             pattern=profile.pattern,
             rotation_gain=profile.rotation_gain,

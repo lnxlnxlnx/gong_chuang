@@ -4,7 +4,7 @@
 
 1. 普通动作需要 ``target`` 与 ``jacobian``，而 ``_new_arm`` 会打开串口，
    所以"缺标定"必须在**装配设备之前**报出来——断了任何设备都不该被碰到；
-2. 装配机械臂**不做第二次初始化/使能**：``RobotArm._from_settings`` 返回的就绪对象
+2. 装配机械臂**不做第二次初始化/使能**：``RobotArm.from_settings`` 返回的就绪对象
    已经使能过（统一生命周期，计划 §2.2）；
 3. 关闭时两项收尾（``arm.close`` / ``source.close``）**每项独立尝试**：机械臂关闭失败
    不该让观测源也不关；停三轴与失能已经在 ``arm.close`` 内部逐项试行，上层不再重复；
@@ -17,23 +17,23 @@ import unittest
 from unittest.mock import Mock, patch
 
 from modules.grasp import Grasp
-from modules.grasp.drive.servo_model import (
-    ObjectSelector,
-    ServoConfig,
-    ServoError,
-    ServoJacobian,
-    ServoTarget,
+from modules.grasp.drive.visual_servo_model import (
+    MaterialSelector,
+    VisualServoConfig,
+    VisualServoError,
+    VisualServoJacobian,
+    VisualServoTarget,
 )
 
 
-def healthy_jacobian() -> ServoJacobian:
+def healthy_jacobian() -> VisualServoJacobian:
     """一个行列式足够大的雅可比：校验不该在这里拦住。"""
-    return ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    return VisualServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
 
 
-def singular_jacobian() -> ServoJacobian:
+def singular_jacobian() -> VisualServoJacobian:
     """两列成比例 -> ``is_singular`` 为真（和 ``test_eye_in_hand`` 用的是同一组数）。"""
-    return ServoJacobian(base_dx=0.01, base_dy=0.02, radial_dx=0.02, radial_dy=0.04)
+    return VisualServoJacobian(base_dx=0.01, base_dy=0.02, radial_dx=0.02, radial_dy=0.04)
 
 
 def fake_arm() -> Mock:
@@ -46,9 +46,9 @@ def fake_arm() -> Mock:
 class GraspSessionTests(unittest.TestCase):
     def settings(self, **overrides) -> dict:
         values = dict(
-            config=ServoConfig(),
-            selector=ObjectSelector(),
-            target=ServoTarget(x_mm=0.0, y_mm=0.0),
+            config=VisualServoConfig(),
+            selector=MaterialSelector(),
+            target=VisualServoTarget(x_mm=0.0, y_mm=0.0),
             jacobian=healthy_jacobian(),
             lift_scale=None,
             arm_config=object(),
@@ -71,7 +71,7 @@ class GraspSessionTests(unittest.TestCase):
     def test_missing_target_opens_no_devices(self) -> None:
         source_factory = Mock()
         with patch("modules.grasp.runtime._new_arm") as new_arm:
-            with self.assertRaises(ServoError):
+            with self.assertRaises(VisualServoError):
                 Grasp._open_settings(
                     source_factory=source_factory, **self.settings(target=None)
                 )
@@ -81,7 +81,7 @@ class GraspSessionTests(unittest.TestCase):
     def test_missing_jacobian_opens_no_devices(self) -> None:
         source_factory = Mock()
         with patch("modules.grasp.runtime._new_arm") as new_arm:
-            with self.assertRaises(ServoError):
+            with self.assertRaises(VisualServoError):
                 Grasp._open_settings(
                     source_factory=source_factory, **self.settings(jacobian=None)
                 )
@@ -94,7 +94,7 @@ class GraspSessionTests(unittest.TestCase):
         self.assertTrue(jacobian.is_singular, "这组数必须是奇异的，否则这条测试没测到东西")
         source_factory = Mock()
         with patch("modules.grasp.runtime._new_arm") as new_arm:
-            with self.assertRaisesRegex(ServoError, "奇异"):
+            with self.assertRaisesRegex(VisualServoError, "奇异"):
                 Grasp._open_settings(
                     source_factory=source_factory, **self.settings(jacobian=jacobian)
                 )
@@ -104,10 +104,10 @@ class GraspSessionTests(unittest.TestCase):
     def test_a_failing_source_factory_never_reaches_the_arm(self) -> None:
         """``source_factory`` 的失败由它自己收尾；所有权还没转移，就不该去开机械臂。"""
         def boom():
-            raise ServoError("起不了观测源")
+            raise VisualServoError("起不了观测源")
 
         with patch("modules.grasp.runtime._new_arm") as new_arm:
-            with self.assertRaisesRegex(ServoError, "起不了观测源"):
+            with self.assertRaisesRegex(VisualServoError, "起不了观测源"):
                 Grasp._open_settings(source_factory=boom, **self.settings())
         new_arm.assert_not_called()
 
@@ -153,9 +153,9 @@ class GraspSessionTests(unittest.TestCase):
         source = Mock()
         source.close.side_effect = RuntimeError("关不掉观测源")
         with patch(
-            "modules.grasp.runtime._new_arm", side_effect=ServoError("装配失败")
+            "modules.grasp.runtime._new_arm", side_effect=VisualServoError("装配失败")
         ):
-            with self.assertRaises(ServoError) as caught:
+            with self.assertRaises(VisualServoError) as caught:
                 Grasp._open_settings(source_factory=lambda: source, **self.settings())
 
         self.assertEqual(str(caught.exception), "装配失败")
@@ -244,13 +244,13 @@ class GraspSessionTests(unittest.TestCase):
     def test_exit_with_a_business_error_keeps_it_primary_and_attaches_the_cleanup(self) -> None:
         grasp, arm, _source, _new_arm = self.open_session()
         arm.close.side_effect = RuntimeError("关机械臂坏了")
-        business = ServoError("平面还没对准就下降")
+        business = VisualServoError("平面还没对准就下降")
 
         caught = None
         try:
             with grasp:
                 raise business
-        except ServoError as error:
+        except VisualServoError as error:
             caught = error
 
         self.assertIsNotNone(caught)

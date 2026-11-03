@@ -184,6 +184,33 @@ class WheelSignTests(MecanumDriveTests):
         self.assert_wheel_speeds((1, -1, 1, 1), rpm=60)
 
 
+class WheelGainTests(MecanumDriveTests):
+    def test_wheel_gains_trim_the_fast_side_and_keep_signs(self) -> None:
+        car = MecanumDrive(
+            "/dev/ttyUSB0",
+            serial_port=FakeSerial(),
+            motion_transform="calibrated",
+            wheel_gains={
+                WheelPosition.FL: 0.99,
+                WheelPosition.FR: 1.01,
+                WheelPosition.RL: 0.99,
+                WheelPosition.RR: 1.01,
+            },
+        )
+
+        # 右侧吃满 10000，左侧按增益少 2%：直行时"往右画弧"被反向抵消，符号不动
+        self.assertEqual(
+            car.forward(rpm=200, pulses=10000, wait=False),
+            [-9802, -10000, 9802, -10000],
+        )
+
+    def test_rejects_non_positive_gain(self) -> None:
+        with self.assertRaisesRegex(ValueError, "wheel_gains"):
+            MecanumDrive(
+                "/dev/ttyUSB0", serial_port=FakeSerial(), wheel_gains={WheelPosition.FL: 0}
+            )
+
+
 class ConvenienceMethodTests(MecanumDriveTests):
     def test_forward_wraps_drive(self) -> None:
         self.car.forward(rpm=60)
@@ -319,6 +346,21 @@ class PulseModeTests(unittest.TestCase):
         self.assertEqual(self.serial.writes[-1], bytes.fromhex("00 FF 66 6B"))
         # 只发 2 条帧：帧间 1 个间隔 + 触发帧之前 1 个
         self.assertEqual(self.sleep.calls, [GAP, GAP])
+
+    def test_unequal_strokes_scale_rpm_so_all_wheels_finish_together(self) -> None:
+        self.car.move_wheels_relative_pulses(2000, 1000, 2000, 1000, rpm=100)
+
+        # 行程一半 = 速度一半：四轮同起同停，不会"别的轮停了还有轮在转"
+        self.assertEqual(
+            self.serial.writes,
+            [
+                self.position_frame(1, Direction.CW, 100, 10, 2000),
+                self.position_frame(2, Direction.CW, 50, 10, 1000),
+                self.position_frame(3, Direction.CW, 100, 10, 2000),
+                self.position_frame(4, Direction.CW, 50, 10, 1000),
+                bytes.fromhex("00 FF 66 6B"),
+            ],
+        )
 
     def test_rotate_ccw_pulses_use_opposite_directions_per_wheel(self) -> None:
         counts = self.car.rotate_ccw(rpm=100, pulses=800, wait=False)

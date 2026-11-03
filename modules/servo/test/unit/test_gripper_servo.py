@@ -51,7 +51,7 @@ class GripperLifecycleTests(unittest.TestCase):
         with patch(
             "modules.servo.runtime.load_gripper_config", return_value=CONFIG
         ) as load_gripper, patch(
-            "modules.servo.runtime.load_bus_config"
+            "modules.servo.runtime.load_servo_bus_config"
         ) as load_bus, patch(
             "modules.servo.runtime.BusServo", return_value=servo
         ) as bus_servo:

@@ -10,22 +10,24 @@
 
 from __future__ import annotations
 
+import math
 import unittest
-from unittest.mock import Mock
+from dataclasses import replace
+from unittest.mock import Mock, patch
 
 from modules.grasp.drive.ring_plan import RingBasePlan, plan_ring_base
-from modules.grasp.drive.servo_model import (
-    ObjectSelector,
-    ServoConfig,
-    ServoError,
-    ServoJacobian,
-    ServoTarget,
+from modules.grasp.drive.visual_servo_model import (
+    MaterialSelector,
+    VisualServoConfig,
+    VisualServoError,
+    VisualServoJacobian,
+    VisualServoTarget,
 )
 from modules.grasp.runtime import Grasp
 from modules.vision.drive.numbered_ring import RingTarget
 
 #: 实测雅可比（modules/grasp/eye_in_hand.json）。
-JACOBIAN = ServoJacobian(
+JACOBIAN = VisualServoJacobian(
     base_dx=-0.08174204217107724,
     base_dy=-0.007583697824866524,
     radial_dx=-0.0002735146342596506,
@@ -85,9 +87,9 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(positive.base_pulses, -negative.base_pulses)
 
     def test_singular_jacobian_is_refused(self) -> None:
-        singular = ServoJacobian(base_dx=0.01, base_dy=0.02, radial_dx=0.02, radial_dy=0.04)
+        singular = VisualServoJacobian(base_dx=0.01, base_dy=0.02, radial_dx=0.02, radial_dy=0.04)
         self.assertTrue(singular.is_singular)
-        with self.assertRaisesRegex(ServoError, "奇异"):
+        with self.assertRaisesRegex(VisualServoError, "奇异"):
             plan(reading=(1.0, 1.0), jacobian=singular)
 
     def test_bad_arguments_are_rejected_before_any_math(self) -> None:
@@ -163,12 +165,12 @@ class FakeSource:
 
 
 def make_grasp(
-    target, config: ServoConfig | None = None
+    target, config: VisualServoConfig | None = None
 ) -> tuple[Grasp, FakeArm, FakeSource]:
     grasp = Grasp(
-        config=config if config is not None else ServoConfig(),
-        selector=ObjectSelector(),
-        target=ServoTarget(x_mm=0.0, y_mm=0.0),
+        config=config if config is not None else VisualServoConfig(),
+        selector=MaterialSelector(),
+        target=VisualServoTarget(x_mm=0.0, y_mm=0.0),
         jacobian=JACOBIAN,
         lift_scale=None,
     )
@@ -191,7 +193,7 @@ class SessionPlanTests(unittest.TestCase):
 
     def test_the_target_reading_comes_from_the_session_config(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target(reading=(5.0, 0.0)))
-        grasp._target = ServoTarget(x_mm=5.0, y_mm=0.0)
+        grasp._target = VisualServoTarget(x_mm=5.0, y_mm=0.0)
         result = grasp.plan_ring()
         self.assertEqual(result.base_pulses, 0, "读数等于目标，不该动")
 
@@ -199,7 +201,7 @@ class SessionPlanTests(unittest.TestCase):
         """落料补偿：读数正好等于「target + 补偿」时不该再动（料会落在环心）。"""
         grasp, _arm, _source = make_grasp(
             ring_target(reading=(7.5, 0.0)),
-            config=ServoConfig(ring_offset_x_mm=7.5),
+            config=VisualServoConfig(ring_offset_x_mm=7.5),
         )
         # 补偿只加在环心那一次上：物料用的 target 一个数都没变。
         self.assertEqual((grasp._target.x_mm, grasp._target.y_mm), (0.0, 0.0))
@@ -218,9 +220,9 @@ class SessionPlanTests(unittest.TestCase):
         """补偿是相对 ``target`` 的偏移：重标 target 之后环心目标跟着走。"""
         grasp, _arm, _source = make_grasp(
             ring_target(reading=(5.0, 0.0)),
-            config=ServoConfig(ring_offset_x_mm=7.5),
+            config=VisualServoConfig(ring_offset_x_mm=7.5),
         )
-        grasp._target = ServoTarget(x_mm=-2.5, y_mm=0.0)
+        grasp._target = VisualServoTarget(x_mm=-2.5, y_mm=0.0)
         self.assertEqual(grasp._ring_target().x_mm, 5.0)
         self.assertEqual(
             grasp.plan_ring().base_pulses, 0, "读数等于 target + 补偿，不该动"
@@ -228,19 +230,19 @@ class SessionPlanTests(unittest.TestCase):
 
     def test_no_ring_in_view_is_an_error(self) -> None:
         grasp, _arm, _source = make_grasp(None)
-        with self.assertRaisesRegex(ServoError, "没有环"):
+        with self.assertRaisesRegex(VisualServoError, "没有环"):
             grasp.plan_ring()
 
     def test_clipped_ring_refuses_to_give_an_angle(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target(clipped=True))
-        with self.assertRaisesRegex(ServoError, "贴到画面边缘"):
+        with self.assertRaisesRegex(VisualServoError, "贴到画面边缘"):
             grasp.plan_ring()
 
     def test_missing_scale_refuses_to_give_an_angle(self) -> None:
         grasp, _arm, _source = make_grasp(
             ring_target(reading=None, scale_mm_per_px=None, scale_source="none")
         )
-        with self.assertRaisesRegex(ServoError, "比例尺"):
+        with self.assertRaisesRegex(VisualServoError, "比例尺"):
             grasp.plan_ring()
 
     def test_the_required_digit_filters_the_frame(self) -> None:
@@ -253,7 +255,7 @@ class SessionPlanTests(unittest.TestCase):
 
     def test_a_different_ring_number_is_refused(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target(digit=3))
-        with self.assertRaisesRegex(ServoError, "3 号"):
+        with self.assertRaisesRegex(VisualServoError, "3 号"):
             grasp.plan_ring(require_digit=2)
 
     def test_the_required_ring_number_passes(self) -> None:
@@ -272,7 +274,7 @@ class SessionPlanTests(unittest.TestCase):
         grasp, _arm, _source = make_grasp(
             ring_target(scale_mm_per_px=0.495, scale_source="station.mm_per_px")
         )
-        with self.assertRaisesRegex(ServoError, "station.mm_per_px"):
+        with self.assertRaisesRegex(VisualServoError, "station.mm_per_px"):
             grasp.plan_ring()
 
     def test_an_explicit_scale_rescales_the_reading(self) -> None:
@@ -287,13 +289,13 @@ class SessionPlanTests(unittest.TestCase):
 
     def test_a_bad_explicit_scale_is_rejected(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target())
-        with self.assertRaises(ServoError):
+        with self.assertRaises(VisualServoError):
             grasp.plan_ring(scale_mm_per_px=0.0)
 
     def test_a_source_without_ring_vision_says_so(self) -> None:
         grasp, _arm, _source = make_grasp(ring_target())
         grasp._source = Mock(spec=["frame"])  # TCP 观测源：没有环心定位
-        with self.assertRaisesRegex(ServoError, "没有环心定位"):
+        with self.assertRaisesRegex(VisualServoError, "没有环心定位"):
             grasp.plan_ring()
 
     def test_a_closed_session_refuses(self) -> None:
@@ -301,6 +303,39 @@ class SessionPlanTests(unittest.TestCase):
         grasp._closed = True
         with self.assertRaises(RuntimeError):
             grasp.plan_ring()
+
+
+class RingFrameRetryTests(unittest.TestCase):
+    """模型偶尔把相邻两个环读成同一号、整帧编号作废：坏帧要重读，别整段失败。"""
+
+    class _Flaky:
+        def __init__(self, blanks: int) -> None:
+            self.blanks = blanks
+            self.calls = 0
+
+        def locate_ring(self, *, timeout=None, digit=None):
+            self.calls += 1
+            return None if self.calls <= self.blanks else ring_target()
+
+    def _grasp_with(self, source):
+        grasp, _arm, _source = make_grasp(ring_target())
+        grasp._source = source
+        return grasp
+
+    def test_a_bad_frame_is_retried(self) -> None:
+        source = self._Flaky(blanks=1)
+        with patch("time.sleep"):
+            plan = self._grasp_with(source).plan_ring(require_digit=2)
+
+        self.assertEqual(source.calls, 2)
+        self.assertEqual(plan.digit, 2)
+
+    def test_it_gives_up_after_the_attempts(self) -> None:
+        source = self._Flaky(blanks=99)
+        with patch("time.sleep"), self.assertRaisesRegex(VisualServoError, "没有环"):
+            self._grasp_with(source).plan_ring()
+
+        self.assertEqual(source.calls, Grasp.RING_FRAME_ATTEMPTS)
 
 
 class AbsolutePositionTests(unittest.TestCase):
@@ -345,11 +380,12 @@ class SimulatedPlantArm:
     一半，等价于"配置过期/尺不对"，闭环应当在线学出响应比并两三步入位。
     """
 
-    def __init__(self, plant: ServoJacobian, *, reading=(30.0, 20.0),
+    def __init__(self, plant: VisualServoJacobian, *, reading=(30.0, 20.0),
                  base_pulses=0, extension_pulses=0) -> None:
         self.plant = plant
         self.reading = [float(reading[0]), float(reading[1])]
         self.pulses = {"base": base_pulses, "extension": extension_pulses}
+        self.encoder_pulses = dict(self.pulses)
         self.moves: list[tuple[str, int]] = []
         self.turns_state = Mock()
         self.turns_state.of.side_effect = lambda name: Mock(pulses=self.pulses[name])
@@ -359,6 +395,7 @@ class SimulatedPlantArm:
     def _apply(self, axis: str, signed: int) -> None:
         self.moves.append((axis, signed))
         self.pulses[axis] += signed
+        self.encoder_pulses[axis] += signed
         moved = self.plant.displacement_for(
             signed if axis == "base" else 0,
             signed if axis == "extension" else 0,
@@ -366,20 +403,33 @@ class SimulatedPlantArm:
         self.reading[0] += moved[0]
         self.reading[1] += moved[1]
 
+    def read_measured_pulses(self, axis: str) -> float:
+        return self.encoder_pulses[axis]
+
+    def move_axis_to_motor_degrees_monitored(
+        self, axis, degrees, *, keep_moving, rpm=None, stop_when_still=False
+    ):
+        """离线机构即时到位；保留监控动作使用的绝对目标语义。"""
+        if not keep_moving():
+            return False
+        target = round(degrees * self.pulses_per_revolution / 360.0)
+        self._apply(axis, target - self.pulses[axis])
+        return True
+
     # ``_move_axis`` 只会调这四个方向原语，且 ``wait=False``（不等，返回的耗时是 0）。
-    def rotate_cw(self, pulses, wait=False):
+    def rotate_cw(self, pulses, wait=False, **_kwargs):
         self._apply("base", int(pulses))
         return Mock(estimated_seconds=0.0)
 
-    def rotate_ccw(self, pulses, wait=False):
+    def rotate_ccw(self, pulses, wait=False, **_kwargs):
         self._apply("base", -int(pulses))
         return Mock(estimated_seconds=0.0)
 
-    def move_forward(self, pulses, wait=False):
+    def move_forward(self, pulses, wait=False, **_kwargs):
         self._apply("extension", int(pulses))
         return Mock(estimated_seconds=0.0)
 
-    def move_backward(self, pulses, wait=False):
+    def move_backward(self, pulses, wait=False, **_kwargs):
         self._apply("extension", -int(pulses))
         return Mock(estimated_seconds=0.0)
 
@@ -409,7 +459,7 @@ class LiveRingSource:
 
 def make_closed_loop(plant_scale: float = 1.0):
     """配置雅可比 = JACOBIAN；真实灵敏度 = ``plant_scale`` × JACOBIAN。"""
-    plant = ServoJacobian(
+    plant = VisualServoJacobian(
         base_dx=JACOBIAN.base_dx * plant_scale,
         base_dy=JACOBIAN.base_dy * plant_scale,
         radial_dx=JACOBIAN.radial_dx * plant_scale,
@@ -417,9 +467,9 @@ def make_closed_loop(plant_scale: float = 1.0):
     )
     arm = SimulatedPlantArm(plant)
     grasp = Grasp(
-        config=ServoConfig(),
-        selector=ObjectSelector(),
-        target=ServoTarget(x_mm=0.0, y_mm=0.0),
+        config=VisualServoConfig(),
+        selector=MaterialSelector(),
+        target=VisualServoTarget(x_mm=0.0, y_mm=0.0),
         jacobian=JACOBIAN,
         lift_scale=None,
     )
@@ -430,6 +480,116 @@ def make_closed_loop(plant_scale: float = 1.0):
 
 class ClosedLoopTests(unittest.TestCase):
     """``align_ring``：一步不够时就靠"实测 / 预测"在线折算，两三步入位。"""
+
+    def test_y_correction_uses_a_new_reading_after_base_motion(self) -> None:
+        """底座造成的 Y 串扰必须在取帧后交给伸缩修正。"""
+        grasp, arm = make_closed_loop()
+        grasp._jacobian = arm.plant = VisualServoJacobian(-0.1, -0.05, 0.02, 0.1)
+        arm.reading = [10.0, 0.0]
+
+        class ObservedSource(LiveRingSource):
+            observed_move_counts = []
+
+            def locate_ring(self, **kwargs):
+                self.observed_move_counts.append(len(self.arm.moves))
+                return super().locate_ring(**kwargs)
+
+        source = ObservedSource(arm)
+        grasp._source = source
+        result = grasp.align_ring(gain=1.0, tolerance_mm=0.1)
+
+        self.assertEqual(result.steps[0].base_pulses, 100)
+        self.assertEqual(result.steps[0].extension_pulses, 0)
+        self.assertIn(1, source.observed_move_counts, "底座走完后必须先取帧")
+        self.assertEqual(result.steps[1].base_pulses, 0)
+        self.assertEqual(result.steps[1].extension_pulses, 50)
+        self.assertTrue(all(not (s.base_pulses and s.extension_pulses) for s in result.steps))
+        self.assertTrue(result.aligned, result.summary())
+        self.assertLessEqual(math.hypot(*arm.reading), 0.1)
+
+    def test_response_learning_is_independent_between_axes(self) -> None:
+        grasp, arm = make_closed_loop()
+        grasp._jacobian = VisualServoJacobian(-0.1, 0.0, 0.0, 0.1)
+        arm.plant = VisualServoJacobian(-0.05, 0.0, 0.0, 0.1)
+        arm.reading = [10.0, 10.0]
+
+        result = grasp.align_ring(gain=1.0, tolerance_mm=0.1)
+
+        self.assertEqual(result.steps[0].base_pulses, 100)
+        self.assertEqual(result.steps[1].extension_pulses, -100)
+        self.assertAlmostEqual(result.steps[1].response, 0.5)
+        self.assertTrue(result.aligned, result.summary())
+
+    def test_last_correction_is_observed_before_selecting_the_best_pose(self) -> None:
+        grasp, arm = make_closed_loop()
+        grasp._jacobian = arm.plant = VisualServoJacobian(-0.1, 0.0, 0.0, 0.1)
+        arm.reading = [0.0, 10.0]
+
+        result = grasp.align_ring(max_iterations=1, gain=1.0, tolerance_mm=0.1)
+
+        self.assertTrue(result.aligned, result.summary())
+        self.assertLessEqual(math.hypot(*arm.reading), 0.1)
+        self.assertEqual(arm.moves, [("extension", -100)])
+
+    def test_small_corrections_overshoot_and_return_with_the_same_net_pulses(self) -> None:
+        """两轴正反向小步都先越过目标再返回，50 脉冲边界仍直接发送。"""
+        for axis in ("base", "extension"):
+            for pulses in (-51, -50, -49, -1, 0, 1, 49, 50, 51):
+                with self.subTest(axis=axis, pulses=pulses):
+                    grasp, arm = make_closed_loop()
+                    displacement = JACOBIAN.displacement_for(
+                        pulses if axis == "base" else 0,
+                        pulses if axis == "extension" else 0,
+                    )
+                    arm.reading = [-value for value in displacement]
+
+                    result = grasp.align_ring(
+                        axes=(axis,), gain=1.0, tolerance_mm=1e-6
+                    )
+
+                    if 0 < abs(pulses) < 50:
+                        extra = 300 if pulses > 0 else -300
+                        expected = [(axis, pulses + extra), (axis, -extra)]
+                    else:
+                        expected = [(axis, pulses)] if pulses else []
+                    self.assertEqual(arm.moves, expected)
+                    self.assertEqual(arm.pulses[axis], pulses)
+                    self.assertTrue(result.aligned, result.summary())
+                    if pulses:
+                        self.assertEqual(
+                            getattr(result.steps[0], axis + "_pulses"), pulses
+                        )
+                    if result.steps[-1].predicted_mm is not None:
+                        self.assertEqual(result.steps[-1].predicted_mm, displacement)
+                        self.assertAlmostEqual(result.response, 1.0)
+
+    def test_small_corrections_converge_when_short_commands_have_no_effect(self) -> None:
+        """模拟电机有转动、短指令却不能推动末端的现场现象。"""
+        for axis in ("base", "extension"):
+            for pulses in (-49, 49):
+                with self.subTest(axis=axis, pulses=pulses):
+                    grasp, arm = make_closed_loop()
+                    displacement = JACOBIAN.displacement_for(
+                        pulses if axis == "base" else 0,
+                        pulses if axis == "extension" else 0,
+                    )
+                    arm.reading = [-value for value in displacement]
+                    original_apply = arm._apply
+
+                    def apply_with_short_command_dead_zone(axis, signed):
+                        previous = list(arm.reading)
+                        original_apply(axis, signed)
+                        if abs(signed) < 50:
+                            arm.reading[:] = previous
+
+                    arm._apply = apply_with_short_command_dead_zone
+                    result = grasp.align_ring(
+                        axes=(axis,), gain=1.0, tolerance_mm=0.1
+                    )
+
+                    self.assertTrue(result.aligned, result.summary())
+                    self.assertLessEqual(math.hypot(*arm.reading), 0.1)
+                    self.assertEqual(arm.read_measured_pulses(axis), pulses)
 
     def test_a_matching_machine_lands_in_one_step(self) -> None:
         grasp, arm = make_closed_loop(1.0)
@@ -442,8 +602,8 @@ class ClosedLoopTests(unittest.TestCase):
     def test_the_closed_loop_lands_on_the_compensated_target(self) -> None:
         """落料补偿改的是闭环的**终点**：读数停在「target + 补偿」，不是停在 0。"""
         grasp, arm = make_closed_loop(1.0)
-        grasp._config = ServoConfig(ring_offset_x_mm=7.5)
-        result = grasp.align_ring(gain=1.0)
+        grasp._config = VisualServoConfig(ring_offset_x_mm=7.5)
+        result = grasp.align_ring(gain=1.0, tolerance_mm=0.1)
         self.assertTrue(result.aligned, result.summary())
         # 脉冲要取整，落点差着半个脉冲的量级（0.036 mm），所以按 delta 比。
         self.assertAlmostEqual(arm.reading[0], 7.5, delta=0.1)
@@ -468,19 +628,121 @@ class ClosedLoopTests(unittest.TestCase):
         self.assertTrue(result.aligned, result.summary())
         self.assertGreater(result.response or 0.0, 0.5)
 
+    def test_a_pair_of_stale_frames_does_not_report_a_stalled_axis(self) -> None:
+        """整帧或只有一个方向的读数滞后时，都应保持位置复测。"""
+        for stale_x_only in (False, True):
+            with self.subTest(stale_x_only=stale_x_only):
+                grasp, arm = make_closed_loop(1.0)
+
+                class DelayedSource(LiveRingSource):
+                    stale_reads = 0
+                    previous_target = None
+
+                    def locate_ring(self, **kwargs):
+                        if len(self.arm.moves) == 4 and self.stale_reads < 2:
+                            self.stale_reads += 1
+                            if stale_x_only:
+                                return replace(self.previous_target, y_mm=self.arm.reading[1])
+                            return self.previous_target
+                        target = super().locate_ring(**kwargs)
+                        self.previous_target = target
+                        return target
+
+                grasp._source = DelayedSource(arm)
+                result = grasp.align_ring(max_iterations=6, gain=0.6, tolerance_mm=2.0)
+
+                self.assertTrue(result.aligned, result.summary())
+                self.assertLessEqual(math.hypot(*arm.reading), 2.0)
+
+    def test_one_weak_base_move_does_not_amplify_the_next_correction(self) -> None:
+        """复现现场小步几乎没响应：不能把一次低响应倒数当作下一步的大增益。"""
+        for reading in ((-24.33, -2.88), (-39.52, 11.32)):
+            with self.subTest(reading=reading):
+                grasp, arm = make_closed_loop(1.0)
+                arm.reading = list(reading)
+                grasp._config = VisualServoConfig(ring_offset_x_mm=6.5, ring_offset_y_mm=-7.0)
+                original_apply = arm._apply
+
+                def apply_with_one_weak_base(axis, signed):
+                    if axis == "base" and len(arm.moves) == 2:
+                        arm.moves.append((axis, signed))
+                        arm.pulses[axis] += signed
+                        arm.encoder_pulses[axis] += signed * 0.1
+                        moved = arm.plant.displacement_for(signed * 0.1, 0)
+                        arm.reading[0] += moved[0]
+                        arm.reading[1] += moved[1]
+                        return
+                    original_apply(axis, signed)
+
+                arm._apply = apply_with_one_weak_base
+                result = grasp.align_ring(max_iterations=6, gain=0.6, tolerance_mm=2.0)
+
+                for step in result.steps:
+                    predicted = JACOBIAN.displacement_for(step.base_pulses, step.extension_pulses)
+                    self.assertLessEqual(math.hypot(*predicted), step.error_mm + 0.1)
+                self.assertTrue(result.aligned, result.summary())
+                # 第三次观测应报告上步的真实小位移，不能打印命令里程表冒充编码器。
+                self.assertAlmostEqual(
+                    result.steps[2].measured_motor_pulses[0],
+                    result.steps[1].base_pulses * 0.1,
+                )
+
+    def test_a_stationary_machine_still_aborts_after_remeasurement(self) -> None:
+        """复测只排除旧帧；设备持续不动时必须停止，不能靠追加运动掩盖故障。"""
+        grasp, arm = make_closed_loop(0.0)
+        result = grasp.align_ring(max_iterations=6, gain=0.6, tolerance_mm=2.0)
+
+        self.assertFalse(result.aligned)
+        self.assertIn("几乎没有", result.note)
+        self.assertAlmostEqual(result.final_error_mm, math.hypot(30.0, 20.0))
+        self.assertLessEqual(len(arm.moves), 4, "一轮修正后只允许退回，不能继续盲走")
+
     def test_a_reversed_axis_stops_instead_of_walking_away(self) -> None:
-        """方向反了（接线/标定问题）必须停下并说清楚，而不是继续发帧。"""
+        """方向反了（接线/标定问题）必须停下并说清楚，而不是继续发帧。
+
+        停完之后还要退回误差最小那一次（这里是起点）：第一步已经把它推远了，
+        留在那儿等于挑最差的结果。
+        """
         grasp, arm = make_closed_loop(-1.0)
         result = grasp.align_ring(max_iterations=4)
         self.assertFalse(result.aligned)
         self.assertIn("方向相反", result.note)
-        self.assertLessEqual(len(arm.moves), 2, "只该走第一步，之后必须停")
+        self.assertIn("误差最小", result.note)
+        # 第一步（两根轴）+ 退回第一步（两根轴），到此为止，不再试探第二步
+        self.assertLessEqual(len(arm.moves), 4, "只该走一步、再退回")
+        self.assertAlmostEqual(arm.reading[0], 30.0, delta=1.0)
 
     def test_base_only_leaves_the_extension_alone(self) -> None:
         grasp, arm = make_closed_loop(1.0)
         result = grasp.align_ring(axes=("base",), max_iterations=4)
         self.assertEqual({axis for axis, _ in arm.moves}, {"base"})
         self.assertIsNotNone(result.final_error_mm)
+
+    def test_it_goes_back_to_the_smallest_error_when_the_steps_run_out(self) -> None:
+        """走满步数不报错：退回**误差最小**那一次的姿态，而不是停在过冲的最后一步。
+
+        ``gain=4`` 故意过冲：误差 36 mm → 108 mm。两步入数走完，臂必须回到量到 36 mm
+        时那个位置（读数 (30, 20)），报的残差也是它。
+        """
+        grasp, arm = make_closed_loop(1.0)
+
+        result = grasp.align_ring(max_iterations=2, gain=4.0, tolerance_mm=0.5)
+
+        self.assertFalse(result.aligned)
+        self.assertIn("误差最小", result.note)
+        self.assertAlmostEqual(result.final_error_mm, math.hypot(30.0, 20.0), delta=1.0)
+        self.assertAlmostEqual(arm.reading[0], 30.0, delta=1.0)
+        self.assertAlmostEqual(arm.reading[1], 20.0, delta=1.0)
+
+    def test_a_small_step_does_not_update_the_response_scale(self) -> None:
+        """1 mm 的步子被背隙/噪声主导：只走，不拿它去学响应比（否则 scale 被带飞）。"""
+        grasp, arm = make_closed_loop(1.0)
+        arm.reading = [1.0, 0.0]
+
+        result = grasp.align_ring(tolerance_mm=0.2, max_iterations=2, gain=1.0)
+
+        self.assertTrue(result.aligned, result.summary())
+        self.assertIsNone(result.response, "小于约 2 mm 预测位移的步子不参与学习")
 
     def test_an_unknown_axis_is_rejected_before_any_motion(self) -> None:
         grasp, arm = make_closed_loop(1.0)
@@ -494,9 +756,8 @@ class ClosedLoopTests(unittest.TestCase):
         result = grasp.align_ring(max_iterations=4, gain=1.0)
         self.assertIsNotNone(result.plan, "闭环必须把最后那一份计划交出来")
         plan = result.plan
-        # 收敛之后"该走到的绝对位置"就是当前里程表（剩下的步长已经是 0）
-        self.assertEqual(plan.base_motor_pulses, arm.pulses["base"])
-        self.assertEqual(plan.extension_motor_pulses, arm.pulses["extension"])
+        # 容差内仍可能有小修正量，最终计划必须与当前姿态重新解算的结果一致。
+        self.assertEqual(plan, grasp.plan_ring())
         # 转发属性与 plan 一致，用起来和 plan_ring() 一样
         self.assertAlmostEqual(result.base, plan.base)
         self.assertAlmostEqual(result.extension, plan.extension)
@@ -507,8 +768,89 @@ class ClosedLoopTests(unittest.TestCase):
     def test_a_closed_loop_without_ring_vision_says_so(self) -> None:
         grasp, _arm = make_closed_loop(1.0)
         grasp._source = Mock(spec=["frame"])
-        with self.assertRaisesRegex(ServoError, "没有环心定位"):
+        with self.assertRaisesRegex(VisualServoError, "没有环心定位"):
             grasp.align_ring()
+
+
+class AssumedDigitTests(unittest.TestCase):
+    """按示教姿态逐环放的流程：这一格是几号环**已经知道**，模型读错号不该让整段失败。
+
+    2026-10-29 现场就是这种取景：一张转过角度的 1 号靶标，模型 5 帧全读成 2/3 号，环心
+    却一直是准的（框内椭圆精修散布 0.7 px）。按号筛框（``require_digit``）只会得到
+    "画面里没有环"。
+    """
+
+    class Misread:
+        """模型永远报 2 号，环心跟着假臂走。"""
+
+        def __init__(self, arm) -> None:
+            self.arm = arm
+            self.digits: list = []
+
+        def locate_ring(self, *, timeout=None, digit=None):
+            self.digits.append(digit)
+            return RingTarget(
+                center_px=(640.0, 360.0),
+                radius_px=250.0,
+                digit=2,
+                score=0.8,
+                clipped=False,
+                x_mm=self.arm.reading[0],
+                y_mm=self.arm.reading[1],
+                scale_mm_per_px=1.0,
+                scale_source="depth/focal",
+            )
+
+    def build(self):
+        """1 号环的落料补偿是 7.5 mm、2 号是 0：从落点就能看出用的是哪一份。"""
+        arm = SimulatedPlantArm(JACOBIAN)
+        grasp = Grasp(
+            config=VisualServoConfig(
+                ring_offsets_mm=((7.5, 0.0), (0.0, 0.0), (0.0, 0.0)),
+            ),
+            selector=MaterialSelector(),
+            target=VisualServoTarget(x_mm=0.0, y_mm=0.0),
+            jacobian=JACOBIAN,
+            lift_scale=None,
+        )
+        source = self.Misread(arm)
+        grasp._arm = arm
+        grasp._source = source
+        return grasp, arm, source
+
+    def test_a_misread_digit_still_aligns_with_the_taught_ring_offset(self) -> None:
+        grasp, arm, source = self.build()
+
+        result = grasp.align_ring(assume_digit=1, gain=1.0, tolerance_mm=0.1)
+
+        self.assertTrue(result.aligned, result.summary())
+        self.assertEqual(result.digit, 1)
+        # 补偿取 1 号那份（7.5 mm），不是模型说的 2 号（0 mm）
+        self.assertAlmostEqual(arm.reading[0], 7.5, delta=0.1)
+        self.assertIn("模型读成 2 号", result.note)
+        self.assertIn(1, source.digits, "先按姿态给的号找")
+        self.assertIn(None, source.digits, "读不出这个号才退回画面里那个环")
+
+    def test_a_matching_digit_is_not_reported_as_a_misread(self) -> None:
+        grasp, _arm = make_closed_loop(1.0)   # 这个源报的就是 2 号
+
+        result = grasp.align_ring(assume_digit=2, gain=1.0)
+
+        self.assertTrue(result.aligned, result.summary())
+        self.assertNotIn("模型读成", result.note)
+
+    def test_a_strict_ring_number_still_refuses_a_misread(self) -> None:
+        grasp, arm, _source = self.build()
+
+        with self.assertRaisesRegex(VisualServoError, "不是要求的 1 号"):
+            grasp.align_ring(require_digit=1, gain=1.0)
+        self.assertEqual(arm.moves, [], "号不对时一步都不该走")
+
+    def test_the_two_notions_of_ring_number_cannot_be_mixed(self) -> None:
+        grasp, _arm, _source = self.build()
+
+        with self.assertRaisesRegex(ValueError, "只能给一个"):
+            grasp.align_ring(require_digit=1, assume_digit=1)
 
 
 class RingSettleTests(unittest.TestCase):
@@ -540,68 +882,20 @@ class RingSettleTests(unittest.TestCase):
         self.assertAlmostEqual(target.reading()[0], 3.0, places=6)
 
     def test_it_reads_through_a_jittering_frame(self) -> None:
+        """三帧读数取中位数，不是用最后一帧——最后一帧只是"够近"，不代表最可信。"""
         source = self.Jittery([(3.0, 0.0), (5.0, 0.0), (5.05, 0.02)])
         target = self.locate(source)
 
         self.assertEqual(source.calls, 3)
-        self.assertAlmostEqual(target.reading()[0], 5.05, places=6)
+        self.assertAlmostEqual(target.reading()[0], 5.0, places=6)
+        self.assertAlmostEqual(target.reading()[1], 0.0, places=6)
 
     def test_never_settling_still_stops_at_the_read_limit(self) -> None:
         source = self.Jittery([(1.0, 0.0), (50.0, 0.0), (100.0, 0.0)])
         target = self.locate(source)
 
-        self.assertEqual(source.calls, 3)   # 有上限：等不到稳定就用最后一帧
-        self.assertAlmostEqual(target.reading()[0], 100.0, places=6)
-
-
-class PlanRingReadingsTests(unittest.TestCase):
-    """一批**已经算好的**读数（三环外推出来的那三个）→ 三份绝对位置，一帧都不拍。"""
-
-    def test_it_plans_every_ring_without_taking_a_frame(self) -> None:
-        grasp, _arm, source = make_grasp(ring_target())
-
-        plans = grasp.plan_ring_readings(
-            {1: (-150.0, 0.0), 2: (0.0, 0.0), 3: (150.0, 0.0)},
-            scale_source="ring box",
-        )
-
-        self.assertEqual(source.calls, 0, "读数已经算好了，不该再取帧")
-        self.assertEqual(sorted(plans), [1, 2, 3])
-        self.assertEqual(plans[2].base_pulses, 0, "读数等于目标，不该动")
-        # 三环等距：两端的偏差大小相同、方向相反（同一个雅可比下）。
-        self.assertGreater(abs(plans[1].base_pulses), 0)
-        self.assertAlmostEqual(
-            plans[1].base_pulses, -plans[3].base_pulses, delta=1
-        )
-
-    def test_one_offset_digit_is_shared_by_every_point(self) -> None:
-        """一条直线上的三个点共用 2 号环的落料补偿——各用各的会把那条直线搅乱。"""
-        grasp, _arm, _source = make_grasp(ring_target())
-        grasp._config = ServoConfig(ring_offsets_mm=((-7.0, -3.0), (3.0, -4.0), (9.0, -4.0)))
-        readings = {1: (-150.0, 0.0), 2: (0.0, 0.0), 3: (150.0, 0.0)}
-
-        own = grasp.plan_ring_readings(readings, scale_source="ring box")
-        shared = grasp.plan_ring_readings(
-            readings, scale_source="ring box", offset_digit=2
-        )
-
-        self.assertNotEqual(own[1].target, own[3].target)
-        self.assertEqual(shared[1].target, shared[2].target)
-        self.assertEqual(shared[3].target, shared[2].target)
-
-    def test_a_scale_that_is_not_physical_millimetres_is_refused(self) -> None:
-        grasp, _arm, _source = make_grasp(ring_target())
-
-        with self.assertRaisesRegex(ServoError, "station.mm_per_px"):
-            grasp.plan_ring_readings(
-                {2: (0.0, 0.0)}, scale_source="station.mm_per_px"
-            )
-
-    def test_a_closed_session_refuses(self) -> None:
-        grasp, _arm, _source = make_grasp(ring_target())
-        grasp._closed = True
-        with self.assertRaises(RuntimeError):
-            grasp.plan_ring_readings({2: (0.0, 0.0)}, scale_source="ring box")
+        self.assertEqual(source.calls, 3)   # 有上限：等不到稳定就读满三帧
+        self.assertAlmostEqual(target.reading()[0], 50.0, places=6)
 
 
 if __name__ == "__main__":

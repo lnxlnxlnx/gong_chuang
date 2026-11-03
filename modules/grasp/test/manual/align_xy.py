@@ -96,7 +96,7 @@ x/y 对准**不动高度**，所以"对准时爪子停在哪一层"原本只由 
 "爪子悬到物块上方挡住光"的收工口（``occluded=True``）不会被无限等待卡死。
 
 对准成功不等于可以下降：物块可能还在跟着转盘走。抓取编排（``app/gripper.py`` 的
-``grab_box_from_turntable``）会在下降前再调一次 ``vision.wait_scene_stable()``，画面
+``grab_material_from_turntable_to_repo``）会在下降前再调一次 ``vision.wait_scene_stable()``，画面
 一直在动就拒绝下降。
 
 ## 认出"哪一个物块"：按次传 `want`，JSON 只是默认值
@@ -169,37 +169,37 @@ from modules.grasp.drive.eye_in_hand import (
     align_x_y,
     align_z,
     descend_z,
-    find_object,
-    hover_above_object,
+    find_material,
+    hover_above_material,
     probe_jacobian,
     probe_lift_scale,
     retract_extension,
 )
-# 配置与值类型只有一个定义处（servo_model），观测判据在 servo_observation，
-# 脉冲原语在 servo_motion，实际控制算法在 eye_in_hand。
+# 配置与值类型只有一个定义处（visual_servo_model），观测判据在 visual_servo_observation，
+# 脉冲原语在 visual_servo_motion，实际控制算法在 eye_in_hand。
 # 这里**不从包顶层导入内部工具**：那些名字是给上层用的会话接口，不是工具装配件。
-from modules.grasp.drive.servo_motion import _move_lift
-from modules.grasp.drive.servo_model import (
+from modules.grasp.drive.visual_servo_motion import _move_lift
+from modules.grasp.drive.visual_servo_model import (
     DEFAULT_CONFIG_PATH,
     LiftScale,
-    ObjectSelector,
-    ServoConfig,
-    ServoError,
-    ServoJacobian,
-    ServoTarget,
+    MaterialSelector,
+    VisualServoConfig,
+    VisualServoError,
+    VisualServoJacobian,
+    VisualServoTarget,
     load_jacobian,
     load_lift_scale,
-    load_object_selector,
-    load_servo_config,
+    load_material_selector,
+    load_visual_servo_config,
     load_target,
     load_z_target,
     save_calibration,
 )
-from modules.grasp.drive.servo_observation import (
+from modules.grasp.drive.visual_servo_observation import (
     ClosableFrameSource,
     FrameSource,
     measure_offset,
-    select_object,
+    select_material,
 )
 from modules.grasp.runtime import Grasp
 from modules.motor.config import load_bus_config as load_motor_bus_config
@@ -209,17 +209,17 @@ def _say(message: str) -> None:
     print(f"  {message}")
 
 
-def _selector_for(arguments) -> ObjectSelector:
+def _selector_for(arguments) -> MaterialSelector:
     """本次会话按**哪个**物块判别：``--want`` 给了就用它，否则读配置里的 ``object``。
 
     ``--want`` 与 ``vision.locate("red")`` 是同一套说法（类别名，或从 1 开始的编号）。
     它按次生效，所以一次程序里依次抓多种物料不必改配置文件。
     """
     if arguments.want is None:
-        return load_object_selector()
+        return load_material_selector()
     from modules.vision.drive.material_locate import parse_want
 
-    return ObjectSelector.from_want(parse_want(arguments.want))
+    return MaterialSelector.from_want(parse_want(arguments.want))
 
 
 def _open_source(arguments, *, vision_settings) -> ClosableFrameSource:
@@ -251,12 +251,12 @@ def _open_source(arguments, *, vision_settings) -> ClosableFrameSource:
     # ``--camera`` 早已落进快照（见 main），所以这里直接问快照要序号：
     # 再读一次命令行等于给"覆盖没生效"留后门。
     camera_id = vision_settings.camera_id("windows" if os.name == "nt" else "jetson")
-    source = Vision._open_config(vision_settings)
+    source = Vision.from_settings(vision_settings)
     print(f"已打开摄像头 {camera_id}，观测来自本机 MaterialLocator")
     return source
 
 
-def run_watch(*, source: FrameSource, selector: ObjectSelector, config: ServoConfig) -> int:
+def run_watch(*, source: FrameSource, selector: MaterialSelector, config: VisualServoConfig) -> int:
     """只看不动：把每一帧的读数实时打出来。"""
     print("watch：只读不发帧。Ctrl+C 退出。\n")
     try:
@@ -275,27 +275,27 @@ def run_watch(*, source: FrameSource, selector: ObjectSelector, config: ServoCon
     except KeyboardInterrupt:
         print("\nwatch 结束。")
         return 0
-    except ServoError as problem:
+    except VisualServoError as problem:
         print(f"读取失败：{problem}")
         return 1
 
 
-def _read_one(source: FrameSource, selector: ObjectSelector, config: ServoConfig):
-    from modules.grasp.drive.eye_in_hand import select_object
+def _read_one(source: FrameSource, selector: MaterialSelector, config: VisualServoConfig):
+    from modules.grasp.drive.eye_in_hand import select_material
 
     frame = source.frame(timeout=config.frame_timeout_seconds)
     if frame is None:
-        raise ServoError("等不到新的观测；确认摄像头有画面、且物块在视野里")
-    return select_object(frame, selector)
+        raise VisualServoError("等不到新的观测；确认摄像头有画面、且物块在视野里")
+    return select_material(frame, selector)
 
 
 def run_status(
     *,
     source: FrameSource,
-    selector: ObjectSelector,
-    target: Optional[ServoTarget],
-    jacobian: Optional[ServoJacobian],
-    config: ServoConfig,
+    selector: MaterialSelector,
+    target: Optional[VisualServoTarget],
+    jacobian: Optional[VisualServoJacobian],
+    config: VisualServoConfig,
 ) -> int:
     """只算不动：打印当前读数、目标读数、误差，以及打算怎么走。"""
     print("status：只读不发帧。Ctrl+C 退出。\n")
@@ -317,7 +317,7 @@ def run_status(
                 if jacobian is not None:
                     try:
                         base_pulses, radial_pulses = jacobian.pulses_for(error_x, error_y)
-                    except ServoError as problem:
+                    except VisualServoError as problem:
                         line += f"｜算不出脉冲：{problem}"
                     else:
                         line += f"｜应走 底座 {base_pulses:+.0f}、伸缩 {radial_pulses:+.0f} 脉冲"
@@ -325,13 +325,13 @@ def run_status(
     except KeyboardInterrupt:
         print("\nstatus 结束。")
         return 0
-    except ServoError as problem:
+    except VisualServoError as problem:
         print(f"读取失败：{problem}")
         return 1
 
 
 def run_set_target(
-    *, source: FrameSource, selector: ObjectSelector, config: ServoConfig, centred: bool = False
+    *, source: FrameSource, selector: MaterialSelector, config: VisualServoConfig, centred: bool = False
 ) -> int:
     """把**当前**画面读数记成目标 ``(tx, ty)``。
 
@@ -343,7 +343,7 @@ def run_set_target(
     然后记录此刻的画面读数——那个读数**就是**抓取点在相机系里的位置。
     """
     if centred:
-        target = ServoTarget(x_mm=0.0, y_mm=0.0)
+        target = VisualServoTarget(x_mm=0.0, y_mm=0.0)
         path = save_calibration(target=target)
         print(f"已按「相机光轴穿过抓取点」记下 {target.summary()}，写入 {path}")
         print("如果之后对准了但爪子明显偏，说明相机是偏装的：")
@@ -355,10 +355,10 @@ def run_set_target(
     input("准备好了按回车：")
     try:
         offset = measure_offset(source, selector, config)
-    except ServoError as problem:
+    except VisualServoError as problem:
         print(f"读取失败：{problem}")
         return 1
-    target = ServoTarget(x_mm=offset[0], y_mm=offset[1])
+    target = VisualServoTarget(x_mm=offset[0], y_mm=offset[1])
     path = save_calibration(target=target)
     print(f"已记录 {target.summary()}，写入 {path}")
     print("接着跑 --calibrate 实测雅可比。")
@@ -366,14 +366,14 @@ def run_set_target(
 
 
 def run_calibrate(
-    *, arm: RobotArm, source: FrameSource, selector: ObjectSelector, config: ServoConfig
+    *, arm: RobotArm, source: FrameSource, selector: MaterialSelector, config: VisualServoConfig
 ) -> int:
     """实测雅可比：让程序自己动两下，看画面挪了多少。"""
     print(f"将用 {config.probe_pulses} 脉冲一段、每轴走两段同向位移，然后退回原位。")
     print("请确认机械臂四周没有障碍物。\n")
     try:
         jacobian = probe_jacobian(arm, source, selector, config, on_message=_say)
-    except ServoError as problem:
+    except VisualServoError as problem:
         print(f"标定失败：{problem}")
         return 1
     path = save_calibration(jacobian=jacobian)
@@ -408,7 +408,7 @@ def run_align(*, grasp: Grasp) -> int:
 
     try:
         result = grasp.align_xy()
-    except ServoError as problem:
+    except VisualServoError as problem:
         print(f"\nx/y 对准失败：{problem}")
         return 1
     print(f"\n{result.summary()}")
@@ -458,10 +458,10 @@ def run_follow(
     if config.hover_z_mm is not None:
         print(f"  先把悬停高度伺服到 z={config.hover_z_mm:.1f} mm（只做一次）")
         try:
-            hover_above_object(
+            hover_above_material(
                 arm, source, selector, config, scale=lift_scale, on_message=_say
             )
-        except ServoError as problem:
+        except VisualServoError as problem:
             print(f"  悬停失败：{problem}（继续跟随）")
 
     rounds = 0
@@ -485,7 +485,7 @@ def run_follow(
                     # 每一轮本来就会立刻重新测一次，再测第二帧只是白花（约 125 ms）。
                     single_step=True,
                 )
-            except ServoError as problem:
+            except VisualServoError as problem:
                 # 跟随过程中"这一帧没看到物块"是常见的（手挡住、移出视野），
                 # 不该让整条循环退出——报一句继续。
                 print(f"  第 {rounds} 轮：{problem}")
@@ -520,8 +520,8 @@ def run_teach(
     *,
     arm: RobotArm,
     source: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
     step_pulses: int,
 ) -> int:
     """手动示教：小步挪动机械臂，读数实时显示，按 ``t`` 把当前读数记成目标。
@@ -549,7 +549,7 @@ def run_teach(
         try:
             offset = measure_offset(source, selector, config)
             reading = f"({offset[0]:+7.2f}, {offset[1]:+6.2f}) mm"
-        except ServoError as problem:
+        except VisualServoError as problem:
             reading = f"看不到物块（{problem}）"
         print(f"当前读数 {reading}   每步 {step} 脉冲")
         try:
@@ -564,10 +564,10 @@ def run_teach(
         if raw == "t":
             try:
                 offset = measure_offset(source, selector, config)
-            except ServoError as problem:
+            except VisualServoError as problem:
                 print(f"  记不了：{problem}")
                 continue
-            target = ServoTarget(x_mm=offset[0], y_mm=offset[1])
+            target = VisualServoTarget(x_mm=offset[0], y_mm=offset[1])
             path = save_calibration(target=target)
             print(f"  已记录 {target.summary()}，写入 {path}")
             print("  接着跑 --calibrate 实测雅可比，再跑 --follow 跟随。")
@@ -637,7 +637,7 @@ def run_pick_ready(
         result = grasp.align_and_descend(
             z_pulses=z_pulses, retract_pulses=retract_pulses
         )
-    except ServoError as problem:
+    except VisualServoError as problem:
         print(f"\n就位失败：{problem}")
         return 1
     print(f"\n{result.summary()}")
@@ -650,8 +650,8 @@ def run_descend_z(
     *,
     arm: RobotArm,
     source: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
     z_pulses: Optional[int] = None,
     retract_pulses: Optional[int] = None,
 ) -> int:
@@ -692,7 +692,7 @@ def run_descend_z(
             scale=load_lift_scale(),
             on_message=_say,
         )
-    except ServoError as problem:
+    except VisualServoError as problem:
         # 三种失败（看不到物块、平面没对准、脉冲数不合法）都发生在发动作之前。
         print(f"\n下降失败（没有发出动作）：{problem}")
         return 1
@@ -700,7 +700,7 @@ def run_descend_z(
 
     try:
         moved = retract_extension(arm, config, pulses=retract_pulses, on_message=_say)
-    except ServoError as problem:
+    except VisualServoError as problem:
         print(f"\n后缩失败：{problem}")
         return 1
     print(f"后缩 {moved} 脉冲完成。")
@@ -714,8 +714,8 @@ def run_align_z_visual(
     *,
     arm: RobotArm,
     source: FrameSource,
-    selector: ObjectSelector,
-    config: ServoConfig,
+    selector: MaterialSelector,
+    config: VisualServoConfig,
     recalibrate: bool = False,
 ) -> int:
     """z 对准（视觉伺服版）：驱动升降，让物块深度落到 ``z_target_mm``。
@@ -741,7 +741,7 @@ def run_align_z_visual(
     # **先确认平面已经对准。** 顺序反了就是让爪子斜着压下去——现场因此差点压坏爪子。
     try:
         offset = measure_offset(source, selector, config)
-    except ServoError as problem:
+    except VisualServoError as problem:
         print(f"看不到物块：{problem}")
         return 1
     planar = math.hypot(offset[0], offset[1])
@@ -755,7 +755,7 @@ def run_align_z_visual(
         )
         return 1
 
-    if not find_object(arm, source, selector, config, on_message=_say):
+    if not find_material(arm, source, selector, config, on_message=_say):
         print(
             f"抬升 {config.find_max_steps} 次仍然看不到物块；"
             "把物块往镜头下放一点、或确认它在画面里"
@@ -768,7 +768,7 @@ def run_align_z_visual(
         print("标定升降灵敏度（走两段同向抬升，然后退回原位）")
         try:
             scale = probe_lift_scale(arm, source, selector, config, on_message=_say)
-        except ServoError as problem:
+        except VisualServoError as problem:
             print(f"标定失败：{problem}")
             return 1
         path = save_calibration(lift_scale=scale)
@@ -778,7 +778,7 @@ def run_align_z_visual(
         result = align_z(
             arm, source, selector, target, scale, config, on_message=_say
         )
-    except ServoError as problem:
+    except VisualServoError as problem:
         print(f"\nz 对准失败：{problem}")
         return 1
     print(f"\n{result.summary()}")
@@ -898,20 +898,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     其余工具模式（watch / status / set-target / target-centred / teach / calibrate /
     follow / align-z / align-z-visual / raise）各有自己的前置条件，仍然按原来的低层
-    流程走：source 由该分支自己创建和关闭，机械臂由 ``RobotArm._from_settings``
+    流程走：source 由该分支自己创建和关闭，机械臂由 ``RobotArm.from_settings``
     装配成一次就绪的会话（已经使能），收尾只调一次 ``arm.close()``。
     **不**给它们加统一的标定门禁——那会造出"缺标定所以不能跑标定"的循环。
     """
     arguments = build_parser().parse_args(argv)
 
     try:
-        config = load_servo_config()
+        config = load_visual_servo_config()
         selector = _selector_for(arguments)
         target = load_target()
         jacobian = load_jacobian()
         # 升降灵敏度只用来"抬到安全高度时一步算到位"和打印预计深度；没标定就是 None。
         lift_scale = load_lift_scale()
-    except ServoError as problem:
+    except VisualServoError as problem:
         print(f"配置有问题：{problem}")
         return 1
 
@@ -937,11 +937,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # 都不参与，读它只会把"远端能跑"变成"本地配置写错就跑不了"。
     vision_settings = None
     if not arguments.tcp:
-        from modules.vision.runtime import _load_settings, _override_settings
+        from modules.vision.runtime import load_vision_settings, _override_settings
 
         try:
             vision_settings = _override_settings(
-                _load_settings(), camera_id=arguments.camera
+                load_vision_settings(), camera_id=arguments.camera
             )
         except (ValueError, FileNotFoundError) as problem:
             print(f"视觉配置有问题：{problem}")
@@ -993,7 +993,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             source_factory=lambda: _open_source(arguments, vision_settings=vision_settings),
             on_message=_say,
         )
-    except (SystemExit, FileNotFoundError, RuntimeError, ServoError, ValueError) as problem:
+    except (SystemExit, FileNotFoundError, RuntimeError, VisualServoError, ValueError) as problem:
         print(f"打不开会话：{problem}")
         return 1
 
@@ -1011,7 +1011,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 # ------------------------------------------------------------------ 工具分支
 #
 # 下面几个模式各有前置条件，**不走** Grasp 的普通动作门禁；每个分支自己创建并关闭
-# 它需要的资源，机械臂用 ``RobotArm._from_settings`` 装配成一次就绪的会话，
+# 它需要的资源，机械臂用 ``RobotArm.from_settings`` 装配成一次就绪的会话，
 # 收尾只调一次 ``arm.close()``（停 / 失能 / 关串口都在它内部逐项试行）。
 
 
@@ -1019,7 +1019,7 @@ def _run_read_only_mode(arguments, vision_settings, selector, target, jacobian, 
     """watch / status / set-target / target-centred：**不开机械臂串口**。"""
     try:
         source = _open_source(arguments, vision_settings=vision_settings)
-    except (SystemExit, FileNotFoundError, RuntimeError, ServoError, ValueError) as problem:
+    except (SystemExit, FileNotFoundError, RuntimeError, VisualServoError, ValueError) as problem:
         print(f"打不开观测源：{problem}")
         return 1
     try:
@@ -1043,15 +1043,15 @@ def _run_low_level_mode(arguments, vision_settings, config) -> int:
     """calibrate / teach / align-z / align-z-visual：需要机械臂，但各有自己的前提。"""
     try:
         source = _open_source(arguments, vision_settings=vision_settings)
-    except (SystemExit, FileNotFoundError, RuntimeError, ServoError, ValueError) as problem:
+    except (SystemExit, FileNotFoundError, RuntimeError, VisualServoError, ValueError) as problem:
         print(f"打不开观测源：{problem}")
         return 1
 
     selector = _selector_for(arguments)
     port = arguments.port or load_motor_bus_config().port
     print(f"打开机械臂总线 {port}")
-    # 统一生命周期：``_from_settings`` 读好配置快照、开串口并使能，是一次就绪的会话。
-    arm = RobotArm._from_settings(config=load_arm_config(), port=port)
+    # 统一生命周期：``from_settings`` 读好配置快照、开串口并使能，是一次就绪的会话。
+    arm = RobotArm.from_settings(config=load_arm_config(), port=port)
     try:
         if arguments.calibrate:
             return run_calibrate(
@@ -1086,7 +1086,7 @@ def _run_raise_mode(arguments, vision_settings) -> int:
     """
     port = arguments.port or load_motor_bus_config().port
     print(f"打开机械臂总线 {port}")
-    arm = RobotArm._from_settings(config=load_arm_config(), port=port)
+    arm = RobotArm.from_settings(config=load_arm_config(), port=port)
     try:
         return run_raise(arm=arm, pulses=arguments.raise_pulses)
     finally:
@@ -1108,14 +1108,14 @@ def _run_follow_mode(arguments, vision_settings, config) -> int:
         return 1
     try:
         source = _open_source(arguments, vision_settings=vision_settings)
-    except (SystemExit, FileNotFoundError, RuntimeError, ServoError, ValueError) as problem:
+    except (SystemExit, FileNotFoundError, RuntimeError, VisualServoError, ValueError) as problem:
         print(f"打不开观测源：{problem}")
         return 1
 
     selector = _selector_for(arguments)
     port = arguments.port or load_motor_bus_config().port
     print(f"打开机械臂总线 {port}")
-    arm = RobotArm._from_settings(config=load_arm_config(), port=port)
+    arm = RobotArm.from_settings(config=load_arm_config(), port=port)
     try:
         return run_follow(
             arm=arm, source=source, selector=selector,

@@ -93,6 +93,8 @@ class RingTarget:
     scale_source: str = ""
     #: 人话说明：这一帧为什么是它、比例尺从哪来。
     detail: str = ""
+    #: 接触画面的边，仅用于小步调整取景，不代表可用于精确对准的环心。
+    clipped_sides: Tuple[str, ...] = ()
 
     @property
     def usable(self) -> bool:
@@ -516,6 +518,7 @@ class RingTargetLocator:
             scale_mm_per_px=None if scale is None else float(scale),
             scale_source=source,
             detail=detail,
+            clipped_sides=_clipped_sides(hit, width, height),
         )
 
     def _millimetres_per_pixel(self, radius_px: float) -> Tuple[Optional[float], str]:
@@ -544,11 +547,18 @@ class RingTargetLocator:
 
 def _touches_border(hit: "Detection", width: int, height: int) -> bool:
     """框有没有被画面边缘裁掉——被裁掉的框，中心已经不是环心了。"""
-    return (
-        hit.x1 <= BORDER_TOLERANCE_PX
-        or hit.y1 <= BORDER_TOLERANCE_PX
-        or hit.x2 >= width - BORDER_TOLERANCE_PX
-        or hit.y2 >= height - BORDER_TOLERANCE_PX
+    return bool(_clipped_sides(hit, width, height))
+
+
+def _clipped_sides(hit: "Detection", width: int, height: int) -> Tuple[str, ...]:
+    """记录具体贴边方向，让取景动作不必依赖被裁切框的毫米坐标。"""
+    return tuple(
+        side for side, touches in (
+            ("left", hit.x1 <= BORDER_TOLERANCE_PX),
+            ("right", hit.x2 >= width - BORDER_TOLERANCE_PX),
+            ("top", hit.y1 <= BORDER_TOLERANCE_PX),
+            ("bottom", hit.y2 >= height - BORDER_TOLERANCE_PX),
+        ) if touches
     )
 
 

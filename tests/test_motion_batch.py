@@ -112,7 +112,7 @@ class CrossModuleMotionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = FakeClock()
         self.bus = FakeEmm42Bus()
-        self.arm = RobotArm._from_settings(
+        self.arm = RobotArm.from_settings(
             config=ARM_CONFIG,
             port="FAKE_STEPPER",
             bus=self.bus,

@@ -43,7 +43,7 @@ def normalize_want(want: "Optional[Want]") -> "Optional[Want]":
     """校验并归一化"我要哪一个物料"；``None`` 表示不指定。
 
     - 字符串：类别名，前后空格与大小写无关（``"Red"`` 就是 ``"red"``）——
-      和 ``modules.grasp.drive.servo_model.ObjectSelector.color`` 是同一套说法；
+      和 ``modules.grasp.drive.visual_servo_model.MaterialSelector.color`` 是同一套说法；
     - 整数：编号，与 :meth:`MaterialReport.summary` 打印的「物料 N:」**同一个编号**
       （只数通过校验的顶面，被丢掉的候选不占号）。
 
@@ -153,7 +153,7 @@ class MaterialReport:
     want: "Optional[Want]" = None
 
     def __post_init__(self) -> None:
-        # 归一化与校验用 ObjectSelector 同一套说法（颜色小写去空格、编号从 1 开始）。
+        # 归一化与校验用 MaterialSelector 同一套说法（颜色小写去空格、编号从 1 开始）。
         object.__setattr__(self, "want", normalize_want(self.want))
 
     @property
@@ -192,7 +192,7 @@ class MaterialReport:
 
         ``want`` 给了就**只按它挑**，挑不到返回 ``None``：不回退到别的物料——"我要红的、
         画面里只有蓝的"必须报"没有"，拿蓝的顶上等于让机械臂朝错误的目标动，而动作本身
-        看起来完全正常（与 ``ObjectSelector.is_open`` 那条规矩同源）。
+        看起来完全正常（与 ``MaterialSelector.is_open`` 那条规矩同源）。
 
         ``want`` 为空时是原规则：Prefer a classified material; otherwise the largest
         accepted face. YOLO 认出类别时按置信度取（原行为）。YOLO 一个框都没给时**不能取

@@ -527,8 +527,8 @@ class TargetSettings:
     material_palette: Mapping[str, Tuple[float, float, float]] = field(default_factory=dict)
 
     # ---------------------------------------------------- 颜色块路径的放宽参数
-    # 这几项原来写死在 ``material_blob`` / ``material_face`` 里。现场光照一变就得改代码，
-    # 所以搬到这里；默认值与那些常量**逐字相同**，不配就与搬之前完全一致。
+    # 现场光照一变就要调，所以放在配置里；默认值与 ``material_blob`` / ``material_face``
+    # 里的常量一致。
     #: 色相容差（OpenCV 0–179 标度）。参考色换灯以后 BGR 会整片平移，色相却基本不变，
     #: 所以掩膜是"BGR 距离够近 **或** 色相够近且不太暗"。调大能救回偏色的料，
     #: 但台面的色相离绿料只差 14——**别超过 12**，否则台面会整片进掩膜。

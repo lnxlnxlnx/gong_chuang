@@ -18,7 +18,7 @@ class FakeRobotArm:
     """假臂：只实现脚本真正用到的动作原语。
 
     脚本**不再**自己收尾（没有 ``initialize`` / ``_cleanup``）：正常关闭由 ``main`` 里的
-    ``with RobotArm._from_settings(...)`` 负责，真正的中断照原样向上抛。
+    ``with RobotArm.from_settings(...)`` 负责，真正的中断照原样向上抛。
     """
 
     def __init__(self) -> None:
@@ -159,7 +159,7 @@ class ArmPositionMotionScriptTests(unittest.TestCase):
         self.assertEqual(arm.calls[-1], ("move_up", 100))
 
     def test_main_lets_the_arm_context_own_the_lifecycle(self) -> None:
-        """``main`` 用 ``with RobotArm._from_settings(...)``：装配一次、关闭一次。"""
+        """``main`` 用 ``with RobotArm.from_settings(...)``：装配一次、关闭一次。"""
         arm = ContextRobotArm()
         config = ArmConfig(
             pulses_per_revolution=3200,
@@ -181,7 +181,7 @@ class ArmPositionMotionScriptTests(unittest.TestCase):
             "parse_args",
             return_value=SimpleNamespace(port="COM29", pulses=100),
         ), patch.object(
-            position_motion.RobotArm, "_from_settings", return_value=arm
+            position_motion.RobotArm, "from_settings", return_value=arm
         ) as build, patch.object(
             position_motion, "run_hardware_test"
         ) as run:

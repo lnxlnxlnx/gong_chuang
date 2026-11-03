@@ -9,7 +9,7 @@ from modules.chassis.app import map as wheel_map
 
 
 class FakeChassis:
-    """假底盘：``_from_settings`` 返回它，``close`` 记一笔（收尾由上下文负责）。"""
+    """假底盘：``from_settings`` 返回它，``close`` 记一笔（收尾由上下文负责）。"""
 
     def __init__(self) -> None:
         self.calls = []
@@ -39,7 +39,7 @@ class FakeChassis:
 class WheelAppTests(unittest.TestCase):
     def test_chassis_demo_stops_and_closes_on_interrupt(self) -> None:
         chassis = FakeChassis()
-        with patch.object(demo.MecanumChassis, "_from_settings", return_value=chassis):
+        with patch.object(demo.MecanumChassis, "from_settings", return_value=chassis):
             with patch("builtins.input", return_value=""):
                 with self.assertRaises(KeyboardInterrupt):
                     demo.demo_chassis(SimpleNamespace(chassis_rpm=30, chassis_duration=1.0))
@@ -48,7 +48,7 @@ class WheelAppTests(unittest.TestCase):
 
     def test_route_runner_stops_and_closes_on_interrupt(self) -> None:
         chassis = FakeChassis()
-        with patch.object(wheel_map.MecanumChassis, "_from_settings", return_value=chassis):
+        with patch.object(wheel_map.MecanumChassis, "from_settings", return_value=chassis):
             with patch("builtins.input", return_value=""):
                 with self.assertRaises(KeyboardInterrupt):
                     wheel_map.run_map_by_func(

@@ -13,7 +13,7 @@ from modules.motion import (
     MotionBatchError,
     MotionController,
     MotionTicket,
-    MotionTimeout,
+    MotionTimeoutError,
 )
 
 
@@ -94,7 +94,7 @@ class MotionTicketTests(unittest.TestCase):
     def test_timeout_leaves_the_ticket_pending_and_waitable_again(self) -> None:
         ticket = make_ticket(self.clock, 3.0)
 
-        with self.assertRaises(MotionTimeout):
+        with self.assertRaises(MotionTimeoutError):
             ticket.wait(timeout=1.0)
         self.assertEqual(ticket.state, PENDING)
 
@@ -292,7 +292,7 @@ class MotionBatchTests(unittest.TestCase):
             batch.wait(timeout=1.0)
 
         self.assertEqual(len(caught.exception.errors), 2)
-        self.assertTrue(all(isinstance(error, MotionTimeout) for _, error in caught.exception.errors))
+        self.assertTrue(all(isinstance(error, MotionTimeoutError) for _, error in caught.exception.errors))
         self.assertTrue(first.pending and second.pending)
 
     def test_reports_what_is_still_pending_and_how_long_the_group_needs(self) -> None:

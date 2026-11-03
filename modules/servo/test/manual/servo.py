@@ -7,7 +7,7 @@ MENU_ENTRY = (12, "总线舵机测试")
 import time
 from collections.abc import Callable
 
-from modules.servo.drive.bus_servo import BusServo, load_bus_config
+from modules.servo.drive.bus_servo import BusServo, load_servo_bus_config
 
 
 def _number(text: str, name: str, minimum: int, maximum: int) -> int:
@@ -41,7 +41,7 @@ def run_manual(servo: BusServo, servo_id: int, *, prompt: Callable[[str], str]) 
 
 def main() -> None:
     """Read the port, baud rate and ID from config, then close the UART on every exit path."""
-    config = load_bus_config()
+    config = load_servo_bus_config()
     print(f"总线舵机 {config.port} @ {config.baudrate} bps，ID={config.servo_id}")
     try:
         servo = BusServo(

@@ -117,14 +117,14 @@ class FakeSerial:
 class ArmTestCase(unittest.TestCase):
     """Build an arm through the assembly seam, with waits recorded instead of slept.
 
-    ``RobotArm._from_settings`` 是 ``open`` 与假设备测试共用的装配接缝：它自己建三个
+    ``RobotArm.from_settings`` 是 ``open`` 与假设备测试共用的装配接缝：它自己建三个
     驱动器（真实协议 + 注入的内存串口）并使能，不做任何运动。
     """
 
     def make_arm(self, serial=None, config=None):
         self.sleep = RecordingSleep()
         self.serial = serial if serial is not None else FakeSerial()
-        self.arm = RobotArm._from_settings(
+        self.arm = RobotArm.from_settings(
             config=config if config is not None else fixture_config(),
             port="/dev/ttyUSB0",
             bus=self.serial,
@@ -317,7 +317,7 @@ class RobotArmInPositionWaitTests(unittest.TestCase):
     def make_polling_arm(self, flags_sequence, config=None):
         self.clock = FakeClock()
         self.serial = PositionStatusSerial(flags_sequence)
-        self.arm = RobotArm._from_settings(
+        self.arm = RobotArm.from_settings(
             config=config if config is not None else fixture_config(),
             port="/dev/ttyUSB0",
             bus=self.serial,
@@ -362,7 +362,7 @@ class RobotArmInPositionWaitTests(unittest.TestCase):
     def test_estimate_mode_still_reports_no_status_at_all(self) -> None:
         """默认路径不变：估算模式不读驱动器，所以也编不出一个状态来。"""
         self.sleep = RecordingSleep()
-        arm = RobotArm._from_settings(
+        arm = RobotArm.from_settings(
             config=fixture_config(),
             port="/dev/ttyUSB0",
             bus=FakeSerial(),
@@ -380,7 +380,7 @@ class RobotArmInPositionWaitTests(unittest.TestCase):
 
     def test_unknown_wait_mode_is_rejected_before_the_serial_is_opened(self) -> None:
         with self.assertRaises(ValueError):
-            RobotArm._from_settings(
+            RobotArm.from_settings(
                 config=fixture_config(),
                 port="/dev/ttyUSB0",
                 bus=FakeSerial(),
@@ -389,7 +389,21 @@ class RobotArmInPositionWaitTests(unittest.TestCase):
 
 
 class ReadAbsStateTests(ArmTestCase):
-    """``read_abs_state``：一根轴现在在哪（里程表口径，与绝对定位同一把尺）。"""
+    """区分命令里程表与编码器实测位置。"""
+
+    def test_measured_pulses_come_from_the_encoder_without_changing_odometry(self) -> None:
+        arm = self.make_arm()
+        before = arm.read_abs_state("base").pulses
+        with patch.object(arm._motors["base"], "read_position", return_value=-98304):
+            self.assertEqual(arm.read_measured_pulses("base"), -4800.0)
+        self.assertEqual(arm.read_abs_state("base").pulses, before)
+
+    def test_encoder_failure_is_not_replaced_with_command_odometry(self) -> None:
+        arm = self.make_arm()
+        with patch.object(arm._motors["base"], "read_position",
+                          side_effect=RuntimeError("编码器读数失败")):
+            with self.assertRaisesRegex(RuntimeError, "编码器读数失败"):
+                arm.read_measured_pulses("base")
 
     def test_it_reports_where_the_axis_was_told_to_go(self) -> None:
         arm = self.make_arm()
@@ -465,7 +479,7 @@ class RobotArmAxisMappingTests(ArmTestCase):
 class RobotArmConstructionTests(unittest.TestCase):
     """装配中途失败时的资源归属。
 
-    ``RobotArm._from_settings`` 会**先打开共享串口、再建三个驱动器并使能**。装配没返回
+    ``RobotArm.from_settings`` 会**先打开共享串口、再建三个驱动器并使能**。装配没返回
     时调用方拿不到对象，所以那个串口只能由装配方自己收尾——不收的话下一次装配会莫名其妙地
     打不开同一个口，而且现场看不出是谁占着。借来的串口**不归**本实例管。
     """
@@ -474,7 +488,7 @@ class RobotArmConstructionTests(unittest.TestCase):
         """装配完就是"已使能、没动过"：三条使能帧，没有动作帧，账上也还是 0。"""
         serial = FakeSerial()
 
-        arm = RobotArm._from_settings(
+        arm = RobotArm.from_settings(
             config=fixture_config(), port="/dev/ttyUSB0", bus=serial
         )
 
@@ -498,7 +512,7 @@ class RobotArmConstructionTests(unittest.TestCase):
                 side_effect=RuntimeError("motor 6 不存在"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "motor 6 不存在"):
-                    RobotArm._from_settings(config=fixture_config(), port="/dev/ttyUSB0")
+                    RobotArm.from_settings(config=fixture_config(), port="/dev/ttyUSB0")
         self.assertEqual(opened, ["/dev/ttyUSB0"], "串口确实由本次装配打开")
         self.assertFalse(serial.is_open, "自己开的串口必须由自己关掉")
 
@@ -510,7 +524,7 @@ class RobotArmConstructionTests(unittest.TestCase):
             side_effect=RuntimeError("motor 6 不存在"),
         ):
             with self.assertRaisesRegex(RuntimeError, "motor 6 不存在"):
-                RobotArm._from_settings(
+                RobotArm.from_settings(
                     config=fixture_config(), port="/dev/ttyUSB0", bus=serial
                 )
         self.assertTrue(serial.is_open, "借来的串口不该被失败的装配关掉")
@@ -535,7 +549,7 @@ class RobotArmConstructionTests(unittest.TestCase):
                 side_effect=RuntimeError("motor 6 不存在"),
             ):
                 with self.assertRaises(RuntimeError) as caught:
-                    RobotArm._from_settings(config=fixture_config(), port="/dev/ttyUSB0")
+                    RobotArm.from_settings(config=fixture_config(), port="/dev/ttyUSB0")
         self.assertIn("motor 6 不存在", str(caught.exception))
         self.assertIsInstance(caught.exception.__cause__, RuntimeError)
         self.assertIn("close broke", str(caught.exception.__cause__))

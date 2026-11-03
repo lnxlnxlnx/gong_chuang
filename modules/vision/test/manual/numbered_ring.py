@@ -33,7 +33,7 @@ import os
 from modules.vision.config import DEFAULT_CONFIG_PATH
 from modules.vision.drive.preview import close_previews, open_preview
 from modules.vision.drive.stream import run_preview
-from modules.vision.runtime import Vision, _load_settings
+from modules.vision.runtime import Vision, load_vision_settings
 
 #: 每这么多帧打印一行环心结论（0 表示只在按 p 时打印）。
 PRINT_EVERY = 30
@@ -173,7 +173,7 @@ def run(settings, *, print_every: int = PRINT_EVERY) -> int:
     camera_id = settings.camera_id("windows" if os.name == "nt" else "jetson")
     shown = {"frames": 0}
     try:
-        with Vision._open_config(settings) as vision:
+        with Vision.from_settings(settings) as vision:
             print(f"摄像头 {camera_id}，窗口 {window!r}；按 p 打完整结论，按 q 退出")
             print(f"环类别 {list(settings.ring_target.names)}"
                   f" → 环号 {dict(settings.ring_target.classes)}（来自 config.json）")
@@ -214,7 +214,7 @@ def run(settings, *, print_every: int = PRINT_EVERY) -> int:
 
 def main() -> None:
     args = parse_args()
-    settings = _load_settings()
+    settings = load_vision_settings()
     print(f"配置来自 {DEFAULT_CONFIG_PATH}")
     if args.image is not None:
         raise SystemExit(run_image(args.image, settings))

@@ -13,7 +13,7 @@ robot.arm.move_axis_to_motor_degrees("extension", plan.extension)   # 伸缩绝�
 
 ``plan.degrees`` / ``plan.pulses`` 是同一位置的字典，键就是轴名::
 
-    app.gripper._move_axes_to(robot, plan.degrees)      # {"base": 222.5, "extension": 5.7}
+    app.gripper.move_axes_to(robot, plan.degrees)      # {"base": 222.5, "extension": 5.7}
 
 ## 为什么是"里程表增量"而不是世界坐标
 
@@ -53,7 +53,7 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
-from modules.grasp.drive.servo_model import ServoError, ServoJacobian
+from modules.grasp.drive.visual_servo_model import VisualServoError, VisualServoJacobian
 
 #: 底座在画面里"几乎推不动"的判据（毫米/脉冲）。低于它就解不出角度。
 MIN_BASE_SENSITIVITY_MM_PER_PULSE = 1e-6
@@ -188,7 +188,7 @@ def plan_ring_base(
     *,
     reading: Sequence[float],
     target: Sequence[float],
-    jacobian: ServoJacobian,
+    jacobian: VisualServoJacobian,
     base_pulses: int,
     extension_pulses: int,
     pulses_per_revolution: int,
@@ -206,7 +206,7 @@ def plan_ring_base(
         reduction_ratio: 底座减速比（电机转几圈输出轴转一圈）。
         tolerance_mm: 判"已经够准"的门槛；只影响 :attr:`RingBasePlan.aligned`。
 
-    :raises ServoError: 雅可比奇异（两轴在画面里的位移方向重合），或底座那一列
+    :raises VisualServoError: 雅可比奇异（两轴在画面里的位移方向重合），或底座那一列
         几乎为零（转底座画面不动，解不出角度）。
     """
     first, second = _pair(reading, "reading")
@@ -223,7 +223,7 @@ def plan_ring_base(
     # 一次线性化：走 p 脉冲让读数变化 J·p，要 e + J·p = 0，即 p = −J⁻¹·e。
     base_step_float, extension_step_float = jacobian.pulses_for(*error)
     if jacobian.base_norm < MIN_BASE_SENSITIVITY_MM_PER_PULSE:  # pragma: no cover - 与奇异判据重叠
-        raise ServoError(
+        raise VisualServoError(
             f"底座在画面里几乎推不动（{jacobian.base_norm:.2e} mm/脉冲），解不出角度；"
             "检查相机是不是离转轴太近、或雅可比标定把两个轴记反了"
         )
@@ -284,6 +284,10 @@ class RingAlignStep:
     predicted_mm: Optional[Tuple[float, float]] = None
     #: 实测 / 预测 的投影比：``1`` 说明尺是对的，``0.5`` 说明实际灵敏度只有一半。
     response: Optional[float] = None
+    #: 响应只在信号足够大且方向一致时用于更新步长；None 表示未评估。
+    response_used: Optional[bool] = None
+    #: 上一步运动前后编码器实测的底座、伸缩位移（命令脉冲单位），不使用命令里程表。
+    measured_motor_pulses: Optional[Tuple[float, float]] = None
 
     def line(self) -> str:
         moved = ""
@@ -294,6 +298,13 @@ class RingAlignStep:
             )
             if self.response is not None:
                 moved += f"，响应比 {self.response:.2f}"
+                if self.response_used is False:
+                    moved += "（未用于更新步长）"
+        if self.measured_motor_pulses is not None:
+            moved += (
+                f"，上步编码器位移：底座 {self.measured_motor_pulses[0]:+.1f}、"
+                f"伸缩 {self.measured_motor_pulses[1]:+.1f} 脉冲"
+            )
         return (
             f"第 {self.attempt} 步：读数 ({self.reading[0]:+.2f},{self.reading[1]:+.2f}) mm，"
             f"误差 {self.error_mm:.2f} mm → 底座 {self.base_pulses:+d}、"
@@ -317,9 +328,6 @@ class RingAlignResult:
     final_error_mm: Optional[float] = None
     tolerance_mm: float = 0.0
     digit: Optional[int] = None
-    #: 最后一次那一帧环心读数的比例尺来源（``depth/focal`` / ``ring box`` 等）。
-    #: 之后要拿"这个读数 ± 偏移"去解算别的点时，比例尺得跟它同一把尺。
-    scale_source: str = ""
     #: 最后一次估计出来的"实测/预测"比（``None`` = 一步都没走成）。
     response: Optional[float] = None
     #: 收敛时那一份计划：各轴绝对位置、残差、备注都在这上面。
@@ -381,7 +389,7 @@ class RingAlignResult:
 # ---------------------------------------------------------------------- 内部
 def _residual(
     error: Tuple[float, float],
-    jacobian: ServoJacobian,
+    jacobian: VisualServoJacobian,
     base_step: int,
     extension_step: int,
 ) -> float:
@@ -429,7 +437,7 @@ def _round(value: float) -> int:
 def _self_test() -> int:
     """不需要机械臂、不需要相机的自测：验算一遍角度与绝对脉冲。"""
     #: 实测值（modules/grasp/eye_in_hand.json）：底座每脉冲让画面挪 (−0.0817, −0.0076) mm。
-    jacobian = ServoJacobian(
+    jacobian = VisualServoJacobian(
         base_dx=-0.08174204217107724,
         base_dy=-0.007583697824866524,
         radial_dx=-0.0002735146342596506,
@@ -491,14 +499,14 @@ def _self_test() -> int:
         problems.append(f"读数等于目标时不该动，实际 {plan.base_pulses}")
 
     # 6) 奇异雅可比：直接拒绝，不能编一个角度出来
-    singular = ServoJacobian(base_dx=0.01, base_dy=0.02, radial_dx=0.02, radial_dy=0.04)
+    singular = VisualServoJacobian(base_dx=0.01, base_dy=0.02, radial_dx=0.02, radial_dy=0.04)
     try:
         plan_ring_base(
             reading=(1.0, 1.0), target=(0.0, 0.0), jacobian=singular,
             base_pulses=0, extension_pulses=0,
             pulses_per_revolution=pulses_per_revolution, reduction_ratio=reduction_ratio,
         )
-    except ServoError as error:
+    except VisualServoError as error:
         if "奇异" not in str(error):
             problems.append(f"奇异时要说清楚，实际 {error}")
     else:

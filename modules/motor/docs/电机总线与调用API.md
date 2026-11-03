@@ -346,7 +346,7 @@ forward_left / forward_right / backward_left / backward_right`，加 `enable() /
 stop() / close()`；底层对象挂在 `car.drive` 上（需要 `drive()`/`drive_pulses()`/
 `drive_mm()`/`get_wheel()` 时走它）。
 
-`Robot.open()` 里装配时走的是 `MecanumChassis._from_settings(...)`，即"配置已经读好、总线已经
+`Robot.open()` 里装配时走的是 `MecanumChassis.from_settings(...)`，即"配置已经读好、总线已经
 打开"的那条路；arm 与 chassis 因此共用同一条总线，各自 `close` 只失效自身。
 
 > 底盘短动作演示见 `modules/chassis/app/demo.py`，地图路线见 `modules/chassis/app/map.py`，

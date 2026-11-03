@@ -35,14 +35,14 @@ Grasp 实例
 
 ## 校验必须早于设备
 
-普通动作需要 ``target`` 与 ``jacobian``。``RobotArm._from_settings`` **已经打开了串口**，
+普通动作需要 ``target`` 与 ``jacobian``。``RobotArm.from_settings`` **已经打开了串口**，
 所以"缺标定"必须在装配机械臂之前就报出来——见 :meth:`Grasp._open_settings`
 里的顺序。这也正是"缺标定所以不能跑标定"那个循环的解法：状态 / 示教 / 标定这些
 工具各有自己的前置条件，它们**不走** :meth:`Grasp.open`（详见菜单 21 的实现）。
 
 ## 包导入不预加载控制算法
 
-本模块顶层只依赖标准库与 ``servo_model``；实际的伺服算法在**动作方法内**才从
+本模块顶层只依赖标准库与 ``visual_servo_model``；实际的伺服算法在**动作方法内**才从
 :mod:`modules.grasp.drive.eye_in_hand` 导入。这样 ``import modules.grasp`` 不会把
 ``python -m modules.grasp.drive.eye_in_hand`` 的目标模块提前塞进 ``sys.modules``
 （那会让 runpy 报 "found in sys.modules"）。
@@ -53,22 +53,23 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
+from statistics import median
 from typing import TYPE_CHECKING, TypedDict
 
-from modules.grasp.drive.servo_model import (
+from modules.grasp.drive.visual_servo_model import (
     GraspReadyResult,
     HoverResult,
     LiftScale,
-    ObjectSelector,
-    ServoConfig,
-    ServoError,
-    ServoJacobian,
-    ServoResult,
-    ServoTarget,
+    MaterialSelector,
+    VisualServoConfig,
+    VisualServoError,
+    VisualServoJacobian,
+    VisualServoResult,
+    VisualServoTarget,
 )
-from modules.grasp.drive.servo_observation import ClosableFrameSource
+from modules.grasp.drive.visual_servo_observation import ClosableFrameSource
 
 if TYPE_CHECKING:
     from modules.arm.config import ArmConfig
@@ -77,18 +78,39 @@ if TYPE_CHECKING:
     from modules.vision.runtime import Vision
 
 
+@dataclass(frozen=True)
+class GrabRangeCheck:
+    """区分目标缺失与坐标超限，供下降诊断和可见高度标定使用。"""
+
+    offset: tuple[float, float] | None
+    tolerance_mm: float
+
+    @property
+    def grabbable(self) -> bool:
+        return self.offset is not None and math.hypot(*self.offset) <= self.tolerance_mm
+
+    def summary(self) -> str:
+        if self.offset is None:
+            return "这一帧未检测到指定物料"
+        x, y = self.offset
+        return (
+            f"读数 ({x:+.2f}, {y:+.2f}) mm，误差 {math.hypot(x, y):.2f} mm"
+            f"，允许 {self.tolerance_mm:.2f} mm"
+        )
+
+
 class GraspSettings(TypedDict):
     """已通过普通抓取动作前置校验的配置快照。
 
     ``target`` 与 ``jacobian`` 在这里是**非空**的：进这份快照之前必须已经检查过
-    （见 :meth:`Grasp._require_action_ready`），否则"缺标定就在开设备前失败"这条不变式
+    （见 :meth:`Grasp.require_action_ready`），否则"缺标定就在开设备前失败"这条不变式
     会从类型上消失。``lift_scale`` 保持可空——它本来就是可选的。
     """
 
-    config: ServoConfig
-    selector: ObjectSelector
-    target: ServoTarget
-    jacobian: ServoJacobian
+    config: VisualServoConfig
+    selector: MaterialSelector
+    target: VisualServoTarget
+    jacobian: VisualServoJacobian
     lift_scale: LiftScale | None
 
 
@@ -105,7 +127,7 @@ def _new_arm(port: str, arm_config) -> RobotArm:
     """
     from modules.arm.runtime import RobotArm
 
-    return RobotArm._from_settings(config=arm_config, port=port)
+    return RobotArm.from_settings(config=arm_config, port=port)
 
 
 def _round_pulses(value: float) -> int:
@@ -121,10 +143,10 @@ class Grasp:
     def __init__(
         self,
         *,
-        config: ServoConfig,
-        selector: ObjectSelector,
-        target: ServoTarget,
-        jacobian: ServoJacobian,
+        config: VisualServoConfig,
+        selector: MaterialSelector,
+        target: VisualServoTarget,
+        jacobian: VisualServoJacobian,
         lift_scale: LiftScale | None,
         on_message: Callable[[str], None] | None = None,
     ) -> None:
@@ -138,7 +160,7 @@ class Grasp:
         self._say: Callable[[str], None] = (
             on_message if on_message is not None else (lambda message: None)
         )
-        #: 设备在 ``open`` / ``_from_modules_settings`` 之前确实还不存在，所以如实可空；
+        #: 设备在 ``open`` / ``from_modules`` 之前确实还不存在，所以如实可空；
         #: 动作边界用 :meth:`_require_resources` 缩窄。
         self._arm: RobotArm | None = None
         self._source: ClosableFrameSource | None = None
@@ -182,37 +204,45 @@ class Grasp:
         视觉来自 vision 模块的 ``config.json`` / ``calibration.json``，
         机械臂来自 ``modules/arm/config.json``，串口来自 ``modules/motor/config.json``。
         """
-        from modules.arm.config import DEFAULT_CONFIG_PATH as arm_default
+        from modules.arm.config import DEFAULT_CONFIG_PATH as ARM_DEFAULT_CONFIG_PATH
         from modules.arm.config import load_arm_config
-        from modules.grasp.drive.servo_model import (
+        from modules.grasp.drive.visual_servo_model import (
             DEFAULT_CONFIG_PATH,
             load_jacobian,
             load_lift_scale,
-            load_object_selector,
-            load_servo_config,
+            load_material_selector,
+            load_visual_servo_config,
             load_target,
         )
-        from modules.motor.config import DEFAULT_HARDWARE_PATH as motor_default
+        from modules.motor.config import DEFAULT_HARDWARE_PATH as MOTOR_DEFAULT_HARDWARE_PATH
         from modules.motor.config import load_bus_config
-        from modules.vision.runtime import Vision, _load_settings
+        from modules.vision.runtime import Vision, load_vision_settings
 
         grasp_path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
-        arm_path = arm_default if arm_config_path is None else Path(arm_config_path)
-        motor_path = motor_default if motor_config_path is None else Path(motor_config_path)
+        arm_path = (
+            ARM_DEFAULT_CONFIG_PATH
+            if arm_config_path is None
+            else Path(arm_config_path)
+        )
+        motor_path = (
+            MOTOR_DEFAULT_HARDWARE_PATH
+            if motor_config_path is None
+            else Path(motor_config_path)
+        )
 
         # 五份配置一次读好，构造后只使用这些值——动作方法里不再读文件。
-        config: ServoConfig = load_servo_config(grasp_path)
-        selector: ObjectSelector = load_object_selector(grasp_path)
-        target: ServoTarget | None = load_target(grasp_path)
-        jacobian: ServoJacobian | None = load_jacobian(grasp_path)
+        config: VisualServoConfig = load_visual_servo_config(grasp_path)
+        selector: MaterialSelector = load_material_selector(grasp_path)
+        target: VisualServoTarget | None = load_target(grasp_path)
+        jacobian: VisualServoJacobian | None = load_jacobian(grasp_path)
         lift_scale: LiftScale | None = load_lift_scale(grasp_path)
         # 在**打开任何设备之前**取得非空 target / jacobian（含奇异判据）。
-        target, jacobian = cls._require_action_ready(target=target, jacobian=jacobian)
+        target, jacobian = cls.require_action_ready(target=target, jacobian=jacobian)
         arm_config = load_arm_config(config_path=arm_path)
         # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
         port: str = load_bus_config(hardware_path=motor_path).port
         # 视觉快照在**打开任何设备之前**读好；真正开设备由 source_factory 负责。
-        vision_settings = _load_settings(vision_config_path, vision_calibration_path)
+        vision_settings = load_vision_settings(vision_config_path, vision_calibration_path)
         return cls._open_settings(
             config=config,
             selector=selector,
@@ -221,17 +251,17 @@ class Grasp:
             lift_scale=lift_scale,
             arm_config=arm_config,
             port=port,
-            source_factory=lambda: Vision._open_config(vision_settings),
+            source_factory=lambda: Vision.from_settings(vision_settings),
         )
 
     @classmethod
     def _open_settings(
         cls,
         *,
-        config: ServoConfig,
-        selector: ObjectSelector,
-        target: ServoTarget,
-        jacobian: ServoJacobian,
+        config: VisualServoConfig,
+        selector: MaterialSelector,
+        target: VisualServoTarget,
+        jacobian: VisualServoJacobian,
         lift_scale: LiftScale | None,
         arm_config: ArmConfig,
         port: str,
@@ -242,12 +272,12 @@ class Grasp:
 
         顺序是硬要求：普通动作的配置校验**不能**挪到装配机械臂之后——``_new_arm``
         已经打开了串口。校验通过之后才建会话、取观测源、装配机械臂；
-        ``RobotArm._from_settings`` 返回的就是**已使能**的就绪对象，所以这里不再
+        ``RobotArm.from_settings`` 返回的就是**已使能**的就绪对象，所以这里不再
         补一次 ``initialize`` / ``enable_all``（统一生命周期，见
         ``docs/模块调用与统一初始化方案.md`` §2.2）。
         任何一步失败都触发 :meth:`close`，已取得的资源全部尝试释放。
         """
-        cls._require_action_ready(target=target, jacobian=jacobian)
+        cls.require_action_ready(target=target, jacobian=jacobian)
         session = cls(
             config=config,
             selector=selector,
@@ -259,7 +289,7 @@ class Grasp:
         try:
             # source_factory 返回即**转移所有权**；返回前失败由 factory 自己收尾。
             session._source = source_factory()
-            # ``_from_settings`` 返回时已经使能过：这里不再补 initialize / enable_all。
+            # ``from_settings`` 返回时已经使能过：这里不再补 initialize / enable_all。
             session._arm = _new_arm(port, arm_config)
             return session
         except BaseException as primary:
@@ -291,25 +321,25 @@ class Grasp:
         这里 ``vision`` 明确是 :class:`~modules.vision.runtime.Vision`：借用分支**不**关闭它，
         所以它不需要 ``ClosableFrameSource`` 那层能力，类型也就更窄。
 
-        :raises ServoError: 缺 target / jacobian，或雅可比奇异。
+        :raises VisualServoError: 缺 target / jacobian，或雅可比奇异。
         """
-        from modules.grasp.drive.servo_model import (
+        from modules.grasp.drive.visual_servo_model import (
             DEFAULT_CONFIG_PATH,
             load_jacobian,
             load_lift_scale,
-            load_object_selector,
-            load_servo_config,
+            load_material_selector,
+            load_visual_servo_config,
             load_target,
         )
 
         grasp_path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
-        config: ServoConfig = load_servo_config(grasp_path)
-        selector: ObjectSelector = load_object_selector(grasp_path)
-        target: ServoTarget | None = load_target(grasp_path)
-        jacobian: ServoJacobian | None = load_jacobian(grasp_path)
+        config: VisualServoConfig = load_visual_servo_config(grasp_path)
+        selector: MaterialSelector = load_material_selector(grasp_path)
+        target: VisualServoTarget | None = load_target(grasp_path)
+        jacobian: VisualServoJacobian | None = load_jacobian(grasp_path)
         lift_scale: LiftScale | None = load_lift_scale(grasp_path)
-        target, jacobian = cls._require_action_ready(target=target, jacobian=jacobian)
-        return cls._from_modules_settings(
+        target, jacobian = cls.require_action_ready(target=target, jacobian=jacobian)
+        return cls.from_modules(
             config=config,
             selector=selector,
             target=target,
@@ -321,13 +351,13 @@ class Grasp:
         )
 
     @classmethod
-    def _from_modules_settings(
+    def from_modules(
         cls,
         *,
-        config: ServoConfig,
-        selector: ObjectSelector,
-        target: ServoTarget,
-        jacobian: ServoJacobian,
+        config: VisualServoConfig,
+        selector: MaterialSelector,
+        target: VisualServoTarget,
+        jacobian: VisualServoJacobian,
         lift_scale: LiftScale | None,
         arm: RobotArm,
         vision: Vision,
@@ -340,7 +370,7 @@ class Grasp:
         **纵深防御**：万一有人绕过公开入口直接调这个接缝传入空值，也必须在装配前拦住，
         而不是等到动作时才炸。
         """
-        cls._require_action_ready(target=target, jacobian=jacobian)
+        cls.require_action_ready(target=target, jacobian=jacobian)
         session = cls(
             config=config,
             selector=selector,
@@ -356,35 +386,35 @@ class Grasp:
         return session
 
     @staticmethod
-    def _require_action_ready(
-        *, target: ServoTarget | None, jacobian: ServoJacobian | None
-    ) -> tuple[ServoTarget, ServoJacobian]:
+    def require_action_ready(
+        *, target: VisualServoTarget | None, jacobian: VisualServoJacobian | None
+    ) -> tuple[VisualServoTarget, VisualServoJacobian]:
         """普通动作的前置校验：必须在**打开任何设备之前**完成。
 
         返回缩窄后的 ``(target, jacobian)``：调用方拿到的就是非空值，不必在装配完成后
         再判一次空——那正是"缺标定却先开了设备"的入口。
         """
         if target is None:
-            raise ServoError("缺少 target；先运行现有设目标或示教工具")
+            raise VisualServoError("缺少 target；先运行现有设目标或示教工具")
         if jacobian is None:
-            raise ServoError("缺少 jacobian；先运行现有标定工具")
+            raise VisualServoError("缺少 jacobian；先运行现有标定工具")
         # 复用原有的奇异判据（pulses_for 自查行列式），不新增阈值。
         jacobian.pulses_for(0.0, 0.0)
         return target, jacobian
 
     # ------------------------------------------------------------- 动作
     @staticmethod
-    def _selector_for(want, default: ObjectSelector) -> ObjectSelector:
+    def _selector_for(want, default: MaterialSelector) -> MaterialSelector:
         """本次动作按哪个物块判别：``want`` 给了就用它，没给就用配置里的那一份。
 
         为什么要按次传：``eye_in_hand.json`` 里的 ``object`` 是**默认值**，而"一次
         main.py 里依次抓红、绿、蓝"要求判别条件每抓一个就换一次——写死在文件里就得
         抓一个改一次文件。``want`` 与 ``vision.locate("red")`` 是**同一套说法**
-        （类别名，或从 1 开始的编号），见 :meth:`ObjectSelector.from_want`。
+        （类别名，或从 1 开始的编号），见 :meth:`MaterialSelector.from_want`。
         """
         if want is None:
             return default
-        return ObjectSelector.from_want(want)
+        return MaterialSelector.from_want(want)
 
     def align_xy(
         self,
@@ -395,11 +425,15 @@ class Grasp:
         reading=None,
         want=None,
         tolerance_mm: float | None = None,
-    ) -> ServoResult:
+        max_iterations: int | None = None,
+        return_best: bool = False,
+    ) -> VisualServoResult:
         """只做 x/y 对准：**默认一步都不动高度**，高度由调用方负责。
 
         只动平面（底座 + 伸缩），**不下降、不后缩**。
 
+        :param max_iterations: 本次调整次数上限；不传时沿用配置，不修改共享配置。
+        :param return_best: 达到调整上限后回到已测得的最佳位置，允许未进容差时继续放料。
         :param hover: 要不要先把高度伺服到 ``hover_z_mm``。那一步会**自己升降**——物块放得
             高时它会一路往上抬到行程端点（抬升方向没有上限），所以默认不做；要做就传
             ``hover=True``。配置里没写 ``hover_z_mm`` 时这一步本来就不发生。
@@ -442,11 +476,11 @@ class Grasp:
         照旧能按最后读数收工。
         """
         arm, source = self._require_resources()
-        from modules.grasp.drive.eye_in_hand import align_x_y, hover_above_object
+        from modules.grasp.drive.eye_in_hand import align_x_y, hover_above_material
 
         selector = self._selector_for(want, self._selector)
         if hover and self._config.hover_z_mm is not None:
-            hover_above_object(
+            hover_above_material(
                 arm,
                 source,
                 selector,
@@ -455,20 +489,24 @@ class Grasp:
                 on_message=self._say,
             )
         # 两条分支只差"要不要自己查安全高度"，其余关键字一模一样：这样加参数时不会
-        # 只改到其中一条（以前那种写法正是这么漂移的）。
+        # 只改到其中一条。
         options = dict(
             single_step=single_step,
             reading=reading,
             lift_scale=self._lift_scale,
             on_message=self._say,
         )
-        # 门槛只改这一次：``ServoConfig`` 是 frozen 的，``replace`` 顺带跑它自己的校验
+        if return_best:
+            options["return_best"] = True
+        # 门槛只改这一次：``VisualServoConfig`` 是 frozen 的，``replace`` 顺带跑它自己的校验
         # （<=0 直接 ValueError），也顺带把由它派生的"停稳细档"（0.25×容差）一起改掉。
         config = (
             self._config
             if tolerance_mm is None
             else replace(self._config, tolerance_mm=float(tolerance_mm))
         )
+        if max_iterations is not None:
+            config = replace(config, max_iterations=max_iterations)
         if not ensure_safe_height:
             return align_x_y(
                 arm,
@@ -488,6 +526,132 @@ class Grasp:
             self._jacobian,
             config,
             **options,
+        )
+
+    def follow_material(
+        self,
+        want_color,
+        *,
+        timeout: float = 90.0,
+        min_follow_seconds: float = 4.0,
+        stable_seconds: float = 0.3,
+        tolerance_mm: float | None = None,
+        gain: float = 5.0,
+        acceleration: int = 220,
+        rpm: int = 90,
+        search_base_degrees: float | None = 420.0,
+    ) -> VisualServoResult:
+        """转盘物料的平面连续跟随；停盘且对准后可直接抓取。
+
+        底座限于 220..680°，失去可用轨迹或目标超出抓料区时回 420°观察。
+        重抓可传 search_base_degrees=None，失去可用轨迹时原地等待重识别。
+        伸缩电机范围 30..990°，并保留硬件更严格的限位。
+        跟随退出时刹停并用编码器对账，随后抓取、回位继续使用位置模式。
+        gain 为每秒误差修正比例；高度由调用方预先保证。
+        默认至少跟随四秒、连续停稳半秒；当前物料已跟满四秒时可传 min_follow_seconds=0。
+        """
+        arm, source = self._require_resources()
+        from modules.grasp.drive.eye_in_hand import follow_material_xy
+
+        selector = self._selector_for(want_color, self._selector)
+        return follow_material_xy(
+            arm,
+            source,
+            selector,
+            self._target,
+            self._jacobian,
+            self._config,
+            timeout=timeout,
+            min_follow_seconds=min_follow_seconds,
+            stable_seconds=stable_seconds,
+            tolerance_mm=tolerance_mm,
+            gain=gain,
+            acceleration=acceleration,
+            rpm=rpm,
+            base_motor_limits=(220.0, 680.0),
+            search_base_degrees=search_base_degrees,
+            on_message=self._say,
+        )
+
+    def material_in_grab_range(self, want_color) -> bool:
+        """用最新单帧判断指定物料是否在可抓范围，不驱动机械臂。"""
+        return self.check_material_for_grab(want_color).grabbable
+
+    def check_material_for_grab(
+        self, want_color, *, tolerance_mm: float | None = None,
+    ) -> GrabRangeCheck:
+        """用最新单帧确认指定物料仍在可抓范围；不等待停稳、不驱动机械臂。
+
+        下降时按当前高度重新测量毫米偏差；结果区分目标缺失与偏离，
+        相机故障、旧帧和无效坐标则报错，不能当作一次普通重抓。
+        tolerance_mm 只覆盖本次检查的平面容差，不修改跟随或升降对准配置。
+        """
+        from modules.grasp.drive.visual_servo_model import MaterialMissingError
+        from modules.grasp.drive.visual_servo_observation import _read_material
+
+        tolerance = (
+            min(self._config.tolerance_mm, self._config.z_center_tolerance_mm)
+            if tolerance_mm is None else tolerance_mm
+        )
+        if not math.isfinite(tolerance) or tolerance <= 0:
+            raise ValueError("tolerance_mm 必须为正的有限数")
+        _, source = self._require_resources()
+        checkpoint = time.monotonic()
+        try:
+            sighting = _read_material(
+                source, self._selector_for(want_color, self._selector),
+                self._config, after=checkpoint, fast=True,
+            )
+        except MaterialMissingError:
+            return GrabRangeCheck(None, tolerance)
+        stamp = sighting.received_at
+        if stamp is None or not math.isfinite(stamp) or stamp < checkpoint:
+            raise VisualServoError("下降监控未取得新的有效采集时间戳")
+        if not all(math.isfinite(v) for v in (sighting.x_mm, sighting.y_mm)):
+            raise VisualServoError("下降监控坐标必须为有限数")
+        return GrabRangeCheck((
+            sighting.x_mm - self._target.x_mm,
+            sighting.y_mm - self._target.y_mm,
+        ), tolerance)
+
+    def align_xy_for_turntable(
+        self,
+        *,
+        want=None,
+        tolerance_mm: float | None = None,
+        fast: bool = False,
+        step_seconds: float | None = None,
+    ) -> VisualServoResult:
+        """转盘抓料用的 x/y 对准；``fast=True`` 时每轮一帧、一小步，不再补颜色/霍夫。
+
+        ``fast=True`` 用于**料已经停住**的场合（``wait_scene_stable`` 之后）：帧走
+        ``Vision.frame_fast``（只 YOLO 框），动作走短步 + 满档加速度，1 s 预算内能修正
+        好几步；到点停在已知最好位置，并再取一帧确认。``fast=False`` 保持原来的
+        "一大步 + 停稳验证"路径。
+
+        与 :meth:`align_xy` 的默认值一致：**不动高度**，高度由调用方负责。返回值可能
+        ``aligned=False``——那是"已知最好"，**不是**对准了，调用方不能拿它去下降。
+        """
+        arm, source = self._require_resources()
+        from modules.grasp.drive.eye_in_hand import (
+            TURNTABLE_FAST_STEP_SECONDS,
+            align_xy_for_turntable,
+        )
+
+        selector = self._selector_for(want, self._selector)
+        return align_xy_for_turntable(
+            arm,
+            source,
+            selector,
+            self._target,
+            self._jacobian,
+            self._config,
+            tolerance_mm=tolerance_mm,
+            fast=fast,
+            step_seconds=(
+                TURNTABLE_FAST_STEP_SECONDS if step_seconds is None else step_seconds
+            ),
+            on_message=self._say,
         )
 
     def plan_ring(
@@ -535,7 +699,7 @@ class Grasp:
         :param timeout: 等一帧的超时（秒）。
         :param scale_mm_per_px: 与 ``jacobian`` 一致的毫米/像素；给了就按它换算读数。
 
-        :raises ServoError: 画面里没有环、环心读数不可用（贴边 / 缺比例尺）、环号不符、
+        :raises VisualServoError: 画面里没有环、环心读数不可用（贴边 / 缺比例尺）、环号不符、
             比例尺对不上、雅可比奇异，或观测源不支持环心定位。
         """
         arm, source = self._require_resources()
@@ -544,46 +708,11 @@ class Grasp:
         )
         return self._plan_for_ring(arm, target, scale_mm_per_px=scale_mm_per_px)
 
-    def plan_ring_readings(
-        self,
-        readings: "dict[int, tuple[float, float]]",
-        *,
-        scale_source: str = "",
-        offset_digit: int | None = None,
-    ) -> "dict[int, RingBasePlan]":
-        """一批**已经算好的**环心读数 → ``{环号: 各轴绝对位置}``；一帧都不拍。
-
-        ``readings`` 是 ``{环号: (x_mm, y_mm)}``，与 :meth:`plan_ring` 的读数是同一套
-        单位（相机系毫米）。三环成排时"2 号环实测 + 一条直线"就能把 1/3 号的环心算
-        出来，再一次性解算三个落点——:func:`app.gripper.place_box_from_repo_to_floor_v3`
-        就是这么用的；抓料/摆料之后拿 ``plan.apply(arm)`` 走到那个绝对位置。
-
-        ``scale_source`` 是这批读数**来自那一帧**的比例尺来源
-        （``RingTarget.scale_source``）。它与雅可比必须是同一把尺，这条不变式与
-        :meth:`plan_ring` 完全一样：非物理毫米的来源在这里同样拒绝，而不是给一个
-        像样的错角度。
-
-        ``offset_digit`` 让这几份位置**共用同一个环号的落料补偿**（``ring_offsets``）。
-        默认各用各的——那适合"每个环都是自己量出来的"。外推出来的点没有自己的补偿表，
-        而且三份补偿不同会把"这三个落点该在一条直线上"直接搅乱（现场配的
-        ``ring_offsets`` 各环差到 16 mm），所以一条直线上的三个点用同一个补偿号。
-
-        :raises ServoError: 比例尺不是物理毫米，或雅可比奇异。
-        """
-        self._require_physical_ring_scale(scale_source, None)
-        arm, _source = self._require_resources()
-        offset = None if offset_digit is None else int(offset_digit)
-        return {
-            int(digit): self._plan_from_reading(
-                arm, reading, digit=int(digit), offset_digit=offset
-            )
-            for digit, reading in readings.items()
-        }
-
     def align_ring(
         self,
         *,
         require_digit: int | None = None,
+        assume_digit: int | None = None,
         timeout: float | None = None,
         scale_mm_per_px: float | None = None,
         axes: "Sequence[str]" = ("base", "extension"),
@@ -591,7 +720,7 @@ class Grasp:
         gain: float = 0.9,
         tolerance_mm: float | None = None,
     ) -> "RingAlignResult":
-        """闭环把环心推到目标读数：**测一帧 → 算 → 走 → 再测**，直到进容差。
+        """先用底座修正 X，重新取帧后用伸缩修正 Y，交替到总误差进入容差。
 
         一次 :meth:`plan_ring` 只做一次线性化解算，它同时依赖两件事：
 
@@ -600,59 +729,160 @@ class Grasp:
         - 环心读数的比例尺与雅可比是不是同一把尺（``ring box`` 是估的，±10%）。
 
         任一对不上，一步就走不准——这正是"转一次再算一次、偏差还是很大"的原因。
-        这里每走一步都用**实测位移 / 预测位移**把响应比在线学出来，下一步按它折算，
-        所以两三步就能收敛；而且把响应比打印出来：**它不是 1，就说明该重标了**。
+        只有实测位移足够大、且与预测方向一致时，才用响应比折算下一步。
+        两轴响应不一致时不能共享这一个比例，否则单轴弱响应会放大另一轴的步长。
 
         与 :meth:`plan_ring` 相同的拒绝（没有环 / 读数不可用 / 环号不符 / 尺不对 /
         雅可比奇异），另外：
 
-        :param axes: 只动哪些轴；``("base",)`` = 只转底座。
-        :param max_iterations: 最多走几步（默认 4）。
+        ## 环号：``require_digit`` 是检查，``assume_digit`` 是先验
+
+        按示教姿态逐环放的流程（``place_material_from_repo_to_floor_by_pose``）**已经知道**
+        这一格是几号环，而模型对**转过角度的靶标**会读错号（2026-10-29 新放的 1 号环 5 帧
+        全读成 2/3 号，环心却一直是准的）。这时 ``require_digit`` 只会让整段流程失败：
+
+        - ``require_digit=N``：画面里的**必须**是 N 号，不是就报错（相机驱动、不知道是几号
+          的场合用这个：拿错一个环去转，臂会朝 95 mm 外的位置动）；
+        - ``assume_digit=N``：这一格**按姿态就是** N 号。先让定位器只在 N 号里挑框；模型
+          读不出 N 号时退回"画面里那个环"照样对准，落料补偿按 N 号取——模型给的号只当
+          参考，对不上就记进 ``note``。
+
+        两个只能给一个。
+
+        :param axes: 只动哪些轴；``("base",)`` = 只用底座修正 X。
+        :param max_iterations: 最多修正几轮（默认 4），每轮最多各修正 X、Y 一次。
         :param gain: 每步取解算值的多少（默认 0.9，留一点余量防过冲）。
         :param tolerance_mm: 到位门槛；``None`` 用 ``eye_in_hand.json`` 的 ``tolerance_mm``。
-        :raises ServoError: 任何一步看不见环、解算失败；或响应比 ≤ 0（方向反了：
-            那是标定/接线问题，硬走只会越走越远）。
+
+        **走满步数不报错**：闭环内部记着"目前误差最小的那一次"（残差 + 两根轴的绝对
+        位置），没进容差就把臂退回那一次，返回 ``aligned=False`` 与那一次的计划。
+        一路都是最后一步最好时，这次退回是 0 脉冲（臂本来就在那儿）。
+        :raises VisualServoError: 任何一步看不见环或解算失败。
         """
         arm, source = self._require_resources()
         from modules.grasp.drive.ring_plan import RingAlignResult, RingAlignStep
-        from modules.grasp.drive.servo_motion import _move_axis
+        from modules.grasp.drive.visual_servo_motion import _move_ring_axis
 
-        wanted = tuple(axes)
-        unknown = [name for name in wanted if name not in ("base", "extension")]
+        unknown = [name for name in axes if name not in ("base", "extension")]
         if unknown:
             raise ValueError(
                 f"align_ring 只认 base / extension，收到 {unknown}"
+            )
+        wanted = tuple(name for name in ("base", "extension") if name in axes)
+        components = {"base": (0, self._jacobian.base_dx),
+                      "extension": (1, self._jacobian.radial_dy)}
+        for axis in wanted:
+            sensitivity = components[axis][1]
+            if not math.isfinite(sensitivity) or abs(sensitivity) <= 1e-12:
+                raise VisualServoError(f"{axis} 的主方向雅可比为零或无效，不能单轴对准")
+        if assume_digit is not None and require_digit is not None:
+            raise ValueError(
+                "assume_digit 与 require_digit 只能给一个：前者是「按姿态这一格就是几号环」，"
+                "后者是「画面里的必须就是这个号」"
+            )
+        assumed = None if assume_digit is None else int(assume_digit)
+        if assumed is not None and assumed < 1:
+            raise ValueError(
+                f"assume_digit 是环号，必须从 1 开始，收到 {assume_digit!r}"
             )
         tolerance = float(
             self._config.tolerance_mm if tolerance_mm is None else tolerance_mm
         )
         steps: list[RingAlignStep] = []
-        scale = 1.0  # 步长的在线折算：1/响应比
+        # 两轴分别学习响应，底座的小响应不能放大伸缩的修正量。
+        scales = {axis: 1.0 for axis in wanted}
+        previous_axis: str | None = None
+        next_axis = 0
+        max_moves = max(1, int(max_iterations)) * len(wanted)
         response: float | None = None
         previous_reading: tuple[float, float] | None = None
         previous_step: tuple[int, int] | None = None
+        previous_motor_positions: dict[str, float] | None = None
         note = ""
         aligned = False
         final_reading: tuple[float, float] | None = None
         digit: int | None = None
         final_plan = None
-        final_source = ""
-        for attempt in range(1, max(1, int(max_iterations)) + 1):
-            target = self._locate_ring_for_plan(
-                source, timeout=timeout, require_digit=require_digit, settle=True
-            )
-            plan = self._plan_for_ring(arm, target, scale_mm_per_px=scale_mm_per_px)
+        # 到目前为止**误差最小**的那一次：最小误差 + 量到它时两轴的绝对脉冲。
+        # 牛顿步会过冲，最后一步不一定最好；没进容差就退回这一次，而不是停在最差的一步。
+        best_error: float | None = None
+        best_pulses: dict[str, int] | None = None
+        best_reading: tuple[float, float] | None = None
+        best_plan = None
+        wrong_digit: int | None = None
+        min_learn_mm = max(
+            4.0 * self._config.settle_tolerance_mm,
+            2.0 * self._config.min_step_mm,
+        )
+        # 最后一次动作也必须观测，再决定是否到位或退回最佳姿态。
+        for attempt in range(1, max_moves + 2):
+            for observation in range(2):
+                target = self._locate_ring_preferring(
+                    source,
+                    timeout=timeout,
+                    require_digit=require_digit,
+                    assume_digit=assumed,
+                    settle=True,
+                )
+                plan = self._plan_for_ring(
+                    arm, target, scale_mm_per_px=scale_mm_per_px, ring_digit=assumed
+                )
+                if (observation == 0 and previous_step is not None
+                        and previous_reading is not None):
+                    predicted = self._jacobian.displacement_for(*previous_step)
+                    measured = (
+                        plan.reading[0] - previous_reading[0],
+                        plan.reading[1] - previous_reading[1],
+                    )
+                    predicted_length = math.hypot(*predicted)
+                    if predicted_length >= min_learn_mm:
+                        parallel_mm = (
+                            measured[0] * predicted[0] + measured[1] * predicted[1]
+                        ) / predicted_length
+                        perpendicular_mm = abs(
+                            measured[0] * predicted[1] - measured[1] * predicted[0]
+                        ) / predicted_length
+                        if (abs(parallel_mm) < min_learn_mm
+                                or perpendicular_mm > min_learn_mm):
+                            # 单轴旧读数也会被另一轴的移动掩盖，复测须同时检查长度和方向。
+                            self._say("  环心响应不足或方向不一致：保持位置复测，不追加运动")
+                            continue
+                break
+            if assumed is not None and int(target.digit) != assumed and wrong_digit is None:
+                # 模型读错号不是这次对准的失败：环心照样是它给的，补偿按姿态用 assumed。
+                # 只在第一次说一句，免得闭环每一步都刷同一行。
+                wrong_digit = int(target.digit)
+                self._say(
+                    f"  模型把这一格读成 {wrong_digit} 号（姿态告诉的是 {assumed} 号）："
+                    f"按画面里这个环对准，落料补偿用 {assumed} 号那一份"
+                )
             digit = plan.digit
             final_reading = plan.reading
             final_plan = plan
-            final_source = str(target.scale_source)
+            motor_positions = {axis: arm.read_measured_pulses(axis) for axis in wanted}
+            measured_motor_pulses = None
+            if previous_motor_positions is not None:
+                measured_motor_pulses = tuple(
+                    motor_positions.get(axis, 0.0) - previous_motor_positions.get(axis, 0.0)
+                    for axis in ("base", "extension")
+                )
             error = math.hypot(plan.error_mm[0], plan.error_mm[1])
+            if best_error is None or error < best_error:
+                # 量到这次误差时两根轴就在**现在**这个位置（不是 ``plan.pulses``：那是
+                # "算完之后该走到哪"，还差一步没走）。退回去要回的就是这里。
+                best_error = error
+                best_reading = plan.reading
+                best_plan = plan
+                best_pulses = {
+                    axis: int(arm.turns_state.of(axis).pulses) for axis in wanted
+                }
             step = RingAlignStep(
                 attempt=attempt,
                 reading=plan.reading,
                 error_mm=error,
                 base_pulses=0,
                 extension_pulses=0,
+                measured_motor_pulses=measured_motor_pulses,
             )
             # 先结算**上一步**的账：实测挪了多少，按雅可比该挪多少。
             if attempt > 1 and previous_step is not None and previous_reading is not None:
@@ -662,47 +892,104 @@ class Grasp:
                     plan.reading[1] - previous_reading[1],
                 )
                 denominator = predicted[0] ** 2 + predicted[1] ** 2
-                if denominator > 1e-12:
+                predicted_length = math.hypot(predicted[0], predicted[1])
+                # 预测步长与实测位移都要超过噪声量级，才能学习响应比。
+                if denominator > 1e-12 and predicted_length >= min_learn_mm:
                     response = (
                         measured[0] * predicted[0] + measured[1] * predicted[1]
                     ) / denominator
-                    step = replace(
-                        step, measured_mm=measured, predicted_mm=predicted, response=response
+                    perpendicular_mm = abs(
+                        measured[0] * predicted[1] - measured[1] * predicted[0]
+                    ) / predicted_length
+                    learn_response = (
+                        response > 0.05 and response * predicted_length >= min_learn_mm
+                        and perpendicular_mm <= min_learn_mm
                     )
-                    if response <= 0.05:
+                    step = replace(
+                        step, measured_mm=measured, predicted_mm=predicted,
+                        response=response, response_used=learn_response,
+                    )
+                    if response <= 0.05 and error > tolerance:
                         steps.append(step)
                         note = (
-                            "实测位移与雅可比预测**方向相反或几乎没有**，再走只会越走越远："
-                            "先重标雅可比（菜单 21 的 --calibrate），或检查底座/伸缩的接线方向"
+                            "实测位移与雅可比预测**方向相反或几乎没有**：停止对准；"
+                            "检查动作是否执行、取帧是否滞后，以及雅可比标定与接线方向"
                         )
                         break
-                    # 响应比 = 真实的灵敏度 / 配置的灵敏度；下一步按它折算。
-                    scale = min(5.0, max(0.2, 1.0 / response))
+                    if learn_response and previous_axis is not None:
+                        scales[previous_axis] = min(5.0, max(0.2, 1.0 / response))
             if error <= tolerance:
                 aligned = True
                 steps.append(step)
                 break
-            base_step = (
-                _round_pulses(plan.base_pulses * gain * scale) if "base" in wanted else 0
-            )
-            extension_step = (
-                _round_pulses(plan.extension_pulses * gain * scale)
-                if "extension" in wanted
-                else 0
-            )
+            if attempt > max_moves:
+                steps.append(step)
+                note = f"走了 {max_iterations} 轮还没进容差，使用误差最小的姿态"
+                break
+            base_step = extension_step = 0
+            for offset in range(len(wanted)):
+                index = (next_axis + offset) % len(wanted)
+                axis = wanted[index]
+                component, sensitivity = components[axis]
+                # 单轴只消除自己的主方向误差，串扰留给下一次新观测处理。
+                pulses = _round_pulses(
+                    -plan.error_mm[component] / sensitivity * gain * scales[axis]
+                )
+                if pulses:
+                    base_step = pulses if axis == "base" else 0
+                    extension_step = pulses if axis == "extension" else 0
+                    previous_axis = axis
+                    next_axis = (index + 1) % len(wanted)
+                    break
             if base_step == 0 and extension_step == 0:
                 steps.append(step)
                 note = "步长不足一个脉冲，停下：把增益调大或检查读数是不是抖"
                 break
-            _move_axis(arm, "base", base_step) if base_step else None
-            _move_axis(arm, "extension", extension_step) if extension_step else None
+            _move_ring_axis(arm, "base", base_step) if base_step else None
+            _move_ring_axis(arm, "extension", extension_step) if extension_step else None
             steps.append(
                 replace(step, base_pulses=base_step, extension_pulses=extension_step)
             )
             previous_reading = plan.reading
             previous_step = (base_step, extension_step)
-        else:
-            note = note or f"走了 {max_iterations} 步还没进容差，先看响应比是不是一直不变"
+            previous_motor_positions = motor_positions
+        if not aligned and best_pulses is not None:
+            # 没进容差（走满步数 / 中途停下）：把臂**退回误差最小的那一次**。最后一步常常
+            # 是过冲的那一步，停在上面对准结果只会更差。已经在那儿就一步都不走。
+            moved = False
+            for axis in wanted:
+                delta = int(best_pulses[axis]) - int(arm.turns_state.of(axis).pulses)
+                if delta:
+                    _move_ring_axis(arm, axis, delta)
+                    moved = True
+            if moved:
+                # 退回到位后**重新量一次**（取中位数）：退回前的旧读数可能已经过时，
+                # 而且它只说明"当时误差最小"，不说明现在真的停在了那里。
+                fresh = None
+                try:
+                    measured = self._locate_ring_preferring(
+                        source,
+                        timeout=timeout,
+                        require_digit=require_digit,
+                        assume_digit=assumed,
+                        settle=True,
+                    )
+                    fresh = measured.reading()
+                except VisualServoError:
+                    fresh = None
+                reading_for_plan = best_reading if fresh is None else fresh
+                final_reading = reading_for_plan
+                # 计划按**退回来之后**的姿态重算：``plan`` 的读数、误差、绝对位置都得是
+                # 现在这个姿态的，否则后面照着 plan 落料会整体偏。
+                final_plan = self._plan_from_reading(
+                    arm,
+                    reading_for_plan,
+                    digit=best_plan.digit,
+                    score=best_plan.score,
+                )
+                note = (note + "；" if note else "") + (
+                    f"已退回误差最小的姿态（{best_error:.1f} mm）"
+                )
 
         final_error = None
         if final_reading is not None and self._target is not None:
@@ -713,6 +1000,17 @@ class Grasp:
                 final_reading[0] - ring_target.x_mm,
                 final_reading[1] - ring_target.y_mm,
             )
+            # 退回后复测已经在容差内：这就是对准了，别因为"走满步数"的旧结论
+            # 让上层不敢抓/不敢放。
+            if not aligned and final_error <= tolerance:
+                aligned = True
+                note = (note + "；" if note else "") + (
+                    f"退回后复测已在容差内（{final_error:.1f} mm）"
+                )
+        if wrong_digit is not None:
+            note = (note + "；" if note else "") + (
+                f"模型读成 {wrong_digit} 号，落料补偿按姿态用 {assumed} 号那份"
+            )
         return RingAlignResult(
             steps=tuple(steps),
             aligned=aligned,
@@ -720,7 +1018,6 @@ class Grasp:
             final_error_mm=final_error,
             tolerance_mm=tolerance,
             digit=digit,
-            scale_source=final_source,
             response=response,
             # 收敛时那一份计划：字段与 ``plan_ring()`` 完全同一套，可以直接存下来
             # （"先对准、之后回到这个绝对位置"就靠它）。
@@ -729,8 +1026,35 @@ class Grasp:
         )
 
     #: 等环心读数停稳时最多连读几帧。3 帧够滤掉底座摆完的那点余振，又不会在
-    #: "一直等不到稳定"时卡住——等不到就用最后一帧，和现在完全一样。
+    #: "一直等不到稳定"时卡住——读到的几帧取中位数，噪声按 √n 降。
     RING_SETTLE_READS = 3
+    #: 一帧读不出可用的环时连读几帧再认输。模型偶尔会把相邻两个环读成同一号
+    #: （``RingTargetLocator._digit_clash`` 会让整帧编号作废），而下一帧通常就正常；
+    #: 单帧失败不该让整段闭环从头再来。
+    RING_FRAME_ATTEMPTS = 3
+
+    def _locate_ring_preferring(
+        self, source, *, timeout, require_digit, assume_digit, settle: bool = False
+    ):
+        """``assume_digit`` 为空时就是 :meth:`_locate_ring_for_plan`；给了就先只找这个号。
+
+        模型对**转过角度**的靶标会读错号（2026-10-29 现场：同一张 1 号环 5 帧读成 2/3 号，
+        环心一直是准的），而按示教姿态逐环放的流程本来就知道这一格是几号。这时不能因为
+        模型不认这个号就把整段闭环抛出去：先按号找（读对了就是用对的框），找不到就退回
+        "画面里那个环"——号只影响落料补偿，补偿由调用方按姿态给。
+        """
+        if assume_digit is None:
+            return self._locate_ring_for_plan(
+                source, timeout=timeout, require_digit=require_digit, settle=settle
+            )
+        try:
+            return self._locate_ring_for_plan(
+                source, timeout=timeout, require_digit=assume_digit, settle=settle
+            )
+        except VisualServoError:
+            return self._locate_ring_for_plan(
+                source, timeout=timeout, require_digit=require_digit, settle=settle
+            )
 
     def _locate_ring_for_plan(
         self, source, *, timeout, require_digit, settle: bool = False
@@ -742,12 +1066,19 @@ class Grasp:
         就去测下一帧，而底座是大惯量摆动，那点时间不够；读数抖 1–2 px，下一步的步长是
         **按这个读数算的**，于是抖动量直接变成来回摆。单帧定位（``plan_ring``）保持一帧，
         那条路是人看着按的，多读几帧只是白等。
+
+        拿到的几帧**取中位数**再返回（不是用最后一帧）：停稳判据只保证"够近"，噪声仍在，
+        中位数才是这几帧里最可信的估计；帧数不变，只是别再白读。
         """
         target = self._validated_ring(
             source, timeout=timeout, require_digit=require_digit
         )
         if not settle:
             return target
+        # 环心本身就有噪声（模型框 + 椭圆精修，实测中位 2.2 px、最坏 7.7 px）：
+        # 停稳判据只是"两帧够近就收工"，不代表最后一帧最可信。把读到的这几帧
+        # 取中位数再拿去解算，噪声按 √n 降，而帧数一点没多花。
+        targets = [target]
         previous = target.reading()
         for _ in range(self.RING_SETTLE_READS - 1):
             if previous is None:
@@ -755,47 +1086,70 @@ class Grasp:
             following = self._validated_ring(
                 source, timeout=timeout, require_digit=require_digit
             )
+            targets.append(following)
             reading = following.reading()
-            target = following
             if reading is not None and math.hypot(
                 reading[0] - previous[0], reading[1] - previous[1]
             ) <= self._config.settle_tolerance_mm:
                 break
             previous = reading
-        return target
+        readings = [item.reading() for item in targets if item.reading() is not None]
+        if not readings:
+            return targets[-1]
+        return replace(
+            targets[-1],
+            x_mm=median(reading[0] for reading in readings),
+            y_mm=median(reading[1] for reading in readings),
+        )
 
     def _validated_ring(self, source, *, timeout, require_digit):
-        """一帧环心 + 三项校验（有环 / 读数可用 / 环号对得上）。
+        """一帧环心 + 三项校验（有环 / 读数可用 / 环号对得上）；坏帧会重读几帧。
 
         ``require_digit`` **下传给定位器**，让它只在这个号里挑框：一帧里同时有 1/2/3 号环
         是正常取景，按"取分最高的那个再看是不是它"会随机报"画面里是 1 号，不是 2 号"——
         分最高的那个通常就不是你要的那个。后面那道环号检查留着，兜住不认 ``digit`` 的源。
+
+        读不到 / 编号自相矛盾 / 环号不符时**连读几帧**（``RING_FRAME_ATTEMPTS``）：
+        模型偶尔会把相邻两个环读成同一号，定位器据此判整帧作废，而下一帧通常就正常；
+        一帧坏掉就把整段闭环抛出去，现场看起来就是"随机失败一次"。
         """
         locate = getattr(source, "locate_ring", None)
         if locate is None:
-            raise ServoError(
+            raise VisualServoError(
                 f"这个观测源没有环心定位（{type(source).__name__}）："
                 "环心是相机这一侧的能力，先确认会话用的是本机视觉源（Vision）"
             )
-        target = locate(timeout=timeout, digit=require_digit)
-        if target is None:
-            raise ServoError(
-                "画面里没有环：把靶标移到视野里、或确认模型类别表里有 tg1/tg2/tg3"
-                "（modules/vision/config.json 的 model.class_names）"
-            )
-        if target.reading() is None:
-            raise ServoError(self._unusable_ring_reason(target))
-        if require_digit is not None and int(target.digit) != int(require_digit):
-            raise ServoError(
-                f"画面里的环是 {target.digit} 号，不是要求的 {require_digit} 号；"
-                "拿另一个环的角度去转，机械臂会朝 95 mm 外的位置动，而动作看起来完全正常"
-            )
-        return target
+        failure: VisualServoError | None = None
+        for attempt in range(max(1, int(self.RING_FRAME_ATTEMPTS))):
+            if attempt:
+                time.sleep(self._config.inter_frame_seconds)
+            target = locate(timeout=timeout, digit=require_digit)
+            if target is None:
+                detail = getattr(source, "last_ring_diagnosis", "")
+                extra = ""
+                if isinstance(detail, str) and detail:
+                    extra = f"；最近一次：{detail}"
+                failure = VisualServoError(
+                    "画面里没有环：把靶标移到视野里、或确认模型类别表里有 tg1/tg2/tg3"
+                    "（modules/vision/config.json 的 model.class_names）" + extra
+                )
+                continue
+            if target.reading() is None:
+                failure = VisualServoError(self._unusable_ring_reason(target))
+                continue
+            if require_digit is not None and int(target.digit) != int(require_digit):
+                failure = VisualServoError(
+                    f"画面里的环是 {target.digit} 号，不是要求的 {require_digit} 号；"
+                    "拿另一个环的角度去转，机械臂会朝 95 mm 外的位置动，而动作看起来完全正常"
+                )
+                continue
+            return target
+        raise failure if failure is not None else VisualServoError("读不到环")
 
-    def _ring_target(self, digit: int | None = None) -> ServoTarget:
+    def _ring_target(self, digit: int | None = None) -> VisualServoTarget:
         """环心那一次伺服的**目标读数**：配置里的 ``target`` 加上落料补偿。
 
-        补偿只加在环心路径上（``ServoConfig.ring_offset``）：物料对准仍然对着
+        补偿只加在环心路径上（``VisualServoConfig.ring_offset``）：物料对准仍然对着
         ``self._target``。两边都加等于整体平移，料与环的相对偏差一点没变。
 
         闭环看不见"料落在环心的哪一侧"（镜头光轴与爪口有固定偏差、料在爪里也会
@@ -805,29 +1159,32 @@ class Grasp:
         环上会差一个方向，因为回程要转过的角度不同。没配这个号就退回全局那一对。
         """
         offset_x, offset_y = self._config.ring_offset(digit)
-        return ServoTarget(
+        return VisualServoTarget(
             x_mm=self._target.x_mm + offset_x,
             y_mm=self._target.y_mm + offset_y,
         )
 
-    def _plan_for_ring(self, arm, target, *, scale_mm_per_px):
-        """一帧已定位的环 → 各轴绝对位置（闭环与单次计划共用这一处）。"""
+    def _plan_for_ring(self, arm, target, *, scale_mm_per_px, ring_digit: int | None = None):
+        """一帧已定位的环 → 各轴绝对位置（闭环与单次计划共用这一处）。
+
+        ``ring_digit`` 给了就按这个号取落料补偿（按示教姿态放的场合：环号是已知的），
+        这时模型读出来的号只当参考。
+        """
         reading = self._ring_reading_in_jacobian_units(
             target, target.reading(), scale_mm_per_px
         )
         return self._plan_from_reading(
-            arm, reading, digit=int(target.digit), score=float(target.score)
+            arm,
+            reading,
+            digit=int(target.digit) if ring_digit is None else int(ring_digit),
+            score=float(target.score),
         )
 
-    def _plan_from_reading(self, arm, reading, *, digit, score=None, offset_digit=None):
-        """读数**已经与雅可比同一把尺**（比例尺由调用方核过）→ 各轴绝对位置。
-
-        ``offset_digit`` 给了就用那个环号的落料补偿（一条直线上的几个点共用一份）；
-        ``digit`` 仍然是这份计划自己的环号，写进结果里给人看。
-        """
+    def _plan_from_reading(self, arm, reading, *, digit, score=None):
+        """读数**已经与雅可比同一把尺**（比例尺由调用方核过）→ 各轴绝对位置。"""
         from modules.grasp.drive.ring_plan import plan_ring_base
 
-        ring_target = self._ring_target(digit if offset_digit is None else offset_digit)
+        ring_target = self._ring_target(digit)
         plan = plan_ring_base(
             reading=reading,
             target=(ring_target.x_mm, ring_target.y_mm),
@@ -865,11 +1222,11 @@ class Grasp:
         current = target.scale_mm_per_px
         if scale_mm_per_px is not None:
             if not scale_mm_per_px > 0:
-                raise ServoError(
+                raise VisualServoError(
                     f"scale_mm_per_px 必须是正数（毫米/像素），收到 {scale_mm_per_px!r}"
                 )
             if current is None or current <= 0:  # pragma: no cover - 读数为空时早已返回
-                raise ServoError("环心读数没有比例尺，换不了单位")
+                raise VisualServoError("环心读数没有比例尺，换不了单位")
             factor = float(scale_mm_per_px) / float(current)
             return (reading[0] * factor, reading[1] * factor)
         self._require_physical_ring_scale(target.scale_source, current)
@@ -887,7 +1244,7 @@ class Grasp:
         if scale_source in PHYSICAL_RING_SCALES:
             return
         measured = "无" if scale_mm_per_px is None else f"{scale_mm_per_px:.4f} mm/px"
-        raise ServoError(
+        raise VisualServoError(
             f"环心读数的比例尺是 {scale_source or '未知'}（{measured}），"
             "不是物理毫米，而 jacobian 是按物理毫米标定的：直接算角度会整体差一个倍数，"
             "而计划看起来完全正常。\n"
@@ -908,7 +1265,6 @@ class Grasp:
         ensure_safe_height: bool = True,
         want=None,
     ) -> GraspReadyResult:
-        # NOTE: 这个函数不再使用
         """执行抓取前就位；**不闭合夹爪，也不承诺完成搬运**。
 
         顺序不是随便定的：
@@ -945,7 +1301,7 @@ class Grasp:
                     robot.grasp.align_and_descend(want=colour)
                     robot.gripper.close_jaws()
                     robot.gripper.set_position(250)      # 张开，放下一个
-        :raises ServoError: 任何一步失败；异常信息里会写清卡在哪一步。
+        :raises VisualServoError: 任何一步失败；异常信息里会写清卡在哪一步。
 
         高度自己管的一条典型用法（第 1 步整体让开，下降脉冲按现场改）::
 
@@ -958,7 +1314,7 @@ class Grasp:
         from modules.grasp.drive.eye_in_hand import (
             align_x_y,
             descend_z,
-            hover_above_object,
+            hover_above_material,
             raise_before_rotating,
             retract_extension,
         )
@@ -972,7 +1328,7 @@ class Grasp:
         else:
             say("① 不动高度：转底盘前的高度由调用方自己保证（低位转动会撞到台面上的物块）")
         hovered = (
-            hover_above_object(
+            hover_above_material(
                 arm, source, selector, self._config,
                 scale=self._lift_scale, on_message=say,
             )

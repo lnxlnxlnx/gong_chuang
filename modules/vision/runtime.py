@@ -22,7 +22,7 @@ with Vision.open(config_path="modules/vision/config.json") as vision:
 - :meth:`Vision.locate` 是**面向业务**的：读不到画面就是失败，抛 ``RuntimeError``；
   画面里没有合格物料是**正常的空报告**（``report.best is None``），不是失败。
 - :meth:`Vision.frame` 是**面向闭环**的窄接口：读不到帧返回 ``None``，沿用伺服侧
-  "这一帧没看见"的既有契约（:class:`modules.grasp.drive.servo_observation.FrameSource`）。
+  "这一帧没看见"的既有契约（:class:`modules.grasp.drive.visual_servo_observation.FrameSource`）。
 
 两者共用一次 :meth:`Vision._read_report`，所以"一次调用只读一帧、只推理一次"只有一处实现。
 
@@ -42,7 +42,7 @@ with Vision.open(config_path="modules/vision/config.json") as vision:
 
 ## 焦距
 
-``_open_config`` 不传 ``settings.focal_px``：主线沿用既有的**粗焦距策略**
+``from_settings`` 不传 ``settings.focal_px``：主线沿用既有的**粗焦距策略**
 （``modules.vision.drive.pinhole`` 的实拍样本值），只有 CLI 显式 ``--focal`` 才覆盖。
 这是刻意保持的既有行为，不是遗漏——改成标定焦距会改变毫米坐标和控制结果。
 """
@@ -75,7 +75,7 @@ DEFAULT_MEASURE_FRAMES = 7
 DEFAULT_SETTLE_MM = 1.0
 
 #: :meth:`Vision.measure_settled` 的重试上限（秒）。与抓取侧
-#: ``ServoConfig.settle_timeout_seconds`` 的默认值一致：同一台机器上"等停稳"
+#: ``VisualServoConfig.settle_timeout_seconds`` 的默认值一致：同一台机器上"等停稳"
 #: 的耐心不该有两个数。
 DEFAULT_SETTLE_TIMEOUT_SECONDS = 4.0
 
@@ -95,7 +95,7 @@ DEFAULT_SCENE_STABLE_POLL_SECONDS = 0.3
 #: 一次判断只连拍 4 帧（约 130 ms），"这一眼没动"太便宜：转盘刚接到转动指令、物块正要
 #: 被带走之前，画面也能看着是静的，照这一眼放行就会跑过去扑空。所以头几眼的静止一律
 #: 不作数，看满这段窗口——足够把"物块要被带走"那次运动等出来，再等它停下来。
-DEFAULT_SCENE_STABLE_MIN_SECONDS = 3.5
+DEFAULT_SCENE_STABLE_MIN_SECONDS = 4.8
 
 if TYPE_CHECKING:
     from modules.vision.drive.camera import USBCamera as Camera
@@ -111,7 +111,7 @@ if TYPE_CHECKING:
     from modules.vision.reports import MaterialReport, RegionReport
 
 
-def _load_settings(
+def load_vision_settings(
     config_path: Optional[Path] = None,
     calibration_path: Optional[Path] = None,
 ) -> VisionConfig:
@@ -162,8 +162,7 @@ def _build_locator(settings: VisionConfig, *, focal_px: Optional[float] = None) 
             material_palette=targets.material_palette or None,
             colour_tolerance=targets.color_tolerance,
             top_diameter_mm=targets.material_diameter_mm,
-            # 颜色块路径与形状判据的放宽参数：原来写死在 material_blob / material_face
-            # 里，现场光照一变就得改代码，现在从 targets 块读（默认值与常量逐字相同）。
+            # 颜色块路径与形状判据的放宽参数：现场光照一变就要调，从 targets 块读。
             hue_tolerance=targets.hue_tolerance,
             value_ratio=targets.value_ratio,
             min_area_px=targets.min_area_px,
@@ -350,7 +349,7 @@ def _sightings_from_report(
 
     枚举的是 ``report.faces``（只含通过校验的顶面）并 ``start=1``：被丢掉的候选
     （夹爪圆弧、背景纹理）**不进编号**。先枚举 ``regions`` 再过滤会留下编号空洞，
-    于是 ``ObjectSelector(material_id=3)`` 会指到一个不存在的物料上。
+    于是 ``MaterialSelector(material_id=3)`` 会指到一个不存在的物料上。
     """
     return tuple(
         _sighting_from_region(region, index, received_at=received_at)
@@ -446,6 +445,11 @@ class Vision:
         #: 事后复测往往已经停了，两个数对不上就说明是等得不够长。只作观测记录，
         #: 不影响任何判定。
         self.last_scene_stability: Optional["SceneStability"] = None
+        #: 最近一次 :meth:`locate_ring` 为什么给出/没给出那个环（诊断用）。
+        #:
+        #: 最常见的一种是"同一帧里同一个环号出现两次"——模型把相邻的环读成同一号，
+        #: 这一帧作废。只看报错是"画面里没有环"会把人引去查相机，所以原因要带出来。
+        self.last_ring_diagnosis = ""
 
     # ------------------------------------------------------------- 创建
     @classmethod
@@ -456,11 +460,11 @@ class Vision:
         calibration_path: Optional[Path] = None,
     ) -> "Vision":
         """读取指定配置，加载模型并打开相机；返回拥有这些资源的会话。"""
-        settings = _load_settings(config_path, calibration_path)
-        return cls._open_config(settings)
+        settings = load_vision_settings(config_path, calibration_path)
+        return cls.from_settings(settings)
 
     @classmethod
-    def _open_config(cls, settings: VisionConfig, *, focal_px: Optional[float] = None) -> "Vision":
+    def from_settings(cls, settings: VisionConfig, *, focal_px: Optional[float] = None) -> "Vision":
         """按**已经读好的快照**开一个会话（CLI 覆盖走这条路，不再读第二个文件）。
 
         顺序是有意的：``camera_id`` 的检查在分配模型之前，模型的加载在打开相机之前。
@@ -508,7 +512,7 @@ class Vision:
 
     # ------------------------------------------------------------- 取帧与定位
     def _read_report(
-        self, *, timeout: Optional[float] = None, want=None
+        self, *, timeout: Optional[float] = None, want=None, fast: bool = False
     ) -> "Optional[Tuple[MaterialReport, float]]":
         """丢掉缓冲里的旧画面，读一帧并定位；读不到返回 ``None``。
 
@@ -517,7 +521,7 @@ class Vision:
         不宣称等于相机曝光时刻，也不能用推理结束时间冒充。
 
         ``want`` 原样交给定位器，决定 :attr:`MaterialReport.best` 挑哪一个物料
-        （``frame`` 那条闭环路径不传它：那边由 ``ObjectSelector`` 选观测）。
+        （``frame`` 那条闭环路径不传它：那边由 ``MaterialSelector`` 选观测）。
         """
         camera, locator = self._require_resources()
         # 机械臂刚动完时，摄像头 / OpenCV 的缓冲里可能还压着动作**之前**的画面，
@@ -537,11 +541,11 @@ class Vision:
             time.sleep(0.05)
 
         stamp = self._clock()
-        report = locator.locate(frame, want=want)
+        report = locator.locate(frame, want=want, fast=fast)
         self.frames += 1
         return report, stamp
 
-    def locate(self, want=None) -> "MaterialReport":
+    def locate(self, want=None, *, fast: bool = False) -> "MaterialReport":
         """取帧并定位一次；``want`` 指定**要哪一个物料**。
 
         - ``None``（默认，保持原行为）：认出来的里置信度最高的那个，否则半径最大的
@@ -555,11 +559,15 @@ class Vision:
         而动作本身看起来完全正常。画面里的其它候选仍然照常列在报告里，便于看清到底
         看到了什么。
 
+        ``fast=True`` 只跑 YOLO 框，**不补颜色/霍夫**（那一路本机约 0.6 s/帧），也不看
+        "框离光轴多远"；框没认出来就是空报告。跟随移动中的物料时用它——料离光轴远是
+        正常状态，补那一路纯属白花时间。
+
         :raises RuntimeError: 读不到摄像头画面（设备掉线）。画面里没有合格物料
             是**正常的空报告**（``report.best is None``），不是失败。
         :raises ValueError: ``want`` 写法不合法（**在取帧之前**就报出来）。
         """
-        result = self._read_report(want=want)
+        result = self._read_report(want=want, fast=fast)
         if result is None:
             raise RuntimeError("读不到摄像头画面")
         return result[0]
@@ -575,9 +583,30 @@ class Vision:
 
         这是**面向闭环的窄观测接口**（形状与 ``CameraLink`` 一致），供抓取和测试使用。
         ``max_age_seconds`` / ``min_received_at`` 保留原有窄接口形状：具体的新鲜度与
-        停稳筛选在 :mod:`modules.grasp.drive.servo_observation`，这里只提供时间戳。
+        停稳筛选在 :mod:`modules.grasp.drive.visual_servo_observation`，这里只提供时间戳。
         """
         result = self._read_report(timeout=timeout)
+        if result is None:
+            return None
+        report, stamp = result
+        return _sightings_from_report(report, received_at=stamp)
+
+    def frame_fast(
+        self,
+        *,
+        timeout: Optional[float] = None,
+        max_age_seconds: Optional[float] = None,
+        min_received_at: Optional[float] = None,
+    ) -> "Optional[Tuple[MaterialSighting, ...]]":
+        """[`frame()`] 的快速版：**只跑 YOLO 框**，不补颜色/霍夫（约 0.6 s/帧）。
+
+        给"跟着走起来的料"用：料离光轴远是正常状态，不该为它补跑一次辅助定位。
+        代价是 YOLO 这一帧没认出来时就是空观测（跟随会跳过这一帧，接着跟）。
+
+        ``max_age_seconds`` / ``min_received_at`` 保留与 :meth:`frame` 相同的形状，
+        新鲜度仍由取帧前丢缓冲保证。
+        """
+        result = self._read_report(timeout=timeout, fast=True)
         if result is None:
             return None
         report, stamp = result
@@ -656,7 +685,7 @@ class Vision:
         调用方自己决定要不要用，而不是被悄悄塞一个"看起来没事"的值。
 
         读不到画面（相机掉线）不算"还在动"：连续读失败会一直重试到超时，
-        与 :func:`modules.grasp.drive.servo_observation.measure_settled` 的取舍一致。
+        与 :func:`modules.grasp.drive.visual_servo_observation.measure_settled` 的取舍一致。
 
         ``require_motion`` / ``motion`` 补的是**另一件事**：:attr:`Fusion.confident`
         只说明"这一批读数内部一致"，它答不了"转盘到底转过没有"。画面本来就静止时，
@@ -1045,7 +1074,10 @@ class Vision:
         :raises RuntimeError: 会话未就绪或已关闭，或读不到摄像头画面。
         """
         frame = self._read_frame(timeout=timeout)
-        return self._ring_target_locator().detect(frame, digit=digit)
+        locator = self._ring_target_locator()
+        target = locator.detect(frame, digit=digit)
+        self.last_ring_diagnosis = locator.last_diagnosis
+        return target
 
     def locate_rings(
         self, *, timeout: Optional[float] = None
@@ -1109,6 +1141,26 @@ class Vision:
                 table_depth_mm=self._settings.table_depth_mm,
             )
         return self._ring_target
+
+    # ------------------------------------------------------------- 板载屏幕
+    def show_text(self, text: str, *, size: Optional[Tuple[int, int]] = None) -> str:
+        """把一段文字显示在板载屏幕上，**显示完就留在那儿**（不阻塞、不关闭）。
+
+        入参就是要给外面看的那串字符，例如 ``"134+123+314+231"``；文字里带换行符
+        就分行显示。字号按画布自动缩，所以字符串长短都不会画出界
+        （:mod:`modules.vision.drive.text_screen`）。
+
+        重复调用覆盖同一个窗口，循环里每帧更新也不会堆出一排窗口。
+
+        **不读帧、不开相机**：独立显示进程维护窗口，相机没打开也能用。
+        首次调用需启动显示进程，绘制确认后返回，之后无需主程序刷新窗口。真正的显示在
+        :func:`modules.vision.drive.text_screen.show_text`，那里也能脱离本会话直接调用。
+
+        :raises ValueError: 文字为空，或画布尺寸装不下留白。
+        """
+        from modules.vision.drive.text_screen import DEFAULT_SIZE, show_text
+
+        return show_text(text, size=DEFAULT_SIZE if size is None else size)
 
     # ------------------------------------------------------------- 收尾
     def close(self) -> None:

@@ -106,6 +106,28 @@ class MaterialLocatorTests(unittest.TestCase):
         self.assertEqual(len(report.regions), 2)
         # 光轴正下方那块被并进来了——"挑离光轴最近的那个"这才有得挑。
         self.assertIn(320.0, [region.center_x_px for region in report.regions])
+
+    def test_fast_mode_uses_the_boxes_even_when_they_are_far_away(self):
+        """跟随专用：YOLO 有框就直接用，不管离光轴多远、也不碰圆面定位器。"""
+        recorder = RecordingLocator((LockedRegion(320.0, 240.0, 60.0),))
+        report = MaterialLocator(
+            locator=recorder, yolo=FakeYOLO([hit("red", 0.9, 120)]), focal_px=300
+        ).locate(self.frame, fast=True)
+
+        self.assertEqual(recorder.calls, [], "fast 模式一个像素的霍夫都不该跑")
+        self.assertEqual(len(report.regions), 1)
+        self.assertEqual(report.regions[0].name, "red")
+
+    def test_fast_mode_without_any_box_is_an_empty_report(self):
+        """YOLO 这一帧没认出来就是没有目标——不要花 0.6 s 去补颜色/霍夫。"""
+        recorder = RecordingLocator((LockedRegion(320.0, 240.0, 60.0),))
+        report = MaterialLocator(
+            locator=recorder, yolo=FakeYOLO([]), focal_px=300
+        ).locate(self.frame, fast=True)
+
+        self.assertEqual(recorder.calls, [])
+        self.assertEqual(report.regions, ())
+        self.assertIsNone(report.best)
     def test_best_prefers_the_highest_classification_score(self):
         self.assertEqual(self.report.best.name, "red")
 

@@ -64,10 +64,10 @@ class PlaceBoxSequenceTests(unittest.TestCase):
     """一条 ``place_box_to_repo`` 到底发了哪些帧、按什么顺序。"""
 
     def setUp(self) -> None:
-        app_gripper.current_position_index = 0
+        app_gripper._turntable_position_index = 0
         self.clock = FakeClock()
         self.bus = FakeEmm42Bus()
-        self.arm = RobotArm._from_settings(
+        self.arm = RobotArm.from_settings(
             config=dataclasses.replace(ARM_CONFIG, max_pulses=11000),
             port="FAKE_STEPPER",
             bus=self.bus,

@@ -1,0 +1,503 @@
+"""监控下降与重抓的离线仿真：执行真实控制代码，只替换电机和相机设备。"""
+
+import math
+import unittest
+from contextlib import ExitStack
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import app.gripper as app_gripper
+import modules.grasp.runtime as grasp_runtime
+from modules.arm.runtime import RobotArm
+from modules.arm.test.unit.test_arm_axes import (
+    FakeClock, FakeSerial, RecordingSleep, fixture_config,
+)
+from modules.grasp import Grasp
+from modules.grasp.drive.visual_servo_model import (
+    MaterialSelector, VisualServoConfig, VisualServoError,
+    VisualServoJacobian, VisualServoTarget,
+)
+from modules.vision.drive.sighting import MaterialSighting
+
+
+class SimulatedLift:
+    """按假时钟积分位置，编码器原点故意与命令里程表相差 12345 脉冲。"""
+
+    def __init__(self, clock, start, ppr):
+        self.clock, self.position, self.ppr = clock, start, ppr
+        self.target, self.stamp, self.speed = start, clock(), 0
+        self.moves, self.stops = [], []
+        self.stalled = False
+
+    def update(self):
+        distance = self.target - self.position
+        step = 0 if self.stalled else self.speed * (self.clock() - self.stamp)
+        self.position += math.copysign(min(abs(distance), step), distance)
+        self.stamp = self.clock()
+
+    def move_relative_pulses(self, pulses, rpm, acceleration, *, synchronized=False):
+        self.update()
+        self.target = self.position + pulses
+        self.speed = rpm * self.ppr / 60
+        self.moves.append((self.clock(), pulses))
+
+    def read_position(self):
+        self.update()
+        return (self.position + 12345) * 65536 / self.ppr
+
+    def stop(self):
+        self.update()
+        self.target = self.position
+        self.stops.append((self.clock(), self.position))
+
+    def read_status(self):
+        self.update()
+        return SimpleNamespace(
+            enabled=True,
+            in_position=abs(self.position - self.target) <= self.ppr * 0.3 / 360,
+            stalled=False, stall_protected=False,
+        )
+
+
+class SimulatedCamera:
+    def __init__(self, clock, sleep):
+        self.clock, self.sleep = clock, sleep
+        self.offset = lambda: (0.0, 0.0)
+        self.stamp = lambda: self.clock()
+        self.samples = []
+
+    def frame_fast(self, **_kwargs):
+        self.sleep(0.04)
+        offset = self.offset()
+        self.samples.append((self.clock(), offset))
+        if offset is None:
+            return ()
+        return (MaterialSighting(
+            material_id=1, color="red", x_mm=offset[0], y_mm=offset[1],
+            z_mm=80, received_at=self.stamp(),
+        ),)
+
+
+class RingMonitoredMotionTests(unittest.TestCase):
+    """用真实机械臂监控路径确认补偿的每一段完成后才发下一段。"""
+
+    def setUp(self):
+        self.clock = FakeClock()
+        self.sleep = RecordingSleep(self.clock)
+        self.arm = RobotArm.from_settings(
+            config=fixture_config(acceleration=0),
+            port="FAKE", bus=FakeSerial(), clock=self.clock, sleep=self.sleep,
+        )
+
+        class SlowMotor(SimulatedLift):
+            def move_relative_pulses(self, *args, **kwargs):
+                self.update()
+                if abs(self.position - self.target) > self.ppr * 0.3 / 360:
+                    raise AssertionError("上一段尚未到位，不允许反转")
+                super().move_relative_pulses(*args, **kwargs)
+                self.speed *= 0.5
+
+        self.motor = SlowMotor(self.clock, 0, self.arm.pulses_per_revolution)
+        self.arm._motors["base"] = self.motor
+
+    def test_compensation_waits_for_both_legs_even_when_estimate_is_short(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        with patch.object(motion, "time", SimpleNamespace(sleep=self.sleep)):
+            motion._move_ring_axis(self.arm, "base", 49)
+
+        self.motor.update()
+        self.assertEqual([p for _stamp, p in self.motor.moves], [349, -300])
+        self.assertAlmostEqual(self.motor.position, 49, delta=3)
+        self.assertAlmostEqual(self.arm.read_abs_state("base").pulses, 49, delta=3)
+
+    def test_unfinished_first_leg_stops_without_sending_the_return_leg(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        self.motor.stalled = True
+        with patch.object(motion, "time", SimpleNamespace(sleep=self.sleep)):
+            with self.assertRaises(TimeoutError) as caught:
+                motion._move_ring_axis(self.arm, "base", 49)
+
+        self.assertEqual(len(self.motor.moves), 1)
+        self.assertTrue(self.motor.stops)
+        message = str(caught.exception)
+        self.assertIn("净修正 +49 脉冲", message)
+        self.assertIn("第 1/2 段 +349 脉冲", message)
+        self.assertIn("指令增量 +349.0", message)
+        self.assertIn("实测增量 +0.0", message)
+        self.assertIn("剩余 +349.0", message)
+        self.assertIn("使能=1、到位=0", message)
+
+    def test_ring_can_remeasure_after_encoder_stops_without_arrival_flag(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        normal_status = self.motor.read_status
+
+        def without_arrival_flag():
+            status = normal_status()
+            status.in_position = False
+            return status
+
+        self.motor.read_status = without_arrival_flag
+        motion._move_ring_axis(self.arm, "base", 49)
+
+        self.assertEqual([p for _stamp, p in self.motor.moves], [349, -300])
+        self.assertAlmostEqual(self.motor.position, 49, delta=3)
+
+    def test_ring_returns_measured_position_when_motor_stops_short_of_target(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        normal_update = self.motor.update
+        stopped_at = []
+
+        def stop_with_following_error():
+            normal_update()
+            if self.motor.speed and abs(self.motor.target - self.motor.position) <= 13.5:
+                self.motor.position = self.motor.target + 13.5
+                self.motor.speed = 0
+                stopped_at.append(self.clock())
+
+        self.motor.update = stop_with_following_error
+        motion._move_ring_axis(self.arm, "base", -70)
+
+        # 停止帧会将驱动器目标重置到当前位置，剩余误差须与原指令比较。
+        self.assertAlmostEqual(-70 - self.motor.position, -13.5)
+        self.assertAlmostEqual(self.motor.position, -56.5)
+        self.assertAlmostEqual(self.arm.read_abs_state("base").pulses, -56, delta=1)
+        self.assertGreaterEqual(self.clock() - stopped_at[0], self.arm.settle_seconds)
+
+    def test_continued_slow_motion_is_not_accepted_as_standstill(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        normal_move = self.motor.move_relative_pulses
+
+        def keep_moving_slowly(*args, **kwargs):
+            normal_move(*args, **kwargs)
+            self.motor.speed = 25.0
+
+        self.motor.move_relative_pulses = keep_moving_slowly
+        with self.assertRaises(TimeoutError):
+            motion._move_ring_axis(self.arm, "base", -70)
+
+        self.assertTrue(self.motor.stops)
+
+    def test_arrived_motor_does_not_require_encoder_standstill(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        normal_read = self.motor.read_position
+        samples = []
+
+        def jittering_encoder():
+            measured = normal_read()
+            if self.motor.moves:
+                samples.append(measured)
+                # 驱动器已到位，但反馈交替抖动，始终无法满足一脉冲的停稳窗口。
+                jitter = 2 if len(samples) % 2 else -2
+                measured += jitter * 65536 / self.arm.pulses_per_revolution
+            return measured
+
+        self.motor.read_position = jittering_encoder
+        motion._move_ring_axis(self.arm, "base", 411)
+
+        self.assertAlmostEqual(self.motor.position, 411, delta=3)
+        self.assertTrue(self.motor.stops)
+        self.assertAlmostEqual(self.arm.read_abs_state("base").pulses, 411, delta=3)
+
+    def test_disabled_or_stalled_motor_is_not_accepted_as_standstill(self):
+        from modules.grasp.drive import visual_servo_motion as motion
+
+        for enabled, stalled in ((False, False), (True, True)):
+            with self.subTest(enabled=enabled, stalled=stalled):
+                self.setUp()
+                normal_status = self.motor.read_status
+
+                def fault_status():
+                    status = normal_status()
+                    status.enabled, status.stalled = enabled, stalled
+                    return status
+
+                self.motor.read_status = fault_status
+                with self.assertRaises(RuntimeError):
+                    motion._move_ring_axis(self.arm, "base", 49)
+
+                self.assertEqual(len(self.motor.moves), 1)
+                self.assertTrue(self.motor.stops)
+
+
+class MonitoredGrabTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = FakeClock()
+        self.sleep = RecordingSleep(self.clock)
+        self.arm = RobotArm.from_settings(
+            config=fixture_config(acceleration=0, initial_motor_degrees={"lift": 830}),
+            port="FAKE", bus=FakeSerial(), clock=self.clock, sleep=self.sleep,
+        )
+        start = self.arm.read_abs_state("lift").pulses
+        self.motor = SimulatedLift(self.clock, start, self.arm.pulses_per_revolution)
+        self.arm._motors["lift"] = self.motor
+        self.camera = SimulatedCamera(self.clock, self.sleep)
+        self.grasp = Grasp(
+            config=VisualServoConfig(tolerance_mm=6, z_center_tolerance_mm=6),
+            selector=MaterialSelector(), target=VisualServoTarget(0, 0),
+            jacobian=VisualServoJacobian(-0.08, 0, 0, 0.02), lift_scale=None,
+        )
+        self.grasp._arm, self.grasp._source = self.arm, self.camera
+        self.robot = SimpleNamespace(arm=self.arm, grasp=self.grasp, gripper=Mock())
+        fake_time = SimpleNamespace(monotonic=self.clock, sleep=self.sleep)
+        for module in (app_gripper, grasp_runtime):
+            context = patch.object(module, "time", fake_time)
+            context.start()
+            self.addCleanup(context.stop)
+
+    def grab(self, *, seconds=5):
+        return app_gripper._descend_and_grab_from_turntable_monitored(
+            self.robot, "red", deadline=self.clock() + seconds,
+        )
+
+    def assert_back_at_observation_height(self):
+        self.motor.update()
+        self.assertAlmostEqual(self.motor.position * 360 / self.motor.ppr, 830, delta=0.2)
+        self.assertAlmostEqual(self.arm.read_abs_state("lift").motor_degrees, 830, delta=0.2)
+        self.robot.gripper.close_jaws.assert_not_called()
+
+    def test_camera_keeps_reading_during_descent_and_grabs_only_at_height(self):
+        grabbed_at = []
+        self.robot.gripper.close_jaws.side_effect = lambda: grabbed_at.append(
+            self.motor.position * 360 / self.motor.ppr
+        )
+        self.assertTrue(self.grab())
+        self.assertGreater(len(self.camera.samples), 3)
+        self.assertAlmostEqual(grabbed_at[0], 550, delta=0.2)
+        self.motor.update()
+        self.assertAlmostEqual(self.motor.position * 360 / self.motor.ppr, 800, delta=0.2)
+
+    def test_missing_or_outside_target_brakes_halfway_and_returns_to_observation(self):
+        started = self.clock()
+        self.camera.offset = lambda: (0, 0) if self.clock() - started < 0.12 else None
+        self.assertFalse(self.grab())
+        stopped_height = self.motor.stops[0][1] * 360 / self.motor.ppr
+        self.assertGreater(stopped_height, 550)
+        self.assertLess(stopped_height, 830)
+        self.assert_back_at_observation_height()
+
+    def test_visible_target_outside_grab_range_never_closes_jaws(self):
+        self.camera.offset = lambda: (6.1, 0)
+        self.assertFalse(self.grab())
+        self.assert_back_at_observation_height()
+
+    def test_v2_custom_grab_tolerance_accepts_logged_offset_without_changing_alignment(self):
+        """重放现场 6.83 mm 偏差，只放宽下降检查，不改跟随对准容差。"""
+        self.camera.offset = lambda: (-1.75, 6.61)
+        self.assertFalse(self.grasp.check_material_for_grab("red").grabbable)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(app_gripper, "_follow_material_until_stable"))
+            stow = stack.enter_context(patch.object(app_gripper, "_stow_material_to_repo"))
+            stack.enter_context(patch.object(app_gripper, "move_axes_to"))
+            app_gripper.grab_material_from_turntable_to_repo_follow_v2(
+                self.robot, ("red",), home=None, grab_tolerance_mm=8.0,
+            )
+        self.robot.gripper.close_jaws.assert_called_once()
+        stow.assert_called_once()
+        self.assertFalse(self.grasp.check_material_for_grab("red").grabbable)
+
+    def test_custom_grab_tolerance_still_cancels_above_its_limit(self):
+        self.camera.offset = lambda: (8.01, 0)
+        with patch("builtins.print") as printed:
+            self.assertFalse(app_gripper._descend_and_grab_from_turntable_monitored(
+                self.robot, "red", deadline=self.clock() + 5, grab_tolerance_mm=8.0,
+            ))
+        self.assert_back_at_observation_height()
+        message = " ".join(str(c.args) for c in printed.call_args_list)
+        self.assertIn("允许 8.00 mm", message)
+
+    def test_invalid_grab_tolerance_fails_before_moving(self):
+        for tolerance in (0, -1, math.nan, math.inf, -math.inf):
+            with self.subTest(tolerance=tolerance):
+                with self.assertRaisesRegex(ValueError, "grab_tolerance_mm"):
+                    app_gripper.grab_material_from_turntable_to_repo_follow_v2(
+                        self.robot, ("red",), grab_tolerance_mm=tolerance,
+                    )
+        self.assertEqual(self.motor.moves, [])
+        self.assertEqual(self.camera.samples, [])
+        self.robot.gripper.close_jaws.assert_not_called()
+
+    def test_cancellation_log_distinguishes_offset_from_missing_and_reports_measured_height(self):
+        self.camera.offset = lambda: (7, 0)
+        with patch("builtins.print") as printed:
+            self.assertFalse(self.grab())
+        message = " ".join(str(c.args) for c in printed.call_args_list)
+        self.assertIn("7.00 mm", message)
+        self.assertIn("实测 lift 830.0°", message)
+        self.assertNotIn("实测 lift 550.0°", message)
+
+    def test_calibration_finds_last_visible_height_and_returns_without_grabbing(self):
+        def visibility():
+            self.motor.update()
+            return (0, 0) if self.motor.position * 360 / self.motor.ppr >= 699.5 else None
+        self.camera.offset = visibility
+        with patch.object(app_gripper, "_follow_material_until_stable"):
+            cutoff = app_gripper.calibrate_turntable_grab_visibility(self.robot, "red")
+        self.assertAlmostEqual(cutoff, 700, delta=0.2)
+        self.assert_back_at_observation_height()
+
+    def test_calibration_rejects_offset_change_instead_of_calling_it_occlusion(self):
+        def offset():
+            self.motor.update()
+            return (0, 0) if self.motor.position * 360 / self.motor.ppr > 810 else (8, 0)
+        self.camera.offset = offset
+        with patch.object(app_gripper, "_follow_material_until_stable"):
+            with self.assertRaisesRegex(RuntimeError, "仍检测到料但坐标超限"):
+                app_gripper.calibrate_turntable_grab_visibility(self.robot, "red")
+        self.assert_back_at_observation_height()
+
+    def test_calibrated_terminal_segment_can_grab_when_camera_is_occluded_below_cutoff(self):
+        def visibility():
+            self.motor.update()
+            return (0, 0) if self.motor.position * 360 / self.motor.ppr >= 699.5 else None
+        self.camera.offset = visibility
+        self.assertTrue(app_gripper._descend_and_grab_from_turntable_monitored(
+            self.robot, "red", deadline=self.clock() + 5, monitor_until_lift=700,
+        ))
+        self.robot.gripper.close_jaws.assert_called_once()
+        self.assertTrue(all(point is not None for _, point in self.camera.samples))
+
+    def test_target_lost_above_cutoff_still_returns_without_grabbing(self):
+        self.camera.offset = lambda: None
+        self.assertFalse(app_gripper._descend_and_grab_from_turntable_monitored(
+            self.robot, "red", deadline=self.clock() + 5, monitor_until_lift=700,
+        ))
+        self.assert_back_at_observation_height()
+
+    def test_final_frame_after_braking_can_cancel_the_grab(self):
+        self.camera.offset = lambda: None if self.motor.stops else (0, 0)
+        self.assertFalse(self.grab())
+        self.assert_back_at_observation_height()
+
+    def test_other_colour_does_not_replace_requested_material(self):
+        self.assertFalse(self.grasp.material_in_grab_range("blue"))
+
+    def test_old_frames_and_invalid_coordinates_fail_instead_of_grabbing(self):
+        self.camera.stamp = lambda: -1
+        with self.assertRaisesRegex(VisualServoError, "时间戳"):
+            self.grab()
+        self.robot.gripper.close_jaws.assert_not_called()
+        self.assertTrue(self.motor.stops)
+        self.assertAlmostEqual(self.arm.read_abs_state("lift").pulses, self.motor.position, delta=1)
+        self.camera.stamp = lambda: self.clock()
+        self.camera.offset = lambda: (math.nan, 0)
+        with self.assertRaisesRegex(VisualServoError, "有限数"):
+            self.grasp.material_in_grab_range("red")
+
+    def test_stalled_lift_never_grabs_and_stops_on_timeout(self):
+        self.motor.stalled = True
+        with self.assertRaisesRegex(TimeoutError, "实测到位"):
+            self.grab()
+        self.robot.gripper.close_jaws.assert_not_called()
+        self.assertTrue(self.motor.stops)
+        self.assertAlmostEqual(self.arm.read_abs_state("lift").motor_degrees, 830, delta=0.2)
+
+    def test_driver_arrival_window_does_not_require_exact_encoder_equality(self):
+        normal_status = self.motor.read_status
+        def in_window():
+            self.motor.update()
+            if abs(self.motor.position - self.motor.target) < 3:
+                self.motor.position = self.motor.target + 2
+                self.motor.speed = 0
+            return normal_status()
+        self.motor.read_status = in_window
+        self.assertTrue(self.grab())
+        self.robot.gripper.close_jaws.assert_called_once()
+
+    def test_grab_still_requires_driver_arrival_when_encoder_is_stationary(self):
+        normal_status = self.motor.read_status
+
+        def without_arrival_flag():
+            status = normal_status()
+            status.in_position = False
+            return status
+
+        self.motor.read_status = without_arrival_flag
+        with self.assertRaises(TimeoutError):
+            self.grab()
+
+        self.robot.gripper.close_jaws.assert_not_called()
+
+    def test_unchanged_encoder_with_stale_arrival_flag_does_not_allow_grabbing(self):
+        self.motor.stalled = True
+        self.motor.read_status = lambda: SimpleNamespace(
+            enabled=True, in_position=True, stalled=False, stall_protected=False,
+        )
+        with self.assertRaises(TimeoutError):
+            self.grab()
+        self.robot.gripper.close_jaws.assert_not_called()
+
+    def test_camera_error_cancels_motion_and_propagates(self):
+        def fail():
+            raise RuntimeError("相机掉线")
+        self.camera.offset = fail
+        with self.assertRaisesRegex(RuntimeError, "相机掉线"):
+            self.grab()
+        self.robot.gripper.close_jaws.assert_not_called()
+        self.assertTrue(self.motor.stops)
+        self.assertAlmostEqual(self.arm.read_abs_state("lift").pulses, self.motor.position, delta=1)
+
+    def test_budget_expiring_during_frame_read_returns_before_retry(self):
+        self.assertFalse(self.grab(seconds=0.02))
+        self.assert_back_at_observation_height()
+
+    def test_retry_stays_on_same_colour_and_stows_only_after_success(self):
+        events = []
+        follow_options = []
+        def follow(_robot, color, **kwargs):
+            self.motor.update()
+            events.append(("follow", color, round(self.motor.position * 360 / self.motor.ppr)))
+            follow_options.append(kwargs)
+            self.camera.offset = lambda: None if len(follow_options) == 1 else (0, 0)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(app_gripper, "_follow_material_until_stable", side_effect=follow))
+            stack.enter_context(patch.object(app_gripper, "_stow_material_to_repo", side_effect=lambda _r, **_kw: events.append("stow")))
+            stack.enter_context(patch.object(app_gripper, "move_axes_to"))
+            app_gripper.grab_material_from_turntable_to_repo_follow_v2(
+                self.robot, ("red",), home=None, stable_seconds=0.3,
+            )
+        self.assertEqual(events, [("follow", "red", 830), ("follow", "red", 830), "stow"])
+        self.assertEqual([kw["min_follow_seconds"] for kw in follow_options], [0, 0])
+        self.assertEqual([kw["stable_seconds"] for kw in follow_options], [0.3, 0.3])
+        self.assertLess(follow_options[1]["timeout"], follow_options[0]["timeout"])
+        self.robot.gripper.close_jaws.assert_called_once()
+
+    def test_repeated_loss_exhausts_one_budget_and_never_stows(self):
+        self.camera.offset = lambda: None
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(app_gripper, "_follow_material_until_stable"))
+            stow = stack.enter_context(patch.object(app_gripper, "_stow_material_to_repo"))
+            with self.assertRaises(TimeoutError):
+                app_gripper.grab_material_from_turntable_to_repo_follow_v2(
+                    self.robot, ("red",), home=None, follow_seconds=0.2,
+                )
+        stow.assert_not_called()
+        self.assert_back_at_observation_height()
+
+
+class ShortStableGateTests(unittest.TestCase):
+    def test_a_stopped_target_is_released_after_point_three_seconds_without_four_second_gate(self):
+        from modules.grasp.drive import eye_in_hand as algorithms
+        from modules.grasp.test.unit.test_continuous_follow import follow
+        from modules.grasp.test.unit.test_eye_in_hand import FollowClock
+        from tests.test_turntable_follow_search import GrabZoneArm, GrabZoneLink
+
+        clock = FollowClock()
+        arm = GrabZoneArm(clock)
+        link = GrabZoneLink(arm, stop_at=0)
+        robot = Mock()
+        robot.arm.read_abs_state.return_value.motor_degrees = 830
+        robot.grasp.follow_material.side_effect = lambda _color, **kw: follow(arm, link, **kw)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(algorithms, "time", clock))
+            stack.enter_context(patch.object(app_gripper, "_descend_and_grab_from_turntable_monitored", return_value=True))
+            stack.enter_context(patch.object(app_gripper, "_stow_material_to_repo"))
+            stack.enter_context(patch.object(app_gripper, "move_axes_to"))
+            app_gripper.grab_material_from_turntable_to_repo_follow_v2(robot, ("red",), home=None)
+        self.assertGreaterEqual(clock.now, 0.3)
+        self.assertLess(clock.now, 1.0)

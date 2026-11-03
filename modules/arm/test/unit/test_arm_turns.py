@@ -238,7 +238,7 @@ class RobotArmTurnsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.serial = FakeSerial()
         self.sleep = RecordingSleep()
-        self.arm = RobotArm._from_settings(
+        self.arm = RobotArm.from_settings(
             config=turns_config(),
             port="/dev/ttyUSB0",
             bus=self.serial,
@@ -306,7 +306,7 @@ class RobotArmInitialTurnsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.serial = FakeSerial()
         self.sleep = RecordingSleep()
-        self.arm = RobotArm._from_settings(
+        self.arm = RobotArm.from_settings(
             config=turns_config(initial_motor_degrees={"extension": 270.0}),
             port="/dev/ttyUSB0",
             bus=self.serial,
@@ -354,7 +354,7 @@ class RobotArmAbsoluteMotorPositionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.serial = FakeSerial()
         self.sleep = RecordingSleep()
-        self.arm = RobotArm._from_settings(
+        self.arm = RobotArm.from_settings(
             config=turns_config(),
             port="/dev/ttyUSB0",
             bus=self.serial,

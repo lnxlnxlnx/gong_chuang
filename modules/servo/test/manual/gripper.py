@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable
 
 from modules.servo.config import GripperConfig, load_gripper_config
-from modules.servo.drive.bus_servo import BusServo, load_bus_config
+from modules.servo.drive.bus_servo import BusServo, load_servo_bus_config
 
 
 def run_manual(
@@ -67,7 +67,7 @@ def main() -> None:
     """Open the bus at its configured baud rate, then close the UART on every exit path."""
     port_override = parse_port()
     config = load_gripper_config()
-    bus = load_bus_config()
+    bus = load_servo_bus_config()
     port = port_override if port_override is not None else bus.port
     print(f"夹爪舵机 {config.servo_id} @ {port} {bus.baudrate} bps")
     try:

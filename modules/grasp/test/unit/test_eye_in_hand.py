@@ -10,9 +10,9 @@
 
 原先一个 ``eye_in_hand.py`` 住着四件事，现在按"谁改谁"分开：
 
-- 值对象 / 配置读写 / 结果类型 → :mod:`modules.grasp.drive.servo_model`；
-- 观测判据（选取、停稳、可见性探测） → :mod:`modules.grasp.drive.servo_observation`；
-- 脉冲原语（真的发帧并等） → :mod:`modules.grasp.drive.servo_motion`；
+- 值对象 / 配置读写 / 结果类型 → :mod:`modules.grasp.drive.visual_servo_model`；
+- 观测判据（选取、停稳、可见性探测） → :mod:`modules.grasp.drive.visual_servo_observation`；
+- 脉冲原语（真的发帧并等） → :mod:`modules.grasp.drive.visual_servo_motion`；
 - 实际控制算法（探针、安全抬升、悬停、x/y 闭环、下降、后缩） →
   :mod:`modules.grasp.drive.eye_in_hand`。
 
@@ -23,7 +23,7 @@
 ## patch 要打在"被执行的那个名字"上
 
 ``align_x_y`` 等函数在**自己的模块**里查找 ``_move_axes`` / ``measure_offset``，
-所以脉冲与观测断言指着 ``servo_motion`` / ``servo_observation``；而
+所以脉冲与观测断言指着 ``visual_servo_motion`` / ``visual_servo_observation``；而
 ``Grasp`` 的方法是在**方法体内**从 ``modules.grasp.drive.eye_in_hand``
 导入算法的，所以算法断言指着那个真实定义处。
 """
@@ -37,46 +37,50 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Optional, Tuple
 from unittest.mock import patch
 
 from modules.grasp.drive import eye_in_hand as algorithms
-from modules.grasp.drive import servo_model as model
-from modules.grasp.drive import servo_motion as motion
-from modules.grasp.drive import servo_observation as observation
+from modules.grasp.drive import visual_servo_model as model
+from modules.grasp.drive import visual_servo_motion as motion
+from modules.grasp.drive import visual_servo_observation as observation
 from modules.grasp.drive.eye_in_hand import (
+    align_xy_for_turntable,
     align_x_y,
     descend_z,
-    find_object,
-    hover_above_object,
+    find_material,
+    follow_material_xy,
+    follow_x_y,
+    hover_above_material,
     probe_jacobian,
     retract_extension,
 )
-from modules.grasp.drive.servo_model import (
+from modules.grasp.drive.visual_servo_model import (
     BASE_AXIS,
     RADIAL_AXIS,
     GraspReadyResult,
     HoverResult,
     LiftScale,
-    ObjectMissing,
-    ObjectSelector,
-    ServoConfig,
-    ServoError,
-    ServoJacobian,
-    ServoResult,
-    ServoTarget,
+    MaterialMissingError,
+    MaterialSelector,
+    VisualServoConfig,
+    VisualServoError,
+    VisualServoJacobian,
+    VisualServoResult,
+    VisualServoTarget,
     ZDescentResult,
     load_jacobian,
-    load_object_selector,
-    load_servo_config,
+    load_material_selector,
+    load_visual_servo_config,
     load_target,
     save_calibration,
 )
-from modules.grasp.drive.servo_observation import (
+from modules.grasp.drive.visual_servo_observation import (
     VISIBILITY_PROBE_FRAMES,
     measure_offset,
     measure_settled,
-    select_object,
+    select_material,
 )
 from modules.grasp import runtime as grasp_runtime
 from modules.grasp.runtime import Grasp
@@ -95,13 +99,13 @@ def sighting_at(x: float, y: float, z: float):
     return parse_sighting(f"物料 4: green物料（green），xyz=({x:.6f},{y:.6f},{z:.6f}) mm")
 
 
-class ServoJacobianTests(unittest.TestCase):
+class VisualServoJacobianTests(unittest.TestCase):
     def test_applying_the_solved_pulses_cancels_the_error(self) -> None:
         """核心不变量：``pulses_for`` 算出的脉冲走一遍，误差必须归零。"""
         generator = random.Random(20261014)
         checked = 0
         while checked < 200:
-            jacobian = ServoJacobian(
+            jacobian = VisualServoJacobian(
                 base_dx=generator.uniform(-0.03, 0.03),
                 base_dy=generator.uniform(-0.03, 0.03),
                 radial_dx=generator.uniform(-0.03, 0.03),
@@ -119,25 +123,25 @@ class ServoJacobianTests(unittest.TestCase):
                 self.assertAlmostEqual(moved_y + error_y, 0.0, places=9)
 
     def test_zero_error_asks_for_no_motion(self) -> None:
-        jacobian = ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+        jacobian = VisualServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
         self.assertEqual(jacobian.pulses_for(0.0, 0.0), (0.0, 0.0))
 
     def test_columns_are_not_swapped(self) -> None:
         """底座只影响 x、伸缩只影响 y 的对角矩阵：脉冲量必须直接等于误差的相反数除以斜率。"""
-        jacobian = ServoJacobian(base_dx=0.01, base_dy=0.0, radial_dx=0.0, radial_dy=0.02)
+        jacobian = VisualServoJacobian(base_dx=0.01, base_dy=0.0, radial_dx=0.0, radial_dy=0.02)
         base_pulses, radial_pulses = jacobian.pulses_for(1.0, -2.0)
         self.assertAlmostEqual(base_pulses, -100.0, places=9)
         self.assertAlmostEqual(radial_pulses, 100.0, places=9)
 
     def test_singular_is_detected_and_refused(self) -> None:
         # 两列成比例 -> 两个轴在画面里同向，凑不出任意方向。
-        singular = ServoJacobian(base_dx=0.01, base_dy=0.02, radial_dx=0.02, radial_dy=0.04)
+        singular = VisualServoJacobian(base_dx=0.01, base_dy=0.02, radial_dx=0.02, radial_dy=0.04)
         self.assertTrue(singular.is_singular)
-        with self.assertRaisesRegex(ServoError, "奇异"):
+        with self.assertRaisesRegex(VisualServoError, "奇异"):
             singular.pulses_for(1.0, 1.0)
 
     def test_displacement_is_linear_in_pulses(self) -> None:
-        jacobian = ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+        jacobian = VisualServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
         first = jacobian.displacement_for(100.0, 0.0)
         second = jacobian.displacement_for(200.0, 0.0)
         self.assertAlmostEqual(second[0], 2 * first[0], places=9)
@@ -145,78 +149,78 @@ class ServoJacobianTests(unittest.TestCase):
         self.assertEqual(jacobian.displacement_for(0.0, 0.0), (0.0, 0.0))
 
     def test_summary_is_in_per_thousand_pulses(self) -> None:
-        text = ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091).summary()
+        text = VisualServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091).summary()
         self.assertIn("每 1000 脉冲", text)
         self.assertIn("12.00", text)
 
 
-class ObjectSelectorTests(unittest.TestCase):
+class MaterialSelectorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.green = sighting(4, 1.0, 2.0, "green")
         self.blue = sighting(5, 3.0, 4.0, "blue")
 
     def test_open_selector_takes_the_only_target(self) -> None:
-        selector = ObjectSelector()
+        selector = MaterialSelector()
         self.assertTrue(selector.is_open)
-        self.assertEqual(select_object((self.green,), selector).material_id, 4)
+        self.assertEqual(select_material((self.green,), selector).material_id, 4)
 
     def test_open_selector_takes_the_nearest_target(self) -> None:
         """没配判别条件、画面里又有多个时：离光轴最近的那个就是爪口下的那个。"""
         self.assertEqual(
-            select_object((self.blue, self.green), ObjectSelector()).material_id, 4
+            select_material((self.blue, self.green), MaterialSelector()).material_id, 4
         )
         self.assertEqual(
-            select_object(
-                (self.green, sighting(9, -0.5, 0.2, "red")), ObjectSelector()
+            select_material(
+                (self.green, sighting(9, -0.5, 0.2, "red")), MaterialSelector()
             ).material_id,
             9,
         )
 
     def test_material_id_selects(self) -> None:
-        selector = ObjectSelector(material_id=5)
-        self.assertEqual(select_object((self.green, self.blue), selector).material_id, 5)
+        selector = MaterialSelector(material_id=5)
+        self.assertEqual(select_material((self.green, self.blue), selector).material_id, 5)
 
     def test_colour_selects_and_is_normalised(self) -> None:
-        selector = ObjectSelector(color="  BLUE ")
+        selector = MaterialSelector(color="  BLUE ")
         self.assertEqual(selector.color, "blue")
-        self.assertEqual(select_object((self.green, self.blue), selector).material_id, 5)
+        self.assertEqual(select_material((self.green, self.blue), selector).material_id, 5)
 
     def test_both_conditions_must_hold(self) -> None:
-        selector = ObjectSelector(material_id=4, color="blue")
-        with self.assertRaisesRegex(ServoError, "没有物块"):
-            select_object((self.green, self.blue), selector)
+        selector = MaterialSelector(material_id=4, color="blue")
+        with self.assertRaisesRegex(VisualServoError, "没有物块"):
+            select_material((self.green, self.blue), selector)
 
     def test_empty_frame_is_reported(self) -> None:
-        with self.assertRaisesRegex(ServoError, "没有物块"):
-            select_object((), ObjectSelector())
+        with self.assertRaisesRegex(VisualServoError, "没有物块"):
+            select_material((), MaterialSelector())
 
     def test_selector_that_matches_nothing_lists_what_was_seen(self) -> None:
-        with self.assertRaises(ServoError) as caught:
-            select_object((self.green,), ObjectSelector(material_id=99))
+        with self.assertRaises(VisualServoError) as caught:
+            select_material((self.green,), MaterialSelector(material_id=99))
         self.assertIn("物料 4", str(caught.exception))
 
     def test_from_want_speaks_the_same_language_as_locate(self) -> None:
         """``locate("red")`` 与 ``align_xy(want="red")`` 必须是同一套说法。"""
-        by_colour = ObjectSelector.from_want("  GREEN ")
+        by_colour = MaterialSelector.from_want("  GREEN ")
         self.assertEqual(by_colour.color, "green")
         self.assertFalse(by_colour.is_open)
-        self.assertEqual(select_object((self.green, self.blue), by_colour).material_id, 4)
+        self.assertEqual(select_material((self.green, self.blue), by_colour).material_id, 4)
 
-        by_number = ObjectSelector.from_want(2)          # 编号从 1 开始，与「物料 N」一致
+        by_number = MaterialSelector.from_want(2)          # 编号从 1 开始，与「物料 N」一致
         self.assertEqual(by_number.material_id, 2)
 
-        self.assertTrue(ObjectSelector.from_want(None).is_open)
+        self.assertTrue(MaterialSelector.from_want(None).is_open)
 
     def test_from_want_rejects_the_same_bad_writes_as_locate(self) -> None:
         for bad in (0, -3, "", "   ", 1.5, True):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
-                    ObjectSelector.from_want(bad)
+                    MaterialSelector.from_want(bad)
 
 
-class ServoConfigTests(unittest.TestCase):
+class VisualServoConfigTests(unittest.TestCase):
     def test_defaults_are_sane(self) -> None:
-        config = ServoConfig()
+        config = VisualServoConfig()
         self.assertGreater(config.tolerance_mm, 0)
         self.assertGreater(config.max_total_pulses, config.max_pulses_per_step)
 
@@ -237,11 +241,11 @@ class ServoConfigTests(unittest.TestCase):
         ):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(ValueError):
-                    ServoConfig(**kwargs)
+                    VisualServoConfig(**kwargs)
 
     def test_per_ring_offsets_override_the_single_pair(self) -> None:
         """同一个补偿放到不同环上会差一个方向，所以每个环号可以有自己的 (x, y)。"""
-        config = ServoConfig(
+        config = VisualServoConfig(
             ring_offset_x_mm=5.5,
             ring_offset_y_mm=-4.5,
             ring_offsets_mm=((1.0, -1.0), (2.0, -2.0)),
@@ -255,7 +259,7 @@ class ServoConfigTests(unittest.TestCase):
     def test_bad_ring_offsets_are_rejected(self) -> None:
         for bad in (((1.0,),), ((1.0, 2.0, 3.0),), ((math.nan, 0.0),)):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
-                ServoConfig(ring_offsets_mm=bad)
+                VisualServoConfig(ring_offsets_mm=bad)
 
 
 class ConfigFileTests(unittest.TestCase):
@@ -270,7 +274,7 @@ class ConfigFileTests(unittest.TestCase):
         self.path.write_text(json.dumps(document), encoding="utf-8")
 
     def test_project_config_loads(self) -> None:
-        config = load_servo_config()
+        config = load_visual_servo_config()
         self.assertGreater(config.tolerance_mm, 0)
 
     def test_the_pulse_steps_are_written_in_the_project_config(self) -> None:
@@ -278,7 +282,7 @@ class ConfigFileTests(unittest.TestCase):
         document = json.loads(model.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
         self.assertIn("z_descend_pulses", document)
         self.assertIn("extension_retract_pulses", document)
-        config = load_servo_config()
+        config = load_visual_servo_config()
         self.assertGreater(config.z_descend_pulses, 0)
         self.assertGreater(config.extension_retract_pulses, 0)
 
@@ -287,23 +291,23 @@ class ConfigFileTests(unittest.TestCase):
         document = json.loads(model.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
         self.assertIn("target_wait_seconds", document)
         self.assertIsNone(document["target_wait_seconds"])
-        self.assertIsNone(load_servo_config().target_wait_seconds)
+        self.assertIsNone(load_visual_servo_config().target_wait_seconds)
 
     def test_the_ring_offset_is_written_in_the_project_config(self) -> None:
         """落料补偿是现场量出来手改的数：两个键必须真的落在配置文件里。"""
         document = json.loads(model.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
         self.assertIn("ring_offset_x_mm", document)
         self.assertIn("ring_offset_y_mm", document)
-        config = load_servo_config()
+        config = load_visual_servo_config()
         self.assertTrue(math.isfinite(config.ring_offset_x_mm))
         self.assertTrue(math.isfinite(config.ring_offset_y_mm))
 
     def test_the_ring_offset_defaults_to_zero_and_reads_back(self) -> None:
         """不配 = 0，与加这个字段之前的行为一致；配了（含负数）原样读回来。"""
-        self.assertEqual(ServoConfig().ring_offset_x_mm, 0.0)
-        self.assertEqual(ServoConfig().ring_offset_y_mm, 0.0)
+        self.assertEqual(VisualServoConfig().ring_offset_x_mm, 0.0)
+        self.assertEqual(VisualServoConfig().ring_offset_y_mm, 0.0)
         self.write({"ring_offset_x_mm": 7.5, "ring_offset_y_mm": -2.25})
-        config = load_servo_config(self.path)
+        config = load_visual_servo_config(self.path)
         self.assertEqual(config.ring_offset_x_mm, 7.5)
         self.assertEqual(config.ring_offset_y_mm, -2.25)
 
@@ -311,14 +315,14 @@ class ConfigFileTests(unittest.TestCase):
         for document in ({"ring_offset_x_mm": "7.5"}, {"ring_offset_y_mm": None}):
             with self.subTest(document=document):
                 self.write(document)
-                with self.assertRaises(ServoError):
-                    load_servo_config(self.path)
+                with self.assertRaises(VisualServoError):
+                    load_visual_servo_config(self.path)
 
     def test_target_wait_zero_keeps_the_old_semantics(self) -> None:
         """``0`` 与 ``null`` 是两件事：0 = 不加额外等待，null = 一直等。"""
         self.write({"target_wait_seconds": 0})
-        self.assertEqual(load_servo_config(self.path).target_wait_seconds, 0.0)
-        self.assertEqual(ServoConfig().target_wait_seconds, 0.0)
+        self.assertEqual(load_visual_servo_config(self.path).target_wait_seconds, 0.0)
+        self.assertEqual(VisualServoConfig().target_wait_seconds, 0.0)
 
     def test_project_config_starts_uncalibrated(self) -> None:
         """出厂状态必须是"没标定"，而不是某个编出来的默认值。"""
@@ -360,20 +364,20 @@ class ConfigFileTests(unittest.TestCase):
         ):
             with self.subTest(document=document):
                 self.write(document)
-                with self.assertRaises(ServoError):
-                    load_servo_config(self.path)
-                    load_object_selector(self.path)
+                with self.assertRaises(VisualServoError):
+                    load_visual_servo_config(self.path)
+                    load_material_selector(self.path)
                     load_target(self.path)
                     load_jacobian(self.path)
 
     def test_missing_file_is_reported(self) -> None:
-        with self.assertRaises(ServoError):
-            load_servo_config(Path("nope.json"))
+        with self.assertRaises(VisualServoError):
+            load_visual_servo_config(Path("nope.json"))
 
     def test_save_calibration_round_trips_and_keeps_other_keys(self) -> None:
         self.write({"tolerance_mm": 1.5, "object": {"color": "green"}})
-        target = ServoTarget(x_mm=-8.25, y_mm=1.75)
-        jacobian = ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+        target = VisualServoTarget(x_mm=-8.25, y_mm=1.75)
+        jacobian = VisualServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
         save_calibration(target=target, jacobian=jacobian, config_path=self.path)
 
         self.assertEqual(load_target(self.path), target)
@@ -381,18 +385,21 @@ class ConfigFileTests(unittest.TestCase):
         assert reloaded is not None
         self.assertEqual(reloaded, jacobian)
         # 别的键必须原样保留。
-        self.assertEqual(load_servo_config(self.path).tolerance_mm, 1.5)
-        self.assertEqual(load_object_selector(self.path).color, "green")
+        self.assertEqual(load_visual_servo_config(self.path).tolerance_mm, 1.5)
+        self.assertEqual(load_material_selector(self.path).color, "green")
 
 
 class FakeArm:
     """把脉冲按真实雅可比换算成画面位移；``gain`` 模拟"只走了这么多"。"""
 
-    def __init__(self, jacobian: ServoJacobian, *, gain: float = 1.0) -> None:
+    def __init__(self, jacobian: VisualServoJacobian, *, gain: float = 1.0) -> None:
         self.jacobian = jacobian
         self.gain = gain
         self.offset = [12.0, -7.0]
         self.calls: List[Tuple[str, int]] = []
+        #: ``follow_x_y`` 按配置的 rpm 把 step_seconds 折算成单轴脉冲上限。
+        self.pulses_per_revolution = 3200
+        self.config = SimpleNamespace(rpm=80, acceleration=200)
 
     def _axis(self, axis: str, forward: bool, pulses: int) -> None:
         signed = pulses if forward else -pulses
@@ -536,7 +543,7 @@ class SettleTests(unittest.TestCase):
     def test_waits_until_two_readings_agree(self) -> None:
         link = self.ScriptedLink([(0.0, 0.0), (5.0, 0.0), (9.0, 0.0)], (9.0, 0.0))
         offset = measure_settled(
-            link, ObjectSelector(), ServoConfig(settle_timeout_seconds=2.0)
+            link, MaterialSelector(), VisualServoConfig(settle_timeout_seconds=2.0)
         )
         self.assertEqual(offset, (9.0, 0.0))
         # 前三次都在变，第四次与第三次一致才返回。
@@ -546,7 +553,7 @@ class SettleTests(unittest.TestCase):
         """已经静止时只要两次读数——不该无脑多等。"""
         link = self.ScriptedLink([], (3.0, -1.0))
         offset = measure_settled(
-            link, ObjectSelector(), ServoConfig(settle_timeout_seconds=2.0)
+            link, MaterialSelector(), VisualServoConfig(settle_timeout_seconds=2.0)
         )
         self.assertEqual(offset, (3.0, -1.0))
         self.assertEqual(link.reads, 2)
@@ -566,8 +573,8 @@ class SettleTests(unittest.TestCase):
 
         messages = []
         offset = measure_settled(
-            AlwaysMoving(), ObjectSelector(),
-            ServoConfig(settle_timeout_seconds=0.2, settle_poll_seconds=0.02),
+            AlwaysMoving(), MaterialSelector(),
+            VisualServoConfig(settle_timeout_seconds=0.2, settle_poll_seconds=0.02),
             on_message=messages.append,
         )
         self.assertGreater(offset[0], 0.0)
@@ -589,16 +596,16 @@ class SettleTests(unittest.TestCase):
                 return (sighting(4, 7.0, -2.0, stamp=time.monotonic()),)
 
         offset = measure_settled(
-            FlakyLink(), ObjectSelector(),
-            ServoConfig(settle_timeout_seconds=2.0, settle_poll_seconds=0.02),
+            FlakyLink(), MaterialSelector(),
+            VisualServoConfig(settle_timeout_seconds=2.0, settle_poll_seconds=0.02),
         )
         self.assertEqual(offset, (7.0, -2.0))
 
     def test_never_seeing_anything_is_reported(self) -> None:
-        with self.assertRaisesRegex(ServoError, "稳定看到物块"):
+        with self.assertRaisesRegex(VisualServoError, "稳定看到物块"):
             measure_settled(
-                EmptyLink(), ObjectSelector(),
-                ServoConfig(
+                EmptyLink(), MaterialSelector(),
+                VisualServoConfig(
                     settle_timeout_seconds=0.2,
                     # 这是"旧语义"的用例：默认不等第一次出现，整次测量共用一个截止时刻。
                     target_wait_seconds=0.2,
@@ -613,8 +620,8 @@ class SettleTests(unittest.TestCase):
         """
         link = JumpyDepthLink()
         settled = observation._settled_sighting(
-            link, ObjectSelector(),
-            ServoConfig(settle_tolerance_mm=0.4, settle_timeout_seconds=2.0,
+            link, MaterialSelector(),
+            VisualServoConfig(settle_tolerance_mm=0.4, settle_timeout_seconds=2.0,
                         settle_poll_seconds=0.01),
             include_depth=False,
         )
@@ -627,8 +634,8 @@ class SettleTests(unittest.TestCase):
         link = JumpyDepthLink()
         messages = []
         settled = observation._settled_sighting(
-            link, ObjectSelector(),
-            ServoConfig(settle_tolerance_mm=0.4, settle_timeout_seconds=0.05,
+            link, MaterialSelector(),
+            VisualServoConfig(settle_tolerance_mm=0.4, settle_timeout_seconds=0.05,
                         settle_poll_seconds=0.005),
             on_message=messages.append,
         )
@@ -646,19 +653,19 @@ class FirstTargetWaitTests(unittest.TestCase):
     """
 
     @staticmethod
-    def config(**overrides) -> ServoConfig:
+    def config(**overrides) -> VisualServoConfig:
         values = dict(
             settle_timeout_seconds=0.05,
             settle_poll_seconds=0.005,
             target_wait_seconds=1.0,
         )
         values.update(overrides)
-        return ServoConfig(**values)
+        return VisualServoConfig(**values)
 
     def test_a_late_target_is_waited_for(self) -> None:
         link = LateLink(3)
         settled = observation._settled_sighting(
-            link, ObjectSelector(), self.config(), wait_for_first_target=True
+            link, MaterialSelector(), self.config(), wait_for_first_target=True
         )
         self.assertEqual((settled.x_mm, settled.y_mm), (7.0, -2.0))
         self.assertEqual(link.reads, 5, "3 次空 + 两帧一致；不该在 4 s 固定期限上放弃")
@@ -667,7 +674,7 @@ class FirstTargetWaitTests(unittest.TestCase):
         link = LateLink(4)
         settled = observation._settled_sighting(
             link,
-            ObjectSelector(),
+            MaterialSelector(),
             self.config(target_wait_seconds=None),
             wait_for_first_target=True,
         )
@@ -675,10 +682,10 @@ class FirstTargetWaitTests(unittest.TestCase):
         self.assertEqual(link.reads, 6)
 
     def test_a_finite_wait_still_times_out_with_its_own_message(self) -> None:
-        with self.assertRaisesRegex(ServoError, "没等到物块出现"):
+        with self.assertRaisesRegex(VisualServoError, "没等到物块出现"):
             observation._settled_sighting(
                 EmptyLink(),
-                ObjectSelector(),
+                MaterialSelector(),
                 self.config(target_wait_seconds=0.02),
                 wait_for_first_target=True,
             )
@@ -703,7 +710,7 @@ class FirstTargetWaitTests(unittest.TestCase):
         link = LateThenMoving()
         settled = observation._settled_sighting(
             link,
-            ObjectSelector(),
+            MaterialSelector(),
             self.config(settle_timeout_seconds=0.2),
             wait_for_first_target=True,
         )
@@ -715,10 +722,10 @@ class FirstTargetWaitTests(unittest.TestCase):
 class AlignWaitsForLateTargetTests(unittest.TestCase):
     """``align_x_y`` 的**第一次**测量才等物块出现；之后仍按原期限收工。"""
 
-    JACOBIAN = ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    JACOBIAN = VisualServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
 
     @staticmethod
-    def config(**overrides) -> ServoConfig:
+    def config(**overrides) -> VisualServoConfig:
         values = dict(
             tolerance_mm=4.0,
             settle_tolerance_mm=0.4,
@@ -731,7 +738,7 @@ class AlignWaitsForLateTargetTests(unittest.TestCase):
             target_wait_seconds=1.0,
         )
         values.update(overrides)
-        return ServoConfig(**values)
+        return VisualServoConfig(**values)
 
     def test_a_target_that_has_not_rotated_into_view_is_waited_for(self) -> None:
         arm = FakeArm(self.JACOBIAN)
@@ -739,8 +746,8 @@ class AlignWaitsForLateTargetTests(unittest.TestCase):
         result = align_x_y(
             arm,
             link,
-            ObjectSelector(),
-            ServoTarget(x_mm=0.0, y_mm=0.0),
+            MaterialSelector(),
+            VisualServoTarget(x_mm=0.0, y_mm=0.0),
             self.JACOBIAN,
             self.config(),
             ensure_safe_height=False,
@@ -764,12 +771,12 @@ class AlignWaitsForLateTargetTests(unittest.TestCase):
                     return (sighting(4, 12.0, -7.0, stamp=time.monotonic()),)
                 return ()
 
-        with self.assertRaises(ObjectMissing):
+        with self.assertRaises(MaterialMissingError):
             align_x_y(
                 FakeArm(self.JACOBIAN),
                 DisappearsAfterFirstMeasurement(),
-                ObjectSelector(),
-                ServoTarget(x_mm=0.0, y_mm=0.0),
+                MaterialSelector(),
+                VisualServoTarget(x_mm=0.0, y_mm=0.0),
                 self.JACOBIAN,
                 self.config(target_wait_seconds=None),
                 ensure_safe_height=False,
@@ -783,10 +790,10 @@ class AlignDoesNotWaitForDepthTests(unittest.TestCase):
     于是每次测量都要等满 ``settle_timeout_seconds``（默认 4 s）才拿最后读数走人。
     """
 
-    JACOBIAN = ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    JACOBIAN = VisualServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
 
     @staticmethod
-    def config(**overrides) -> ServoConfig:
+    def config(**overrides) -> VisualServoConfig:
         values = dict(
             tolerance_mm=4.0,
             settle_tolerance_mm=0.4,
@@ -799,14 +806,14 @@ class AlignDoesNotWaitForDepthTests(unittest.TestCase):
             settle_poll_seconds=0.01,
         )
         values.update(overrides)
-        return ServoConfig(**values)
+        return VisualServoConfig(**values)
 
     def test_an_already_aligned_object_returns_after_two_frames(self) -> None:
         arm = FakeArm(self.JACOBIAN)
         link = JumpyDepthLink(x=0.4, y=-0.5)  # 误差 0.64 mm，已经在容差里
         started = time.monotonic()
         result = align_x_y(
-            arm, link, ObjectSelector(), ServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
+            arm, link, MaterialSelector(), VisualServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
             self.config(), ensure_safe_height=False,
         )
         elapsed = time.monotonic() - started
@@ -827,7 +834,7 @@ class AlignDoesNotWaitForDepthTests(unittest.TestCase):
         link = JumpyDepthLink(arm=arm)
         started = time.monotonic()
         result = align_x_y(
-            arm, link, ObjectSelector(), ServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
+            arm, link, MaterialSelector(), VisualServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
             self.config(), ensure_safe_height=False,
         )
         elapsed = time.monotonic() - started
@@ -846,7 +853,7 @@ class AlignFineSettleToleranceTests(unittest.TestCase):
     读数噪声只要比它小一大截就够——那个 0.4 mm 是给探针 / z 标定用的精度。
     """
 
-    JACOBIAN = ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    JACOBIAN = VisualServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
 
     class JitterLink:
         """第一帧给 0，之后一直给 ``value``：两帧之差正好是 ``value``。"""
@@ -863,7 +870,7 @@ class AlignFineSettleToleranceTests(unittest.TestCase):
             return (sighting_at(x, 0.0, 113.2),)
 
     @staticmethod
-    def config(**overrides) -> ServoConfig:
+    def config(**overrides) -> VisualServoConfig:
         values = dict(
             tolerance_mm=6.0,
             settle_tolerance_mm=0.4,
@@ -875,13 +882,13 @@ class AlignFineSettleToleranceTests(unittest.TestCase):
             settle_poll_seconds=0.005,
         )
         values.update(overrides)
-        return ServoConfig(**values)
+        return VisualServoConfig(**values)
 
     def test_a_one_millimetre_frame_to_frame_jitter_still_settles_in_two_frames(self) -> None:
         arm = FakeArm(self.JACOBIAN)
         link = self.JitterLink(1.2)          # 0.4 < Δ ≤ 6/4：细档该放行
         result = align_x_y(
-            arm, link, ObjectSelector(), ServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
+            arm, link, MaterialSelector(), VisualServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
             self.config(), ensure_safe_height=False,
         )
 
@@ -894,7 +901,7 @@ class AlignFineSettleToleranceTests(unittest.TestCase):
         arm = FakeArm(self.JACOBIAN)
         link = self.JitterLink(1.2)          # > 2/4 = 0.5，要等到下一对相同读数
         align_x_y(
-            arm, link, ObjectSelector(), ServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
+            arm, link, MaterialSelector(), VisualServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
             self.config(tolerance_mm=2.0), ensure_safe_height=False,
         )
 
@@ -908,10 +915,10 @@ class SingleStepTests(unittest.TestCase):
     机械臂动一下"，每轮只取一帧；放进循环就是跟踪。
     """
 
-    JACOBIAN = ServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    JACOBIAN = VisualServoJacobian(base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
 
     @staticmethod
-    def config(**overrides) -> ServoConfig:
+    def config(**overrides) -> VisualServoConfig:
         values = dict(
             tolerance_mm=4.0,
             min_step_mm=1.0,
@@ -922,11 +929,11 @@ class SingleStepTests(unittest.TestCase):
             settle_timeout_seconds=5.0,
         )
         values.update(overrides)
-        return ServoConfig(**values)
+        return VisualServoConfig(**values)
 
     def call(self, arm, link, **kwargs):
         return align_x_y(
-            arm, link, ObjectSelector(), ServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
+            arm, link, MaterialSelector(), VisualServoTarget(x_mm=0.0, y_mm=0.0), self.JACOBIAN,
             kwargs.pop("config", self.config()), ensure_safe_height=False, **kwargs
         )
 
@@ -1002,7 +1009,7 @@ class SingleStepTests(unittest.TestCase):
         arm = FakeArm(self.JACOBIAN)
         link = JumpyDepthLink(arm=arm)
         config = self.config()
-        target = ServoTarget(x_mm=0.0, y_mm=0.0)
+        target = VisualServoTarget(x_mm=0.0, y_mm=0.0)
 
         rounds = 0
         for _ in range(8):
@@ -1010,7 +1017,7 @@ class SingleStepTests(unittest.TestCase):
             if math.hypot(*reading) <= config.tolerance_mm:
                 break
             align_x_y(
-                arm, link, ObjectSelector(), target, self.JACOBIAN, config,
+                arm, link, MaterialSelector(), target, self.JACOBIAN, config,
                 ensure_safe_height=False, reading=reading,
             )
             rounds += 1
@@ -1032,7 +1039,7 @@ class SingleStepTests(unittest.TestCase):
         arm = FakeArm(self.JACOBIAN)
         link = JumpyDepthLink(arm=arm)
         config = self.config()
-        target = ServoTarget(x_mm=0.0, y_mm=0.0)
+        target = VisualServoTarget(x_mm=0.0, y_mm=0.0)
 
         for push in ((15.0, -12.0), (-25.0, 20.0), (3.0, 3.0)):
             with self.subTest(push=push):
@@ -1041,7 +1048,7 @@ class SingleStepTests(unittest.TestCase):
                     if math.hypot(*reading) <= config.tolerance_mm:
                         break
                     align_x_y(
-                        arm, link, ObjectSelector(), target, self.JACOBIAN, config,
+                        arm, link, MaterialSelector(), target, self.JACOBIAN, config,
                         ensure_safe_height=False, reading=reading,
                     )
                     reading = (arm.offset[0] + push[0], arm.offset[1] + push[1])
@@ -1052,12 +1059,440 @@ class SingleStepTests(unittest.TestCase):
                 )
 
 
+class FakeClock:
+    """只推进时间的假钟：每次 ``monotonic()`` 前进 ``step`` 秒。
+
+    1 s 预算那一路不能拿真钟测（会真的睡/真的到点），这里把 ``eye_in_hand.time``
+    整个换掉，时间走向由测试决定。
+    """
+
+    def __init__(self, step: float = 0.4) -> None:
+        self.now = 0.0
+        self.step = step
+
+    def monotonic(self) -> float:
+        value = self.now
+        self.now += self.step
+        return value
+
+
+class ScriptedLink:
+    """按脚本把 ``push`` 叠加到假机械臂的真实位移上（模拟物块被推走/画面跳目标）。"""
+
+    error = None
+
+    def __init__(self, arm: FakeArm, pushes: List[Tuple[float, float]]) -> None:
+        self.arm = arm
+        self.pushes = list(pushes)
+        self.reads = 0
+
+    def frame(self, **_kwargs):
+        push = self.pushes[min(self.reads, len(self.pushes) - 1)]
+        self.reads += 1
+        return (
+            sighting(
+                4,
+                self.arm.offset[0] + push[0],
+                self.arm.offset[1] + push[1],
+                stamp=time.monotonic(),
+            ),
+        )
+
+
+class MovingLink:
+    """按脚本给出物块读数：模拟转盘带着料走，脚本用完之后停在最后一个读数上。
+
+    读数直接来自脚本、不跟着假机械臂走——这一点是**故意的**：这里要验的是"跟的时候
+    每帧都发一步、料不跑了就收工"，而不是伺服能不能收敛（那由 ``AlignXYTests`` 负责）。
+    """
+
+    error = None
+
+    def __init__(self, offsets: List[Tuple[float, float]]) -> None:
+        self.offsets = list(offsets)
+        self.reads = 0
+
+    def frame(self, **_kwargs):
+        offset = self.offsets[min(self.reads, len(self.offsets) - 1)]
+        self.reads += 1
+        return (sighting(4, offset[0], offset[1], stamp=time.monotonic()),)
+
+
+class IffyLink(MovingLink):
+    """前几帧一个目标都没有（转出去/被爪影挡住），之后按脚本报读数。"""
+
+    def __init__(self, offsets, misses: int) -> None:
+        super().__init__(offsets)
+        self.misses = misses
+
+    def frame(self, **_kwargs):
+        if self.reads < self.misses:
+            self.reads += 1
+            return ()
+        return super().frame()
+
+
+class DriftingLink:
+    """永远在动：每次读数都比上一次远 5 mm（模拟转盘一直带着料走）。"""
+
+    error = None
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def frame(self, **_kwargs):
+        self.reads += 1
+        return (
+            sighting(4, -40.0 - 5.0 * self.reads, 0.0, stamp=time.monotonic()),
+        )
+
+
+class BoxesOnlyLink:
+    """带 ``frame_fast`` 的观测源：跟随必须走它，不能走会补霍夫的 ``frame``。"""
+
+    error = None
+
+    def __init__(self) -> None:
+        self.fast_reads = 0
+        self.slow_reads = 0
+
+    def frame(self, **_kwargs):
+        self.slow_reads += 1
+        return ()
+
+    def frame_fast(self, **_kwargs):
+        self.fast_reads += 1
+        return (sighting(4, 0.0, 0.0, stamp=time.monotonic()),)
+
+
+class BlindFirstLink:
+    """前 ``misses`` 帧什么都看不见，之后一直报同一个读数（料转到后面再回来）。"""
+
+    error = None
+
+    def __init__(self, misses: int) -> None:
+        self.misses = misses
+        self.reads = 0
+
+    def frame_fast(self, **_kwargs):
+        self.reads += 1
+        if self.reads <= self.misses:
+            return ()
+        return (sighting(4, 0.0, 0.0, stamp=time.monotonic()),)
+
+
+class FastJumpyLink(JumpyDepthLink):
+    """带 ``frame_fast`` 的假源：分别记录慢/快两条取帧路径各走了几次。"""
+
+    def __init__(self, arm: FakeArm) -> None:
+        super().__init__(arm=arm)
+        self.fast_reads = 0
+        self.slow_reads = 0
+
+    def frame(self, **kwargs):
+        self.slow_reads += 1
+        return super().frame(**kwargs)
+
+    def frame_fast(self, **kwargs):
+        self.fast_reads += 1
+        return super().frame(**kwargs)
+
+
+class SlowOnlyLink:
+    """``frame_fast`` 永远看不见，只有慢 ``frame`` 能认出料（深蓝柱那种模型漏检）。"""
+
+    error = None
+
+    def __init__(self, x: float = 0.0, y: float = 0.0) -> None:
+        self.x = x
+        self.y = y
+        self.fast_reads = 0
+        self.slow_reads = 0
+
+    def frame_fast(self, **_kwargs):
+        self.fast_reads += 1
+        return ()
+
+    def frame(self, **_kwargs):
+        self.slow_reads += 1
+        return (sighting(4, self.x, self.y, stamp=time.monotonic()),)
+
+
+class FollowClock:
+    """跟随循环的假钟：时间只由 ``sleep`` 推进（一小步动作的等待）。"""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += max(0.0, seconds)
+
+
+class FollowMaterialTests(unittest.TestCase):
+    """Continuous following observes while moving and confirms a stopped scene."""
+
+    def rig(self, **kwargs):
+        from modules.grasp.test.unit.test_continuous_follow import (
+            VelocityArm,
+            WorldLink,
+        )
+
+        clock = FollowClock()
+        arm = VelocityArm(clock)
+        return clock, arm, WorldLink(arm, **kwargs)
+
+    def call(self, arm, link, **kwargs):
+        from modules.grasp.test.unit.test_continuous_follow import follow
+
+        return follow(arm, link, **kwargs)
+
+    def test_it_keeps_sending_while_the_material_moves(self):
+        clock, arm, link = self.rig(stop_at=99)
+        with (
+            patch.object(algorithms, "time", clock),
+            self.assertRaisesRegex(VisualServoError, "跟了"),
+        ):
+            self.call(arm, link, timeout=0.6)
+        self.assertGreaterEqual(sum(any(v) for _, *v in arm.commands), 2)
+        self.assertTrue(arm.closed)
+
+    def test_a_large_error_uses_the_bounded_continuous_speed(self):
+        clock, arm, link = self.rig(stop_at=99)
+        arm.position[0] = -1000
+        with (
+            patch.object(algorithms, "time", clock),
+            self.assertRaises(VisualServoError),
+        ):
+            self.call(arm, link, timeout=0.6)
+        speeds = [abs(v) for _, *axes in arm.commands for v in axes]
+        self.assertEqual(max(speeds), 50)
+        self.assertTrue(all(v <= 50 for v in speeds))
+
+    def test_short_loss_follows_the_observed_clockwise_curve(self):
+        clock, arm, link = self.rig(missing=((0.9, 1.12),))
+        with patch.object(algorithms, "time", clock):
+            result = self.call(arm, link, timeout=7)
+        self.assertTrue(result.aligned)
+        blind = [v for stamp, *v in arm.commands if 0.95 <= stamp <= 1.18]
+        self.assertTrue(blind)
+        self.assertTrue(all(v[0] > 0 for v in blind))
+
+    def test_the_follow_step_overshoots_on_purpose(self) -> None:
+        """``gain>1``：料在动时多冲一点，别每帧都只走"刚好走完误差"。"""
+
+        def run(gain: float):
+            arm = FakeArm(SingleStepTests.JACOBIAN)
+            arm.offset = [5.0, 0.0]
+            link = JumpyDepthLink(arm=arm)
+            with patch.object(algorithms, "time", FollowClock()):
+                return follow_x_y(
+                    arm,
+                    link,
+                    MaterialSelector(),
+                    VisualServoTarget(x_mm=0.0, y_mm=0.0),
+                    SingleStepTests.JACOBIAN,
+                    SingleStepTests.config(),
+                    step_seconds=0.2,
+                    gain=gain,
+                )
+
+        plain = run(1.0)
+        overshooting = run(1.4)
+        self.assertGreater(abs(overshooting.base_pulses), abs(plain.base_pulses))
+        self.assertGreater(abs(overshooting.radial_pulses), abs(plain.radial_pulses))
+
+    def test_a_steady_reading_does_not_mean_the_material_stopped(self):
+        clock, arm, link = self.rig(stop_at=99)
+        original_frame = link.frame_fast
+
+        def steady_frame(**kwargs):
+            original_frame(**kwargs)
+            return (sighting(4, -40, 0, stamp=clock.now - 0.04),)
+
+        link.frame_fast = steady_frame
+        with (
+            patch.object(algorithms, "time", clock),
+            self.assertRaises(VisualServoError),
+        ):
+            self.call(arm, link, timeout=0.6)
+        self.assertGreaterEqual(sum(any(v) for _, *v in arm.commands), 2)
+
+    def test_following_uses_the_boxes_only_frame(self):
+        clock, arm, link = self.rig(stop_at=0)
+        with patch.object(algorithms, "time", clock):
+            result = self.call(arm, link, timeout=5)
+        self.assertTrue(result.aligned)
+        self.assertGreaterEqual(link.fast_reads, 3)
+        self.assertEqual(link.slow_reads, 0)
+
+    def test_camera_motion_does_not_override_compensated_material_stability(self):
+        clock, arm, link = self.rig(stop_at=0)
+        checks = []
+
+        def scene_stable():
+            checks.append(True)
+            return False
+
+        link.scene_stable = scene_stable
+        with patch.object(algorithms, "time", clock):
+            result = self.call(arm, link, timeout=5)
+        self.assertTrue(result.aligned)
+        self.assertEqual(len(checks), 0)
+
+    def test_it_stops_when_the_material_stops(self):
+        clock, arm, link = self.rig()
+        with patch.object(algorithms, "time", clock):
+            result = self.call(arm, link, timeout=7)
+        self.assertTrue(result.aligned)
+        self.assertFalse(result.unverified)
+        self.assertTrue(any(any(v) for _, *v in arm.commands))
+        self.assertGreaterEqual(clock.now, 4)
+        self.assertEqual(arm.velocity, (0, 0))
+
+    def test_a_frame_where_the_material_is_missing_does_not_stop_the_follow(self):
+        clock, arm, link = self.rig(stop_at=0, missing=((0, 0.2),))
+        with patch.object(algorithms, "time", clock):
+            result = self.call(arm, link, timeout=5)
+        self.assertTrue(result.aligned)
+
+
+class TurntableAlignTests(unittest.TestCase):
+    """``align_xy_for_turntable``：单帧一步、大步、1 s 预算，到点停在误差最小的位置。"""
+
+    JACOBIAN = SingleStepTests.JACOBIAN
+    CONFIG = SingleStepTests.config()
+
+    def call(self, arm, link, **kwargs):
+        return align_xy_for_turntable(
+            arm,
+            link,
+            MaterialSelector(),
+            VisualServoTarget(x_mm=0.0, y_mm=0.0),
+            self.JACOBIAN,
+            self.CONFIG,
+            **kwargs,
+        )
+
+    def test_one_measurement_and_one_coarse_step(self) -> None:
+        """首帧只取一帧，一步按粗调上限走完，再等停稳验证一次。"""
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [30.0, 0.0]
+        link = JumpyDepthLink(arm=arm)
+
+        result = self.call(arm, link)
+
+        self.assertTrue(result.aligned)
+        self.assertEqual(result.iterations, 2, "测一次、走一步、验证一次")
+        self.assertEqual(link.reads, 3, "首帧 1 次 + 验证时连续两帧")
+        self.assertGreater(
+            abs(result.base_pulses), self.CONFIG.max_pulses_per_step,
+            "一步就按粗调上限走完，不被细调档 1200 夹住",
+        )
+
+    def test_fast_mode_takes_short_steps_and_skips_auxiliary_frames(self) -> None:
+        """静止料的快速档：每轮一帧一小步，帧只走 YOLO 框，不再补颜色/霍夫。"""
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [20.0, -6.0]
+        link = FastJumpyLink(arm)
+
+        with patch.object(algorithms, "time", FollowClock()):
+            result = self.call(arm, link, fast=True, seconds=2.0)
+
+        self.assertTrue(result.aligned)
+        self.assertGreater(link.fast_reads, 0)
+        self.assertEqual(link.slow_reads, 0, "快速档不该再调会补霍夫的 frame")
+        self.assertFalse(result.unverified, "最后一步已经取过一帧确认")
+        # 走的是 follow_x_y 的短步：单轴不再一次给到 4000 脉冲的粗调上限。
+        self.assertTrue(arm.calls)
+        for _kind, pulses in arm.calls:
+            self.assertLessEqual(pulses, self.CONFIG.parallel_rotation_limit_pulses)
+
+    def test_fast_mode_falls_back_to_the_auxiliary_path_when_yolo_misses(self) -> None:
+        """第一帧没有 YOLO 框（模型漏检）时退回慢路径，深蓝柱那种现场仍然抓得到。"""
+        arm = FakeArm(self.JACOBIAN)
+        link = SlowOnlyLink()
+
+        result = self.call(arm, link, fast=True, seconds=1.0)
+
+        self.assertTrue(result.aligned)
+        self.assertGreater(link.fast_reads, 0, "先试过快速档")
+        self.assertGreater(link.slow_reads, 0, "没框时退回慢路径")
+
+    def test_fast_mode_calibrates_once_even_if_the_first_frame_is_in_tolerance(self) -> None:
+        """首帧已在容差内也要先校准一步：读数够近不等于真的对上了才下降。"""
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [4.0, 0.0]
+        link = FastJumpyLink(arm)
+
+        with patch.object(algorithms, "time", FollowClock()):
+            result = self.call(arm, link, fast=True, seconds=1.0)
+
+        self.assertTrue(result.aligned)
+        self.assertTrue(arm.calls, "首帧已在容差内也必须先校准一步")
+        self.assertLess(result.error_mm, 4.0)
+
+    def test_the_slow_path_also_calibrates_once_within_tolerance(self) -> None:
+        """慢路径同样：首帧 4 mm（<6 mm 容差）也得先走一步，再按验证结果收工。"""
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [4.0, 0.0]
+        link = JumpyDepthLink(arm=arm)
+
+        def move(arm_, base_pulses, radial_pulses, _config):
+            if base_pulses:
+                arm_._axis(BASE_AXIS, base_pulses > 0, abs(base_pulses))
+            if radial_pulses:
+                arm_._axis(RADIAL_AXIS, radial_pulses > 0, abs(radial_pulses))
+            return 0.0
+
+        with patch.object(algorithms, "_move_axes", side_effect=move):
+            result = self.call(arm, link, seconds=1.0)
+
+        self.assertTrue(result.aligned)
+        self.assertTrue(arm.calls, "首帧已在容差内也必须先校准一步")
+
+    def test_the_first_step_always_happens(self) -> None:
+        """首测可能要等物块转进视野（现场等过 6.85 s）：预算不能把第一次修正吃掉。
+
+        ``seconds=0`` 是这条底线的极端形式：一次都没动就"预算用完"等于对准没做，
+        现场看到的就是"误差 16 mm、走了 0 脉冲"。
+        """
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [16.5, 5.0]
+        link = JumpyDepthLink(arm=arm)
+
+        result = self.call(arm, link, seconds=0.0)
+
+        self.assertTrue(arm.calls, "至少要走一次")
+        self.assertTrue(result.aligned)
+
+    def test_the_budget_stops_at_the_smallest_error_seen(self) -> None:
+        """预算到点、而且之后更差时：退回误差最小的那一次，读数也按"最终位置"排列。"""
+        arm = FakeArm(self.JACOBIAN)
+        arm.offset = [0.0, 0.0]
+        link = ScriptedLink(arm, [(12.0, -7.0), (40.0, 30.0)])
+        clock = FakeClock()
+
+        with patch.object(algorithms, "time", clock):
+            result = self.call(arm, link, seconds=1.0)
+
+        self.assertFalse(result.aligned)
+        self.assertEqual(arm.net_pulses, (0, 0), "应当退回第一帧那个位置")
+        self.assertEqual(result.readings[-1], (12.0, -7.0), "最小误差那次排最后")
+        self.assertAlmostEqual(result.readings[0][0], 28.0, delta=0.05)
+        self.assertAlmostEqual(result.readings[0][1], 37.0, delta=0.05)
+        self.assertAlmostEqual(result.error_mm, math.hypot(12.0, -7.0))
+        self.assertEqual((result.base_pulses, result.radial_pulses), (0, 0))
+
+
 class ProbeJacobianTests(unittest.TestCase):
-    TRUTH = ServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    TRUTH = VisualServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
 
     def test_recovers_the_truth_exactly(self) -> None:
         arm = FakeArm(self.TRUTH)
-        probed = probe_jacobian(arm, BufferedLink(arm), ObjectSelector(), ServoConfig(probe_pulses=600))
+        probed = probe_jacobian(arm, BufferedLink(arm), MaterialSelector(), VisualServoConfig(probe_pulses=600))
         # 逐项比较而不是整对象相等：除法会带出 1e-18 量级的尾数，
         # 那和"标定对不对"无关。
         for field in ("base_dx", "base_dy", "radial_dx", "radial_dy"):
@@ -1067,7 +1502,7 @@ class ProbeJacobianTests(unittest.TestCase):
     def test_returns_the_arm_to_where_it_started(self) -> None:
         arm = FakeArm(self.TRUTH)
         start = list(arm.offset)
-        probe_jacobian(arm, BufferedLink(arm), ObjectSelector(), ServoConfig(probe_pulses=600))
+        probe_jacobian(arm, BufferedLink(arm), MaterialSelector(), VisualServoConfig(probe_pulses=600))
         self.assertAlmostEqual(arm.offset[0], start[0], places=9)
         self.assertAlmostEqual(arm.offset[1], start[1], places=9)
         self.assertEqual(arm.net_pulses, (0, 0))
@@ -1075,33 +1510,33 @@ class ProbeJacobianTests(unittest.TestCase):
     def test_uses_two_same_direction_segments_per_axis(self) -> None:
         """每轴两段**同向**：第二段没有背隙损失，斜率才是真的。"""
         arm = FakeArm(self.TRUTH)
-        probe_jacobian(arm, BufferedLink(arm), ObjectSelector(), ServoConfig(probe_pulses=600))
+        probe_jacobian(arm, BufferedLink(arm), MaterialSelector(), VisualServoConfig(probe_pulses=600))
         base_calls = [kind for kind, _ in arm.calls if kind.startswith("base")]
         radial_calls = [kind for kind, _ in arm.calls if kind.startswith("radial")]
         self.assertEqual(base_calls, ["base:fwd", "base:fwd", "base:back", "base:back"])
         self.assertEqual(radial_calls, ["radial:fwd", "radial:fwd", "radial:back", "radial:back"])
 
     def test_singular_machine_is_refused(self) -> None:
-        flat = ServoJacobian(base_dx=0.01, base_dy=0.01, radial_dx=0.02, radial_dy=0.02)
+        flat = VisualServoJacobian(base_dx=0.01, base_dy=0.01, radial_dx=0.02, radial_dy=0.02)
         arm = FakeArm(flat)
-        with self.assertRaisesRegex(ServoError, "奇异"):
-            probe_jacobian(arm, BufferedLink(arm), ObjectSelector(), ServoConfig(probe_pulses=600))
+        with self.assertRaisesRegex(VisualServoError, "奇异"):
+            probe_jacobian(arm, BufferedLink(arm), MaterialSelector(), VisualServoConfig(probe_pulses=600))
 
     def test_no_object_is_refused(self) -> None:
         arm = FakeArm(self.TRUTH)
-        with self.assertRaisesRegex(ServoError, "稳定看到物块"):
+        with self.assertRaisesRegex(VisualServoError, "稳定看到物块"):
             probe_jacobian(
-                arm, EmptyLink(), ObjectSelector(),
+                arm, EmptyLink(), MaterialSelector(),
                 # 停稳超时调小：这一条测的是"看不到物块要报错"，不该真等 4 秒。
-                ServoConfig(probe_pulses=600, settle_timeout_seconds=0.2),
+                VisualServoConfig(probe_pulses=600, settle_timeout_seconds=0.2),
             )
         self.assertEqual(arm.calls, [], "看不到物块时一个动作都不该发")
 
 
-def align_result() -> ServoResult:
+def align_result() -> VisualServoResult:
     """一份"平面已对准"的假结果（误差落在容差内，``aligned`` 为真）。"""
-    return ServoResult(
-        target=ServoTarget(x_mm=0.0, y_mm=0.0),
+    return VisualServoResult(
+        target=VisualServoTarget(x_mm=0.0, y_mm=0.0),
         readings=((0.4, -0.5),),
         error_x=0.4,
         error_y=-0.5,
@@ -1139,9 +1574,11 @@ class GraspSessionRig:
 
     #: 与 :class:`AlignXYTests` 用的是同一个雅可比；刻意再写一遍而不是互相引用，
     #: 免得两个类的加载顺序变成隐含依赖。
-    TRUTH = ServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
-    TARGET = ServoTarget(x_mm=0.0, y_mm=0.0)
+    TRUTH = VisualServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    TARGET = VisualServoTarget(x_mm=0.0, y_mm=0.0)
     STAGES = ("hover", "raise", "align", "down", "back")
+    #: 不在 ``align_and_descend`` 主链里、单独 mock 的名字（``follow_material`` 用）。
+    EXTRA_STAGES = ("follow",)
 
     def __init__(self, *, hover_z_mm: Optional[float] = None, strict_align: bool = True):
         """``strict_align``：主链必须传 ``ensure_safe_height=False``。
@@ -1152,10 +1589,10 @@ class GraspSessionRig:
         self.strict_align = strict_align
         self.arm = FakeArm(self.TRUTH)
         self.source = BufferedLink(self.arm)
-        self.config = ServoConfig(hover_z_mm=hover_z_mm)
+        self.config = VisualServoConfig(hover_z_mm=hover_z_mm)
         self.grasp = Grasp(
             config=self.config,
-            selector=ObjectSelector(),
+            selector=MaterialSelector(),
             target=self.TARGET,
             jacobian=self.TRUTH,
             lift_scale=LiftScale(dz_per_pulse=0.0121),
@@ -1170,16 +1607,18 @@ class GraspSessionRig:
     def __enter__(self):
         self._patches = [
             patch.object(algorithms, name)
-            for name in ("hover_above_object", "raise_before_rotating", "align_x_y",
-                         "descend_z", "retract_extension")
+            for name in ("hover_above_material", "raise_before_rotating", "align_x_y",
+                         "descend_z", "retract_extension", "follow_material_xy")
         ]
-        hover, lift, align, down, back = (item.start() for item in self._patches)
+        hover, lift, align, down, back, follow = (item.start() for item in self._patches)
         self._mocks = [hover, lift, align, down, back]
+        self._extra = [follow]
         hover.side_effect = lambda *_a, **_k: HoverResult(
             configured=True, pulses=-120, start_z_mm=120.0, end_z_mm=100.0
         )
         lift.side_effect = lambda *_a, **_k: 250
         align.side_effect = self._align
+        follow.side_effect = lambda *_a, **_k: align_result()
         down.side_effect = lambda *_a, **_k: ZDescentResult(
             pulses=2200, planar_mm=0.64, start_z_mm=100.0, seconds=1.2
         )
@@ -1229,20 +1668,61 @@ class GraspSessionRig:
         return [name for name, item in zip(self.STAGES, self._mocks) if item.called]
 
     def mock(self, stage: str):
+        if stage in self.EXTRA_STAGES:
+            return self._extra[self.EXTRA_STAGES.index(stage)]
         return self._mocks[self.STAGES.index(stage)]
 
 
 class AlignXYTests(unittest.TestCase):
-    TRUTH = ServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
-    TARGET = ServoTarget(x_mm=2.0, y_mm=-1.0)
+    TRUTH = VisualServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    TARGET = VisualServoTarget(x_mm=2.0, y_mm=-1.0)
+
+    def test_best_effort_restores_the_best_measured_pose_after_five_adjustments(self) -> None:
+        # 最后一轮也要实测；最佳位置可能在中途、最后，也可能就是起点。
+        for errors in (
+            (10, 8, 6, 4, 7, 5), (10, 9, 8, 7, 6, 5),
+            (3, 8, 6, 4, 7, 5), (10, 8, 6, 4, 7, 1),
+        ):
+            with self.subTest(errors=errors):
+                position = [0, 0]
+                measured_positions = []
+                moves = []
+                values = iter(errors)
+
+                def measure(*_args, **_kwargs):
+                    measured_positions.append(tuple(position))
+                    return sighting(1, next(values), 0)
+
+                def move(_arm, base, radial, _config):
+                    moves.append((base, radial))
+                    position[0] += base
+                    position[1] += radial
+                    return 0.0
+
+                with patch.object(algorithms, "_settled_sighting", side_effect=measure), \
+                        patch.object(algorithms, "_move_axes", side_effect=move):
+                    result = align_x_y(
+                        object(), object(), MaterialSelector(), VisualServoTarget(0, 0),
+                        VisualServoJacobian(0.01, 0, 0, 0.01),
+                        VisualServoConfig(tolerance_mm=2, max_iterations=5),
+                        ensure_safe_height=False, return_best=True,
+                    )
+                best_index = errors.index(min(errors))
+                self.assertEqual(len(measured_positions), 6)
+                self.assertEqual(tuple(position), measured_positions[best_index])
+                self.assertEqual((result.base_pulses, result.radial_pulses), tuple(position))
+                self.assertAlmostEqual(result.error_mm, min(errors))
+                self.assertEqual(result.readings[-1], (min(errors), 0))
+                self.assertEqual(result.aligned, min(errors) <= 2)
+                self.assertEqual(len(moves), 5 + (best_index != 5))
 
     def test_converges_and_guards_every_post_move_read(self) -> None:
         arm = FakeArm(self.TRUTH)
         link = BufferedLink(arm)
-        config = ServoConfig(
+        config = VisualServoConfig(
             tolerance_mm=0.5, max_iterations=12, max_pulses_per_step=2000, min_step_mm=0.1
         )
-        result = align_x_y(arm, link, ObjectSelector(), self.TARGET, self.TRUTH, config)
+        result = align_x_y(arm, link, MaterialSelector(), self.TARGET, self.TRUTH, config)
 
         self.assertTrue(result.aligned, result)
         self.assertLessEqual(result.error_mm, 0.5)
@@ -1258,10 +1738,10 @@ class AlignXYTests(unittest.TestCase):
         """每次只走 60%：闭环靠重新测量补回来，这正是不用绝对标定也能到位的原因。"""
         arm = FakeArm(self.TRUTH, gain=0.6)
         link = BufferedLink(arm)
-        config = ServoConfig(
+        config = VisualServoConfig(
             tolerance_mm=0.5, max_iterations=12, max_pulses_per_step=2000, min_step_mm=0.1
         )
-        result = align_x_y(arm, link, ObjectSelector(), self.TARGET, self.TRUTH, config)
+        result = align_x_y(arm, link, MaterialSelector(), self.TARGET, self.TRUTH, config)
         self.assertTrue(result.aligned, result)
         self.assertGreater(result.iterations, 2, "有系统性欠走时不该一两次就到")
 
@@ -1274,11 +1754,11 @@ class AlignXYTests(unittest.TestCase):
         """
         arm = FakeArm(self.TRUTH)
         link = BufferedLink(arm)
-        config = ServoConfig(
+        config = VisualServoConfig(
             tolerance_mm=0.5, max_iterations=12, max_pulses_per_step=100,
             coarse_error_mm=1e9, min_step_mm=0.2,
         )
-        align_x_y(arm, link, ObjectSelector(), self.TARGET, self.TRUTH, config)
+        align_x_y(arm, link, MaterialSelector(), self.TARGET, self.TRUTH, config)
         for _kind, pulses in arm.calls:
             self.assertLessEqual(pulses, 100)
 
@@ -1288,14 +1768,14 @@ class AlignXYTests(unittest.TestCase):
         刻意**不**去比较"粗调比细调少几轮"——细调在同样迭代上限下可能根本收敛不了
         （那正是需要粗调的原因），拿它当基准会让这条测试变成在测迭代上限。
         """
-        config = ServoConfig(
+        config = VisualServoConfig(
             tolerance_mm=0.5, max_iterations=12,
             max_pulses_per_step=100, coarse_max_pulses_per_step=5000,
             coarse_error_mm=2.0,
         )
         arm = FakeArm(self.TRUTH)
         link = BufferedLink(arm)
-        result = align_x_y(arm, link, ObjectSelector(), self.TARGET, self.TRUTH, config)
+        result = align_x_y(arm, link, MaterialSelector(), self.TARGET, self.TRUTH, config)
         self.assertTrue(result.aligned, result)
         # 粗调档真的用到了超过细调上限的步长（误差 11.66 mm，需要约 900 脉冲）。
         self.assertTrue(
@@ -1310,7 +1790,7 @@ class AlignXYTests(unittest.TestCase):
         这台机器底座 0.164 mm/脉冲、伸缩 0.0139 mm/脉冲，差将近 12 倍。
         同一个"最小脉冲数"落在底座上等于二十多毫米的走动，会把闭环推到振荡。
         """
-        real_like = ServoJacobian(
+        real_like = VisualServoJacobian(
             base_dx=-0.1642, base_dy=-0.0114, radial_dx=0.00089, radial_dy=0.0139
         )
         base_min, radial_min = real_like.minimum_pulses(1.0)
@@ -1320,14 +1800,14 @@ class AlignXYTests(unittest.TestCase):
 
     def test_sensitive_axis_takes_small_steps(self) -> None:
         """底座很灵敏时它只该走几个脉冲；步子大小由灵敏度决定，不是拍脑袋定的。"""
-        real_like = ServoJacobian(
+        real_like = VisualServoJacobian(
             base_dx=-0.1642, base_dy=-0.0114, radial_dx=0.00089, radial_dy=0.0139
         )
         arm = FakeArm(real_like)
         arm.offset = [3.0, 2.0]
         result = align_x_y(
-            arm, BufferedLink(arm), ObjectSelector(), ServoTarget(0.0, 0.0), real_like,
-            ServoConfig(tolerance_mm=0.1, max_iterations=8, min_step_mm=0.01),
+            arm, BufferedLink(arm), MaterialSelector(), VisualServoTarget(0.0, 0.0), real_like,
+            VisualServoConfig(tolerance_mm=0.1, max_iterations=8, min_step_mm=0.01),
         )
         self.assertTrue(result.aligned, result)
         base_moves = [pulses for kind, pulses in arm.calls if kind.startswith("base")]
@@ -1341,14 +1821,14 @@ class AlignXYTests(unittest.TestCase):
         这是真机上最容易变成"永远收敛不了"的一处：地板本来是为了吃掉背隙，
         可它同时给系统设了一个分辨率下限；容差比它小的时候，每一步都会跨过目标。
         """
-        real_like = ServoJacobian(
+        real_like = VisualServoJacobian(
             base_dx=-0.1642, base_dy=-0.0114, radial_dx=0.00089, radial_dy=0.0139
         )
         arm = FakeArm(real_like)
         arm.offset = [0.05, 0.05]  # 误差约 0.07 mm，远小于地板 1.0 mm
         result = align_x_y(
-            arm, BufferedLink(arm), ObjectSelector(), ServoTarget(0.0, 0.0), real_like,
-            ServoConfig(tolerance_mm=0.01, max_iterations=6, min_step_mm=1.0),
+            arm, BufferedLink(arm), MaterialSelector(), VisualServoTarget(0.0, 0.0), real_like,
+            VisualServoConfig(tolerance_mm=0.01, max_iterations=6, min_step_mm=1.0),
         )
         self.assertTrue(result.resolution_limited, result)
         self.assertEqual(arm.calls, [], "不该发出任何动作——那只会跨过目标")
@@ -1358,8 +1838,8 @@ class AlignXYTests(unittest.TestCase):
         """转角不大时两个轴同时发（底座先发）；跟踪速度就靠这一条。"""
         arm = FakeArm(self.TRUTH)
         align_x_y(
-            arm, BufferedLink(arm), ObjectSelector(), self.TARGET, self.TRUTH,
-            ServoConfig(tolerance_mm=0.5, max_pulses_per_step=4000, min_step_mm=0.1,
+            arm, BufferedLink(arm), MaterialSelector(), self.TARGET, self.TRUTH,
+            VisualServoConfig(tolerance_mm=0.5, max_pulses_per_step=4000, min_step_mm=0.1,
                         parallel_rotation_limit_pulses=4000),
         )
         self.assertTrue(arm.calls, arm.calls)
@@ -1369,8 +1849,8 @@ class AlignXYTests(unittest.TestCase):
         """大角度旋转不并行：先伸缩到位再转，免得伸出状态下横扫底座。"""
         arm = FakeArm(self.TRUTH)
         align_x_y(
-            arm, BufferedLink(arm), ObjectSelector(), self.TARGET, self.TRUTH,
-            ServoConfig(tolerance_mm=0.5, max_pulses_per_step=4000, min_step_mm=0.1,
+            arm, BufferedLink(arm), MaterialSelector(), self.TARGET, self.TRUTH,
+            VisualServoConfig(tolerance_mm=0.5, max_pulses_per_step=4000, min_step_mm=0.1,
                         parallel_rotation_limit_pulses=1),
         )
         self.assertTrue(arm.calls, arm.calls)
@@ -1379,36 +1859,36 @@ class AlignXYTests(unittest.TestCase):
     def test_iteration_limit_is_reported(self) -> None:
         arm = FakeArm(self.TRUTH, gain=0.01)
         link = BufferedLink(arm)
-        config = ServoConfig(
+        config = VisualServoConfig(
             tolerance_mm=0.1, max_iterations=3, max_pulses_per_step=2000, min_step_mm=0.01
         )
-        with self.assertRaisesRegex(ServoError, "3 次"):
-            align_x_y(arm, link, ObjectSelector(), self.TARGET, self.TRUTH, config)
+        with self.assertRaisesRegex(VisualServoError, "3 次"):
+            align_x_y(arm, link, MaterialSelector(), self.TARGET, self.TRUTH, config)
 
     def test_pulse_budget_is_enforced(self) -> None:
         arm = FakeArm(self.TRUTH, gain=0.01)
         link = BufferedLink(arm)
-        config = ServoConfig(
+        config = VisualServoConfig(
             tolerance_mm=0.01, max_iterations=50, max_pulses_per_step=40,
             max_total_pulses=80, min_step_mm=0.001,
         )
-        with self.assertRaisesRegex(ServoError, "预算"):
-            align_x_y(arm, link, ObjectSelector(), self.TARGET, self.TRUTH, config)
+        with self.assertRaisesRegex(VisualServoError, "预算"):
+            align_x_y(arm, link, MaterialSelector(), self.TARGET, self.TRUTH, config)
 
     def test_singular_jacobian_is_reported_before_moving(self) -> None:
         arm = FakeArm(self.TRUTH)
         link = BufferedLink(arm)
-        singular = ServoJacobian(base_dx=0.01, base_dy=0.02, radial_dx=0.02, radial_dy=0.04)
-        with self.assertRaisesRegex(ServoError, "奇异"):
-            align_x_y(arm, link, ObjectSelector(), self.TARGET, singular, ServoConfig())
+        singular = VisualServoJacobian(base_dx=0.01, base_dy=0.02, radial_dx=0.02, radial_dy=0.04)
+        with self.assertRaisesRegex(VisualServoError, "奇异"):
+            align_x_y(arm, link, MaterialSelector(), self.TARGET, singular, VisualServoConfig())
         self.assertEqual(arm.calls, [])
 
     def test_missing_object_is_reported(self) -> None:
         arm = FakeArm(self.TRUTH)
-        with self.assertRaisesRegex(ServoError, "稳定看到物块"):
+        with self.assertRaisesRegex(VisualServoError, "稳定看到物块"):
             align_x_y(
-                arm, EmptyLink(), ObjectSelector(), self.TARGET, self.TRUTH,
-                ServoConfig(settle_timeout_seconds=0.2),
+                arm, EmptyLink(), MaterialSelector(), self.TARGET, self.TRUTH,
+                VisualServoConfig(settle_timeout_seconds=0.2),
             )
         self.assertEqual(arm.calls, [])
 
@@ -1416,8 +1896,8 @@ class AlignXYTests(unittest.TestCase):
         arm = FakeArm(self.TRUTH)
         link = BufferedLink(arm)
         result = align_x_y(
-            arm, link, ObjectSelector(), self.TARGET, self.TRUTH,
-            ServoConfig(tolerance_mm=0.5, max_pulses_per_step=2000, min_step_mm=0.1),
+            arm, link, MaterialSelector(), self.TARGET, self.TRUTH,
+            VisualServoConfig(tolerance_mm=0.5, max_pulses_per_step=2000, min_step_mm=0.1),
         )
         self.assertEqual((result.base_pulses, result.radial_pulses), arm.net_pulses)
 
@@ -1425,8 +1905,8 @@ class AlignXYTests(unittest.TestCase):
         arm = FakeArm(self.TRUTH)
         link = BufferedLink(arm)
         result = align_x_y(
-            arm, link, ObjectSelector(), self.TARGET, self.TRUTH,
-            ServoConfig(tolerance_mm=0.5, max_pulses_per_step=2000, min_step_mm=0.1),
+            arm, link, MaterialSelector(), self.TARGET, self.TRUTH,
+            VisualServoConfig(tolerance_mm=0.5, max_pulses_per_step=2000, min_step_mm=0.1),
         )
         text = result.summary()
         self.assertIn("完成", text)
@@ -1465,8 +1945,8 @@ class AlignXYTests(unittest.TestCase):
 
         arm = FakeArm(self.TRUTH, gain=0.7)
         result = align_x_y(
-            arm, JumpyDiameterLink(arm), ObjectSelector(), self.TARGET, self.TRUTH,
-            ServoConfig(tolerance_mm=0.5, max_pulses_per_step=2000, min_step_mm=0.1),
+            arm, JumpyDiameterLink(arm), MaterialSelector(), self.TARGET, self.TRUTH,
+            VisualServoConfig(tolerance_mm=0.5, max_pulses_per_step=2000, min_step_mm=0.1),
         )
         self.assertTrue(result.aligned, result)
 
@@ -1487,15 +1967,15 @@ class AlignXYTests(unittest.TestCase):
 
         arm = FakeArm(self.TRUTH, gain=0.7)
         result = align_x_y(
-            arm, WobblyLink(arm), ObjectSelector(), self.TARGET, self.TRUTH,
-            ServoConfig(tolerance_mm=0.5, max_pulses_per_step=2000, min_step_mm=0.1),
+            arm, WobblyLink(arm), MaterialSelector(), self.TARGET, self.TRUTH,
+            VisualServoConfig(tolerance_mm=0.5, max_pulses_per_step=2000, min_step_mm=0.1),
         )
         self.assertTrue(result.aligned, result)
 
     def test_measure_offset_reads_the_xy_pair(self) -> None:
         arm = FakeArm(self.TRUTH)
         link = BufferedLink(arm)
-        self.assertEqual(measure_offset(link, ObjectSelector(), ServoConfig()), tuple(arm.offset))
+        self.assertEqual(measure_offset(link, MaterialSelector(), VisualServoConfig()), tuple(arm.offset))
 
 
 class MoveAxesTests(unittest.TestCase):
@@ -1507,11 +1987,11 @@ class MoveAxesTests(unittest.TestCase):
     现象是闭环怎么走都不动、最后报"迭代用尽"。
     """
 
-    TRUTH = ServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    TRUTH = VisualServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
 
     def _record_sleeps(self, arm, config, base_pulses, radial_pulses):
         sleeps: List[float] = []
-        # ``sleep`` 要在**真正执行它的模块**里换掉：``_move_axes`` 是 servo_motion 的
+        # ``sleep`` 要在**真正执行它的模块**里换掉：``_move_axes`` 是 visual_servo_motion 的
         # 函数，它查的是自己模块的名字，不是 eye_in_hand 的。
         with patch.object(motion.time, "sleep", sleeps.append):
             motion._move_axes(arm, base_pulses, radial_pulses, config)
@@ -1519,7 +1999,7 @@ class MoveAxesTests(unittest.TestCase):
 
     def test_gap_is_inserted_between_the_two_frames(self) -> None:
         arm = FakeArm(self.TRUTH)
-        config = ServoConfig(inter_frame_seconds=0.03, parallel_rotation_limit_pulses=4000)
+        config = VisualServoConfig(inter_frame_seconds=0.03, parallel_rotation_limit_pulses=4000)
         sleeps = self._record_sleeps(arm, config, 100, 200)
         self.assertEqual([kind for kind, _ in arm.calls], ["base:fwd", "radial:fwd"], arm.calls)
         self.assertIn(0.03, sleeps, f"两条帧之间没有留间隔：{sleeps}")
@@ -1527,20 +2007,20 @@ class MoveAxesTests(unittest.TestCase):
     def test_no_gap_when_only_one_axis_moves(self) -> None:
         """只动一个轴时不需要间隔——那种情况本来就不会撞上这个问题。"""
         arm = FakeArm(self.TRUTH)
-        config = ServoConfig(inter_frame_seconds=0.03)
+        config = VisualServoConfig(inter_frame_seconds=0.03)
         sleeps = self._record_sleeps(arm, config, 100, 0)
         self.assertNotIn(0.03, sleeps, sleeps)
 
     def test_large_rotation_still_extends_first(self) -> None:
         """大角度旋转不并行：先伸缩到位、再转，免得伸出状态下横扫底座。"""
         arm = FakeArm(self.TRUTH)
-        config = ServoConfig(parallel_rotation_limit_pulses=1, inter_frame_seconds=0.03)
+        config = VisualServoConfig(parallel_rotation_limit_pulses=1, inter_frame_seconds=0.03)
         self._record_sleeps(arm, config, 500, 200)
         self.assertEqual([kind for kind, _ in arm.calls], ["radial:fwd", "base:fwd"], arm.calls)
 
     def test_nothing_happens_when_both_are_zero(self) -> None:
         arm = FakeArm(self.TRUTH)
-        self.assertEqual(self._record_sleeps(arm, ServoConfig(), 0, 0), [])
+        self.assertEqual(self._record_sleeps(arm, VisualServoConfig(), 0, 0), [])
         self.assertEqual(arm.calls, [])
 
 
@@ -1559,7 +2039,7 @@ class LiftScaleTests(unittest.TestCase):
                 self.assertAlmostEqual(moved + error, 0.0, places=9)
 
     def test_zero_sensitivity_is_rejected(self) -> None:
-        with self.assertRaisesRegex(ServoError, "灵敏度是 0"):
+        with self.assertRaisesRegex(VisualServoError, "灵敏度是 0"):
             LiftScale(dz_per_pulse=0.0).pulses_for(1.0)
 
 
@@ -1568,7 +2048,7 @@ class ZGuardTests(unittest.TestCase):
 
     def test_guard_clamps_a_descent_that_would_go_too_low(self) -> None:
         scale = LiftScale(dz_per_pulse=0.0121)
-        config = ServoConfig(z_min_mm=30.0)
+        config = VisualServoConfig(z_min_mm=30.0)
         # 现在 z=40、想下降 2000 脉冲（按 0.0121 会降到 15.8 mm，低于护栏）。
         step, clamped = algorithms._lift_step_within_guard(
             z_mm=40.0, step=-2000, scale=scale, config=config
@@ -1580,7 +2060,7 @@ class ZGuardTests(unittest.TestCase):
 
     def test_guard_leaves_a_safe_move_alone(self) -> None:
         scale = LiftScale(dz_per_pulse=0.0121)
-        config = ServoConfig(z_min_mm=30.0)
+        config = VisualServoConfig(z_min_mm=30.0)
         step, clamped = algorithms._lift_step_within_guard(
             z_mm=120.0, step=-600, scale=scale, config=config
         )
@@ -1625,7 +2105,7 @@ class PulseStepTests(unittest.TestCase):
 
     def test_the_descent_uses_the_configured_pulse_count(self) -> None:
         arm = self.Arm()
-        result = descend_z(arm, self.StillLink(1.0, -1.0), ObjectSelector(), ServoConfig())
+        result = descend_z(arm, self.StillLink(1.0, -1.0), MaterialSelector(), VisualServoConfig())
         self.assertEqual(arm.calls, [("down", 1700)])
         self.assertEqual(result.pulses, 1700)
         self.assertAlmostEqual(result.planar_mm, math.hypot(1.0, -1.0), places=9)
@@ -1633,14 +2113,14 @@ class PulseStepTests(unittest.TestCase):
 
     def test_a_plane_that_is_not_aligned_is_refused_before_any_motion(self) -> None:
         arm = self.Arm()
-        with self.assertRaisesRegex(ServoError, "还没对准"):
-            descend_z(arm, self.StillLink(20.0, 0.0), ObjectSelector(), ServoConfig())
+        with self.assertRaisesRegex(VisualServoError, "还没对准"):
+            descend_z(arm, self.StillLink(20.0, 0.0), MaterialSelector(), VisualServoConfig())
         self.assertEqual(arm.calls, [])
 
     def test_the_override_only_changes_this_run(self) -> None:
         arm = self.Arm()
-        config = ServoConfig()
-        result = descend_z(arm, self.StillLink(0.0, 0.0), ObjectSelector(), config, pulses=250)
+        config = VisualServoConfig()
+        result = descend_z(arm, self.StillLink(0.0, 0.0), MaterialSelector(), config, pulses=250)
         self.assertEqual(arm.calls, [("down", 250)])
         self.assertEqual(result.pulses, 250)
         # 覆盖不写回配置：下一次还是配置里的值。
@@ -1650,25 +2130,25 @@ class PulseStepTests(unittest.TestCase):
         for pulses in (0, -150, 12.5, True):
             with self.subTest(pulses=pulses):
                 arm = self.Arm()
-                with self.assertRaises(ServoError):
+                with self.assertRaises(VisualServoError):
                     descend_z(
                         arm,
                         self.StillLink(0.0, 0.0),
-                        ObjectSelector(),
-                        ServoConfig(),
+                        MaterialSelector(),
+                        VisualServoConfig(),
                         pulses=pulses,
                     )
                 self.assertEqual(arm.calls, [])
 
     def test_the_retract_pulls_the_extension_back_by_the_configured_count(self) -> None:
         arm = self.Arm()
-        moved = retract_extension(arm, ServoConfig())
+        moved = retract_extension(arm, VisualServoConfig())
         self.assertEqual(arm.calls, [("back", 150)])
         self.assertEqual(moved, 150)
 
     def test_the_retract_override_is_honoured(self) -> None:
         arm = self.Arm()
-        self.assertEqual(retract_extension(arm, ServoConfig(), pulses=40), 40)
+        self.assertEqual(retract_extension(arm, VisualServoConfig(), pulses=40), 40)
         self.assertEqual(arm.calls, [("back", 40)])
 
 
@@ -1743,12 +2223,12 @@ class SafeLiftTests(unittest.TestCase):
     def make(self, *, z_mm: float = 67.0, slope: float = 0.0121, **overrides):
         rig = LiftRig(z_mm=z_mm, slope=slope)
         link = CoupledZLink(rig)
-        return rig, link, ServoConfig(**overrides)
+        return rig, link, VisualServoConfig(**overrides)
 
     def test_the_calibrated_scale_reaches_the_safe_height_in_two_segments(self) -> None:
         rig, link, config = self.make()
         raised = algorithms.raise_before_rotating(
-            rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+            rig, link, MaterialSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
 
         self.assertGreaterEqual(rig.z, config.safe_lift_z_mm)
@@ -1761,7 +2241,7 @@ class SafeLiftTests(unittest.TestCase):
 
     def test_without_the_scale_it_walks_in_fixed_segments(self) -> None:
         rig, link, config = self.make()
-        raised = algorithms.raise_before_rotating(rig, link, ObjectSelector(), config)
+        raised = algorithms.raise_before_rotating(rig, link, MaterialSelector(), config)
 
         self.assertGreaterEqual(rig.z, config.safe_lift_z_mm)
         self.assertEqual(set(rig.up_pulses), {config.safe_lift_step_pulses})
@@ -1772,21 +2252,21 @@ class SafeLiftTests(unittest.TestCase):
     def test_the_scale_path_can_be_switched_off(self) -> None:
         rig, link, config = self.make(safe_lift_use_scale=False)
         algorithms.raise_before_rotating(
-            rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+            rig, link, MaterialSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
         self.assertEqual(set(rig.up_pulses), {config.safe_lift_step_pulses})
 
     def test_the_computed_segment_is_capped(self) -> None:
         rig, link, config = self.make(safe_lift_max_pulses_per_step=400)
         algorithms.raise_before_rotating(
-            rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+            rig, link, MaterialSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
         self.assertEqual(rig.up_pulses[0], 400)
 
     def test_already_high_enough_costs_one_measurement_and_no_motion(self) -> None:
         rig, link, config = self.make(z_mm=105.0)
         raised = algorithms.raise_before_rotating(
-            rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+            rig, link, MaterialSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
 
         self.assertEqual(raised, 0)
@@ -1796,7 +2276,7 @@ class SafeLiftTests(unittest.TestCase):
     def test_the_quick_check_passes_on_a_single_frame_when_clearly_safe(self) -> None:
         """每一轮都要查的调用方（--follow）用单帧快判：够高就只花一帧。"""
         rig, link, config = self.make(z_mm=110.0)
-        raised = algorithms.raise_before_rotating(rig, link, ObjectSelector(), config, quick=True)
+        raised = algorithms.raise_before_rotating(rig, link, MaterialSelector(), config, quick=True)
 
         self.assertEqual(raised, 0)
         self.assertEqual(rig.calls, [])
@@ -1804,7 +2284,7 @@ class SafeLiftTests(unittest.TestCase):
 
     def test_the_quick_check_falls_back_when_the_margin_is_not_met(self) -> None:
         rig, link, config = self.make(z_mm=102.0)  # 过了安全高度，但不够余量
-        raised = algorithms.raise_before_rotating(rig, link, ObjectSelector(), config, quick=True)
+        raised = algorithms.raise_before_rotating(rig, link, MaterialSelector(), config, quick=True)
 
         self.assertEqual(raised, 0)
         # 一帧快判 + 一次停稳测量（两次定位）
@@ -1814,7 +2294,7 @@ class SafeLiftTests(unittest.TestCase):
         """余量就是为这一条存在的：模糊帧把 z 读大、"以为够高"正是低位转底盘的成因。"""
         rig, _unused, config = self.make(z_mm=99.0)  # 真值低于安全高度
         link = FirstFrameHigh(rig, offset_mm=4.0)  # 第一帧读成 103，仍在余量（5 mm）内
-        raised = algorithms.raise_before_rotating(rig, link, ObjectSelector(), config, quick=True)
+        raised = algorithms.raise_before_rotating(rig, link, MaterialSelector(), config, quick=True)
 
         self.assertGreater(len(rig.up_pulses), 0)  # 没被那一帧骗过去：该抬还是抬
         self.assertEqual(raised, sum(rig.up_pulses))
@@ -1822,7 +2302,7 @@ class SafeLiftTests(unittest.TestCase):
     def test_a_lift_that_changes_nothing_is_reported_instead_of_pushed(self) -> None:
         rig, link, config = self.make(slope=0.0)  # 已经到行程端点：走多少都不变
         raised = algorithms.raise_before_rotating(
-            rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+            rig, link, MaterialSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
 
         self.assertEqual(len(rig.up_pulses), 1)  # 只试一段就停，不接着往上顶
@@ -1832,7 +2312,7 @@ class SafeLiftTests(unittest.TestCase):
         """到端点时物块几乎不动、只剩画面噪声：判据不能只看"是不是恰好 0"。"""
         rig, link, config = self.make(slope=0.00005)
         raised = algorithms.raise_before_rotating(
-            rig, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+            rig, link, MaterialSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
 
         self.assertEqual(len(rig.up_pulses), 1)
@@ -1840,7 +2320,7 @@ class SafeLiftTests(unittest.TestCase):
 
     def test_without_a_scale_a_dead_lift_stops_after_two_segments(self) -> None:
         rig, link, config = self.make(slope=0.0)
-        raised = algorithms.raise_before_rotating(rig, link, ObjectSelector(), config)
+        raised = algorithms.raise_before_rotating(rig, link, MaterialSelector(), config)
 
         # 没有灵敏度可参照，所以第一段没法判；两段都不动就收手（而不是顶满 20 段）。
         self.assertEqual(len(rig.up_pulses), 2)
@@ -1853,12 +2333,12 @@ class HoverTests(unittest.TestCase):
     def rig(self, *, z_mm: float = 120.0, slope: float = 0.0121, **overrides):
         arm = LiftRig(z_mm=z_mm, slope=slope)
         link = CoupledZLink(arm)
-        return arm, link, ServoConfig(**overrides)
+        return arm, link, VisualServoConfig(**overrides)
 
     def test_without_the_key_nothing_moves(self) -> None:
         arm, link, config = self.rig(z_mm=80.0)
-        result = hover_above_object(
-            arm, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        result = hover_above_material(
+            arm, link, MaterialSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
 
         self.assertFalse(result.configured)
@@ -1867,8 +2347,8 @@ class HoverTests(unittest.TestCase):
 
     def test_it_lowers_to_the_configured_height(self) -> None:
         arm, link, config = self.rig(z_mm=120.0, hover_z_mm=100.0)
-        result = hover_above_object(
-            arm, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        result = hover_above_material(
+            arm, link, MaterialSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
 
         self.assertTrue(result.configured)
@@ -1878,8 +2358,8 @@ class HoverTests(unittest.TestCase):
 
     def test_it_raises_to_the_configured_height(self) -> None:
         arm, link, config = self.rig(z_mm=80.0, hover_z_mm=110.0)
-        result = hover_above_object(
-            arm, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        result = hover_above_material(
+            arm, link, MaterialSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
 
         self.assertGreater(result.pulses, 0)
@@ -1887,8 +2367,8 @@ class HoverTests(unittest.TestCase):
 
     def test_already_at_the_height_costs_no_motion(self) -> None:
         arm, link, config = self.rig(z_mm=110.5, hover_z_mm=110.0)
-        result = hover_above_object(
-            arm, link, ObjectSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
+        result = hover_above_material(
+            arm, link, MaterialSelector(), config, scale=LiftScale(dz_per_pulse=0.0121)
         )
 
         self.assertEqual(result.pulses, 0)
@@ -1897,14 +2377,14 @@ class HoverTests(unittest.TestCase):
     def test_without_a_scale_it_refuses_to_lower(self) -> None:
         """没标定灵敏度时往下走是在朝物块靠近，宁可不动。"""
         arm, link, config = self.rig(z_mm=130.0, hover_z_mm=110.0)
-        result = hover_above_object(arm, link, ObjectSelector(), config)
+        result = hover_above_material(arm, link, MaterialSelector(), config)
 
         self.assertTrue(result.stopped_without_scale)
         self.assertEqual(arm.calls, [])
 
     def test_without_a_scale_it_still_raises(self) -> None:
         arm, link, config = self.rig(z_mm=80.0, hover_z_mm=110.0)
-        result = hover_above_object(arm, link, ObjectSelector(), config)
+        result = hover_above_material(arm, link, MaterialSelector(), config)
 
         self.assertGreater(len(arm.up_pulses), 0)
         self.assertGreaterEqual(arm.z, 110.0 - config.z_tolerance_mm)
@@ -1912,9 +2392,9 @@ class HoverTests(unittest.TestCase):
     def test_the_config_refuses_a_hover_below_the_safe_height(self) -> None:
         """悬停得比"转底盘前的安全高度"还低 = 低位转底盘，配置层直接拦。"""
         with self.assertRaises(ValueError):
-            ServoConfig(hover_z_mm=90.0, safe_lift_z_mm=100.0)
+            VisualServoConfig(hover_z_mm=90.0, safe_lift_z_mm=100.0)
         with self.assertRaises(ValueError):
-            ServoConfig(hover_z_mm=0.0)
+            VisualServoConfig(hover_z_mm=0.0)
 
 
 class FindObjectTests(unittest.TestCase):
@@ -1922,12 +2402,12 @@ class FindObjectTests(unittest.TestCase):
         """看不到物块时只快速探几帧；旧写法每步都要等到 settle_timeout 才认输。"""
         rig = LiftRig()
         link = BlindLink()
-        config = ServoConfig(
+        config = VisualServoConfig(
             settle_timeout_seconds=30.0, settle_poll_seconds=0.25, find_max_steps=3
         )
 
         started = time.monotonic()
-        found = find_object(rig, link, ObjectSelector(), config)
+        found = find_material(rig, link, MaterialSelector(), config)
         elapsed = time.monotonic() - started
 
         self.assertFalse(found)
@@ -1940,28 +2420,28 @@ class EnsureSafeHeightTests(unittest.TestCase):
     """``align_x_y`` 的"要不要先查安全高度"开关：省一次测量，但不能省错地方。"""
 
     def rig(self):
-        jacobian = ServoJacobian(
+        jacobian = VisualServoJacobian(
             base_dx=0.012, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091
         )
         arm = FakeArm(jacobian)
         link = BufferedLink(arm)
-        target = ServoTarget(x_mm=arm.offset[0], y_mm=arm.offset[1])
+        target = VisualServoTarget(x_mm=arm.offset[0], y_mm=arm.offset[1])
         return arm, link, target, jacobian
 
     def test_the_check_is_skipped_only_when_the_caller_asks(self) -> None:
         arm, link, target, jacobian = self.rig()
-        config = ServoConfig()
+        config = VisualServoConfig()
 
         with patch.object(algorithms, "raise_before_rotating") as check:
             result = align_x_y(
-                arm, link, ObjectSelector(), target, jacobian, config,
+                arm, link, MaterialSelector(), target, jacobian, config,
                 ensure_safe_height=False,
             )
         check.assert_not_called()
         self.assertTrue(result.aligned)
 
         with patch.object(algorithms, "raise_before_rotating") as check:
-            align_x_y(arm, link, ObjectSelector(), target, jacobian, config)
+            align_x_y(arm, link, MaterialSelector(), target, jacobian, config)
         check.assert_called_once()
 
     def test_the_calibrated_scale_is_handed_to_the_check(self) -> None:
@@ -1970,7 +2450,7 @@ class EnsureSafeHeightTests(unittest.TestCase):
 
         with patch.object(algorithms, "raise_before_rotating") as check:
             align_x_y(
-                arm, link, ObjectSelector(), target, jacobian, ServoConfig(),
+                arm, link, MaterialSelector(), target, jacobian, VisualServoConfig(),
                 lift_scale=scale,
             )
 
@@ -2012,7 +2492,7 @@ class GraspAlignXYSessionTests(unittest.TestCase):
 
             hover.assert_called_once()
             align.assert_called_once()
-            self.assertEqual(align.call_args.args[0:3], (session.arm, session.source, ObjectSelector()))
+            self.assertEqual(align.call_args.args[0:3], (session.arm, session.source, MaterialSelector()))
             session.mock("raise").assert_not_called()
             session.mock("down").assert_not_called()
             session.mock("back").assert_not_called()
@@ -2093,6 +2573,19 @@ class GraspAlignXYSessionTests(unittest.TestCase):
                 session.grasp._config.tolerance_mm,
             )
 
+    def test_best_effort_and_five_adjustments_apply_only_to_this_call(self) -> None:
+        rig = self.build(hover_z_mm=None)
+        with rig as session:
+            session.grasp.align_xy(max_iterations=5, return_best=True)
+            self.assertEqual(session.mock("align").call_args.args[5].max_iterations, 5)
+            self.assertTrue(session.mock("align").call_args.kwargs["return_best"])
+            session.grasp.align_xy()
+            self.assertEqual(
+                session.mock("align").call_args.args[5].max_iterations,
+                session.grasp._config.max_iterations,
+            )
+            self.assertFalse(session.mock("align").call_args.kwargs.get("return_best", False))
+
     def test_a_non_positive_tolerance_is_rejected_before_anything_moves(self) -> None:
         rig = self.build(hover_z_mm=None)
         with rig as session:
@@ -2111,11 +2604,64 @@ class GraspAlignXYSessionTests(unittest.TestCase):
         with rig as session:
             session.grasp.align_and_descend(want="red")
 
-            wanted = ObjectSelector(color="red")
+            wanted = MaterialSelector(color="red")
             for name in ("hover", "raise", "align", "down"):
                 with self.subTest(step=name):
                     # 这四个底层函数的前三个位置参数都是 (arm, source, selector)。
                     self.assertEqual(session.mock(name).call_args.args[2], wanted)
+
+
+class GraspFollowMaterialTests(unittest.TestCase):
+    """``Grasp.follow_material``：**每轮一帧、一小步**，而且一次升降帧都不发。
+
+    循环本身在 ``follow_material_xy`` 里测；这里守的是会话这一层的口子：
+    循环真的被调用、按次的 want、跟随的两个调参原样交下去、以及"只动平面"——
+    升降那四个口子一个都不许动（安全高度检查会自己升降，与跟随即矛盾）。
+    """
+
+    def test_it_runs_the_tracking_loop_without_touching_the_height(self) -> None:
+        rig = GraspSessionRig()
+        with rig as session:
+            result = session.grasp.follow_material("green", timeout=4.0)
+
+            follow = session.mock("follow")
+            follow.assert_called_once()
+            kwargs = follow.call_args.kwargs
+            self.assertEqual(kwargs["timeout"], 4.0)
+            # Continuous follow has its own velocity-loop settings.
+            self.assertEqual(kwargs["gain"], 5.0)
+            self.assertEqual(kwargs["acceleration"], 220)
+            self.assertEqual(kwargs["rpm"], 90)
+            self.assertEqual(kwargs["base_motor_limits"], (220.0, 680.0))
+            self.assertEqual(kwargs["search_base_degrees"], 420.0)
+            self.assertNotIn("step_seconds", kwargs)
+            self.assertNotIn("coarse_step_seconds", kwargs)
+            # 按次给的 want 必须真的变成判别条件：否则跟的是配置里那个默认物料。
+            self.assertEqual(follow.call_args.args[2], MaterialSelector(color="green"))
+            for stage in ("hover", "raise", "align", "down", "back"):
+                with self.subTest(stage=stage):
+                    session.mock(stage).assert_not_called()
+
+        self.assertTrue(result.aligned)
+
+    def test_a_per_call_tolerance_reaches_the_servo(self) -> None:
+        rig = GraspSessionRig()
+        with rig as session:
+            session.grasp.follow_material(
+                "red", tolerance_mm=1.5, min_follow_seconds=0, stable_seconds=0.7,
+            )
+            self.assertEqual(
+                session.mock("follow").call_args.kwargs["tolerance_mm"], 1.5
+            )
+            self.assertEqual(session.mock("follow").call_args.kwargs["min_follow_seconds"], 0)
+            self.assertEqual(session.mock("follow").call_args.kwargs["stable_seconds"], 0.7)
+
+    def test_a_bad_want_is_rejected_before_anything_moves(self) -> None:
+        rig = GraspSessionRig()
+        with rig as session:
+            with self.assertRaises(ValueError):
+                session.grasp.follow_material(0)
+            session.mock("follow").assert_not_called()
 
 
 class GraspAlignAndDescendTests(unittest.TestCase):
@@ -2211,8 +2757,8 @@ class GraspAlignAndDescendTests(unittest.TestCase):
         rig = GraspSessionRig()
         with rig as session:
             session.stage_clock()
-            session.mock(stage).side_effect = ServoError(f"{stage} 失败")
-            with self.assertRaisesRegex(ServoError, f"{stage} 失败"):
+            session.mock(stage).side_effect = VisualServoError(f"{stage} 失败")
+            with self.assertRaisesRegex(VisualServoError, f"{stage} 失败"):
                 session.grasp.align_and_descend()
             called = session.called_stages()
 
@@ -2319,8 +2865,8 @@ class OcclusionTests(unittest.TestCase):
     "可以下降"的平面精度**，才按最后一次读数收工，并且在结果里写明"未再验证"。
     """
 
-    TRUTH = ServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
-    TARGET = ServoTarget(x_mm=2.0, y_mm=-1.0)
+    TRUTH = VisualServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    TARGET = VisualServoTarget(x_mm=2.0, y_mm=-1.0)
 
     class OccludedLink:
         """前 ``visible_reads`` 次读得到物块，之后画面里什么都没有（被爪子挡住）。"""
@@ -2341,9 +2887,9 @@ class OcclusionTests(unittest.TestCase):
                 ),
             )
 
-    def config(self) -> ServoConfig:
+    def config(self) -> VisualServoConfig:
         # 超时给得很短：这条路径要等满 settle_timeout 才认输，测试不该真的等 4 s。
-        return ServoConfig(
+        return VisualServoConfig(
             tolerance_mm=0.5,
             max_iterations=12,
             max_pulses_per_step=2000,
@@ -2360,7 +2906,7 @@ class OcclusionTests(unittest.TestCase):
         messages: List[str] = []
 
         result = align_x_y(
-            arm, link, ObjectSelector(), self.TARGET, self.TRUTH, self.config(),
+            arm, link, MaterialSelector(), self.TARGET, self.TRUTH, self.config(),
             ensure_safe_height=False, on_message=messages.append,
         )
 
@@ -2377,9 +2923,9 @@ class OcclusionTests(unittest.TestCase):
         arm = FakeArm(self.TRUTH)
         link = self.OccludedLink(arm, visible_reads=2)
 
-        with self.assertRaisesRegex(ServoError, "没有物块"):
+        with self.assertRaisesRegex(VisualServoError, "没有物块"):
             align_x_y(
-                arm, link, ObjectSelector(), self.TARGET, self.TRUTH, self.config(),
+                arm, link, MaterialSelector(), self.TARGET, self.TRUTH, self.config(),
                 ensure_safe_height=False,
             )
 
@@ -2388,9 +2934,9 @@ class OcclusionTests(unittest.TestCase):
         arm = FakeArm(self.TRUTH)
         link = self.OccludedLink(arm, visible_reads=0)
 
-        with self.assertRaisesRegex(ServoError, "没有物块"):
+        with self.assertRaisesRegex(VisualServoError, "没有物块"):
             align_x_y(
-                arm, link, ObjectSelector(), self.TARGET, self.TRUTH, self.config(),
+                arm, link, MaterialSelector(), self.TARGET, self.TRUTH, self.config(),
                 ensure_safe_height=False,
             )
 
@@ -2414,7 +2960,7 @@ class OcclusionTests(unittest.TestCase):
 
         arm = FakeArm(self.TRUTH, gain=0.6)
         result = align_x_y(
-            arm, TwoTargets(arm), ObjectSelector(), self.TARGET, self.TRUTH, self.config(),
+            arm, TwoTargets(arm), MaterialSelector(), self.TARGET, self.TRUTH, self.config(),
             ensure_safe_height=False,
         )
 
@@ -2426,11 +2972,11 @@ class OcclusionTests(unittest.TestCase):
         arm = FakeArm(self.TRUTH)
         link = self.OccludedLink(arm, visible_reads=0)
 
-        with self.assertRaises(ServoError) as caught:
+        with self.assertRaises(VisualServoError) as caught:
             measure_settled(
                 link,
-                ObjectSelector(),
-                ServoConfig(settle_timeout_seconds=0.05, settle_poll_seconds=0.01),
+                MaterialSelector(),
+                VisualServoConfig(settle_timeout_seconds=0.05, settle_poll_seconds=0.01),
             )
 
         message = str(caught.exception)
@@ -2450,17 +2996,17 @@ class StepDirectionTests(unittest.TestCase):
     不许误伤，否则一个能收敛的闭环会被无谓地打断。
     """
 
-    TRUTH = ServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
-    TARGET = ServoTarget(x_mm=0.0, y_mm=0.0)
+    TRUTH = VisualServoJacobian(base_dx=0.0120, base_dy=0.0035, radial_dx=-0.0021, radial_dy=0.0091)
+    TARGET = VisualServoTarget(x_mm=0.0, y_mm=0.0)
 
-    def config(self) -> ServoConfig:
-        return ServoConfig(
+    def config(self) -> VisualServoConfig:
+        return VisualServoConfig(
             tolerance_mm=0.5, max_iterations=12, max_pulses_per_step=2000, min_step_mm=0.1
         )
 
-    def inverted(self) -> ServoJacobian:
+    def inverted(self) -> VisualServoJacobian:
         """与机器相反的那份雅可比（相机装反 / 接线改过之后的典型状态）。"""
-        return ServoJacobian(
+        return VisualServoJacobian(
             base_dx=-self.TRUTH.base_dx,
             base_dy=-self.TRUTH.base_dy,
             radial_dx=-self.TRUTH.radial_dx,
@@ -2475,9 +3021,9 @@ class StepDirectionTests(unittest.TestCase):
         """
         arm = FakeArm(self.TRUTH)
 
-        with self.assertRaises(ServoError) as caught:
+        with self.assertRaises(VisualServoError) as caught:
             align_x_y(
-                arm, BufferedLink(arm), ObjectSelector(), self.TARGET, self.inverted(),
+                arm, BufferedLink(arm), MaterialSelector(), self.TARGET, self.inverted(),
                 self.config(), ensure_safe_height=False,
             )
 
@@ -2517,7 +3063,7 @@ class StepDirectionTests(unittest.TestCase):
         arm = FakeArm(self.TRUTH, gain=0.3)
 
         result = align_x_y(
-            arm, BufferedLink(arm), ObjectSelector(), self.TARGET, self.TRUTH,
+            arm, BufferedLink(arm), MaterialSelector(), self.TARGET, self.TRUTH,
             self.config(), ensure_safe_height=False,
         )
 
@@ -2530,7 +3076,7 @@ class StepDirectionTests(unittest.TestCase):
         messages: List[str] = []
 
         result = align_x_y(
-            arm, BufferedLink(arm), ObjectSelector(), self.TARGET, self.TRUTH,
+            arm, BufferedLink(arm), MaterialSelector(), self.TARGET, self.TRUTH,
             self.config(), ensure_safe_height=False, on_message=messages.append,
         )
 

@@ -160,7 +160,7 @@ class ArmAxesTestCase(unittest.TestCase):
         self.clock = FakeClock()
         self.sleep = RecordingSleep(self.clock)
         self.serial = serial if serial is not None else FakeSerial()
-        self.arm = RobotArm._from_settings(
+        self.arm = RobotArm.from_settings(
             config=config if config is not None else fixture_config(),
             port="/dev/ttyUSB0",
             bus=self.serial,
@@ -187,7 +187,7 @@ class EnableFrameSpacingTests(unittest.TestCase):
         sleep = RecordingSleep(clock)
         serial = FakeSerial()
 
-        RobotArm._from_settings(
+        RobotArm.from_settings(
             config=fixture_config(),
             port="/dev/ttyUSB0",
             bus=serial,

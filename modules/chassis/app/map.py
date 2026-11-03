@@ -23,7 +23,7 @@ def _confirmed(label: str) -> bool:
 
 def demo_run_one_map(profile: HardwareProfile) -> None:
     """Run the first recorded route with the configured wheel calibration."""
-    with MecanumChassis._from_settings(profile=profile, port=_port()) as car:
+    with MecanumChassis.from_settings(profile=profile, port=_port()) as car:
         if _confirmed("运行地图"):
             car.forward_left(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
             car.forward(rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration)
@@ -33,7 +33,7 @@ def demo_run_one_map(profile: HardwareProfile) -> None:
             car.backward_right(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
 
 
-def func_run_circle_map(car, profile: HardwareProfile) -> None:
+def run_circle_map(car, profile: HardwareProfile) -> None:
     """Drive the recorded full-circle route on an already enabled chassis."""
     car.forward_left(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
     car.forward(rpm=profile.chassis_rpm, duration=15.5 * profile.chassis_duration)
@@ -44,7 +44,7 @@ def func_run_circle_map(car, profile: HardwareProfile) -> None:
     car.backward_right(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
 
 
-def func_run_half_map(car, profile: HardwareProfile) -> None:
+def run_half_map(car, profile: HardwareProfile) -> None:
     """Drive the recorded half-map route and return path."""
     car.forward_left(rpm=profile.chassis_rpm, duration=3 * profile.chassis_duration)
     car.forward(rpm=profile.chassis_rpm, duration=8 * profile.chassis_duration)
@@ -68,6 +68,6 @@ def func_run_half_map(car, profile: HardwareProfile) -> None:
 
 def run_map_by_func(profile: HardwareProfile, func: Callable) -> None:
     """Confirm a route, then release the chassis even if it is interrupted."""
-    with MecanumChassis._from_settings(profile=profile, port=_port()) as car:
+    with MecanumChassis.from_settings(profile=profile, port=_port()) as car:
         if _confirmed("运行地图"):
             func(car, profile)

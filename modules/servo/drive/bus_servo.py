@@ -67,7 +67,7 @@ PROBE_REPLY_LENGTH: Final = 8
 _DETECTED_PORTS: Dict[Tuple[int, Tuple[str, ...]], str] = {}
 
 
-class ProbedPort(Protocol):
+class ServoProbedPort(Protocol):
     """探测一条串口只用这几个方法；测试给个假的就行，不必装 pyserial。"""
 
     def reset_input_buffer(self) -> None: ...
@@ -116,10 +116,10 @@ def usb_serial_candidates() -> Tuple[str, ...]:
     )
 
 
-def _serial_opener(baudrate: int, timeout_seconds: float) -> Callable[[str], ProbedPort]:
+def _serial_opener(baudrate: int, timeout_seconds: float) -> Callable[[str], ServoProbedPort]:
     from modules.serial_link import open_serial
 
-    def open_port(port: str) -> ProbedPort:
+    def open_port(port: str) -> ServoProbedPort:
         return open_serial(port, baudrate=baudrate, timeout=timeout_seconds)
 
     return open_port
@@ -145,7 +145,7 @@ def _is_position_reply(packet: bytes, servo_id: int) -> bool:
 def _port_answers_servo(
     port: str,
     *,
-    open_port: Callable[[str], ProbedPort],
+    open_port: Callable[[str], ServoProbedPort],
     servo_ids: Sequence[int],
 ) -> bool:
     """这条口上有没有舵机回**读位置**帧。只发只读命令，不会让舵机动作。"""
@@ -170,7 +170,7 @@ def resolve_bus_port(
     timeout_seconds: float,
     probe_ids: Sequence[int] = (),
     candidates: Optional[Sequence[str]] = None,
-    opener: Optional[Callable[[str], ProbedPort]] = None,
+    opener: Optional[Callable[[str], ServoProbedPort]] = None,
 ) -> str:
     """把配置里的端口解析成真正要打开的那一条。
 
@@ -205,7 +205,7 @@ def resolve_bus_port(
     )
 
 
-def load_bus_config(
+def load_servo_bus_config(
     platform: str | None = None,
     hardware_path: Path = DEFAULT_HARDWARE_PATH,
 ) -> BusServoConfig:
@@ -242,7 +242,7 @@ def load_bus_config(
     )
 
 
-class SerialPort(Protocol):
+class ServoSerialPort(Protocol):
     """Minimum serial interface used by the driver and its tests."""
 
     is_open: bool
@@ -287,7 +287,7 @@ class BusServo:
         *,
         baudrate: int = BAUDRATE,
         timeout: float = 0.1,
-        serial_port: SerialPort | None = None,
+        serial_port: ServoSerialPort | None = None,
         owns_serial: bool | None = None,
     ) -> None:
         # 地址为 0 时代表广播(所有舵机)，因此允许 0..253
@@ -361,7 +361,7 @@ class BusServo:
         # 数据段为 2 字节带符号小端位置值 (packet[5:7])
         return int.from_bytes(packet[5:7], "little", signed=True)
 
-    def _open_serial(self) -> SerialPort:
+    def _open_serial(self) -> ServoSerialPort:
         from modules.serial_link import open_serial
 
         return open_serial(self.port, baudrate=self.baudrate, timeout=self.timeout)
@@ -396,7 +396,7 @@ class BusServo:
             raise RuntimeError("servo response checksum mismatch")
         return packet
 
-    def _require_serial(self) -> SerialPort:
+    def _require_serial(self) -> ServoSerialPort:
         if self._serial is None:
             raise RuntimeError("call initialize() before sending commands")
         return self._serial

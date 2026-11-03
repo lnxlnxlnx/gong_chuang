@@ -132,7 +132,7 @@ with Robot.open(arm=True) as robot:
 
 - `mode="same_start"`（默认）：一起起步，**各自到位**（谁走的路短谁先停）。想让它们同时停要按轴改 rpm（联动/插补），本模块刻意不做。
 - `mode="serial"`：按 抬升 → 伸缩 → 底座 → 下降 的安全顺序逐轴走完（与 `_serial_order` 同序）；它只接受 `wait=True`。
-- **并行有安全上限**：底座旋转超过 `DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`（600 脉冲）时不许和伸缩并行——伸出状态下横扫会把整条臂扫过工作区（与 `modules/grasp/drive/servo_motion.py` 同一条规矩）。超了会**在发帧之前**抛错，并提示改用 `mode="serial"`。
+- **并行有安全上限**：底座旋转超过 `DEFAULT_PARALLEL_ROTATION_LIMIT_PULSES`（600 脉冲）时不许和伸缩并行——伸出状态下横扫会把整条臂扫过工作区（与 `modules/grasp/drive/visual_servo_motion.py` 同一条规矩）。超了会**在发帧之前**抛错，并提示改用 `mode="serial"`。
 - 发帧中途失败时会先补一条广播触发、再逐轴停止：广播触发帧会点燃总线上所有缓存命令，"缓存了却没触发"是个危险状态，不能留着。
 - 三根轴是 `Response=None` 的驱动器，连 ACK 都不回，所以缓存帧发完不需要读回包——这也是"同时启动"能做得这么轻的原因。
 
@@ -155,7 +155,7 @@ with Robot.open_all() as robot:
 
 ## 统一入口
 
-在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13 为夹爪测试（原来的 14「夹爪直连调试」已合并进来，编号 14 不再使用）；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集；17 为 COIN-D6 实时点云窗口（滑块或输入框调距离与角度窗口）；18 为物料顶部圆面定位（霍夫判断存在并测距，YOLO 补充类别，见 `modules/vision/docs/视觉物料定位.md`）；19 已**归档**（原「摄像头识别 + 机械臂抓取」走的是"相机固定 + 爪上靶标"路线，**本机不适用**，代码与测试移到 `legacy/grasp_fixed_camera/`，菜单不再显示 19）；20 为**转盘测试**（三工位分度盘，见 `modules/servo/docs/转盘控制说明.md`）；21 为**x/y 对准物块 + z 下降**（抓取第一步：先让爪子正下方对准物块，再按固定脉冲数下降到位）。**本机的相机装在机械臂上、跟着爪子动**，所以菜单 21 走的是 eye-in-hand 视觉伺服：把画面里的物块调到固定的目标读数，全程**脉冲驱动**，不需要 `mm_per_motor_rev`、不需要行程标定、也不需要给爪子贴靶标。第一次用先 `--set-target` 记目标读数、再 `--calibrate` 实测雅可比，`--status` 只看不动。平面稳定之后 `--align-z` 走抓取前最后两步：升降（6 号）下降 `z_descend_pulses` 脉冲、伸缩（7 号）后缩 `extension_retract_pulses` 脉冲——两个数都写在 `modules/grasp/eye_in_hand.json` 里，现场直接改、不用重标（`--z-pulses` / `--retract-pulses` 可以只覆盖这一次）；想一次跑完就用 `--align-and-descend`（悬停高度 → 安全高度 → x/y 对准 → 下降 → 后缩，每一段都报耗时）；起始悬停高度也在同一个文件里（`hover_z_mm`，默认与 `safe_lift_z_mm` 同值），就位时会先把爪子伺服到那一层——它决定了开环下降的起点，改它就要重测 `z_descend_pulses`。第 19 项走的是另一套（相机固定 + 爪上靶标），其假设**不适用于本机**；两套做法的分流说明见 `modules/grasp/docs/抓取坐标链路.md` 第 0 节与第 10 节。步进总线端口读取 `modules/motor/config.json` 中当前平台的 `port`（底盘与机械臂共用这一处），舵机总线端口读取 `modules/servo/config.json`；激光测试使用独立的 `modules/laser_scan/config.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `modules/lidar/config.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
+在项目根目录运行 `python test.py` 打开交互菜单。选 1 运行离线单测；2–9 为机械臂、麦轮、电机诊断和视觉的手动真机测试；10 为激光障碍物扫描；11 为电机不动的激光固定测距；12 为总线舵机测试；13 为夹爪测试（原来的 14「夹爪直连调试」已合并进来，编号 14 不再使用）；15 为障碍物模型测试（在摄像头、验证集图片、图片文件夹或视频上试新训练的模型，全部按菜单问答选择，不需要命令行参数）；16 为 COIN-D6 激光雷达点云采集；17 为 COIN-D6 实时点云窗口（滑块或输入框调距离与角度窗口）；18 为物料顶部圆面定位（霍夫判断存在并测距，YOLO 补充类别，见 `modules/vision/docs/视觉物料定位.md`）；19 已**归档**（原「摄像头识别 + 机械臂抓取」走的是"相机固定 + 爪上靶标"路线，**本机不适用**，代码与测试移到 `legacy/grasp_fixed_camera/`，菜单不再显示 19）；20 为**转盘测试**（三工位分度盘，见 `modules/servo/docs/转盘控制说明.md`）；21 为**x/y 对准物块 + z 下降**（抓取第一步：先让爪子正下方对准物块，再按固定脉冲数下降到位）。**本机的相机装在机械臂上、跟着爪子动**，所以菜单 21 走的是 eye-in-hand 视觉伺服：把画面里的物块调到固定的目标读数，全程**脉冲驱动**，不需要 `mm_per_motor_rev`、不需要行程标定、也不需要给爪子贴靶标。第一次用先 `--set-target` 记目标读数、再 `--calibrate` 实测雅可比，`--status` 只看不动。平面稳定之后 `--align-z` 走抓取前最后两步：升降（6 号）下降 `z_descend_pulses` 脉冲、伸缩（7 号）后缩 `extension_retract_pulses` 脉冲——两个数都写在 `modules/grasp/eye_in_hand.json` 里，现场直接改、不用重标（`--z-pulses` / `--retract-pulses` 可以只覆盖这一次）；想一次跑完就用 `--align-and-descend`（悬停高度 → 安全高度 → x/y 对准 → 下降 → 后缩，每一段都报耗时）；起始悬停高度也在同一个文件里（`hover_z_mm`，默认与 `safe_lift_z_mm` 同值），就位时会先把爪子伺服到那一层——它决定了开环下降的起点，改它就要重测 `z_descend_pulses`。第 19 项走的是另一套（相机固定 + 爪上靶标），其假设**不适用于本机**；两套做法的分流说明见 `modules/grasp/docs/抓取坐标链路.md` 第 0 节与第 10 节。步进总线端口读取 `modules/motor/config.json` 中当前平台的 `port`（底盘与机械臂共用这一处），舵机总线端口读取 `modules/servo/config.json`；激光测试使用独立的 `modules/stp23l/config.json`，扫描步长和停稳时间分别由 `scan.step_pulses`、`scan.settle_seconds` 设置；D6 激光雷达使用 `modules/coin_d6/config.json`，端口、采集圈数、角度与距离窗口都在里面改。Windows 默认用 `windows`，Jetson 默认用 `jetson`；运行前先把配置中的端口改成实际设备名。真机动作仍会逐项请求确认。
 
 ```powershell
 python test.py
@@ -219,22 +219,22 @@ with Robot.open(gripper=True, turntable=True) as robot:
 **转盘和机械臂的互锁不在本层**：转盘转动会撞到停在料盘上方的机械臂，而本层不知道机械臂在哪，
 所以调用方必须在转动前保证机械臂已让开——和机械臂那边"伸出状态下不许转底座"是同一条规矩。
 
-## D6 激光雷达（lidar）
+## D6 激光雷达（coin_d6）
 
-`lidar` 包封装国科光芯 COIN-D6 的串口指令与点云解析（协议见
-`modules/lidar/docs/国科光芯/1 D6激光雷达手册资料/`），并把采集结果画成点云图：
+`coin_d6` 包封装国科光芯 COIN-D6 的串口指令与点云解析（协议见
+`modules/coin_d6/docs/国科光芯/1 D6激光雷达手册资料/`），并把采集结果画成点云图：
 
-- `modules.lidar.drive.protocol`：帧编解码。启动 `AA 55 F0 0F`、停止 `AA 55 F5 0A`，应答为 12 字节
+- `modules.coin_d6.drive.protocol`：帧编解码。启动 `AA 55 F0 0F`、停止 `AA 55 F5 0A`，应答为 12 字节
   `A5 5A ...`；上传帧 `A5 5A LEN CS TYPE DATA`（`0x01` 设备信息、`0x81` 点云）；点云包为
   `AA 55 M&T LSN FSA LSA CS` + 每点 3 字节（14 位距离、8 位强度、高反标志）。读取端会跳过噪声、
   坏校验包并自动重新同步，也同时接受带 `A5 5A` 外层封装与裸 `AA 55` 两种点云流。
-- `modules.lidar.CoinD6`：一次串口会话，`initialize()` / `start()` / `read_device_info()` /
+- `modules.coin_d6.CoinD6`：一次串口会话，`initialize()` / `start()` / `read_device_info()` /
   `collect_scan()` / `stop()` / `close()`；`scan(config.scan)` 一次跑完启停与采集。
-- `modules.lidar.PointCloud` / `CloudPoint`：点云数据（角度、距离、强度、高反），可 `save_csv()`。
-- `modules.lidar.app.visualize`：俯视点云图（按距离着色、等比例、带距离环），保存 PNG 并可弹窗。
-- `modules.lidar.app.simulate`：内置虚拟雷达，不接硬件就能跑通「串口 → 解析 → 出图」整条链路。
+- `modules.coin_d6.PointCloud` / `CloudPoint`：点云数据（角度、距离、强度、高反），可 `save_csv()`。
+- `modules.coin_d6.app.visualize`：俯视点云图（按距离着色、等比例、带距离环），保存 PNG 并可弹窗。
+- `modules.coin_d6.app.simulate`：内置虚拟雷达，不接硬件就能跑通「串口 → 解析 → 出图」整条链路。
 
-全部可调参数集中在 `modules/lidar/config.json`，改完存盘即生效，菜单里不再输入端口：
+全部可调参数集中在 `modules/coin_d6/config.json`，改完存盘即生效，菜单里不再输入端口：
 
 - `profiles.windows.port` / `profiles.jetson.port`：串口设备名（Windows 看设备管理器，Jetson 用 `/dev/ttyUSB*`）。
 - `device.baudrate`：波特率，D6/D2 出厂为 `230400`。
@@ -248,11 +248,11 @@ with Robot.open(gripper=True, turntable=True) as robot:
 - `visualization.range_mm` / `color_by` / `colormap` / `point_size` / `show_window`：出图范围、着色字段（`distance`/`intensity`/`angle`）与是否弹窗。
 
 ```python
-from lidar import CoinD6, load_lidar_config, render_point_cloud
+from modules.coin_d6 import CoinD6, load_lidar_config, render_point_cloud
 
 config = load_lidar_config()                       # 也可传 "windows" / "jetson"
 with CoinD6(config.device.port, baudrate=config.device.baudrate) as lidar:
-    cloud = modules.lidar.scan(config.scan)                # 启动、采 N 圈、停止
+    cloud = lidar.scan(config.scan)                          # 启动、采 N 圈、停止
 cloud.save_csv("output/lidar_cloud/scan.csv")
 render_point_cloud(cloud, config.view, "output/lidar_cloud/scan.png")
 ```
@@ -261,17 +261,17 @@ render_point_cloud(cloud, config.view, "output/lidar_cloud/scan.png")
 `visualization.show_window` 弹窗。没有硬件时用内置虚拟雷达验证整条链路：
 
 ```powershell
-python -m modules.lidar.test.manual.coin_d6 --simulate --no-window
+python -m modules.coin_d6.test.manual.coin_d6 --simulate --no-window
 ```
 
 该命令不需要串口，会生成一张模拟房间（含圆柱障碍与高反条）的点云图。真机运行前先把
-`modules/lidar/config.json` 中的端口改成实际设备名，并确认雷达前方无遮挡。
+`modules/coin_d6/config.json` 中的端口改成实际设备名，并确认雷达前方无遮挡。
 
 第一次接真机（或采集一直失败）时先跑诊断：它只发一次启动指令，把**实际发送的原始字节**
 和雷达回传的原始字节、解析统计一起打出来，用来区分接线/波特率问题和协议问题。
 
 ```powershell
-python -m modules.lidar.test.manual.coin_d6 --diagnose
+python -m modules.coin_d6.test.manual.coin_d6 --diagnose
 ```
 
 正常应看到 `已发送启动指令（原始字节，非文本）：AA 55 F0 0F`、一条 `A5 5A …` 应答和若干
@@ -290,19 +290,19 @@ python -m modules.lidar.test.manual.coin_d6 --diagnose
 - 视图范围跟着"距离上限"缩放，距离环按窗口的 25/50/75/100% 画。
 
 ```powershell
-python -m modules.lidar.test.manual.coin_d6_live --simulate     # 不接硬件先看界面
-python -m modules.lidar.test.manual.coin_d6_live                # 真机（端口取 modules/lidar/config.json）
+python -m modules.coin_d6.test.manual.coin_d6_live --simulate     # 不接硬件先看界面
+python -m modules.coin_d6.test.manual.coin_d6_live                # 真机（端口取 modules/coin_d6/config.json）
 ```
 
 关闭窗口即停止雷达转动并释放串口；真机报错会显示在右下角状态区，不会崩掉窗口。
-`modules/lidar/app/live.py` 里的 `LiveCloud` 是这套读数的模型（后台线程 + 滚动缓存 + 快照过滤），
+`modules/coin_d6/app/live.py` 里的 `LiveCloud` 是这套读数的模型（后台线程 + 滚动缓存 + 快照过滤），
 与界面无关，可以直接在别的程序里复用。
 
 离线单测覆盖帧解析、校验、断包重同步、角度换算、扫描窗口过滤与出图，全部不打开串口：
 
 ```powershell
-python -m unittest modules.lidar.test.unit.test_lidar_protocol modules.lidar.test.unit.test_lidar_device modules.lidar.test.unit.test_lidar_config `
-  modules.lidar.test.unit.test_lidar_cloud modules.lidar.test.unit.test_lidar_visualize modules.lidar.test.unit.test_lidar_menu -v
+python -m unittest modules.coin_d6.test.unit.test_lidar_protocol modules.coin_d6.test.unit.test_lidar_device modules.coin_d6.test.unit.test_lidar_config `
+  modules.coin_d6.test.unit.test_lidar_cloud modules.coin_d6.test.unit.test_lidar_visualize modules.coin_d6.test.unit.test_lidar_menu -v
 ```
 
 `modules/servo/test/manual/gripper.py`（菜单 13）不会在导入时执行动作。夹爪直连调试可运行同一个脚本，逐项按回车确认后依次试动 300 和 500：
@@ -310,10 +310,10 @@ python -m unittest modules.lidar.test.unit.test_lidar_protocol modules.lidar.tes
 ```python
 import time
 from modules.servo.config import load_gripper_config
-from modules.servo.drive.bus_servo import BusServo, load_bus_config
+from modules.servo.drive.bus_servo import BusServo, load_servo_bus_config
 
 config = load_gripper_config()
-bus = load_bus_config()
+bus = load_servo_bus_config()
 servo = BusServo(bus.port, config.servo_id, baudrate=bus.baudrate, timeout=0.5).initialize()
 try:
     servo.set_position(config.open_position, config.duration_ms)
@@ -666,9 +666,9 @@ with Grasp.open() as grasp:        # 读配置 + 开机械臂 + 开视觉源（V
 |---|---|---|
 | 会话 / 编排 | `modules/grasp/runtime.py` | `Grasp`：拥有机械臂与视觉源；悬停 → 安全抬升 → x/y → 下降 → 后缩 |
 | 伺服算法 | `modules/grasp/drive/eye_in_hand.py` | 误差 → 脉冲步长，逐帧闭环 |
-| 数值模型 | `modules/grasp/drive/servo_model.py` | 配置、雅可比、结果与异常类型 |
-| 观测判据 | `modules/grasp/drive/servo_observation.py` | "这一帧够不够新、够不够稳" |
-| 脉冲原语 | `modules/grasp/drive/servo_motion.py` | 单轴 / 多轴脉冲下发 |
+| 数值模型 | `modules/grasp/drive/visual_servo_model.py` | 配置、雅可比、结果与异常类型 |
+| 观测判据 | `modules/grasp/drive/visual_servo_observation.py` | "这一帧够不够新、够不够稳" |
+| 脉冲原语 | `modules/grasp/drive/visual_servo_motion.py` | 单轴 / 多轴脉冲下发 |
 | 环心计划 | `modules/grasp/drive/ring_plan.py` | 环心 → 各轴**绝对电机角度**（只算不动） |
 
 几个要点：

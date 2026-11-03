@@ -32,7 +32,7 @@ from .runtime import (
     MotionBatchReport,
     MotionController,
     MotionTicket,
-    MotionTimeout,
+    MotionTimeoutError,
 )
 
 __all__ = [
@@ -47,5 +47,5 @@ __all__ = [
     "MotionBatchReport",
     "MotionController",
     "MotionTicket",
-    "MotionTimeout",
+    "MotionTimeoutError",
 ]

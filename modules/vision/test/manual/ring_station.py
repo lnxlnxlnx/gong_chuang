@@ -27,7 +27,7 @@ from modules.vision.drive.preview import (
     open_preview,
     warn_blank_preview,
 )
-from modules.vision.runtime import Vision, _load_settings
+from modules.vision.runtime import Vision, load_vision_settings
 
 #: 每这么多帧打印一次中文结论。
 PRINT_EVERY = 30
@@ -54,7 +54,7 @@ def run(settings, *, print_every: int = PRINT_EVERY) -> int:
     blank_frames = 0
     warned_blank = False
     try:
-        with Vision._open_config(settings) as vision:
+        with Vision.from_settings(settings) as vision:
             camera_id = settings.camera_id("windows" if os.name == "nt" else "jetson")
             geometry = settings.station_geometry
             reference = settings.station_reference
@@ -130,7 +130,7 @@ def _preview(vision, window: str, *, print_every: int, on_frame, on_key) -> str:
 
 def main() -> None:
     args = parse_args()
-    settings = _load_settings()
+    settings = load_vision_settings()
     print(f"配置来自 {DEFAULT_CONFIG_PATH}")
     raise SystemExit(run(settings, print_every=args.print_every))
 

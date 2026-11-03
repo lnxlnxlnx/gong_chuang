@@ -36,7 +36,7 @@ from modules.vision.drive.preview import (
     open_preview,
     warn_blank_preview,
 )
-from modules.vision.runtime import Vision, _load_settings
+from modules.vision.runtime import Vision, load_vision_settings
 
 #: 连续读不到这么多帧就认为摄像头掉线，退出预览。
 MAX_MISSES = 30
@@ -115,7 +115,7 @@ def run(settings, *, image_path=None, focal_px=None, depth_mm=None) -> int:
     show_mm = False
     reason = ""
     try:
-        with Vision._open_config(settings) as vision:
+        with Vision.from_settings(settings) as vision:
             camera_id = settings.camera_id("windows" if os.name == "nt" else "jetson")
             frame_size = vision._frame_size()
             session = MeasurementSession(frame_size)
@@ -307,7 +307,7 @@ def _run_image(image_path, *, focal_px, depth_mm) -> int:
 
 def main() -> None:
     args = parse_args()
-    settings = _load_settings()
+    settings = load_vision_settings()
     print(f"配置来自 {DEFAULT_CONFIG_PATH}")
     raise SystemExit(run(settings, image_path=args.image, focal_px=args.focal,
                          depth_mm=args.depth))

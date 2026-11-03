@@ -40,6 +40,7 @@
 
 - 相机 / 画面检查 → :mod:`modules.vision.drive.camera`
 - 预览窗口 → :mod:`modules.vision.drive.preview`；两线程预览 → :mod:`modules.vision.drive.stream`
+- 板载屏显示文字（``robot.vision.show_text``） → :mod:`modules.vision.drive.text_screen`
 - 模型路径与设置 → :mod:`modules.vision.config`；检测器工厂 → :mod:`modules.vision.detector_factory`
 - 帧级定位算法 → :mod:`modules.vision.drive.material_locate` 等 ``drive`` 子模块
 - 工位识别（三圆环 / 叠放位） → :mod:`modules.vision.drive.ring_station`、:mod:`modules.vision.drive.stacked_ring`

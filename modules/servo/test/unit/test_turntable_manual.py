@@ -153,7 +153,7 @@ class TurntableWiringTests(unittest.TestCase):
         run_sequence = Mock(side_effect=sequence_error)
         with patch.object(turntable_manual, "parse_port", return_value=port_override), \
                 patch.object(turntable_manual, "load_turntable_config", return_value=CONFIG), \
-                patch.object(turntable_manual, "load_bus_config", return_value=BUS), \
+                patch.object(turntable_manual, "load_servo_bus_config", return_value=BUS), \
                 patch.object(turntable_manual, "run_manual", run_sequence), \
                 patch.object(turntable_manual, "BusServo") as bus_servo, \
                 patch.object(

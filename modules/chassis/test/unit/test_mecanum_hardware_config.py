@@ -192,7 +192,7 @@ class MecanumHardwareConfigTests(unittest.TestCase):
             profile = load_profile("windows", config_path, hardware_path=config_path)
 
         with patch("modules.chassis.runtime.MecanumDrive") as drive:
-            MecanumChassis._from_settings(
+            MecanumChassis.from_settings(
                 profile=profile, port="COM42", bus=BUS, owns_bus=False
             )
 

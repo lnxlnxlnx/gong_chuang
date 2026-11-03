@@ -198,10 +198,10 @@ class RelaxedColourTests(unittest.TestCase):
 
 class OverrideTests(unittest.TestCase):
     def test_the_new_knobs_can_be_overridden_for_one_run(self) -> None:
-        from modules.vision.runtime import _load_settings
+        from modules.vision.runtime import load_vision_settings
 
         settings = _override_settings(
-            _load_settings(),
+            load_vision_settings(),
             interior_std_max=18.0,
             edge_support_min=0.4,
             colour_relax_factor=1.0,
@@ -213,7 +213,7 @@ class OverrideTests(unittest.TestCase):
         self.assertEqual(settings.targets.colour_relax_factor, 1.0)
         self.assertEqual(settings.targets.min_area_px, 250.0)
         # 没给的那些保持原样（覆盖不是"重置成默认值"）。
-        self.assertEqual(settings.targets.color_tolerance, _load_settings().targets.color_tolerance)
+        self.assertEqual(settings.targets.color_tolerance, load_vision_settings().targets.color_tolerance)
 
 
 if __name__ == "__main__":

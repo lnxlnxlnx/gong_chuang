@@ -60,7 +60,7 @@ from modules.servo.config import (
     GripperConfig,
     load_gripper_config,
 )
-from modules.servo.drive.bus_servo import BusServo, BusServoConfig, SerialPort, load_bus_config
+from modules.servo.drive.bus_servo import BusServo, BusServoConfig, ServoSerialPort, load_servo_bus_config
 
 #: 读回位置与目标位置相差在这个范围内就算到位（舵机位置量程 0..1000）。
 #: 夹爪行程只有 0..200（≈48°），所以这是一个**判据**而不是硬件事实，留在代码里。
@@ -152,7 +152,7 @@ class GripperServo:
         *,
         config_path: Optional[Path] = None,
         hardware_path: Optional[Path] = None,
-        bus: Optional[SerialPort] = None,
+        bus: Optional[ServoSerialPort] = None,
         owns_bus: Optional[bool] = None,
     ) -> "GripperServo":
         """读夹爪配置（运动调参 + 硬件事实），开总线并使能扭矩。
@@ -168,8 +168,8 @@ class GripperServo:
         path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
         hardware = DEFAULT_HARDWARE_PATH if hardware_path is None else Path(hardware_path)
         config = load_gripper_config(path, hardware)
-        # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
-        bus_config = load_bus_config(hardware_path=hardware)
+        # 注意 load_servo_bus_config 的第一个位置参数是 platform，路径只能走关键字。
+        bus_config = load_servo_bus_config(hardware_path=hardware)
         if bus is None:
             session = cls(config=config, port=bus_config.port, baudrate=bus_config.baudrate)
         else:

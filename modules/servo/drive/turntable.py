@@ -68,12 +68,12 @@ from modules.servo.config import (
 from modules.servo.drive.bus_servo import (
     BusServo,
     BusServoConfig,
-    SerialPort,
-    load_bus_config,
+    ServoSerialPort,
+    load_servo_bus_config,
 )
 
 #: 舵机位置量程：0..1000。一个单位对应多少度由 ``turntable.travel_degrees`` 给出
-#: （本机 240°），那是装机事实，所以不再写死在代码里。
+#: （本机 240°），那是装机事实，从配置读。
 POSITION_UNITS = 1000
 
 #: ``TurntableReport`` 单独构造时（测试、离线打印）用的兜底换算，运行时一律用配置值。
@@ -128,7 +128,7 @@ class TurntableServo:
         settle_seconds: Optional[float] = None,
     ) -> None:
         self.config = config if config is not None else load_turntable_config()
-        bus = bus_config if bus_config is not None else load_bus_config()
+        bus = bus_config if bus_config is not None else load_servo_bus_config()
         self.port = port or bus.port
         # 到位容差与停稳余量都来自配置；显式传参只用于测试或单次覆盖。
         position_tolerance = (
@@ -164,7 +164,7 @@ class TurntableServo:
         *,
         config_path: Optional[Path] = None,
         hardware_path: Optional[Path] = None,
-        bus: Optional[SerialPort] = None,
+        bus: Optional[ServoSerialPort] = None,
         owns_bus: Optional[bool] = None,
     ) -> "TurntableServo":
         """读转盘配置 + 舵机总线配置，开总线并使能扭矩。
@@ -178,8 +178,8 @@ class TurntableServo:
         path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
         hardware = DEFAULT_HARDWARE_PATH if hardware_path is None else Path(hardware_path)
         config = load_turntable_config(path, hardware)
-        # 注意 load_bus_config 的第一个位置参数是 platform，路径只能走关键字。
-        bus_config = load_bus_config(hardware_path=hardware)
+        # 注意 load_servo_bus_config 的第一个位置参数是 platform，路径只能走关键字。
+        bus_config = load_servo_bus_config(hardware_path=hardware)
         if bus is None:
             session = cls(bus_config.port, config=config, bus_config=bus_config)
         else:

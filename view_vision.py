@@ -99,7 +99,7 @@ from modules.vision.runtime import (
     DEFAULT_MEASURE_FRAMES,
     DEFAULT_SETTLE_TIMEOUT_SECONDS,
     Vision,
-    _load_settings,
+    load_vision_settings,
     _override_settings,
     _sightings_from_report,
 )
@@ -1018,7 +1018,7 @@ def _banner(settings, initial: str, *, frames: int) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     arguments = build_parser().parse_args(argv)
     try:
-        settings = _override_settings(_load_settings(), camera_id=arguments.camera)
+        settings = _override_settings(load_vision_settings(), camera_id=arguments.camera)
     except ValueError as problem:
         print(f"配置或参数不合法：{problem}")
         return 1
@@ -1031,7 +1031,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     frames = max(DEFAULT_MIN_SAMPLES, int(arguments.frames))
 
     try:
-        with Vision._open_config(settings, focal_px=arguments.focal) as vision:
+        with Vision.from_settings(settings, focal_px=arguments.focal) as vision:
             viewer = Viewer(
                 vision, settings, focal_px=arguments.focal,
                 depth_mm=arguments.depth, frames=frames,

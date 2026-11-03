@@ -44,7 +44,7 @@ class EntryPointTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()) as output:
                     test_launcher.main()
         self.assertIn("10. 激光障碍物扫描", output.getvalue())
-        import_module.assert_called_once_with("modules.laser_scan.test.manual.laser_scan")
+        import_module.assert_called_once_with("modules.stp23l.test.manual.laser_scan")
 
     def test_menu_dispatches_fixed_laser_distance(self) -> None:
         with patch("builtins.input", side_effect=["11", "0"]):
@@ -52,7 +52,7 @@ class EntryPointTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()) as output:
                     test_launcher.main()
         self.assertIn("11. 激光固定测距", output.getvalue())
-        import_module.assert_called_once_with("modules.laser_scan.test.manual.laser_fixed")
+        import_module.assert_called_once_with("modules.stp23l.test.manual.laser_fixed")
 
     def test_menu_dispatches_bus_servo_test(self) -> None:
         with patch("builtins.input", side_effect=["12", "0"]):
@@ -68,7 +68,7 @@ class EntryPointTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()) as output:
                     test_launcher.main()
         self.assertIn("16. D6 激光雷达点云", output.getvalue())
-        import_module.assert_called_once_with("modules.lidar.test.manual.coin_d6")
+        import_module.assert_called_once_with("modules.coin_d6.test.manual.coin_d6")
 
     def test_menu_dispatches_coin_d6_live_window(self) -> None:
         with patch("builtins.input", side_effect=["17", "0"]):
@@ -76,7 +76,7 @@ class EntryPointTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()) as output:
                     test_launcher.main()
         self.assertIn("17. D6 点云实时显示", output.getvalue())
-        import_module.assert_called_once_with("modules.lidar.test.manual.coin_d6_live")
+        import_module.assert_called_once_with("modules.coin_d6.test.manual.coin_d6_live")
 
     def _assert_menu_dispatches(self, choice: str, label: str, module: str) -> None:
         """选 ``choice`` 之后，菜单应当 import ``module`` 并调用它的 main()。"""

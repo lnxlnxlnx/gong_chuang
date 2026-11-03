@@ -34,8 +34,8 @@ def main(profile_name: str | None = None) -> None:
     if profile_name is None:
         profile_name = "windows" if os.name == "nt" else "jetson"
     profile = load_profile(profile_name)
-    # 统一生命周期：_from_settings 已经 initialization + enable_all，收尾交给 with。
-    with MecanumChassis._from_settings(profile=profile, port=_port()) as car:
+    # 统一生命周期：from_settings 已经 initialization + enable_all，收尾交给 with。
+    with MecanumChassis.from_settings(profile=profile, port=_port()) as car:
         time.sleep(0.2)
 
         # 依次演示：前进 → 后退 → 左平移 → 右平移 → 左旋 → 右旋
